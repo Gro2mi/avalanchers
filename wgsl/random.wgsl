@@ -1,12 +1,18 @@
-fn rand1(n: f32) -> f32 {
-  return fract(sin(n) * 43758.5453123);
+fn rand1(x: f32) -> f32 {
+  return fract(sin(x) * 43758.5453123);
 }
-
+fn rand1u(x: u32) -> f32 {
+  return rand1(f32(x));
+}
 fn rand2(x: f32) -> vec2<f32> {
   return vec2<f32>(
     fract(sin(x) * 43758.5453),
     fract(sin(x + 13.13) * 43758.5453)
   );
+}
+
+fn rand2u(x: u32) -> vec2f {
+  return rand2(f32(x));
 }
 
 fn rand3(x: f32) -> vec3<f32> {
@@ -15,6 +21,9 @@ fn rand3(x: f32) -> vec3<f32> {
     fract(sin(x + 21.21) * 43758.5453),
     fract(sin(x + 42.42) * 43758.5453)
   );
+}
+fn rand3u(x: u32) -> vec3f {
+  return rand3(f32(x));
 }
 
 fn rand4(x: f32) -> vec4<f32> {
@@ -43,6 +52,9 @@ fn rand22(v: vec2<f32>) -> vec2<f32> {
     rand21(v),
     rand21(v + 13.13)
   );
+}
+fn rand22u(v: vec2u) -> vec2f {
+  return rand22(vec2f(v));
 }
 
 fn rand33(v: vec3<f32>) -> vec3<f32> {

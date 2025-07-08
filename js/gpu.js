@@ -38,7 +38,7 @@ class ShaderNode {
     return this.module;
   }
 
-  createPipeline(compute = { module: this.module, entryPoint: 'computeMain', }, layout = 'auto') {
+  createPipeline(compute = { module: this.module, entryPoint: this.name, }, layout = 'auto') {
     if (!this.module) {
       throw new Error("Shader module is not created for " + this.name);
     }
@@ -85,40 +85,48 @@ class Shaders {
     this.shaderImports = new ShaderNode("Imports");
     this.linesImported = 0;
 
-    this.normals = new ShaderNode("Normals", true);
-    this.computeReleasePoints = new ShaderNode("ComputeReleasePoints", false);
-    this.loadReleasePoints = new ShaderNode("LoadReleasePoints", false);
-    this.trajectory = new ShaderNode("Trajectory", false);
-    // this.timestamps = new gpuTimestamps(6);
+    this.computeNormals = new ShaderNode("computeNormals", true);
+    this.computeRoughness = new ShaderNode("computeRoughness", true);
+    this.computeReleasePoints = new ShaderNode("computeReleasePoints", false);
+    this.loadReleasePoints = new ShaderNode("loadReleasePoints", false);
+    this.initializeParticles = new ShaderNode("initializeParticles", false);
+    this.trajectory = new ShaderNode("computeTrajectories", false);
   }
 
   async fetch() {
     // TODO: implement include functionality for WGSL
     this.shaderImports.code = await loadAndConcatShaders([
       "wgsl/random.wgsl",
+      "wgsl/util.wgsl",
     ]);
     await this.shaderImports.compile();
     this.linesImported = countLines(this.shaderImports.code);
 
-    this.normals.code = await loadAndConcatShaders(['wgsl/normals_compute.wgsl']);
-    this.computeReleasePoints.code = await loadAndConcatShaders(['wgsl/release_points_compute.wgsl']);
-    this.loadReleasePoints.code = await loadAndConcatShaders(['wgsl/release_points_load.wgsl']);
-    this.trajectory.code = await loadAndConcatShaders(['wgsl/trajectory_compute.wgsl']);
+    this.computeNormals.code = await loadAndConcatShaders(["wgsl/random.wgsl", "wgsl/util.wgsl", 'wgsl/computeNormals.wgsl']);
+    this.computeRoughness.code = await loadAndConcatShaders(["wgsl/random.wgsl", "wgsl/util.wgsl", 'wgsl/computeRoughness.wgsl']);
+    this.computeReleasePoints.code = await loadAndConcatShaders(["wgsl/random.wgsl", "wgsl/util.wgsl", 'wgsl/computeReleasePoints.wgsl']);
+    this.loadReleasePoints.code = await loadAndConcatShaders(["wgsl/random.wgsl", "wgsl/util.wgsl", 'wgsl/loadReleasePoints.wgsl']);
+    this.initializeParticles.code = await loadAndConcatShaders(["wgsl/random.wgsl", "wgsl/util.wgsl", 'wgsl/initializeParticles.wgsl']);
+    // this.trajectory.code = await loadAndConcatShaders(['wgsl/computeTrajectories.wgsl']);
   }
 
   async compile() {
     // await this.decodeDem.compile();
-    await this.normals.compile();
-    await this.computeReleasePoints.compile();
-    await this.loadReleasePoints.compile();
-    await this.trajectory.compile();
+    await this.computeNormals.compile(this.linesImported);
+    await this.computeRoughness.compile(this.linesImported);
+    await this.computeReleasePoints.compile(this.linesImported);
+    await this.loadReleasePoints.compile(this.linesImported);
+    await this.initializeParticles.compile(this.linesImported);
+    // await this.trajectory.compile();
   }
 
   createPipelines() {
-    this.normals.createPipeline();
+    this.computeNormals.createPipeline();
+    this.computeRoughness.createPipeline();
     this.computeReleasePoints.createPipeline();
     this.loadReleasePoints.createPipeline();
-    this.trajectory.createPipeline();
+    this.initializeParticles.createPipeline();
+    // this.trajectory.createPipeline();
   }
 
   static async fetchAndConcat(urls) {
@@ -153,6 +161,16 @@ class Shaders {
 }
 
 
+function createRgba16floatTexture() {
+  return device.createTexture({
+    size: [dem.width, dem.height],
+    format: "rgba16float",
+    usage: GPUTextureUsage.STORAGE_BINDING
+      | GPUTextureUsage.TEXTURE_BINDING
+      | GPUTextureUsage.COPY_SRC
+      | GPUTextureUsage.COPY_DST,
+  });
+}
 
 async function run(simSettings, dem, release_point, predefinedReleasePoints) {
 
@@ -161,88 +179,73 @@ async function run(simSettings, dem, release_point, predefinedReleasePoints) {
   // TODO: currently only works with 3 which is enough for test cases
   const trackedTrajectories = 3;
   const debugBufferSize = 100 * 4;
+
+  const width = dem.width;
+  const height = dem.height;
+  const bytesPerRowUnpadded = width * 4;
+  const bytesPerRow = align(bytesPerRowUnpadded, 256);
+
+  const simSettingsBuffer = createInputBuffer(device, SimSettings.byteSize);
+  device.queue.writeBuffer(simSettingsBuffer, 0, simSettings.createBuffer());
+
   simTimer = new Timer("Avalanche Simulation")
   // only load shaders if not already loaded or in debug mode
-  if (debug || shaders.normals.code == null) {
+  if (debug || shaders.computeNormals.code == null) {
     await shaders.fetch();
     simTimer.checkpoint("shader fetching");
     await shaders.compile();
     simTimer.checkpoint("shader compilation");
     shaders.createPipelines();
   }
+
+  const sampler = device.createSampler({
+    magFilter: 'linear',
+    minFilter: 'linear',
+  });
+
   const boundsBuffer = createInputBuffer(device, 4);
   device.queue.writeBuffer(boundsBuffer, 0, new Float32Array([dem.world_resolution]));
 
   const demTexture = createDemTextureAndBuffer(device, dem.data1d);
 
   // Create output texture for normals
-  const normalsTexture = device.createTexture({
-    size: [dem.width, dem.height],
-    format: "rgba16float",
-    usage: GPUTextureUsage.STORAGE_BINDING
-      | GPUTextureUsage.TEXTURE_BINDING
-      | GPUTextureUsage.COPY_SRC
-      | GPUTextureUsage.COPY_DST,
+  const normalsTexture = createRgba16floatTexture();
+  const slopeTexture = createRgba16floatTexture();
+  const roughnessTexture = createRgba16floatTexture();
+  const releasePointsTexture = createRgba16floatTexture();
+
+
+  const windTexture = device.createTexture({
+    size: [width, height, 1],
+    format: 'rgba16float',
+    usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING,
   });
-
-  const outDebugNormals = createStorageBuffer(device, debugBufferSize);
-  const readbackDebugNormals = createReadbackBuffer(device, debugBufferSize);
-
-  shaders.normals.createBindGroup([
-    { binding: 0, resource: { buffer: boundsBuffer } },
-    { binding: 1, resource: demTexture.createView() },
-    { binding: 2, resource: normalsTexture.createView() },
-    { binding: 3, resource: { buffer: outDebugNormals } },
-  ],
-  );
+  const landcoverTexture = device.createTexture({
+    size: [width, height, 1],
+    format: 'rgba8uint',
+    usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING,
+  });
 
 
   // Release points compute shader
-  const releasePointsSettings = {
-    minSlopeAngle: 35,
-    maxSlopeAngle: 45,
-    minElevation: 1500,
-    slabThickness: 1,
-  };
-  const releasePointsSettingsData = new Float32Array([
-    releasePointsSettings.minSlopeAngle,
-    releasePointsSettings.maxSlopeAngle,
-    releasePointsSettings.minElevation,
-    releasePointsSettings.slabThickness,
-  ]);
-  const releasePointsSettingsBuffer = createInputBuffer(device, releasePointsSettingsData.byteLength);
-  device.queue.writeBuffer(releasePointsSettingsBuffer, 0, releasePointsSettingsData);
 
-  const releasePointsTexture = device.createTexture({
-    size: [dem.width, dem.height],
-    format: "rgba16float",
-    usage: GPUTextureUsage.STORAGE_BINDING
-      | GPUTextureUsage.TEXTURE_BINDING
-      | GPUTextureUsage.COPY_SRC
-      | GPUTextureUsage.COPY_DST,
+  const outNumberReleaseCells = device.createBuffer({
+    size: 4,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
   });
+  device.queue.writeBuffer(outNumberReleaseCells, 0, new Uint32Array([0]));
+
+
 
   const outDebugRelease = createStorageBuffer(device, debugBufferSize);
   const readbackDebugRelease = createReadbackBuffer(device, debugBufferSize);
 
-  shaders.computeReleasePoints.createBindGroup([
-    { binding: 0, resource: { buffer: releasePointsSettingsBuffer } },
-    { binding: 1, resource: demTexture.createView() },
-    { binding: 2, resource: normalsTexture.createView() },
-    { binding: 3, resource: releasePointsTexture.createView() },
-    { binding: 4, resource: { buffer: outDebugRelease } },
-  ],
-  );
 
   const pixelData = await loadPNG("avaframe/" + simSettings.casename + "releaseTexture.png");
 
   function align(value, alignment) {
     return Math.ceil(value / alignment) * alignment;
   }
-  const width = dem.width;
-  const height = dem.height;
-  const bytesPerRowUnpadded = width * 4;
-  const bytesPerRow = align(bytesPerRowUnpadded, 256);
 
   const paddedData = new Uint8Array(bytesPerRow * height);
   const rgbaData = flipFlatArrayInY(pixelData.rgba, pixelData.width, pixelData.height);
@@ -254,13 +257,13 @@ async function run(simSettings, dem, release_point, predefinedReleasePoints) {
     paddedData.set(rgbaData.subarray(srcOffset, srcOffset + bytesPerRowUnpadded), dstOffset);
     // The remaining bytes in the row are already zero by default
   }
-  const texture = device.createTexture({
+  const releasePointsIn = device.createTexture({
     size: [width, height, 1],
     format: 'rgba8uint',
     usage: GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING,
   });
   device.queue.writeTexture(
-    { texture },
+    { texture: releasePointsIn },
     paddedData,
     {
       offset: 0,
@@ -274,36 +277,97 @@ async function run(simSettings, dem, release_point, predefinedReleasePoints) {
     }
   );
 
-  shaders.loadReleasePoints.createBindGroup([
-    { binding: 0, resource: texture.createView() },
-    { binding: 1, resource: releasePointsTexture.createView() },
-    { binding: 2, resource: { buffer: outDebugRelease } },
-  ],
-  );
 
   const unpaddedBytesPerRow = dem.width * 8;
   const paddedBytesPerRow = Math.ceil(unpaddedBytesPerRow / 256) * 256;
-  const readReleasePointsBuffer = device.createBuffer({
+  const readReleaseTextureBuffer = device.createBuffer({
+    size: paddedBytesPerRow * dem.height,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+  });
+  const readSlopeTextureBuffer = device.createBuffer({
+    size: paddedBytesPerRow * dem.height,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+  });
+  const readRoughnessTextureBuffer = device.createBuffer({
     size: paddedBytesPerRow * dem.height,
     usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
   });
 
+  const atomicCounter = device.createBuffer({
+    size: 4,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+  });
+  device.queue.writeBuffer(atomicCounter, 0, new Uint32Array([0]));
+
+
+  const outDebugNormals = createStorageBuffer(device, debugBufferSize);
+  const readbackDebugNormals = createReadbackBuffer(device, debugBufferSize);
+
+  shaders.computeNormals.createBindGroup([
+    { binding: 0, resource: { buffer: simSettingsBuffer } },
+    { binding: 1, resource: demTexture.createView() },
+    { binding: 2, resource: windTexture.createView() },
+    { binding: 3, resource: normalsTexture.createView() },
+    { binding: 4, resource: slopeTexture.createView() },
+    { binding: 5, resource: { buffer: outDebugNormals } },
+  ],
+  );
+
+  shaders.computeRoughness.createBindGroup([
+    { binding: 0, resource: { buffer: simSettingsBuffer } },
+    { binding: 1, resource: normalsTexture.createView() },
+    { binding: 2, resource: landcoverTexture.createView() },
+    { binding: 3, resource: roughnessTexture.createView() },
+  ],
+  );
+
+  shaders.computeReleasePoints.createBindGroup([
+    { binding: 0, resource: { buffer: simSettingsBuffer } },
+    { binding: 1, resource: demTexture.createView() },
+    { binding: 2, resource: slopeTexture.createView() },
+    { binding: 3, resource: roughnessTexture.createView() },
+    { binding: 6, resource: releasePointsTexture.createView() },
+    { binding: 7, resource: { buffer: outDebugRelease } },
+    { binding: 8, resource: { buffer: outNumberReleaseCells } },
+  ],
+  );
+  shaders.loadReleasePoints.createBindGroup([
+    { binding: 0, resource: releasePointsIn.createView() },
+    { binding: 1, resource: releasePointsTexture.createView() },
+    { binding: 2, resource: { buffer: outDebugRelease } },
+    { binding: 3, resource: { buffer: outNumberReleaseCells } },
+  ],
+  );
+
+
+
+  // Create bind group
+  // shaders.trajectory.createBindGroup([
+  //   { binding: 0, resource: { buffer: simSettingsBuffer } },
+  //   { binding: 1, resource: { buffer: inputPointBuffer } },
+  //   { binding: 2, resource: demTexture.createView() },
+  //   { binding: 3, resource: normalsTexture.createView() },
+  //   { binding: 4, resource: releasePointsTexture.createView() },
+  //   { binding: 5, resource: sampler },
+
+  //   { binding: 6, resource: { buffer: simInfoBuffer } },
+  //   { binding: 7, resource: { buffer: outBuffer } },
+  //   { binding: 8, resource: { buffer: outDebugTrajectories } },
+  //   { binding: 9, resource: { buffer: outputTextureBuffer } },
+  //   { binding: 10, resource: { buffer: outputVelocityTextureBuffer } },
+  //   { binding: 11, resource: { buffer: outTrajectoryAtomicBuffer } },
+  // ],
+  // );
 
   // Trajectory compute shader
 
 
   const inputPointData = new Float32Array([release_point[0], release_point[1]]);
 
-  const settingsBuffer = createInputBuffer(device, SimSettings.byteSize);
   const inputPointBuffer = createInputBuffer(device, inputPointData.byteLength);
 
-  device.queue.writeBuffer(settingsBuffer, 0, simSettings.createBuffer());
   device.queue.writeBuffer(inputPointBuffer, 0, inputPointData);
 
-  const sampler = device.createSampler({
-    magFilter: 'linear',
-    minFilter: 'linear',
-  });
 
   const outputTextureSize = 4 * dem.width * dem.height;
   const outputTextureBuffer = createStorageBuffer(device, outputTextureSize);
@@ -314,7 +378,7 @@ async function run(simSettings, dem, release_point, predefinedReleasePoints) {
   const simInfoBuffer = createStorageBuffer(device, SimInfo.byteSize);
   const outBuffer = createStorageBuffer(device, simDataBufferSize);
   const outDebugTrajectories = createStorageBuffer(device, debugBufferSize);
-  const outAtomicBuffer = device.createBuffer({
+  const outTrajectoryAtomicBuffer = device.createBuffer({
     size: 4,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
   });
@@ -329,26 +393,8 @@ async function run(simSettings, dem, release_point, predefinedReleasePoints) {
     usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
   });
 
-  // Create bind group
-  shaders.trajectory.createBindGroup([
-    { binding: 0, resource: { buffer: settingsBuffer } },
-    { binding: 1, resource: { buffer: inputPointBuffer } },
-    { binding: 2, resource: demTexture.createView() },
-    { binding: 3, resource: normalsTexture.createView() },
-    { binding: 4, resource: releasePointsTexture.createView() },
-    { binding: 5, resource: sampler },
-
-    { binding: 6, resource: { buffer: simInfoBuffer } },
-    { binding: 7, resource: { buffer: outBuffer } },
-    { binding: 8, resource: { buffer: outDebugTrajectories } },
-    { binding: 9, resource: { buffer: outputTextureBuffer } },
-    { binding: 10, resource: { buffer: outputVelocityTextureBuffer } },
-    { binding: 11, resource: { buffer: outAtomicBuffer } },
-  ],
-  );
 
   let bufferTimestamps;
-  let timestampQuerySet;
   if (debug) {
     bufferTimestamps = device.createBuffer({
       size: numberGpuTimestamps * 8, // 2 timestamps * 8 bytes each
@@ -357,59 +403,65 @@ async function run(simSettings, dem, release_point, predefinedReleasePoints) {
         | GPUBufferUsage.COPY_SRC
         | GPUBufferUsage.COPY_DST,
     });
-    timestampQuerySet = device.createQuerySet({ type: 'timestamp', count: numberGpuTimestamps });
+    shaders.timestampQuerySet = device.createQuerySet({ type: 'timestamp', count: numberGpuTimestamps });
   }
 
   // Encode commands
-  const commandEncoder = device.createCommandEncoder();
-  if (debug) { commandEncoder.writeTimestamp(timestampQuerySet, 0) };
-  shaders.normals.createComputePass(commandEncoder);
-  if (debug) { commandEncoder.writeTimestamp(timestampQuerySet, 1) };
+  const commandEncoderPreperation = device.createCommandEncoder();
+  // if (debug) { commandEncoder.writeTimestamp(timestampQuerySet, 0) };
+  shaders.computeNormals.createComputePass(commandEncoderPreperation);
+  shaders.computeRoughness.createComputePass(commandEncoderPreperation);
+  // if (debug) { commandEncoder.writeTimestamp(timestampQuerySet, 1) };
   if (predefinedReleasePoints) {
-    shaders.loadReleasePoints.createComputePass(commandEncoder);
+    shaders.loadReleasePoints.createComputePass(commandEncoderPreperation);
   } else {
-    shaders.computeReleasePoints.createComputePass(commandEncoder);
-  }
-  if (debug) { commandEncoder.writeTimestamp(timestampQuerySet, 2) };
-  shaders.trajectory.createComputePass(commandEncoder, n = simSettings.numberTrajectories);
-  if (debug) { commandEncoder.writeTimestamp(timestampQuerySet, 3) };
+    shaders.computeReleasePoints.createComputePass(commandEncoderPreperation);
+  } 
+  
+  copyTexture(commandEncoderPreperation, releasePointsTexture, readReleaseTextureBuffer, paddedBytesPerRow);
+  copyTexture(commandEncoderPreperation, slopeTexture, readSlopeTextureBuffer, paddedBytesPerRow);
+  copyTexture(commandEncoderPreperation, roughnessTexture, readRoughnessTextureBuffer, paddedBytesPerRow);
+  device.queue.submit([commandEncoderPreperation.finish()]);
+  await device.queue.onSubmittedWorkDone();
+
+  simTimer.checkpoint("preparation");
+  
+  const numberParticles = (await copyAndReadBuffer(outNumberReleaseCells, Uint32Array))[0] * simSettings.releasedParticlesPerCell;
+  
+  const commandEncoder = device.createCommandEncoder();
+  device.queue.writeBuffer(atomicCounter, 0, new Uint32Array([0]));
+
+  const particles = createStorageBuffer(device, numberParticles * Particle.byteSize);
+  shaders.initializeParticles.createBindGroup([
+    { binding: 0, resource: { buffer: simSettingsBuffer } },
+    { binding: 1, resource: demTexture.createView() },
+    { binding: 2, resource: releasePointsTexture.createView() },
+    { binding: 3, resource: sampler },
+    { binding: 4, resource: { buffer: particles } },
+    { binding: 5, resource: { buffer: atomicCounter } },
+  ],
+  );
+  // if (debug) { commandEncoder.writeTimestamp(timestampQuerySet, 2) };
+  shaders.initializeParticles.createComputePass(commandEncoder);
+  // shaders.trajectory.createComputePass(commandEncoder, n = simSettings.numberTrajectories);
+  // if (debug) { commandEncoder.writeTimestamp(timestampQuerySet, 3) };
 
   // Wait for copy to finish
-  await device.queue.onSubmittedWorkDone();
   // Copy outputs to readback buffers
   commandEncoder.copyBufferToBuffer(simInfoBuffer, 0, readbackSimInfo, 0, SimInfo.byteSize);
   commandEncoder.copyBufferToBuffer(outBuffer, 0, readbackSimData, 0, simDataBufferSize);
   commandEncoder.copyBufferToBuffer(outputTextureBuffer, 0, readbackOutputTexture, 0, outputTextureSize);
   commandEncoder.copyBufferToBuffer(outputVelocityTextureBuffer, 0, readbackVelocityTexture, 0, outputTextureSize);
-  commandEncoder.copyBufferToBuffer(outAtomicBuffer, 0, readbackAtomicBuffer, 0, 4);
-
-  commandEncoder.copyTextureToBuffer(
-    {
-      texture: releasePointsTexture,
-      mipLevel: 0,
-      origin: { x: 0, y: 0, z: 0 },
-    },
-    {
-      buffer: readReleasePointsBuffer,
-      bytesPerRow: paddedBytesPerRow,
-    },
-    {
-      width: dem.width,
-      height: dem.height,
-      depthOrArrayLayers: 1,
-    }
-  );
+  commandEncoder.copyBufferToBuffer(outTrajectoryAtomicBuffer, 0, readbackAtomicBuffer, 0, 4);
 
   commandEncoder.copyBufferToBuffer(outDebugTrajectories, 0, readbackDebugTrajectories, 0, debugBufferSize);
   commandEncoder.copyBufferToBuffer(outDebugNormals, 0, readbackDebugNormals, 0, debugBufferSize);
   commandEncoder.copyBufferToBuffer(outDebugRelease, 0, readbackDebugRelease, 0, debugBufferSize);
-  if (debug) {
-    commandEncoder.writeTimestamp(timestampQuerySet, 4)
-    commandEncoder.resolveQuerySet(timestampQuerySet, 0, numberGpuTimestamps, bufferTimestamps, 0);
-  }
+  // if (debug) {
+  //   commandEncoder.writeTimestamp(timestampQuerySet, 4)
+  //   commandEncoder.resolveQuerySet(timestampQuerySet, 0, numberGpuTimestamps, bufferTimestamps, 0);
+  // }
 
-  simTimer.checkpoint("preparation");
-  // Submit commands
   device.queue.submit([commandEncoder.finish()]);
   await device.queue.onSubmittedWorkDone();
   simTimer.checkpoint("shader execution");
@@ -427,18 +479,22 @@ async function run(simSettings, dem, release_point, predefinedReleasePoints) {
   const bufferDebugNormals = await readBuffer(readbackDebugNormals, Float32Array);
   const bufferDebugRelease = await readBuffer(readbackDebugRelease, Float32Array);
   const bufferDebugTrajectories = await readBuffer(readbackDebugTrajectories, Float32Array);
+
+  const particlesData = await copyAndReadBuffer(particles, Float32Array);
+  console.log("Particles: ", particlesData);
+  console.log("NumberParticles: ", numberParticles);
   simTimer.checkpoint("readback buffer");
 
   if (debug) {
-    const gpuTimestampsNs = new BigInt64Array(await copyAndReadBuffer(bufferTimestamps));
-    // loses precision for numbers > 2^53 -1
-    const gpuTimestamps = {
-      normals: Number(gpuTimestampsNs[1] - gpuTimestampsNs[0]) / 1e6,
-      releasePoints: Number(gpuTimestampsNs[2] - gpuTimestampsNs[1]) / 1e6,
-      trajectories: Number(gpuTimestampsNs[3] - gpuTimestampsNs[2]) / 1e6,
-      copy: Number(gpuTimestampsNs[4] - gpuTimestampsNs[3]) / 1e6,
-    }
-    console.log("GPU timestamps: ", gpuTimestamps);
+    // const gpuTimestampsNs = await copyAndReadBuffer(commandEncoder, bufferTimestamps, BigInt64Array);
+    // // loses precision for numbers > 2^53 -1
+    // const gpuTimestamps = {
+    //   normals: Number(gpuTimestampsNs[1] - gpuTimestampsNs[0]) / 1e6,
+    //   releasePoints: Number(gpuTimestampsNs[2] - gpuTimestampsNs[1]) / 1e6,
+    //   trajectories: Number(gpuTimestampsNs[3] - gpuTimestampsNs[2]) / 1e6,
+    //   copy: Number(gpuTimestampsNs[4] - gpuTimestampsNs[3]) / 1e6,
+    // }
+    // console.log("GPU timestamps: ", gpuTimestamps);
 
     console.log("Debug info normals: ", debugBufferLine(bufferDebugNormals,
       ["nx", "ny", "nz", "resolution", "dzdx", "dzdy", "dxx", "dyy", "dxy", "curvature"]
@@ -451,23 +507,42 @@ async function run(simSettings, dem, release_point, predefinedReleasePoints) {
     ));
   }
 
-  await readReleasePointsBuffer.mapAsync(GPUMapMode.READ);
-  const mapped = new Uint16Array(readReleasePointsBuffer.getMappedRange());
-  const { r, g, b, a } = processRGBA16FloatBuffer(mapped, dem.width, dem.height);
-  readReleasePointsBuffer.unmap();
+  const { r: releasePoints, g: gpxArea, b: predictor, a } = await readAndParseRGBA16FloatBuffer(readReleaseTextureBuffer, dem.width, dem.height);
+  const { r: slopeAngle, g: slopeAspect, b: windShelterIndex, a2 } = await readAndParseRGBA16FloatBuffer(readSlopeTextureBuffer, dem.width, dem.height);
+  const { r: roughness, g: forest, b: b, a3 } = await readAndParseRGBA16FloatBuffer(readRoughnessTextureBuffer, dem.width, dem.height);
 
   simTimer.checkpoint("readback textures");
   simData = new SimData(simInfo.dxyMin);
   simData.parse(bufferSimData, simInfo.stepCount, trackedTrajectories);
 
-  console.log([...bufferSimData.slice(0, SimData.timeStepByteSize / 4)]); 
+  console.log([...bufferSimData.slice(0, SimData.timeStepByteSize / 4)]);
   simTimer.printSummary();
   simData.parseVelocityTexture([...bufferVelocityTexture]);
   simData.parseCellCountTexture([...bufferOutputTexture]);
-  simData.parseReleasePointTexture(r, g, b, a)
+  simData.parseSlopeTexture(slopeAngle, slopeAspect, windShelterIndex);
+  simData.parseReleaseTexture(releasePoints, gpxArea, predictor)
+  simData.parseRoughnessTexture(roughness, forest)
   simTimer.checkpoint("parse results");
 }
 
+function copyTexture(commandEncoder, texture, buffer, paddedBytesPerRow) {
+  commandEncoder.copyTextureToBuffer(
+    {
+      texture: texture,
+      mipLevel: 0,
+      origin: { x: 0, y: 0, z: 0 },
+    },
+    {
+      buffer: buffer,
+      bytesPerRow: paddedBytesPerRow,
+    },
+    {
+      width: dem.width,
+      height: dem.height,
+      depthOrArrayLayers: 1,
+    }
+  );
+}
 async function readBuffer(buffer, ctor, size = 0) {
   await buffer.mapAsync(GPUMapMode.READ);
   const arrayBuffer = buffer.getMappedRange();
@@ -476,15 +551,14 @@ async function readBuffer(buffer, ctor, size = 0) {
   return result;
 }
 
-async function copyAndReadBuffer(buffer) {
+async function copyAndReadBuffer(buffer, ctor = Float32Array) {
   const size = buffer.size;
-  const gpuReadBuffer = device.createBuffer({ size, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  const gpuReadBuffer = device.createBuffer({ size, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });  
   const copyEncoder = device.createCommandEncoder();
   copyEncoder.copyBufferToBuffer(buffer, 0, gpuReadBuffer, 0, size);
-  const copyCommands = copyEncoder.finish();
-  device.queue.submit([copyCommands]);
+  device.queue.submit([copyEncoder.finish()]);
   await gpuReadBuffer.mapAsync(GPUMapMode.READ);
-  return gpuReadBuffer.getMappedRange();
+  return new ctor(gpuReadBuffer.getMappedRange());
 }
 
 function debugBufferLine(bufferDebug, descriptions = [], debugBufferSize = 100) {
@@ -609,6 +683,14 @@ function exportReleasePointsToPNG(releasePoints, width, height, canvasId = "rele
     }
     return flipped;
   }
+}
+
+async function readAndParseRGBA16FloatBuffer(buffer) {
+  await buffer.mapAsync(GPUMapMode.READ);
+  const mappedBuffer = new Uint16Array(buffer.getMappedRange());
+  const { r, g, b, a } = processRGBA16FloatBuffer(mappedBuffer, dem.width, dem.height);
+  buffer.unmap();
+  return { r, g, b, a };
 }
 
 function processRGBA16FloatBuffer(mapped, width, height) {

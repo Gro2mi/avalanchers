@@ -149,12 +149,23 @@ class SimInfo {
     }
 }
 
-class SimSettings {
+class Particle {
     static byteSize = 12 * 4;
+    constructor() {
+    this.position = { x: 0, y: 0, z: 0 };
+    this.mass = 0;
+    this.velocity = { x: 0, y: 0, z: 0 };
+    this.C = { xx: 0, xy: 0, yy: 0, xx: 0 }; // Assuming C is a 2x2 matrix stored as a flat array
+    }
+
+}
+
+class SimSettings {
+    static byteSize = 15 * 4;
     constructor() {
     }
 
-    async set(casename, maxSteps, simModel, frictionModel, density, slabThickness, frictionCoefficient, dragCoefficient, cfl, numbersTrajectories, boundary) {
+    async set(casename, maxSteps, simModel, frictionModel, density, slabThickness, frictionCoefficient, dragCoefficient, cfl, releasedParticlesPerCell) {
         this.casename = casename;
 
         this.maxSteps = maxSteps;
@@ -165,42 +176,42 @@ class SimSettings {
         this.frictionCoefficient = frictionCoefficient;
         this.dragCoefficient = dragCoefficient;
         this.cfl = cfl;
-        this.bounds = null;
-        this.numberTrajectories = numbersTrajectories;
+        this.cellSize = dem.world_resolution;
+        this.releasedParticlesPerCell = releasedParticlesPerCell;
+        
+        this.minSlopeAngle = 35;
+        this.maxSlopeAngle = 45;
+        this.minElevation = 1500;
+        this.velocityThreshold = 1e-6;
+        this.roughnessThreshold = 0.01;  // TODO is this high enough?
     }
 
     createBuffer() {
-        let settingsData = new Uint32Array([
+        this.cellSize = dem.world_resolution;
+        let settingsU32 = new Uint32Array([
             this.maxSteps,
             this.simModel,
             this.frictionModel,
+            this.releasedParticlesPerCell,
         ]);
-        let settingsFloat = new Float32Array([
+        let settingsF32 = new Float32Array([
             this.density,
             this.slabThickness,
             this.frictionCoefficient,
             this.dragCoefficient,
             this.cfl,
-            dem.bounds.xmin,
-            dem.bounds.ymin,
-            dem.bounds.xmax,
-            dem.bounds.ymax,
+            this.cellSize,
+            this.minSlopeAngle,
+            this.maxSlopeAngle,
+            this.minElevation,
+            this.velocityThreshold,
+            this.roughnessThreshold
         ]);
         const settingsBufferData = new ArrayBuffer(SimSettings.byteSize);
         const settingsBufferU32 = new Uint32Array(settingsBufferData);
         const settingsBufferF32 = new Float32Array(settingsBufferData);
-        settingsBufferU32[0] = settingsData[0];
-        settingsBufferU32[1] = settingsData[1];
-        settingsBufferU32[2] = settingsData[2];
-        settingsBufferF32[3] = settingsFloat[0];
-        settingsBufferF32[4] = settingsFloat[1];
-        settingsBufferF32[5] = settingsFloat[2];
-        settingsBufferF32[6] = settingsFloat[3];
-        settingsBufferF32[7] = settingsFloat[4];
-        settingsBufferF32[8] = settingsFloat[5];
-        settingsBufferF32[9] = settingsFloat[6];
-        settingsBufferF32[10] = settingsFloat[7];
-        settingsBufferF32[11] = settingsFloat[8];
+        settingsBufferU32.set(settingsU32);
+        settingsBufferF32.set(settingsF32, settingsU32.length);
         return settingsBufferData;
     }
 }
@@ -230,7 +241,10 @@ class SimData {
         this.roughness = [];
         this.slopeAngle = [];
         this.cellCount = [];
+        this.gpxArea = null;
+        this.releasePredictor = null;
         this.velocityField = [];
+        this.gEff = [];
     }
 
     cleanFloatArray(data) {
@@ -240,15 +254,19 @@ class SimData {
     }
 
     //   releasePoints = transposeAndTo2DArray(releasePoints, dem.width, dem.height);
-    parseReleasePointTexture(r, g, b, a) {
-        this.slopeAngle = this.cleanFloatArray(r);
-        this.roughness = this.cleanFloatArray(g);
-        this.slopeAspect = this.cleanFloatArray(b).map(
-            row => row.map(
-                value => ((360 + (value * 180 / Math.PI)) % 360)
-            )
-        );
-        this.releaseSlabThickness = this.cleanFloatArray(a);
+    parseSlopeTexture(slopeAngle, slopeAspect, windShelterIndex) {
+        this.slopeAngle = this.cleanFloatArray(slopeAngle);
+        this.slopeAspect = this.cleanFloatArray(slopeAspect);
+        this.roughness = this.cleanFloatArray(windShelterIndex);
+    }
+    parseReleaseTexture(slabThickness, gpxArea, releasePredictor) {
+        this.releaseSlabThickness = this.cleanFloatArray(slabThickness);
+        this.gpxArea = this.cleanFloatArray(gpxArea);
+        this.releasePredictor = this.cleanFloatArray(releasePredictor);
+    }
+    parseRoughnessTexture(roughness, forest) {
+        this.roughness = this.cleanFloatArray(roughness);
+        this.forest = this.cleanFloatArray(forest);
     }
     parseVelocityTexture(velocityTexture) {
         this.velocityField = to2DArray(velocityTexture, dem.width, dem.height).map(typedArr => Array.from(typedArr));
@@ -299,6 +317,8 @@ class SimData {
         this.normal.x.push(bufferData[baseOffset + 12]);
         this.normal.y.push(bufferData[baseOffset + 13]);
         this.normal.z.push(bufferData[baseOffset + 14]);
+
+        this.gEff.push(bufferData[baseOffset + 22]);
 
         this.uv.x.push(bufferData[baseOffset + 16]);
         this.uv.y.push(bufferData[baseOffset + 17]);
@@ -396,7 +416,7 @@ async function loadDemBinary(url, width, height) {
 
 async function loadDemJson(casename) {
     const response = await fetch('avaframe/' + casename + '.json');  // Path to your JSON file
-const jsonData = await response.json();
+    const jsonData = await response.json();
     return jsonData;
 }
 

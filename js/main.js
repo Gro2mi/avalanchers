@@ -25,10 +25,10 @@ const dragCoefficientValue = document.getElementById('dragCoefficientValue');
 dragCoefficientSlider.addEventListener('input', () => {
     dragCoefficientValue.textContent = dragCoefficientSlider.value;
 });
-const numberTrajectoriesSlider = document.getElementById('numberTrajectoriesSlider');
-const numberTrajectoriesValue = document.getElementById('numberTrajectoriesValue');
-numberTrajectoriesSlider.addEventListener('input', () => {
-    numberTrajectoriesValue.textContent = numberTrajectoriesSlider.value;
+const releasedParticlesPerCellSlider = document.getElementById('releasedParticlesPerCellSlider');
+const releasedParticlesPerCellValue = document.getElementById('releasedParticlesPerCellValue');
+releasedParticlesPerCellSlider.addEventListener('input', () => {
+    releasedParticlesPerCellValue.textContent = releasedParticlesPerCellSlider.value;
 });
 
 const zoomLevelSlider = document.getElementById('zoomLevelSlider');
@@ -153,10 +153,10 @@ async function getSettings() {
         frictionModel = frictionModelDropdown.selectedIndex,
         density = 200,
         slabThickness = 1,
-        frictionCoefficient = frictionCoefficientSlider.value,
-        dragCoefficient = dragCoefficientSlider.value,
+        frictionCoefficient = parseFloat(frictionCoefficientSlider.value),
+        dragCoefficient = parseInt(dragCoefficientSlider.value),
         cfl = parseFloat(cflSlider.value),
-        numberTrajectories = parseInt(numberTrajectoriesSlider.value),
+        releasedParticlesPerCell = parseInt(releasedParticlesPerCellSlider.value),
     )
 }
 

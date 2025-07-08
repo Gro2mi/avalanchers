@@ -43,7 +43,7 @@ async function plotDem(dem) {
         const layout = {
             template: plotly_dark,
             scene: {
-                aspectmode: 'data', 
+                aspectmode: 'data',
             }
         };
         Plotly.newPlot('demPlot', data, layout);
@@ -92,17 +92,17 @@ function updatePlots(selectedVariable) {
         title: `Histogram of ${selectedVariable}`,
         template: plotly_dark,
     };
-        Plotly.update(demPlot, {
-            surfacecolor: [simData[selectedVariable]],  // new data
-            cmin: [null],                               // reset min
-            cmax: [null],                               // reset max
-            colorscale: ['Portland'],
-            colorbar: {
-                title: plotVariable.options[plotVariable.selectedIndex].text
-            },
+    Plotly.update(demPlot, {
+        surfacecolor: [simData[selectedVariable]],  // new data
+        cmin: [null],                               // reset min
+        cmax: [null],                               // reset max
+        colorscale: ['Portland'],
+        colorbar: {
+            title: plotVariable.options[plotVariable.selectedIndex].text
+        },
             lighting: resetLighting,
 
-        });
+    });
     if (selectedVariable === 'slopeAspect') {
         Plotly.update(demPlot, {
             surfacecolor: [simData[selectedVariable]],
@@ -317,6 +317,15 @@ function plotOutput() {
         y: simData.stepDistance,
 
         name: 'Step Distance',
+        visible: 'legendonly',
+    };
+    const traceGEff = {
+        type: 'scatter',
+        mode: 'lines',
+        x: x,
+        y: simData.gEff,
+
+        name: 'g_eff',
         // visible: 'legendonly',
     };
     let layout = {
@@ -363,6 +372,7 @@ function plotOutput() {
         traceNormalY,
         traceNormalZ,
         traceStepDistance,
+        traceGEff,
     ]
 
     Plotly.newPlot('outputPlot', traces, layout).then(() => {
