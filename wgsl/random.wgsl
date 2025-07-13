@@ -73,3 +73,12 @@ fn rand44(v: vec4<f32>) -> vec4<f32> {
     rand41(v + vec4<f32>(23.23, 31.31, 47.47, 67.67))
   );
 }
+
+fn rand32u(v: vec2u) -> vec3f {
+  let vf = vec2f(v);
+  return vec3<f32>(
+    rand21(vf),
+    rand21(vf + vec2f(21.21, 37.37)),
+    rand21(vf + vec2f(17.17, 31.31))
+  );
+}

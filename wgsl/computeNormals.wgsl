@@ -1,5 +1,5 @@
 
-@group(0) @binding(0) var<uniform> simSettings: SimSettings;
+
 @group(0) @binding(1) var demTexture: texture_2d<f32>;
 @group(0) @binding(2) var windTexture: texture_2d<f32>;
 

@@ -1,12 +1,12 @@
-@group(0) @binding(0) var<uniform> simSettings: SimSettings;
+// @group(0) @binding(0) var<uniform> simSettings: SimSettings;
 @group(0) @binding(1) var demTexture: texture_2d<f32>;
 @group(0) @binding(2) var slopeTexture: texture_2d<f32>;
 @group(0) @binding(3) var roughnessTexture: texture_2d<f32>;
-// @group(0) @binding(2) var landcoverTexture: texture_2d<u32>;
+// @group(0) @binding(4) var landcoverTexture: texture_2d<u32>;
 
 @group(0) @binding(6) var releasePointsTexture: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(7) var<storage, read_write> out_debug: array<f32>;
-@group(0) @binding(8) var<storage, read_write> atomicBuffer: AtomicData;
+@group(0) @binding(8) var<storage, read_write> atomicReleaseCellCounter: AtomicValue;
 
 
 const confers_trees = vec4u(34, 139, 34, 255);
@@ -55,7 +55,7 @@ fn computeReleasePoints(@builtin(global_invocation_id) id: vec3<u32>) {
     } else {
         // release cell
         textureStore(releasePointsTexture, tex_pos, vec4f(1, gpxMask, predictor, 0f));
-        atomicAdd(&atomicBuffer.counter, 1u);
+        atomicAdd(&atomicReleaseCellCounter.value, 1u);
     out_debug[0] = f32(simSettings.slab_thickness);
     }
     // needs to stay here, otherwise texture is not used

@@ -39,15 +39,20 @@ zoomLevelSlider.addEventListener('change', () => {
     dem.loadTiles(gpx, zoom = zoomLevelSlider.value).then(() => {
         plotDem(dem);
         plotGpx(gpx)
+        simSettings.setDem(dem);
     });
 
 });
+zoomLevelSlider.addEventListener('input', () => {
+    zoomLevelValue.textContent = zoomLevelSlider.value + ' Resolution: ' + pixelWidthMeters(zoomLevelSlider.value, 47.2).toFixed(2) + ' m';
+  });
 
 demDropdown.addEventListener('change', async (event) => {
     predefinedReleasePoints = true;
     const selectedFile = event.target.value;
     localStorage.setItem('demDropdown', selectedFile);
     await dem.loadPNGAsFloat32(selectedFile);
+    simSettings.setDem(dem);
     plotDem(dem);
     await fetchInputs();
     if (!isMobileDevice) {
@@ -94,6 +99,7 @@ const simSettingsDiv = document.getElementById('simSettingsDiv')
 const runButton = document.getElementById('runSimulation')
 const prepareButton = document.getElementById('prepareSimulation')
 runButton.addEventListener('click', async () => {
+    getSettings();
     await runAndPlot();
 });
 prepareButton.addEventListener('click', async () => {
@@ -108,7 +114,7 @@ async function runAndPlot() {
     try {
         await run(simSettings, dem, release_point, predefinedReleasePoints);
         plotOutput();
-        plotPosition();
+        plotTrajectory(dem.bounds.xmin, dem.bounds.ymin, dem.mapFactor);
         plotHistogram();
         simTimer.checkpoint('plotting');
         plotTimer();
@@ -145,8 +151,8 @@ window.addEventListener('DOMContentLoaded', () => {
     }
 });
 
-async function getSettings() {
-    await simSettings.set(
+function getSettings() {
+    simSettings.set(
         casename = demDropdown.value,
         maxSteps = parseInt(stepSlider.value),
         simModel = 0,
@@ -190,13 +196,15 @@ async function main() {
         const maxInvocations = adapter.limits.maxComputeInvocationsPerWorkgroup;
         const workgroupSizeXY = Math.floor(Math.sqrt(maxInvocations));
         console.log("Release point:", release_point);
+        maxWorkgroupX = adapter.limits.maxComputeWorkgroupSizeX;
         device = await adapter.requestDevice({
             requiredFeatures: ["float32-filterable", 'timestamp-query'],
             requiredLimits: {
-                maxComputeWorkgroupSizeX: workgroupSizeXY,
+                maxComputeWorkgroupSizeX: maxWorkgroupX,
                 maxComputeWorkgroupSizeY: workgroupSizeXY,
                 maxComputeWorkgroupSizeZ: 1,
-                maxComputeInvocationsPerWorkgroup: maxInvocations
+                maxComputeInvocationsPerWorkgroup: maxInvocations,
+                maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
             }
         });
         device.lost.then(err => {
@@ -210,6 +218,7 @@ async function main() {
     await fetchInputs();
 
     await dem.loadPNGAsFloat32(simSettings.casename);
+    simSettings.setDem(dem);
     // const gpxString = await fetch('gpx/NockspitzeNDirectTop.gpx').then(response => response.text());
     // gpx = parseGPX(gpxString);
     // await dem.loadTiles(gpx, zoom = zoomLevelSlider.value)
@@ -234,6 +243,7 @@ document.getElementById("gpxfile").addEventListener("change", async (e) => {
     tiles = [];
     gpx = parseGPX(gpxString);
     await dem.loadTiles(gpx, zoom = zoomLevelSlider.value)
+    simSettings.setDem(dem);
 
     plotDem(dem);
     plotGpx(gpx);

@@ -62,7 +62,7 @@ class ShaderNode {
     return this.bindGroup;
   }
 
-  createComputePass(commandEncoder, n = 1, workgroupCountX = Math.ceil(dem.width / 16), workgroupCountY = Math.ceil(dem.height / 16)) {
+  createComputePass(commandEncoder, workgroupCountX = Math.ceil(dem.width / 16), workgroupCountY = Math.ceil(dem.height / 16)) {
     if (!this.pipeline) {
       throw new Error("Pipeline is not created for " + this.name);
     }
@@ -71,10 +71,8 @@ class ShaderNode {
     }
     this.computePass = commandEncoder.beginComputePass({ label: this.name + " Compute Pass" });
     this.computePass.setPipeline(this.pipeline);
-    for (let i = 0; i < n; i++) {
-      this.computePass.setBindGroup(0, this.bindGroup);
-      this.computePass.dispatchWorkgroups(workgroupCountX, workgroupCountY, 1);
-    }
+    this.computePass.setBindGroup(0, this.bindGroup);
+    this.computePass.dispatchWorkgroups(workgroupCountX, workgroupCountY, 1);
     this.computePass.end();
   }
 }
@@ -90,23 +88,30 @@ class Shaders {
     this.computeReleasePoints = new ShaderNode("computeReleasePoints", false);
     this.loadReleasePoints = new ShaderNode("loadReleasePoints", false);
     this.initializeParticles = new ShaderNode("initializeParticles", false);
+    this.computeParticles = new ShaderNode("computeParticles", false);
+    this.resetMaxVelocity = new ShaderNode("resetMaxVelocity", false);
+
     this.trajectory = new ShaderNode("computeTrajectories", false);
   }
 
   async fetch() {
     // TODO: implement include functionality for WGSL
     this.shaderImports.code = await loadAndConcatShaders([
-      "wgsl/random.wgsl",
       "wgsl/util.wgsl",
+      "wgsl/random.wgsl",
     ]);
     await this.shaderImports.compile();
     this.linesImported = countLines(this.shaderImports.code);
 
-    this.computeNormals.code = await loadAndConcatShaders(["wgsl/random.wgsl", "wgsl/util.wgsl", 'wgsl/computeNormals.wgsl']);
-    this.computeRoughness.code = await loadAndConcatShaders(["wgsl/random.wgsl", "wgsl/util.wgsl", 'wgsl/computeRoughness.wgsl']);
-    this.computeReleasePoints.code = await loadAndConcatShaders(["wgsl/random.wgsl", "wgsl/util.wgsl", 'wgsl/computeReleasePoints.wgsl']);
-    this.loadReleasePoints.code = await loadAndConcatShaders(["wgsl/random.wgsl", "wgsl/util.wgsl", 'wgsl/loadReleasePoints.wgsl']);
-    this.initializeParticles.code = await loadAndConcatShaders(["wgsl/random.wgsl", "wgsl/util.wgsl", 'wgsl/initializeParticles.wgsl']);
+    this.computeNormals.code = await loadAndConcatShaders(["wgsl/util.wgsl", "wgsl/random.wgsl", 'wgsl/computeNormals.wgsl']);
+    this.computeRoughness.code = await loadAndConcatShaders(["wgsl/util.wgsl", "wgsl/random.wgsl", 'wgsl/computeRoughness.wgsl']);
+    this.computeReleasePoints.code = await loadAndConcatShaders(["wgsl/util.wgsl", "wgsl/random.wgsl", 'wgsl/computeReleasePoints.wgsl']);
+    this.loadReleasePoints.code = await loadAndConcatShaders(['wgsl/loadReleasePoints.wgsl']);
+    this.initializeParticles.code = await loadAndConcatShaders(["wgsl/util.wgsl", "wgsl/random.wgsl", 'wgsl/initializeParticles.wgsl']);
+    this.computeParticles.code = 
+      (await loadAndConcatShaders(["wgsl/util.wgsl", "wgsl/random.wgsl", 'wgsl/computeParticles.wgsl']))
+      .replace(/WORKGROUP_SIZE/g, maxWorkgroupX.toString());
+    this.resetMaxVelocity.code = await loadAndConcatShaders(["wgsl/util.wgsl", 'wgsl/resetMaxVelocity.wgsl']);
     // this.trajectory.code = await loadAndConcatShaders(['wgsl/computeTrajectories.wgsl']);
   }
 
@@ -115,8 +120,10 @@ class Shaders {
     await this.computeNormals.compile(this.linesImported);
     await this.computeRoughness.compile(this.linesImported);
     await this.computeReleasePoints.compile(this.linesImported);
-    await this.loadReleasePoints.compile(this.linesImported);
+    await this.loadReleasePoints.compile();
     await this.initializeParticles.compile(this.linesImported);
+    await this.computeParticles.compile(this.linesImported);
+    await this.resetMaxVelocity.compile();
     // await this.trajectory.compile();
   }
 
@@ -126,6 +133,8 @@ class Shaders {
     this.computeReleasePoints.createPipeline();
     this.loadReleasePoints.createPipeline();
     this.initializeParticles.createPipeline();
+    this.computeParticles.createPipeline();
+    this.resetMaxVelocity.createPipeline();
     // this.trajectory.createPipeline();
   }
 
@@ -296,8 +305,16 @@ async function run(simSettings, dem, release_point, predefinedReleasePoints) {
   const atomicCounter = device.createBuffer({
     size: 4,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+    label: "atomicCounter",
   });
   device.queue.writeBuffer(atomicCounter, 0, new Uint32Array([0]));
+
+  const maxVelocityAtomicBuffer = device.createBuffer({
+    size: 4,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+    label: "maxVelocityAtomicBuffer",
+  });
+  device.queue.writeBuffer(maxVelocityAtomicBuffer, 0, new Uint32Array([0]));
 
 
   const outDebugNormals = createStorageBuffer(device, debugBufferSize);
@@ -341,27 +358,6 @@ async function run(simSettings, dem, release_point, predefinedReleasePoints) {
 
 
 
-  // Create bind group
-  // shaders.trajectory.createBindGroup([
-  //   { binding: 0, resource: { buffer: simSettingsBuffer } },
-  //   { binding: 1, resource: { buffer: inputPointBuffer } },
-  //   { binding: 2, resource: demTexture.createView() },
-  //   { binding: 3, resource: normalsTexture.createView() },
-  //   { binding: 4, resource: releasePointsTexture.createView() },
-  //   { binding: 5, resource: sampler },
-
-  //   { binding: 6, resource: { buffer: simInfoBuffer } },
-  //   { binding: 7, resource: { buffer: outBuffer } },
-  //   { binding: 8, resource: { buffer: outDebugTrajectories } },
-  //   { binding: 9, resource: { buffer: outputTextureBuffer } },
-  //   { binding: 10, resource: { buffer: outputVelocityTextureBuffer } },
-  //   { binding: 11, resource: { buffer: outTrajectoryAtomicBuffer } },
-  // ],
-  // );
-
-  // Trajectory compute shader
-
-
   const inputPointData = new Float32Array([release_point[0], release_point[1]]);
 
   const inputPointBuffer = createInputBuffer(device, inputPointData.byteLength);
@@ -375,7 +371,12 @@ async function run(simSettings, dem, release_point, predefinedReleasePoints) {
 
   // Create all output buffers
   const simDataBufferSize = trackedTrajectories * SimData.timeStepByteSize * simSettings.maxSteps;
-  const simInfoBuffer = createStorageBuffer(device, SimInfo.byteSize);
+  const simInfoBuffer = device.createBuffer({
+    size: SimInfo.byteSize,
+    usage: GPUBufferUsage.STORAGE
+      | GPUBufferUsage.COPY_SRC
+      | GPUBufferUsage.COPY_DST,
+  });
   const outBuffer = createStorageBuffer(device, simDataBufferSize);
   const outDebugTrajectories = createStorageBuffer(device, debugBufferSize);
   const outTrajectoryAtomicBuffer = device.createBuffer({
@@ -416,8 +417,8 @@ async function run(simSettings, dem, release_point, predefinedReleasePoints) {
     shaders.loadReleasePoints.createComputePass(commandEncoderPreperation);
   } else {
     shaders.computeReleasePoints.createComputePass(commandEncoderPreperation);
-  } 
-  
+  }
+
   copyTexture(commandEncoderPreperation, releasePointsTexture, readReleaseTextureBuffer, paddedBytesPerRow);
   copyTexture(commandEncoderPreperation, slopeTexture, readSlopeTextureBuffer, paddedBytesPerRow);
   copyTexture(commandEncoderPreperation, roughnessTexture, readRoughnessTextureBuffer, paddedBytesPerRow);
@@ -425,30 +426,81 @@ async function run(simSettings, dem, release_point, predefinedReleasePoints) {
   await device.queue.onSubmittedWorkDone();
 
   simTimer.checkpoint("preparation");
-  
-  const numberParticles = (await copyAndReadBuffer(outNumberReleaseCells, Uint32Array))[0] * simSettings.releasedParticlesPerCell;
-  
-  const commandEncoder = device.createCommandEncoder();
-  device.queue.writeBuffer(atomicCounter, 0, new Uint32Array([0]));
 
-  const particles = createStorageBuffer(device, numberParticles * Particle.byteSize);
+  const numberParticles = (await copyAndReadBuffer(outNumberReleaseCells, Uint32Array))[0] * simSettings.releasedParticlesPerCell;
+
+  const commandEncoderInitialization = device.createCommandEncoder();
+
+  const particles = device.createBuffer({
+    size: numberParticles * Particle.byteSize,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+  });
   shaders.initializeParticles.createBindGroup([
     { binding: 0, resource: { buffer: simSettingsBuffer } },
-    { binding: 1, resource: demTexture.createView() },
-    { binding: 2, resource: releasePointsTexture.createView() },
-    { binding: 3, resource: sampler },
-    { binding: 4, resource: { buffer: particles } },
-    { binding: 5, resource: { buffer: atomicCounter } },
+    { binding: 1, resource: { buffer: simInfoBuffer } },
+    { binding: 2, resource: demTexture.createView() },
+    { binding: 3, resource: releasePointsTexture.createView() },
+    { binding: 4, resource: sampler },
+    { binding: 5, resource: { buffer: particles } },
+    { binding: 6, resource: { buffer: atomicCounter } },
+    { binding: 7, resource: { buffer: maxVelocityAtomicBuffer } },
   ],
   );
   // if (debug) { commandEncoder.writeTimestamp(timestampQuerySet, 2) };
-  shaders.initializeParticles.createComputePass(commandEncoder);
+  shaders.initializeParticles.createComputePass(commandEncoderInitialization);
+  device.queue.submit([commandEncoderInitialization.finish()]);
+  await device.queue.onSubmittedWorkDone();
+  const startParticles = await copyAndReadBuffer(particles, Float32Array);
+
+
+  shaders.computeParticles.createBindGroup([
+    { binding: 0, resource: { buffer: simSettingsBuffer } },
+    { binding: 1, resource: { buffer: simInfoBuffer } },
+    { binding: 2, resource: demTexture.createView() },
+    { binding: 3, resource: normalsTexture.createView() },
+    { binding: 4, resource: { buffer: particles } },
+    { binding: 5, resource: sampler },
+
+    { binding: 6, resource: { buffer: maxVelocityAtomicBuffer } },
+    { binding: 7, resource: { buffer: outBuffer } },
+    { binding: 8, resource: { buffer: outDebugTrajectories } },
+    { binding: 9, resource: { buffer: outputTextureBuffer } },
+    { binding: 10, resource: { buffer: outputVelocityTextureBuffer } },
+    // { binding: 11, resource: { buffer: outTrajectoryAtomicBuffer } },
+  ],
+  );
+  
+  shaders.resetMaxVelocity.createBindGroup([
+    { binding: 1, resource: { buffer: simInfoBuffer } },
+    { binding: 2, resource: { buffer: maxVelocityAtomicBuffer } },
+    // { binding: 11, resource: { buffer: outTrajectoryAtomicBuffer } },
+  ],
+  );
+
+  device.queue.writeBuffer(simInfoBuffer, 0, new Uint32Array([0, numberParticles]));
+  // for (let i = 0; i < simSettings.maxSteps; i++) {
+  const commandEncoderCompute = device.createCommandEncoder();
+  const computePass = commandEncoderCompute.beginComputePass();
+  for (let i = 0; i < simSettings.maxSteps; i++) {
+    // device.queue.writeBuffer(simInfoBuffer, 0, new Uint32Array([i]));
+    // shaders.computeParticles.createComputePass(commandEncoderCompute, Math.ceil(numberParticles / 64), 1);
+
+    computePass.setPipeline(shaders.computeParticles.pipeline);
+    computePass.setBindGroup(0, shaders.computeParticles.bindGroup);
+    computePass.dispatchWorkgroups(Math.ceil(numberParticles / maxWorkgroupX));
+    computePass.setPipeline(shaders.resetMaxVelocity.pipeline);
+    computePass.setBindGroup(0, shaders.resetMaxVelocity.bindGroup);
+    computePass.dispatchWorkgroups(1);
+  }
+  computePass.end()
+  device.queue.submit([commandEncoderCompute.finish()]);
+  await device.queue.onSubmittedWorkDone();
   // shaders.trajectory.createComputePass(commandEncoder, n = simSettings.numberTrajectories);
   // if (debug) { commandEncoder.writeTimestamp(timestampQuerySet, 3) };
 
+  const commandEncoder = device.createCommandEncoder();
   // Wait for copy to finish
   // Copy outputs to readback buffers
-  commandEncoder.copyBufferToBuffer(simInfoBuffer, 0, readbackSimInfo, 0, SimInfo.byteSize);
   commandEncoder.copyBufferToBuffer(outBuffer, 0, readbackSimData, 0, simDataBufferSize);
   commandEncoder.copyBufferToBuffer(outputTextureBuffer, 0, readbackOutputTexture, 0, outputTextureSize);
   commandEncoder.copyBufferToBuffer(outputVelocityTextureBuffer, 0, readbackVelocityTexture, 0, outputTextureSize);
@@ -466,13 +518,11 @@ async function run(simSettings, dem, release_point, predefinedReleasePoints) {
   await device.queue.onSubmittedWorkDone();
   simTimer.checkpoint("shader execution");
 
-  const simInfo = await readBuffer(readbackSimInfo, SimInfo);
-  console.log("Step count tracked Trajectory: ", simInfo.stepCount);
-  console.log("dxy min: ", simInfo.dxyMin);
   // Read results
   const totalTimesteps = await readBuffer(readbackAtomicBuffer, Uint32Array);
   console.log("Max timesteps: ", totalTimesteps[0]);
-  const bufferSimData = await readBuffer(readbackSimData, Float32Array, trackedTrajectories * SimData.timeStepByteSize * simInfo.stepCount);
+  // TODO read simData
+  const bufferSimData = await readBuffer(readbackSimData, Float32Array, trackedTrajectories * SimData.timeStepByteSize * simSettings.maxSteps);
   const bufferOutputTexture = await readBuffer(readbackOutputTexture, Uint32Array);
   const bufferVelocityTexture = await readBuffer(readbackVelocityTexture, Uint32Array);
 
@@ -481,6 +531,7 @@ async function run(simSettings, dem, release_point, predefinedReleasePoints) {
   const bufferDebugTrajectories = await readBuffer(readbackDebugTrajectories, Float32Array);
 
   const particlesData = await copyAndReadBuffer(particles, Float32Array);
+  console.log("Start Particles: ", startParticles);
   console.log("Particles: ", particlesData);
   console.log("NumberParticles: ", numberParticles);
   simTimer.checkpoint("readback buffer");
@@ -510,18 +561,18 @@ async function run(simSettings, dem, release_point, predefinedReleasePoints) {
   const { r: releasePoints, g: gpxArea, b: predictor, a } = await readAndParseRGBA16FloatBuffer(readReleaseTextureBuffer, dem.width, dem.height);
   const { r: slopeAngle, g: slopeAspect, b: windShelterIndex, a2 } = await readAndParseRGBA16FloatBuffer(readSlopeTextureBuffer, dem.width, dem.height);
   const { r: roughness, g: forest, b: b, a3 } = await readAndParseRGBA16FloatBuffer(readRoughnessTextureBuffer, dem.width, dem.height);
-
+  const lastTimestep = new Uint32Array(particlesData.buffer, 12 * 4, 1)[0];
   simTimer.checkpoint("readback textures");
-  simData = new SimData(simInfo.dxyMin);
-  simData.parse(bufferSimData, simInfo.stepCount, trackedTrajectories);
+  simData = new SimData(simSettings.cellSize);
+  simData.parse(bufferSimData, lastTimestep, trackedTrajectories);
 
   console.log([...bufferSimData.slice(0, SimData.timeStepByteSize / 4)]);
   simTimer.printSummary();
-  simData.parseVelocityTexture([...bufferVelocityTexture]);
-  simData.parseCellCountTexture([...bufferOutputTexture]);
   simData.parseSlopeTexture(slopeAngle, slopeAspect, windShelterIndex);
   simData.parseReleaseTexture(releasePoints, gpxArea, predictor)
   simData.parseRoughnessTexture(roughness, forest)
+  simData.parseVelocityTexture([...bufferVelocityTexture]);
+  simData.parseCellCountTexture([...bufferOutputTexture]);
   simTimer.checkpoint("parse results");
 }
 
@@ -553,7 +604,7 @@ async function readBuffer(buffer, ctor, size = 0) {
 
 async function copyAndReadBuffer(buffer, ctor = Float32Array) {
   const size = buffer.size;
-  const gpuReadBuffer = device.createBuffer({ size, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });  
+  const gpuReadBuffer = device.createBuffer({ size, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
   const copyEncoder = device.createCommandEncoder();
   copyEncoder.copyBufferToBuffer(buffer, 0, gpuReadBuffer, 0, size);
   device.queue.submit([copyEncoder.finish()]);

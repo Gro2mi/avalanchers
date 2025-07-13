@@ -1,4 +1,3 @@
-@group(0) @binding(0) var<uniform> simSettings: SimSettings;
 @group(0) @binding(1) var normalsTexture: texture_2d<f32>;
 @group(0) @binding(2) var forestTexture: texture_2d<u32>;
 @group(0) @binding(3) var roughnessTexture: texture_storage_2d<rgba16float, write>;

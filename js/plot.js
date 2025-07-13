@@ -1,7 +1,7 @@
 const outputPlot = document.getElementById('outputPlot');
 const demPlot = document.getElementById('demPlot');
 const histogramPlot = document.getElementById('histogramPlot');
-    
+
 const resetLighting = {
     ambient: 0.8,
     diffuse: 0.8,
@@ -47,16 +47,16 @@ async function plotDem(dem) {
             }
         };
         Plotly.newPlot('demPlot', data, layout);
-        demPlot.on('plotly_click', function(eventData) {
-                const point = eventData.points[0];
-                const i = point.pointNumber[0]; // column index (x)
-                const j = point.pointNumber[1]; // row index (y)
-                const x = point.x;
-                const y = point.y;
-                const z = point.z;
+        demPlot.on('plotly_click', function (eventData) {
+            const point = eventData.points[0];
+            const i = point.pointNumber[0]; // column index (x)
+            const j = point.pointNumber[1]; // row index (y)
+            const x = point.x;
+            const y = point.y;
+            const z = point.z;
 
-                console.log(`Clicked surface point at i=${i}, j=${j}, x=${x}, y=${y}, z=${z}`);
-            });
+            console.log(`Clicked surface point at i=${i}, j=${j}, x=${x}, y=${y}, z=${z}`);
+        });
     } catch (error) {
         console.error('Error loading or plotting data:', error);
     }
@@ -100,7 +100,7 @@ function updatePlots(selectedVariable) {
         colorbar: {
             title: plotVariable.options[plotVariable.selectedIndex].text
         },
-            lighting: resetLighting,
+        lighting: resetLighting,
 
     });
     if (selectedVariable === 'slopeAspect') {
@@ -148,12 +148,15 @@ function plotGpx(gpx) {
     dem.interpolateElevation(webMercatorCoords[0])
     const lineTrace = {
         type: 'scatter3d',
-        mode: 'line+markers',
+        mode: 'lines+markers',
         x: webMercatorCoords.map(pt => pt.x),
         y: webMercatorCoords.map(pt => pt.y),
-        z: webMercatorCoords.map(pt => pt.z || 3000),
+        z: webMercatorCoords.map(pt => pt.z + 1 || 3000),
         marker: {
-            size: 3,
+            size: 2,
+        },
+        line: {
+            width: 4,
         },
         name: 'Route'
     };
@@ -161,12 +164,12 @@ function plotGpx(gpx) {
     Plotly.addTraces(demPlot, [lineTrace]);
 }
 
-function plotPosition() {
+function plotTrajectory(xminBounds, yminBounds, mapFactor) {
     const lineTrace = {
         type: 'scatter3d',
         mode: 'line+markers',
-        x: simData.position.x,
-        y: simData.position.y,
+        x: simData.position.x.map(val => val * mapFactor + xminBounds),
+        y: simData.position.y.map(val => val * mapFactor + yminBounds),
         // Offset elevation by 5 units to visually separate the trajectory from the DEM surface
         z: simData.elevation.map((val) => (val + 5)),
         marker: {

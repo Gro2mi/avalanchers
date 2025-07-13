@@ -8,8 +8,8 @@ class Dem {
         this.x = [];
         this.y = [];
         this.z = [];
-        this.world_resolution = null; // meters per pixel
-        this.map_resolution = null;
+        this.cellSize = null; // meters per pixel
+        this.mapFactor = null;
     }
 
     async loadPNGAsFloat32(casename) {
@@ -31,7 +31,8 @@ class Dem {
 
         this.create2DData();
         this.bounds = await fetchBounds(casename);
-        this.world_resolution = (this.bounds.xmax - this.bounds.xmin) / (this.width - 1);
+        this.cellSize = (this.bounds.xmax - this.bounds.xmin) / (this.width - 1);
+        this.mapFactor = 1;
         this.x = linspace(this.bounds.xmin, this.bounds.xmax, this.width);
         this.y = linspace(this.bounds.ymin, this.bounds.ymax, this.height);
         console.log("Loaded PNG ", casename, ":", this.width, "x", this.height);
@@ -51,8 +52,8 @@ class Dem {
         this.width = width;
         this.height = height;
         // approximate latitude for correction, assuming it to be constant
-        this.world_resolution = pixelWidthMeters(zoom, (bbox.maxLat - bbox.minLat) / 2 + bbox.minLat);
-        this.map_resolution = pixelWidthMeters(zoom, 0);
+        this.cellSize = pixelWidthMeters(zoom, (bbox.maxLat - bbox.minLat) / 2 + bbox.minLat);
+        this.mapFactor = pixelWidthMeters(zoom, 0) / this.cellSize;
         this.create2DData();
         this.x = linspace(this.bounds.xmin, this.bounds.xmax, this.width)//.reverse();
         this.y = linspace(this.bounds.ymin, this.bounds.ymax, this.height)//.reverse();
@@ -71,8 +72,8 @@ class Dem {
     }
 
     getIndex(pt) {
-        const dx = (pt.x - this.bounds.xmin) / this.map_resolution;
-        const dy = (pt.y - this.bounds.ymin) / this.map_resolution; // Y is flipped in images
+        const dx = (pt.x - this.bounds.xmin) / (this.cellSize * this.mapFactor);
+        const dy = (pt.y - this.bounds.ymin) / (this.cellSize * this.mapFactor);
         return { x: dx, y: dy };
     }
 
@@ -141,31 +142,35 @@ class RegionBounds {
 }
 
 class SimInfo {
-    static byteSize = 2 * 4;
+    static byteSize = 4 * 4;
     constructor(buffer) {
         const view = new DataView(buffer);
-        this.stepCount = view.getUint32(0, true);
-        this.dxyMin = view.getFloat32(4, true);
+        this.timestep = view.getUint32(0, true);
+        this.numberParticles = view.getUint32(4, true);
+        this.elevationThreshold = view.getFloat32(8, true);
+        this.maxVelocity = view.getFloat32(8, true);
     }
 }
 
 class Particle {
-    static byteSize = 12 * 4;
+    static byteSize = 16 * 4;
     constructor() {
-    this.position = { x: 0, y: 0, z: 0 };
-    this.mass = 0;
-    this.velocity = { x: 0, y: 0, z: 0 };
-    this.C = { xx: 0, xy: 0, yy: 0, xx: 0 }; // Assuming C is a 2x2 matrix stored as a flat array
+        this.position = { x: 0, y: 0, z: 0 };
+        this.mass = 0;
+        this.velocity = { x: 0, y: 0, z: 0 };
+        this.C = { xx: 0, xy: 0, yx: 0, yy: 0 }; // Assuming C is a 2x2 matrix stored as a flat array
+        this.stopped = 0;
+        // 3 * 4 bytes padding
     }
 
 }
 
 class SimSettings {
-    static byteSize = 15 * 4;
+    static byteSize = 20 * 4;
     constructor() {
     }
 
-    async set(casename, maxSteps, simModel, frictionModel, density, slabThickness, frictionCoefficient, dragCoefficient, cfl, releasedParticlesPerCell) {
+    set(casename, maxSteps, simModel, frictionModel, density, slabThickness, frictionCoefficient, dragCoefficient, cfl, releasedParticlesPerCell) {
         this.casename = casename;
 
         this.maxSteps = maxSteps;
@@ -176,25 +181,35 @@ class SimSettings {
         this.frictionCoefficient = frictionCoefficient;
         this.dragCoefficient = dragCoefficient;
         this.cfl = cfl;
-        this.cellSize = dem.world_resolution;
         this.releasedParticlesPerCell = releasedParticlesPerCell;
-        
+
         this.minSlopeAngle = 35;
         this.maxSlopeAngle = 45;
         this.minElevation = 1500;
         this.velocityThreshold = 1e-6;
         this.roughnessThreshold = 0.01;  // TODO is this high enough?
     }
+    setDem(dem) {
+        console.assert(Number.isFinite(dem.cellSize) , "DEM not defined");
+        this.cellSize = dem.world_resolution;
+        this.gridShape = { x: dem.width, y: dem.height };
+        this.worldSize = { x: dem.width * dem.cellSize, y: dem.height * dem.cellSize };
+    }
 
     createBuffer() {
-        this.cellSize = dem.world_resolution;
+        console.assert(Number.isFinite(this.cellSize) , "DEM not defined");
+        this.cellSize = dem.cellSize;
         let settingsU32 = new Uint32Array([
             this.maxSteps,
             this.simModel,
             this.frictionModel,
             this.releasedParticlesPerCell,
+            this.gridShape.x,
+            this.gridShape.y,
         ]);
         let settingsF32 = new Float32Array([
+            this.worldSize.x,
+            this.worldSize.y,
             this.density,
             this.slabThickness,
             this.frictionCoefficient,
