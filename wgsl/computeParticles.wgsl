@@ -44,87 +44,74 @@ fn computeParticles(
     let particleId = pId.x;
     let localId = lId.x;
 
-    if (particleId < simInfo.number_particles) {
-        let particle = &particles[particleId];
-        if (particle.stopped == 0u) {
-            let uv = positionToUV(particle.position);
-            
-            if(particleId == 0u){
-            // atomicMax(&atomicBuffer.counter, step_count);
-                out_debug[0] = f32(particle.position.x);
-                out_debug[1] = f32(particle.position.y);
-                out_debug[2] = f32(uv.x);
-                out_debug[3] = f32(uv.y);
-                out_debug[6] = f32(simInfo.timestep);
-                out_debug[7] = f32(simInfo.number_particles);
-                out_debug[8] = f32(simSettings.grid_shape.x);
-                out_debug[9] = f32(simSettings.grid_shape.y);
-                out_debug[10] = f32(simSettings.world_size.x);
-                out_debug[11] = f32(simSettings.world_size.y);
-                out_debug[12] = f32(simSettings.friction_coefficient);
-                out_debug[13] = (f32(atomicLoad(&maxVelocity.value)) / f32(maxVelocityFactor));
-                out_debug[14] = f32(simSettings.world_size.x);
-                out_debug[15] = f32(simSettings.world_size.y);
-                out_debug[16] = f32(simSettings.world_size.x);
-            }
-            let normal = getNormal(uv); 
-            const acceleration_gravity = vec3f(0.0, 0.0, -g);
-            let acceleration_normal = g * normal.z * normal;
+    let particle = &particles[particleId];
+    if (particleId >= simInfo.number_particles) {
+        return;
+    }
+    if (particle.stopped > 0u) {
+        return;
+    }
+    let uv = positionToUV(particle.position);
+    
+    if(particleId == 0u){
+    // atomicMax(&atomicBuffer.counter, step_count);
+        out_debug[0] = f32(particle.position.x);
+        out_debug[1] = f32(particle.position.y);
+        out_debug[2] = f32(uv.x);
+        out_debug[3] = f32(uv.y);
+        out_debug[6] = f32(simInfo.timestep);
+        out_debug[7] = f32(simInfo.number_particles);
+        out_debug[8] = f32(simSettings.grid_shape.x);
+        out_debug[9] = f32(simSettings.grid_shape.y);
+        out_debug[10] = f32(simSettings.world_size.x);
+        out_debug[11] = f32(simSettings.world_size.y);
+        out_debug[12] = f32(simSettings.friction_coefficient);
+        out_debug[13] = (f32(atomicLoad(&maxVelocity.value)) / f32(maxVelocityFactor));
+        out_debug[14] = f32(simSettings.world_size.x);
+        out_debug[15] = f32(simSettings.world_size.y);
+        out_debug[16] = f32(simSettings.world_size.x);
+    }
+    let normal = getNormal(uv); 
+    const acceleration_gravity = vec3f(0.0, 0.0, -g);
+    let acceleration_normal = g * normal.z * normal;
 
-            let acceleration_tangential = acceleration_gravity + acceleration_normal;
-            var dt = simSettings.cfl * simSettings.cell_size / (simInfo.max_velocity + simSettings.velocity_threshold);
-            particle.velocity = particle.velocity + acceleration_tangential * dt; 
-            let acceleration_friction_magnitude = acceleration_by_friction(acceleration_normal, particle);
-            if(length(particle.velocity) < acceleration_friction_magnitude * dt){
-                dt = length(particle.velocity) / acceleration_friction_magnitude;
-                particle.stopped = simInfo.timestep;
-            }
-            let velocity_length = length(particle.velocity);
-            if (velocity_length > simSettings.velocity_threshold) {
-                particle.velocity -= acceleration_friction_magnitude * (particle.velocity / velocity_length) * dt;
-            }
-            let relative_trajectory = particle.velocity * dt;
-            particle.position = particle.position + relative_trajectory;
-            let new_uv = positionToUV(particle.position);
-            let elevation = get_elevation(new_uv);
-                
+    let acceleration_tangential = acceleration_gravity + acceleration_normal;
+    var dt = simSettings.cfl * simSettings.cell_size / (simInfo.max_velocity + simSettings.velocity_threshold);
+    particle.velocity = particle.velocity + acceleration_tangential * dt; 
+    var acceleration_normal_friction_magnitude = acceleration_by_normal_friction(acceleration_normal, particle);
+    let acceleration_drag_friction_magnitude = acceleration_by_drag_friction(acceleration_normal, particle);
+    var acceleration_friction_magnitude = acceleration_drag_friction_magnitude + acceleration_normal_friction_magnitude;
+    if(length(particle.velocity) < acceleration_friction_magnitude * dt){
+        dt = length(particle.velocity) / acceleration_friction_magnitude;
+        particle.stopped = simInfo.timestep;
+    }
+    let velocity_length = length(particle.velocity);
+    if (velocity_length > simSettings.velocity_threshold) {
+        particle.velocity -= acceleration_friction_magnitude * (particle.velocity / velocity_length) * dt;
+    }
+    let relative_trajectory = particle.velocity * dt;
+    particle.position = particle.position + relative_trajectory;
+    let new_uv = positionToUV(particle.position);
+    let elevation = get_elevation(new_uv);
+        
 
-            if (particleId == 0u) {
-                var current: TimestepData;
-                current.position = particle.position;
-                current.velocity = particle.velocity;
-                current.dt = dt;
-                current.acceleration_tangential = acceleration_tangential;
-                current.acceleration_friction_magnitude = acceleration_friction_magnitude;
-                current.normal = normal;
-                current.acceleration_normal = acceleration_normal;
-                current.elevation = elevation;
-                current.uv = new_uv;
-                update_output_data(0u, simInfo.timestep, current);
-                
-            // out_debug[2] = f32(particle.position.x);
-                simInfo.timestep = simInfo.timestep + 1u;
-            }
-        }
+    if (particleId == 0u) {
+        var current: TimestepData;
+        current.position = particle.position;
+        current.velocity = particle.velocity;
+        current.dt = dt;
+        current.acceleration_tangential = acceleration_tangential;
+        current.acceleration_friction_magnitude = acceleration_friction_magnitude;
+        current.normal = normal;
+        current.acceleration_normal = acceleration_normal;
+        current.elevation = elevation;
+        current.uv = new_uv;
+        update_output_data(0u, simInfo.timestep, current);
+        
+    // out_debug[2] = f32(particle.position.x);
+        simInfo.timestep = simInfo.timestep + 1u;
     }
 
-    // Update global atomic values:
-    // 1. Binary tree reduction in the workgroup
-    // 2. Write a single atomic value per workgroup
-
-    workgroupBarrier();
-    var stride = WORKGROUP_SIZEu / 2u;
-    while (stride > 0u) {
-        if (localId < stride) {
-            sharedMaxVelocity[localId] = max(sharedMaxVelocity[localId], sharedMaxVelocity[localId + stride]);
-        }
-        stride = stride / 2u;
-        workgroupBarrier();
-    }
-
-    if (localId == 0u) {
-        atomicMax(&maxVelocity.value, u32(maxVelocityFactor * sharedMaxVelocity[0]));
-    }
 
     atomicMax(&maxVelocity.value, u32(maxVelocityFactor * length(particle.velocity)));
     
@@ -173,6 +160,91 @@ fn update_output_data(trajectory: u32, timestep: u32, timestep_data: TimestepDat
     out_timestep_data[timestep].trajectories[trajectory] = timestep_data;
 }
 
+fn acceleration_by_normal_friction(acceleration_normal: vec3f, particle: ptr<storage, Particle, read_write>) -> f32 {
+    let mass_per_area = simSettings.snow_density * particle.snow_thickness;
+    let velocity_magnitude = length(particle.velocity);
+    let model = simSettings.friction_model;
+    if velocity_magnitude < simSettings.velocity_threshold || model >= 4u {
+        return 0.0f;
+    }
+    // standard 0.155, samos: standard 0.155, small 0.22, medium 0.17
+    let friction_coefficient = simSettings.friction_coefficient;
+    let normal_stress = length(acceleration_normal) * mass_per_area;
+    const min_shear_stress = 70f;
+    var shear_stress = 0.0f;
+    //actually: friction model: 0 coulomb, 1 voellmy, 2 voellmy minshear, 3 samosAt
+    // Coulomb friction model
+    if (model == 0u || model == 1u || model == 2u){
+        shear_stress = friction_coefficient * normal_stress;
+    }
+    // samosAT friction model
+    else if (model == 3){
+        let rs0 = 0.222;
+        let rs = density * velocity_magnitude * velocity_magnitude / (normal_stress + 0.001);
+        shear_stress = normal_stress * friction_coefficient * (1.0 + rs0 / (rs0 + rs)) ;
+    }
+    let acceleration_magnitude = shear_stress / mass_per_area;
+    return acceleration_magnitude;
+}
+
+
+fn acceleration_by_drag_friction(acceleration_normal: vec3f, particle: ptr<storage, Particle, read_write>) -> f32 {
+    let mass_per_area = simSettings.snow_density * particle.snow_thickness;
+    let velocity_magnitude = length(particle.velocity);
+    let model = simSettings.friction_model;
+    if velocity_magnitude < simSettings.velocity_threshold || model >= 4u {
+        return 0.0f;
+    }
+    // standard 0.155, samos: standard 0.155, small 0.22, medium 0.17
+    let friction_coefficient = simSettings.friction_coefficient;
+    let drag_coefficient = simSettings.drag_coefficient; // only used for voellmy, standard 4000.
+    let normal_stress = length(acceleration_normal * mass_per_area);
+    const min_shear_stress = 70f;
+    var shear_stress = 0.0f;
+    //actually: friction model: 0 coulomb, 1 voellmy, 2 voellmy minshear, 3 samosAt
+    // Coulomb friction model
+    // Voellmy friction model
+    if (model == 1){
+        shear_stress = density * g * velocity_magnitude * velocity_magnitude / drag_coefficient;
+    }
+    // Voellmy min shear friction model
+    else if (model == 2){
+        shear_stress = min_shear_stress + density * g * velocity_magnitude * velocity_magnitude / drag_coefficient;
+    }
+    // samosAT friction model
+    else if (model == 3){
+        let min_shear_stress_samosat = 0f;
+        let rs0 = 0.222;
+        let kappa = 0.43;
+        let r = 0.05;
+        let b = 4.13;
+        let rs = density * velocity_magnitude * velocity_magnitude / (normal_stress + 0.001);
+        var div = particle.snow_thickness / r;
+        if div < 1.0 {
+            div = 1.0;
+        }
+        div = log(div) / kappa + b;
+        shear_stress = min_shear_stress_samosat + density * velocity_magnitude * velocity_magnitude / (div * div);
+    }
+    let acceleration_magnitude = shear_stress / mass_per_area;
+    return acceleration_magnitude;
+}
+
+const TEXTURE_GATHER_OFFSET = 1.0f / 512.0f;
+// Samples height texture with bilinear filtering.
+fn get_elevation(uv: vec2f) -> f32 {
+    // TODO: fix interpolation at the edges of the texture
+    return textureSampleLevel(dem_texture, tex_sampler, uv, 0).x;
+}
+
+fn get_normal_and_curvature(uv: vec2f) -> vec4f {
+    return textureSampleLevel(normals_texture, tex_sampler, uv, 0); // convert from [0, 1] to [-1, 1
+}
+
+fn getNormal(uv: vec2f) -> vec3f {
+    return get_normal_and_curvature(uv).xyz; // convert from [0, 1] to [-1, 1
+}
+
 fn acceleration_by_friction(acceleration_normal: vec3f, particle: ptr<storage, Particle, read_write>) -> f32 {
     let mass_per_area = simSettings.snow_density * particle.snow_thickness;
     let velocity_magnitude = length(particle.velocity);
@@ -216,21 +288,6 @@ fn acceleration_by_friction(acceleration_normal: vec3f, particle: ptr<storage, P
     }
     let acceleration_magnitude = shear_stress / mass_per_area;
     return acceleration_magnitude;
-}
-
-const TEXTURE_GATHER_OFFSET = 1.0f / 512.0f;
-// Samples height texture with bilinear filtering.
-fn get_elevation(uv: vec2f) -> f32 {
-    // TODO: fix interpolation at the edges of the texture
-    return textureSampleLevel(dem_texture, tex_sampler, uv, 0).x;
-}
-
-fn get_normal_and_curvature(uv: vec2f) -> vec4f {
-    return textureSampleLevel(normals_texture, tex_sampler, uv, 0); // convert from [0, 1] to [-1, 1
-}
-
-fn getNormal(uv: vec2f) -> vec3f {
-    return get_normal_and_curvature(uv).xyz; // convert from [0, 1] to [-1, 1
 }
 
 
