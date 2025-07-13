@@ -72,6 +72,7 @@ fn computeParticles(
         out_debug[16] = f32(simSettings.world_size.x);
     }
     let normal = getNormal(uv); 
+    particle.velocity = particle.velocity - dot(particle.velocity, normal) * normal; 
     const acceleration_gravity = vec3f(0.0, 0.0, -g);
     let acceleration_normal = g * normal.z * normal;
 
