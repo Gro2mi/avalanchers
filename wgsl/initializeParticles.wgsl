@@ -6,7 +6,8 @@
 
 @group(0) @binding(5) var<storage, read_write> particles: array<Particle>;
 @group(0) @binding(6) var<storage, read_write> numberReleaseParticles: AtomicValue;
-@group(0) @binding(7) var<storage, read_write> maxVelocity: AtomicValue;
+@group(0) @binding(7) var<storage, read_write> output_texture_buffer: array<atomic<u32>>; // trajectory texture
+@group(0) @binding(8) var<storage, read_write> output_velocity_texture_buffer: array<atomic<u32>>; // trajectory texture
 
 
 @compute @workgroup_size(16, 16, 1)
@@ -15,7 +16,7 @@ fn initializeParticles(@builtin(global_invocation_id) cell: vec3<u32>) {
     if(cell.x == 0 && cell.y == 0) {
         // set max velocity for the first timestep, 
         // 3.5 m/s^2 for tangential acceleration at 50° slope
-        atomicStore(&maxVelocity.value, u32(sqrt(2f * simSettings.cfl * simSettings.cell_size / 3.5) * maxVelocityFactor)); // reset max velocity for new timestep
+        simInfo.max_velocity = sqrt(2f * simSettings.cfl * simSettings.cell_size / 3.5);
         simInfo.elevation_threshold = minElevation() - 0.1;
     }
     
@@ -43,6 +44,11 @@ fn initializeParticles(@builtin(global_invocation_id) cell: vec3<u32>) {
         p.snow_thickness = snowThickness;
         p.C = mat2x2f(0f, 0f, 0f, 0f);
         p.stopped = 0u;
+        
+        let cell_index = positionToCellIndex(p.position);
+        atomicAdd(&output_texture_buffer[cell_index], 1u);
+        atomicMax(&output_velocity_texture_buffer[cell_index], u32(length(p.velocity))); // ensure that the velocity is not zero, this is needed for the next step
+
     }
 }
 
