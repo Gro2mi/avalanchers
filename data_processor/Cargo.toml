@@ -1,0 +1,16 @@
+[package]
+name = "data_processor"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "data_processor"
+crate-type = ["cdylib"] # This is essential for Python bindings
+
+[dependencies]
+pyo3 = { version = "0.25", features = ["extension-module", "macros", "serde"] }
+serde = { workspace = true}
+bincode = "2.0"
+half = "2.6"
+lz4_flex = "0.11"
+image = { workspace = true}

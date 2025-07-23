@@ -1,0 +1,23 @@
+[workspace]
+members = [
+    "cli", "data_processor",
+    "wasm",
+]
+resolver = "3"
+
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0" 
+wgpu = "26.0" # Use the latest stable version
+pollster = "0.4" # For async execution in native
+anyhow = "1.0" # General-purpose error handling
+js-sys = "0.3"
+wasm-bindgen = "0.2" 
+wasm-bindgen-futures = "0.4" 
+web-sys = { version = "0.3", features = ["Window", "Document"] }
+bytemuck = { version = "1.23", features = ["derive"] }
+tempfile = "3.20"
+futures-intrusive = "0.5"
+rand = "0.9"
+image = "0.25" 
