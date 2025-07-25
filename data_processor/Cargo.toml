@@ -14,3 +14,6 @@ bincode = "2.0"
 half = { workspace = true}
 lz4_flex = "0.11"
 image = { workspace = true}
+zstd = "0.13"
+xz2 = "0.1"
+
