@@ -52,6 +52,14 @@ pub fn to_2d(data: &[f32], width: usize, height: usize) -> Vec<Vec<f32>> {
         .collect()
 }
 
+pub fn highest_power_of_two(n: u32) -> u32 {
+    if n == 0 {
+        0
+    } else {
+        1 << (31 - n.leading_zeros())
+    }
+}
+
 pub fn bilinear_interpolate(x: f32, y: f32, grid: &Vec<Vec<f32>>) -> Option<f32> {
     let x0 = x.floor() as isize;
     let x1 = x.ceil() as isize;

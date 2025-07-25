@@ -1,13 +1,16 @@
 use anyhow::Result;
 use wgpu::{
     BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
-    BindGroupLayoutEntry, BindingType, BufferBindingType, ComputePipeline,
+    BindGroupLayoutEntry, BindingType, ComputePipeline,
     ComputePipelineDescriptor, Device, PipelineLayoutDescriptor, ShaderModuleDescriptor,
-    ShaderSource, ShaderStages,
+    ShaderSource, ShaderStages, StorageTextureAccess, TextureFormat, TextureViewDimension,
 };
 
-pub const SHADER_COMPUTE_NORMALS: &str = include_str!("../../wgsl/computeNormals.wgsl");
-pub const SHADER_UTILS: &str = include_str!("../../wgsl/util.wgsl");
+pub const SHADER_COMPUTE_NORMALS: &str = concat!(
+    include_str!("../../wgsl/util.wgsl"),
+    "\n",
+    include_str!("../../wgsl/computeNormals.wgsl"),
+);
 pub const SHADER_RESET_MAX_VELOCITY: &str = include_str!("../../wgsl/resetMaxVelocity.wgsl");
 pub const SHADER_LOAD_RELEASE_POINTS: &str = include_str!("../../wgsl/loadReleasePoints.wgsl");
 // pub const SHADER_: &str = include_str!("../../wgsl/.wgsl");
@@ -62,7 +65,7 @@ impl ComputeShaderConfig {
             label: Some(&format!("{} Compute Pipeline", name)),
             layout: Some(&pipeline_layout),
             module: &shader_module,
-            entry_point: Some("main"),
+            entry_point: Some(&name),
             compilation_options: Default::default(),
             cache: None,
         });
@@ -99,45 +102,44 @@ pub fn create_shader_configs(
     device: &Device,
 ) -> Result<std::collections::HashMap<String, ComputeShaderConfig>> {
     let mut shader_configs = std::collections::HashMap::new();
-
     shader_configs.insert(
         "compute_normals".to_string(),
         ComputeShaderConfig::new(
             &device,
             "compute_normals".to_string(),
-            crate::shaders::SHADER_COMPUTE_NORMALS,
+            SHADER_COMPUTE_NORMALS,
             &[
-                // Binding 0: Uniform buffer (simSettingsBuffer)
+                // Binding 0: Uniform buffer (sim_settings_buffer)
                 BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
                     min_binding_size: None,
                 },
-                // Binding 1: Texture (demTexture)
+                // Binding 1: Texture (dem_texture)
                 BindingType::Texture {
                     multisampled: false,
                     view_dimension: wgpu::TextureViewDimension::D2,
                     sample_type: wgpu::TextureSampleType::Float { filterable: false },
                 },
-                // Binding 2: Texture (windTexture)
+                // Binding 2: Texture (wind_texture)
                 BindingType::Texture {
                     multisampled: false,
                     view_dimension: wgpu::TextureViewDimension::D2,
                     sample_type: wgpu::TextureSampleType::Float { filterable: false },
                 },
-                // Binding 3: Texture (normalsTexture)
-                BindingType::Texture {
-                    multisampled: false,
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                // Binding 3: Texture (normals_texture)
+                BindingType::StorageTexture {
+                    access: StorageTextureAccess::WriteOnly,
+                    format: TextureFormat::Rgba16Float,
+                    view_dimension: TextureViewDimension::D2,
                 },
-                // Binding 4: Texture (slopeTexture)
-                BindingType::Texture {
-                    multisampled: false,
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                // Binding 4: Texture (slope_texture)
+                BindingType::StorageTexture {
+                    access: StorageTextureAccess::WriteOnly,
+                    format: TextureFormat::Rgba16Float,
+                    view_dimension: TextureViewDimension::D2,
                 },
-                // Binding 5: Storage buffer (outDebugNormals)
+                // Binding 5: Storage buffer (out_debug_normals_buffer)
                 BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Storage { read_only: false },
                     has_dynamic_offset: false,

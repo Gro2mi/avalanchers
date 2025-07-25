@@ -1,8 +1,7 @@
 use std::{path::PathBuf, vec::Vec};
 
 use crate::utils::*;
-use crate::data_processor::*;
-use std::f32::consts::PI;
+use data_processor::*;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 // use reqwest::Client;
@@ -169,6 +168,7 @@ impl Dem {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::f32::consts::PI;
 
     #[test]
     fn test_dem_new_defaults() {

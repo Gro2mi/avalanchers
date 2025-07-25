@@ -1,8 +1,8 @@
 [workspace]
 members = [
     "cli", "data_processor",
-    "wasm",
-]
+    "wasm", "compute_core"
+, "test_lib"]
 resolver = "3"
 
 
@@ -21,3 +21,4 @@ tempfile = "3.20"
 futures-intrusive = "0.5"
 rand = "0.9"
 image = "0.25" 
+half = "2.6"

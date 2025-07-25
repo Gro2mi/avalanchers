@@ -1,17 +1,7 @@
-use crate::shaders;
 use anyhow::{Result, anyhow};
 use std::collections::HashMap;
 use wgpu::{
-    Adapter, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
-    BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, Buffer, BufferBindingType,
-    BufferDescriptor, BufferUsages, COPY_BYTES_PER_ROW_ALIGNMENT, CommandEncoderDescriptor,
-    ComputePassDescriptor, ComputePipeline, ComputePipelineDescriptor, Device, DeviceDescriptor,
-    Extent3d, Features, Instance, InstanceDescriptor, Limits, MapMode, Origin3d,
-    PipelineLayoutDescriptor, PowerPreference, Queue, RequestAdapterOptions,
-    ShaderModuleDescriptor, ShaderSource, ShaderStages, TexelCopyBufferInfo, TexelCopyBufferLayout,
-    TexelCopyTextureInfo, Texture, TextureDescriptor, TextureDimension, TextureFormat,
-    TextureUsages, TextureView, TextureViewDescriptor,
-    util::{BufferInitDescriptor, DeviceExt},
+    util::{BufferInitDescriptor, DeviceExt}, Buffer, BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Device, Extent3d, MapMode, Origin3d, Queue, TexelCopyBufferInfo, TexelCopyBufferLayout, TexelCopyTextureInfo, Texture, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages, TextureView, TextureViewDescriptor, COPY_BYTES_PER_ROW_ALIGNMENT
 };
 
 // Re-export features for conditional compilation
@@ -41,36 +31,41 @@ impl ComputeBuffers {
         }
     }
 
-    // --- Buffer Methods (from previous example) ---
     pub fn add_buffer(
         &mut self,
         device: &Device,
-        name: String,
-        size_bytes: u64,
+        name: &str,
+        size_bytes: usize,
         usage: BufferUsages,
     ) {
         let buffer = device.create_buffer(&BufferDescriptor {
             label: Some(&format!("{} Buffer", name)),
-            size: size_bytes,
+            size: size_bytes as u64,
             usage: usage,
             mapped_at_creation: false,
         });
-        self.buffers.insert(name, buffer);
+        self.buffers.insert(name.into(), buffer);
     }
 
     pub fn add_buffer_with_data<T: bytemuck::Pod + Send + Sync>(
         &mut self,
         device: &Device,
-        name: String,
+        name: &str,
         data: &[T],
         usage: BufferUsages,
     ) {
+        let mut bytes = bytemuck::cast_slice(data).to_vec();
+        let remainder = bytes.len() % 16;
+        if remainder != 0 {
+            let pad = 16 - remainder;
+            bytes.extend(std::iter::repeat(0u8).take(pad));
+        }
         let buffer = device.create_buffer_init(&BufferInitDescriptor {
             label: Some(&format!("{} Buffer", name)),
-            contents: bytemuck::cast_slice(data),
+            contents: &bytes,
             usage: usage,
         });
-        self.buffers.insert(name, buffer);
+        self.buffers.insert(name.into(), buffer);
     }
 
     pub fn get_buffer(&self, name: &str) -> Option<&Buffer> {
@@ -89,6 +84,8 @@ impl ComputeBuffers {
         let buffer = self
             .get_buffer(buffer_name)
             .ok_or_else(|| anyhow!("Buffer '{}' not found", buffer_name))?;
+
+        
 
         let buffer_slice = buffer.slice(..);
         let (sender, receiver) = futures_intrusive::channel::shared::oneshot_channel();
@@ -138,21 +135,16 @@ impl ComputeBuffers {
         Ok(())
     }
 
-    // --- Texture Methods (NEW) ---
-
     /// Adds a new empty texture and its default view.
-    pub fn add_texture(&mut self, device: &Device, name: String, descriptor: &TextureDescriptor) {
-        let texture = device.create_texture(descriptor);
+    pub fn add_texture(&mut self, device: &Device, texture_descriptor: &TextureDescriptor) {
+        let name = texture_descriptor
+            .label
+            .expect("You have to provide a label for the texture");
+        let texture = device.create_texture(texture_descriptor);
         let view = texture.create_view(&TextureViewDescriptor::default());
-        self.textures.insert(name.clone(), texture);
-        self.texture_views.insert(name, view);
-    }
-    
-    pub fn add_texture_data(&mut self, device: &Device, name: String, descriptor: &TextureDescriptor) {
-        let texture = device.create_texture(descriptor);
-        let view = texture.create_view(&TextureViewDescriptor::default());
-        self.textures.insert(name.clone(), texture);
-        self.texture_views.insert(name, view);
+
+        self.textures.insert(name.into(), texture);
+        self.texture_views.insert(name.into(), view);
     }
 
     /// Adds a new texture with initial data, handling 256-byte row alignment.
@@ -162,13 +154,14 @@ impl ComputeBuffers {
         &mut self,
         device: &Device,
         queue: &Queue,
-        name: String,
         data: &[T],
         texture_descriptor: &TextureDescriptor,
     ) -> Result<()> {
+        let name = texture_descriptor
+            .label
+            .expect("You have to provide a label for the texture");
         let texture = device.create_texture(texture_descriptor);
         let view = texture.create_view(&TextureViewDescriptor::default());
-
         let bytes_per_pixel = texture_descriptor
             .format
             .block_copy_size(None)
@@ -186,7 +179,7 @@ impl ComputeBuffers {
                 texture_descriptor.label.unwrap_or("unlabeled")
             )),
             contents: &vec![0; total_padded_size as usize], // Initialize with zeros
-            usage: BufferUsages::COPY_SRC,
+            usage: BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
         });
 
         // Copy user data into the staging buffer, adding padding
@@ -234,8 +227,8 @@ impl ComputeBuffers {
         );
         queue.submit(Some(encoder.finish()));
 
-        self.textures.insert(name.clone(), texture);
-        self.texture_views.insert(name, view);
+        self.textures.insert(name.into(), texture);
+        self.texture_views.insert(name.into(), view);
         Ok(())
     }
 
@@ -421,15 +414,97 @@ impl ComputeBuffers {
     }
 }
 
-pub fn texture_descriptor(label: &str, size: Extent3d, format: TextureFormat, usage: TextureUsages) -> TextureDescriptor {
+pub fn texture_descriptor(
+    label: &str,
+    size: Extent3d,
+    format: TextureFormat,
+    usage: TextureUsages,
+) -> TextureDescriptor {
     TextureDescriptor {
-            label: Some(label),
-            size: size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: TextureDimension::D2,
-            format: format,
-            usage: usage,
-            view_formats: &[],
-        }
+        label: Some(label),
+        size: size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: format,
+        usage: usage,
+        view_formats: &[],
+    }
+}
+pub const DEBUG_BUFFER_SIZE: usize = 100 * 4;
+pub fn create_buffers_and_texture_descriptions(
+    device: &Device,
+    texture_size: Extent3d,
+) -> ComputeBuffers {
+    let mut compute_buffers = ComputeBuffers::new();
+    let texture_usage_default = TextureUsages::TEXTURE_BINDING
+        | TextureUsages::STORAGE_BINDING
+        | TextureUsages::COPY_DST
+        | TextureUsages::COPY_SRC;
+
+    let texture_usage_input = TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST;
+    let buffer_usage_output = BufferUsages::STORAGE | BufferUsages::COPY_DST;
+
+    compute_buffers.add_texture(
+        &device,
+        &texture_descriptor(
+            "wind_texture",
+            texture_size,
+            TextureFormat::Rgba16Float,
+            texture_usage_input,
+        ),
+    );
+    compute_buffers.add_texture(
+        &device,
+        &texture_descriptor(
+            "normals_texture",
+            texture_size,
+            TextureFormat::Rgba16Float,
+            texture_usage_default,
+        ),
+    );
+    compute_buffers.add_texture(
+        &device,
+        &texture_descriptor(
+            "slope_texture",
+            texture_size,
+            TextureFormat::Rgba16Float,
+            texture_usage_default,
+        ),
+    );
+    compute_buffers.add_texture(
+        &device,
+        &texture_descriptor(
+            "roughness_texture",
+            texture_size,
+            TextureFormat::Rgba16Float,
+            texture_usage_default,
+        ),
+    );
+    compute_buffers.add_texture(
+        &device,
+        &texture_descriptor(
+            "release_points_texture",
+            texture_size,
+            TextureFormat::Rgba16Float,
+            texture_usage_default,
+        ),
+    );
+    compute_buffers.add_texture(
+        &device,
+        &texture_descriptor(
+            "landcover_texture",
+            texture_size,
+            TextureFormat::Rgba8Uint,
+            texture_usage_input,
+        ),
+    );
+    compute_buffers.add_buffer(
+        &device,
+        "out_debug_normals_buffer",
+        DEBUG_BUFFER_SIZE,
+        buffer_usage_output,
+    );
+
+    compute_buffers
 }

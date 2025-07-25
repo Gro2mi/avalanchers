@@ -5,8 +5,6 @@ use std::io::{self, Write};
 
 use crate::dem::Dem;
 use std::fmt;
-use tempfile::NamedTempFile;
-use std::io::Read;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable, Serialize, Deserialize)]
@@ -71,7 +69,7 @@ impl SimSettings {
         bytemuck::bytes_of(self)
     }
 
-    pub fn from_json(patch: Settings) -> Self {
+    pub fn from_settings(patch: &Settings, dem: &Dem) -> Self {
         let mut settings = SimSettings::new();
         if let Some(val) = patch.max_steps {
             settings.max_steps = val;
@@ -115,6 +113,7 @@ impl SimSettings {
         if let Some(val) = patch.roughness_threshold {
             settings.roughness_threshold = val;
         }
+        settings.set_dem(dem);
         settings
     }
 
@@ -177,6 +176,27 @@ pub struct Settings {
 }
 
 impl Settings {
+    pub fn new() -> Self {
+        Settings {
+            dem_path: String::new(),
+            release_areas: None,
+            max_steps: None,
+            sim_model: None,
+            friction_model: None,
+            released_particles_per_cell: None,
+            density: None,
+            slab_thickness: None,
+            friction_coefficient: None,
+            drag_coefficient: None,
+            cfl: None,
+            min_slope_angle: None,
+            max_slope_angle: None,
+            min_elevation: None,
+            velocity_threshold: None,
+            roughness_threshold: None,
+        }
+    }
+
     pub fn from_json(path: &str) -> io::Result<Self> {
         let data = fs::read_to_string(path)?;
         let settings: Settings = serde_json::from_str(&data)
@@ -190,6 +210,27 @@ impl Settings {
         let mut file = fs::File::create(path)?;
         file.write_all(json.as_bytes())?;
         Ok(())
+    }
+
+    pub fn create_from_json(file_path: &str) -> (SimSettings, Dem) {
+        let settings =
+            Settings::from_json(&file_path).expect("Failed to load settings from JSON file");
+        return settings.create();
+    }
+    pub fn create_from_path(file_path: &str) -> (SimSettings, Dem) {
+        let mut settings = Settings::new();
+        settings.dem_path = file_path.to_string();
+        return settings.create();
+    }
+    pub fn create(&self) -> (SimSettings, Dem) {
+        let dem_path = std::path::PathBuf::from(&self.dem_path);
+        if !dem_path.exists() {
+            eprintln!("DEM file does not exist: {}", self.dem_path);
+            std::process::exit(1);
+        }
+        let dem = Dem::load_png_as_float32(dem_path);
+        let sim_settings = SimSettings::from_settings(&self, &dem);
+        (sim_settings, dem)
     }
 }
 
@@ -205,13 +246,26 @@ impl fmt::Display for Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
+    use tempfile::NamedTempFile;
+
+    fn create_test_dem() -> Dem {
+        let mut dem = Dem::new();
+        dem.cell_size = 1.0;
+        dem.width = 10;
+        dem.height = 20;
+        dem
+    }
 
     #[test]
     fn test_simsettings_new_defaults() {
         let settings = SimSettings::new();
         assert_eq!(settings.max_steps, 3000);
         assert_eq!(settings.sim_model, 0);
-        assert_eq!(settings.friction_model, FrictionModel::VoellmyMinShear.as_int());
+        assert_eq!(
+            settings.friction_model,
+            FrictionModel::VoellmyMinShear.as_int()
+        );
         assert_eq!(settings.released_particles_per_cell, 1);
         assert_eq!(settings.grid_shape_x, 1);
         assert_eq!(settings.grid_shape_y, 1);
@@ -232,18 +286,15 @@ mod tests {
 
     #[test]
     fn test_simsettings_set_dem() {
-        let mut dem = Dem::new();
-        dem.cell_size = 2.0;
-        dem.width = 10;
-        dem.height = 20;
+        let dem = create_test_dem();
 
         let mut settings = SimSettings::new();
         settings.set_dem(&dem);
-        assert_eq!(settings.cell_size, 2.0);
-        assert_eq!(settings.grid_shape_x, 10);
-        assert_eq!(settings.grid_shape_y, 20);
-        assert_eq!(settings.world_size_x, 20.0);
-        assert_eq!(settings.world_size_y, 40.0);
+        assert_eq!(settings.cell_size, dem.cell_size);
+        assert_eq!(settings.grid_shape_x, dem.width as u32);
+        assert_eq!(settings.grid_shape_y, dem.height as u32);
+        assert_eq!(settings.world_size_x, dem.cell_size * dem.width as f32);
+        assert_eq!(settings.world_size_y, dem.cell_size * dem.height as f32);
     }
 
     #[test]
@@ -273,7 +324,8 @@ mod tests {
             dem_path: String::from("dem.png"),
             release_areas: Some(String::from("release_area.png")),
         };
-        let settings = SimSettings::from_json(patch);
+        let dem = create_test_dem();
+        let settings = SimSettings::from_settings(&patch, &dem);
         assert_eq!(settings.max_steps, 42);
         assert_eq!(settings.sim_model, 1);
         assert_eq!(settings.friction_model, 2);
@@ -288,6 +340,11 @@ mod tests {
         assert_eq!(settings.min_elevation, 100.0);
         assert_eq!(settings.velocity_threshold, 0.001);
         assert_eq!(settings.roughness_threshold, 0.002);
+        assert_eq!(settings.grid_shape_x, dem.width as u32);
+        assert_eq!(settings.grid_shape_y, dem.height as u32);
+        assert_eq!(settings.cell_size, dem.cell_size);
+        assert_eq!(settings.world_size_x, dem.cell_size * dem.width as f32);
+        assert_eq!(settings.world_size_y, dem.cell_size * dem.height as f32);
     }
 
     #[test]

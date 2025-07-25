@@ -5,13 +5,12 @@ use std::time::Instant;
 
 // src/lib.rs
 use bincode::{Decode, Encode, config};
-use half::f16;
 use lz4_flex::{compress_prepend_size, decompress_size_prepended};
 use pyo3::exceptions::PyValueError;
-use pyo3::{buffer, prelude::*};
+use pyo3::{prelude::*};
 use std::io::Read;
 
-use image::{GenericImageView, ImageBuffer, ImageReader};
+use image::{GenericImageView, ImageReader};
 
 #[pyclass]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,7 +90,7 @@ impl FileFormat {
 
 #[pyclass]
 #[derive(Encode, Decode, PartialEq, Debug, Clone)]
-pub struct Metadata {
+pub struct MetaGrid {
     #[pyo3(get)]
     magic_bytes: u32,
     #[pyo3(get)]
@@ -100,17 +99,17 @@ pub struct Metadata {
     pub width: u32,
     #[pyo3(get, set)]
     pub height: u32,
-    pub data_type: u8, // 2 for f32
+    #[pyo3(get, set)]
+    pub data_type: u8,
 }
 
-// Implement methods for MyMetadata for Python
 #[pymethods]
-impl Metadata {
-    #[new] // This makes it callable as `MyMetadata(name, timestamp, version)` in Python
-    fn new(magic_bytes: u32, width: u32, height: u32, data_type: DataType) -> Self {
-        Metadata {
-            // u32::from_le_bytes(*b"AVAG")
-            magic_bytes: magic_bytes,
+impl MetaGrid {
+    // TODO add DEM variables, variable name (peak velocity, etc.), unit
+    #[new]
+    fn new(width: u32, height: u32, data_type: DataType) -> Self {
+        MetaGrid {
+            magic_bytes: u32::from_le_bytes(*b"AVAG"),
             version: 1,
             width: width,
             height: height,
@@ -118,7 +117,6 @@ impl Metadata {
         }
     }
 
-    // A simple representation for Python's `repr()`
     fn __repr__(&self) -> String {
         format!(
             "Metadata(magic_bytes='{}', version={}, width={}, height={}, data_type={})",
@@ -132,7 +130,7 @@ impl Metadata {
     fn __str__(&self) -> String {
         self.__repr__()
     }
-    fn __eq__(&self, other: &Metadata) -> bool {
+    fn __eq__(&self, other: &MetaGrid) -> bool {
         self.magic_bytes == other.magic_bytes
             && self.version == other.version
             && self.width == other.width
@@ -141,22 +139,58 @@ impl Metadata {
     }
 }
 
-pub struct MetaGrid{
-    pub metadata: Metadata,
+#[pyclass]
+#[derive(Encode, Decode, PartialEq, Debug, Clone)]
+pub struct MetaParticle {
+    #[pyo3(get)]
+    magic_bytes: u32,
+    #[pyo3(get)]
+    pub version: u8,
+    #[pyo3(get, set)]
+    pub length: u32,
+    #[pyo3(get, set)]
+    pub data_type: u8,
 }
-impl MetaGrid {
-    pub fn new(width: u32, height: u32, data_type: DataType) -> Self {
-        MetaGrid {
-            metadata: Metadata::new(u32::from_le_bytes(*b"AVAG"), width, height, data_type),
+
+#[pymethods]
+impl MetaParticle {
+    #[new] // This makes it callable as `MyMetadata(name, timestamp, version)` in Python
+    fn new(length: u32, data_type: DataType) -> Self {
+        MetaParticle {
+            magic_bytes: u32::from_le_bytes(*b"AVAP"),
+            version: 1,
+            length: length,
+            data_type: data_type.as_int(),
         }
     }
+
+    // A simple representation for Python's `repr()`
+    fn __repr__(&self) -> String {
+        format!(
+            "MetadataParticle(magic_bytes='{}', version={}, length={}, data_type={})",
+            std::str::from_utf8(&self.magic_bytes.to_le_bytes()).unwrap_or("????"),
+            self.version,
+            self.length,
+            DataType::from_int(self.data_type).unwrap().as_str()
+        )
+    }
+    fn __str__(&self) -> String {
+        self.__repr__()
+    }
+    fn __eq__(&self, other: &MetaParticle) -> bool {
+        self.magic_bytes == other.magic_bytes
+            && self.version == other.version
+            && self.length == other.length
+            && self.data_type == other.data_type
+    }
 }
+
 
 #[pyclass]
 #[derive(Encode, Decode, PartialEq, Debug)]
 pub struct F32Data {
     #[pyo3(get, set)]
-    pub metadata: Metadata,
+    pub metadata: MetaGrid,
     #[pyo3(get, set)]
     pub data: Vec<f32>,
 }
@@ -164,7 +198,7 @@ pub struct F32Data {
 #[pymethods]
 impl F32Data {
     #[new]
-    fn new(metadata: &Metadata, data: Vec<f32>) -> Self {
+    fn new(metadata: &MetaGrid, data: Vec<f32>) -> Self {
         assert!(
             metadata.width * metadata.height == data.len() as u32,
             "Data length does not match metadata dimensions"
@@ -285,7 +319,7 @@ pub fn f32_to_rgba_bytes(data: &[f32]) -> Vec<u8> {
 #[pymodule]
 fn data_processor(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Add the Rust structs as Python classes
-    m.add_class::<Metadata>()?;
+    m.add_class::<MetaGrid>()?;
     m.add_class::<F32Data>()?;
     m.add_class::<DataType>()?;
     m.add_class::<FileFormat>()?;
@@ -298,6 +332,7 @@ mod tests {
     use super::*;
     use std::env;
     use std::fs;
+    use half::f16;
     #[test]
     fn data_type_ranges() {
         println!("Data type ranges:");
@@ -325,7 +360,7 @@ mod tests {
         let width = 128;
         let height = 256;
         let data_type = DataType::F32;
-        let metadata = Metadata::new_grid(width, height, data_type);
+        let metadata = MetaGrid::new(width, height, data_type);
         assert_eq!(metadata.width, width);
         assert_eq!(metadata.height, height);
         assert_eq!(metadata.data_type, 32);
@@ -354,7 +389,7 @@ mod tests {
 
     #[test]
     fn test_f32data_new_and_repr() {
-        let metadata = Metadata::new_grid(1, 3, DataType::F32);
+        let metadata = MetaGrid::new(1, 3, DataType::F32);
         let data = vec![1.0f32, 2.0, 3.0];
         let f32data = F32Data::new(&metadata, data.clone());
         assert_eq!(f32data.metadata, metadata);
@@ -366,13 +401,13 @@ mod tests {
 
     #[test]
     fn test_metadata_repr() {
-        let metadata = Metadata::new_grid(5, 6, DataType::F32);
+        let metadata = MetaGrid::new(5, 6, DataType::F32);
         let repr = metadata.__repr__();
-        assert!(repr.contains("Metadata(magic_bytes="));
+        assert!(repr.contains("Metadata(magic_bytes='AVAG'"));
         assert!(repr.contains("version=1"));
         assert!(repr.contains("width=5"));
         assert!(repr.contains("height=6"));
-        assert!(repr.contains("data_type=32"));
+        assert!(repr.contains("data_type=f32"));
     }
 
     #[test]
@@ -390,7 +425,7 @@ mod tests {
     fn test_f32data_save_and_load() {
         let tmp_dir = env::temp_dir();
         let file_path = tmp_dir.join("test_f32data_save_and_load.bin");
-        let metadata = Metadata::new_grid(2, 2, DataType::F32);
+        let metadata = MetaGrid::new(2, 2, DataType::F32);
         let data = vec![0.1, 0.2, 0.3, 0.4];
         let f32data = F32Data::new(&metadata, data.clone());
         f32data.save(file_path.to_str().unwrap()).unwrap();
@@ -404,7 +439,7 @@ mod tests {
 
     #[test]
     fn test_dimension_mismatch() {
-        let metadata = Metadata::new_grid(2, 2, DataType::F32);
+        let metadata = MetaGrid::new(2, 2, DataType::F32);
         let data = vec![0.1, 0.2]; // Incorrect length
         let result = std::panic::catch_unwind(|| F32Data::new(&metadata, data));
         assert!(result.is_err(), "Expected panic due to dimension mismatch");
