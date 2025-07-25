@@ -1,14 +1,15 @@
 use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::path::Path;
-use std::time::Instant;
+use std::path::{Path, PathBuf};
 
 // src/lib.rs
 use bincode::{Decode, Encode, config};
 use lz4_flex::{compress_prepend_size, decompress_size_prepended};
 use pyo3::exceptions::PyValueError;
-use pyo3::{prelude::*};
+use pyo3::prelude::*;
+use std::io::Cursor;
 use std::io::Read;
+use zstd::stream::{decode_all, encode_all};
 
 use image::{GenericImageView, ImageReader};
 
@@ -185,7 +186,6 @@ impl MetaParticle {
     }
 }
 
-
 #[pyclass]
 #[derive(Encode, Decode, PartialEq, Debug)]
 pub struct F32Data {
@@ -231,7 +231,7 @@ impl F32Data {
 
     #[staticmethod]
     fn load(path: &str) -> PyResult<Self> {
-        let buffer = read_bin(Path::new(path))
+        let buffer = read_bin(&PathBuf::from(path))
             .map_err(|e| PyValueError::new_err(format!("Failed to read file: {}", e)))?;
         let (data, _): (F32Data, _) = bincode::decode_from_slice(&buffer, config::standard())
             .map_err(|e| PyValueError::new_err(format!("Bincode deserialization failed: {}", e)))?;
@@ -248,8 +248,7 @@ impl F32Data {
     }
 }
 
-pub fn read_bin(path: &Path) -> PyResult<Vec<u8>> {
-    let path = Path::new(path);
+pub fn read_bin(path: &PathBuf) -> PyResult<Vec<u8>> {
     let mut file = File::open(path)
         .map_err(|e| PyValueError::new_err(format!("Failed to open file: {}", e)))?;
     let mut buffer = Vec::new();
@@ -264,7 +263,7 @@ pub fn write_bin(path: &Path, buffer: &Vec<u8>) {
     writer.write_all(&buffer).expect("Failed to write data");
 }
 
-pub fn write_compressed_bin(path: &Path, buffer: &Vec<u8>) {
+pub fn write_lz4_bin(path: &Path, buffer: &Vec<u8>) {
     let file = File::create(path.with_extension("lz4")).expect("Failed to create file");
     let compressed_data = compress_prepend_size(buffer);
     let mut writer = BufWriter::with_capacity(16 * 1024 * 1024, file); // 16 MB buffer
@@ -273,36 +272,71 @@ pub fn write_compressed_bin(path: &Path, buffer: &Vec<u8>) {
         .expect("Failed to write data");
 }
 
-pub fn read_compressed_bin(path: &Path) -> PyResult<Vec<u8>> {
-    read_bin(path).and_then(|buffer| {
+pub fn read_lz4(path: &Path) -> PyResult<Vec<u8>> {
+    read_bin(&path.with_extension("lz4")).and_then(|buffer| {
         decompress_size_prepended(&buffer)
             .map_err(|e| PyValueError::new_err(format!("Failed to decompress data: {}", e)))
     })
 }
 
-pub fn save_png(
+pub fn write_zstd(path: &Path, buffer: &Vec<u8>) {
+    let file = File::create(path.with_extension("zst")).expect("Failed to create file");
+    let compressed_data = encode_all(Cursor::new(buffer), 22).expect("Failed to compress data");
+    let mut writer = BufWriter::with_capacity(16 * 1024 * 1024, file); // 16 MB buffer
+    writer
+        .write_all(&compressed_data)
+        .expect("Failed to write data");
+}
+
+pub fn read_zstd_bin(path: &Path) -> PyResult<Vec<u8>> {
+    read_bin(&path.with_extension("zst")).and_then(|buffer| {
+        decode_all(Cursor::new(&buffer[..]))
+            .map_err(|e| PyValueError::new_err(format!("Failed to decompress data: {}", e)))
+    })
+}
+
+use std::io::BufReader;
+use xz2::read::XzDecoder;
+use xz2::write::XzEncoder;
+pub fn write_xz(path: &Path, buffer: &Vec<u8>) {
+    let mut encoder = XzEncoder::new(
+        BufWriter::new(File::create(path.with_extension("xz")).expect("Failed to create file")),
+        6,
+    ); // level 0-9
+
+    std::io::copy(&mut BufReader::new(Cursor::new(buffer)), &mut encoder)
+        .expect("Failed to write data");
+    encoder.finish().expect("Failed to finish encoding");
+}
+
+pub fn read_xz(path: &Path) -> PyResult<Vec<u8>> {
+    let compressed = File::open(path.with_extension("xz")).expect("Failed to open file");
+    let mut decoder = XzDecoder::new(BufReader::new(compressed));
+    let mut decompressed = Vec::new();
+
+    std::io::copy(&mut decoder, &mut decompressed)?;
+    Ok(decompressed)
+}
+
+pub fn write_png(
     path: &Path,
     data: &[u8],
     width: usize,
     height: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let start = Instant::now();
     // Avoid copying data by using a slice reference instead of to_vec()
     let img = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(width as u32, height as u32, data)
         .ok_or("Failed to create image buffer")?;
-    img.save(path)?;
-    let duration = start.elapsed();
-    println!("Image creation and saving took: {:?}", duration);
+    img.save(path.with_extension("png"))?;
     Ok(())
 }
 
-pub fn load_png(path: &Path) -> Result<(Vec<u8>, usize, usize), Box<dyn std::error::Error>> {
-    let img = ImageReader::open(path)?.decode()?;
+pub fn read_png(path: &Path) -> Result<(Vec<u8>, usize, usize), Box<dyn std::error::Error>> {
+    let img = ImageReader::open(path.with_extension("png"))?.decode()?;
     let rgba = img.to_rgba8();
     let (width, height) = img.dimensions();
     Ok((rgba.into_raw().to_vec(), width as usize, height as usize))
 }
-
 
 pub fn rgba_bytes_to_f32(data: &[u8]) -> Vec<f32> {
     data.chunks_exact(4)
@@ -311,9 +345,7 @@ pub fn rgba_bytes_to_f32(data: &[u8]) -> Vec<f32> {
 }
 
 pub fn f32_to_rgba_bytes(data: &[f32]) -> Vec<u8> {
-    data.iter()
-        .flat_map(|f| f.to_le_bytes())
-        .collect()
+    data.iter().flat_map(|f| f.to_le_bytes()).collect()
 }
 
 #[pymodule]
@@ -330,9 +362,11 @@ fn data_processor(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use half::f16;
     use std::env;
     use std::fs;
-    use half::f16;
+    use std::time::Instant;
+    
     #[test]
     fn data_type_ranges() {
         println!("Data type ranges:");
@@ -471,12 +505,12 @@ mod tests {
         assert_eq!(FileFormat::Png.as_extension(), "png");
     }
     #[test]
-    fn test_write_and_read_compressed_bin() {
+    fn test_write_and_read_lz4_bin() {
         let tmp_dir = env::temp_dir();
-        let file_path = tmp_dir.join("test_write_and_read_compressed_bin");
+        let file_path = tmp_dir.join("test_write_and_read_lz4_bin");
         let data = vec![10u8, 20, 30, 40, 50, 60, 70, 80];
-        write_compressed_bin(&file_path, &data);
-        let decompressed = read_compressed_bin(&file_path.with_extension("lz4")).unwrap();
+        write_lz4_bin(&file_path, &data);
+        let decompressed = read_lz4(&file_path.with_extension("lz4")).unwrap();
         assert_eq!(decompressed, data);
         let _ = fs::remove_file(file_path.with_extension("lz4"));
     }
@@ -486,7 +520,7 @@ mod tests {
         let tmp_dir = env::temp_dir();
         let file_path = tmp_dir.join("test_invalid_compressed.lz4");
         write_bin(&file_path, &vec![1, 2, 3, 4]); // Not actually compressed
-        let result = read_compressed_bin(&file_path.with_extension("bin"));
+        let result = read_lz4(&file_path.with_extension("bin"));
         assert!(result.is_err());
         let _ = fs::remove_file(file_path.with_extension("bin"));
     }
@@ -502,5 +536,116 @@ mod tests {
         assert_eq!(result, floats);
         let f32_bytes = f32_to_rgba_bytes(&result);
         assert_eq!(f32_bytes, bytes)
+    }
+
+    #[test]
+    fn test_write_and_read_file_size_bin() {
+        // For avaMal.png
+        // Start PNG:      744017 bytes
+        // Format  WriteTime   FileSize         ReadTime
+        // LZ4:    18.3895ms    1127904 bytes    12.0114ms
+        // ZST:   2.8399438s     902141 bytes    26.5853ms
+        // BIN:     1.4439ms    1779504 bytes    10.7315ms
+        // PNG:   237.1214ms     868965 bytes     97.231ms
+        // XZ :   566.5664ms     621664 bytes    87.8251ms
+
+        // For avaArzlerUni.png
+        // Start PNG:     2463733 bytes
+        // Format  WriteTime   FileSize           ReadTime
+        // LZ4:        9.1ms    3775084 bytes    14.7216ms
+        // ZST:   2.3181056s    2994253 bytes    71.6658ms
+        // BIN:     3.0754ms    3763260 bytes    10.6038ms
+        // PNG:   550.2348ms    2860167 bytes   214.7707ms
+        // XZ :   1.9335498s    2158308 bytes   243.1962ms
+        let tmp_dir = env::temp_dir();
+        let file_path = tmp_dir.join("test_write_and_read_lz4_bin");
+        let png_path = PathBuf::from("../avaframe/avaArzlerUni.png");
+        print!("Start PNG: ");
+        print_file_size(&png_path);
+        println!();
+        let (data, width, height) = read_png(&png_path).expect("Failed to load PNG");
+        println!("Format  WriteTime   FileSize           ReadTime");
+
+        let mut start = Instant::now();
+        write_lz4_bin(&file_path, &data);
+        let mut duration = start.elapsed();
+        print!("LZ4: {:>12?}", duration);
+        print_file_size(&file_path.with_extension("lz4"));
+
+        start = Instant::now();
+        let decompressed = read_lz4(&file_path.with_extension("lz4")).unwrap();
+        duration = start.elapsed();
+        println!(" {:>12?}", duration);
+        assert_eq!(decompressed, data);
+
+        start = Instant::now();
+        write_zstd(&file_path, &data);
+        duration = start.elapsed();
+        print!("ZST: {:>12?}", duration);
+        print_file_size(&file_path.with_extension("zst"));
+
+        start = Instant::now();
+        let decompressed_zstd = read_zstd_bin(&file_path.with_extension("zst")).unwrap();
+        duration = start.elapsed();
+        println!(" {:>12?}", duration);
+        assert_eq!(decompressed_zstd, data);
+
+        start = Instant::now();
+        write_bin(&file_path, &data);
+        duration = start.elapsed();
+        print!("BIN: {:>12?}", duration);
+        print_file_size(&file_path.with_extension("bin"));
+
+        start = Instant::now();
+        let decompressed_bin = read_bin(&file_path.with_extension("bin")).unwrap();
+        duration = start.elapsed();
+        println!(" {:>12?}", duration);
+        assert_eq!(decompressed_bin, data);
+
+        start = Instant::now();
+        let _ = write_png(&file_path, &data, width, height);
+        duration = start.elapsed();
+        print!("PNG: {:>12?}", duration);
+        print_file_size(&file_path.with_extension("png"));
+
+        start = Instant::now();
+        let decompressed_png = read_png(&file_path.with_extension("png")).unwrap().0;
+        duration = start.elapsed();
+        println!(" {:>12?}", duration);
+        assert_eq!(decompressed_png, data);
+
+        start = Instant::now();
+        let _ = write_xz(&file_path, &data);
+        duration = start.elapsed();
+        print!("XZ : {:>12?}", duration);
+        print_file_size(&file_path.with_extension("xz"));
+
+        start = Instant::now();
+        let decompressed_xz = read_xz(&file_path.with_extension("xz")).unwrap();
+        duration = start.elapsed();
+        println!(" {:>12?}", duration);
+        assert_eq!(decompressed_xz, data);
+        // let _ = fs::remove_file(file_path.with_extension("lz4"));
+    }
+
+    // fn file_format_performance(fwrite: impl Fn(&Path, &Vec<u8>), fread: impl Fn(&Path) -> Vec<u8>, format: &str, data: &Vec<u8>) {
+    //     let mut start = Instant::now();
+    //     fwrite(&file_path, &data);
+    //     let mut duration = start.elapsed();
+    //     println!("File format performance took: {:?}", duration);
+    //     print_file_size(&file_path.with_extension(format), format!("{}  File", format));
+
+    //     start = Instant::now();
+    //     let decompressed_bin = fread(&file_path.with_extension(format)).unwrap();
+    //     duration = start.elapsed();
+    //     println!("Decompression took: {:?}\n", duration);
+    //     assert_eq!(decompressed_bin, data);
+    // }
+
+    fn print_file_size(path: &Path) {
+        let file_size = std::fs::metadata(path)
+            .expect("Failed to get file metadata")
+            .len();
+        print!(" {:>10} bytes", file_size);
     }
 }
