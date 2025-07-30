@@ -202,7 +202,7 @@ impl F32Data {
     pub fn new(metadata: &MetaGrid, data: Vec<f32>) -> Self {
         assert_eq!(
             metadata.width * metadata.height,
-            data[0].len() as u32,
+            data.len() as u32,
             "Data width does not match metadata dimensions"
         );
         F32Data {
@@ -231,24 +231,36 @@ impl F32Data {
         Ok(())
     }
 
+    #[getter]
+    pub fn get_data<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        let rows = self.metadata.height as usize;
+        let cols = self.metadata.width as usize;
+        let array = Array2::from_shape_vec((rows, cols), self.data.clone())
+        .map_err(|e| PyValueError::new_err(format!("Shape error: {}", e)))?;
+
+        Ok(array.into_pyarray(py))
+    }
+
+    // #[getter]
+    // fn get_data_list<'py>(&self) -> PyResult<Vec<Vec<f32>>> {
+    //     Ok(self.data.to_2d().clone()) // Python will interpret it as list of lists
+    // }
+
     #[staticmethod]
-    fn load(path: &str) -> PyResult<Self> {
+    pub fn load(path: &str) -> PyResult<Self> {
         let buffer = read_bin(&PathBuf::from(path))
             .map_err(|e| PyValueError::new_err(format!("Failed to read file: {}", e)))?;
         let (data, _): (F32Data, _) = bincode::decode_from_slice(&buffer, config::standard())
             .map_err(|e| PyValueError::new_err(format!("Bincode deserialization failed: {}", e)))?;
-        assert!(
-            data.metadata.magic_bytes == u32::from_le_bytes(*b"AVAG"),
-            "Invalid magic bytes"
-        );
-        assert!(
-            data.metadata.data_type == 32,
-            "Wrong data type: {} instead of f32",
-            data.metadata.data_type
-        );
+        assert_eq!(data.metadata.magic_bytes, u32::from_le_bytes(*b"AVAG"), "Invalid magic bytes");
+        assert_eq!(data.metadata.data_type, 32, "Wrong data type: {} instead of f32", data.metadata.data_type);
         Ok(data)
     }
 }
+
+use numpy::{IntoPyArray};
+use numpy::ndarray::Array2;
+
 
 pub fn read_bin(path: &PathBuf) -> PyResult<Vec<u8>> {
     let mut file = File::open(path)
@@ -259,7 +271,7 @@ pub fn read_bin(path: &PathBuf) -> PyResult<Vec<u8>> {
     Ok(buffer)
 }
 
-pub fn write_bin(path: &Path, buffer: &Vec<u8>) {
+pub fn write_bin(path: &Path, buffer: &[u8]) {
     let file = File::create(path.with_extension("bin")).expect("Failed to create file");
     let mut writer = BufWriter::with_capacity(16 * 1024 * 1024, file); // 16 MB buffer
     writer.write_all(&buffer).expect("Failed to write data");
@@ -368,7 +380,7 @@ mod tests {
     use std::env;
     use std::fs;
     use std::time::Instant;
-    
+
     #[test]
     fn data_type_ranges() {
         println!("Data type ranges:");
@@ -541,6 +553,7 @@ mod tests {
     }
 
     #[test]
+    // #[ignore]
     fn test_write_and_read_file_size_bin() {
         // For avaMal.png
         // Start PNG:      744017 bytes
@@ -560,7 +573,7 @@ mod tests {
         // PNG:   550.2348ms    2860167 bytes   214.7707ms
         // XZ :   1.9335498s    2158308 bytes   243.1962ms
         let tmp_dir = env::temp_dir();
-        let file_path = tmp_dir.join("test_write_and_read_lz4_bin");
+        let file_path = tmp_dir.join("test_write_file");
         let png_path = PathBuf::from("../avaframe/avaArzlerUni.png");
         print!("Start PNG: ");
         print_file_size(&png_path);
