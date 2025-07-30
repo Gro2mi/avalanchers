@@ -1,10 +1,11 @@
 // compute_cli/src/main.rs
-use std::{env, path::Path, time::Instant};
-
+use std::{env, time::Instant};
+use std::path::{PathBuf, Path};
 use clap::Parser;
 use anyhow::Result;
 use compute_core::{dem::Dem, settings::{Settings, SimSettings}}; // Import from your new crate
 use compute_core::utils::*;
+use data_processor::*;
 
 #[derive(Parser, Debug)]
 #[command(name = "Avalanche Simulation")]
@@ -31,13 +32,13 @@ fn main() -> Result<()> {
                 "Warning: File does not exist: {}. Using settings.json instead.",
                 path.display()
             );
-            std::path::PathBuf::from("settings.json")
+            PathBuf::from("settings.json")
         }
         None => {
             eprintln!(
                 "Warning: No file path provided. Using settings.json instead."
             );
-            std::path::PathBuf::from("settings.json")
+            PathBuf::from("settings.json")
         }
     };
 
@@ -51,34 +52,9 @@ fn main() -> Result<()> {
         std::process::exit(1);
     }
     let dem = Dem::load_png_as_float32(dem_path);
-    let mut sim_settings = SimSettings::from_json(settings);
-    sim_settings.set_dem(&dem);
+    let mut sim_settings = SimSettings::from_settings(&settings, &dem);
+    // sim_settings.set_dem(&dem);
     print!("Loaded simSettings: {:?}", sim_settings);
-
-    let mut start = Instant::now();
-    save_png(Path::new("output.png"), &f32_to_rgba_bytes(&dem.data1d), dem.width, dem.height).expect("Failed to save output PNG");
-    let mut duration = start.elapsed();
-    println!("Image creation and saving took: {:?}", duration);
-
-    start = Instant::now();
-    let buffer = create_grid_buffer(&dem.data1d, 8192, 8192);
-    write_bin(Path::new("grid_with_header_small.bin"), &buffer);
-    duration = start.elapsed();
-    println!("bin saving took: {:?}", duration);
-
-    let rand_data = create_random_rgba_data(8192, 8192);
-    save_png(Path::new("random.png"), &rand_data, 8192, 8192).expect("Failed to save output PNG");
-    let rr = rgba_bytes_to_f32(&rand_data);
-    start = Instant::now();
-    let buffer = create_grid_buffer(&rr, 8192, 8192);
-    write_bin(Path::new("grid_with_header.bin"), &buffer);
-    duration = start.elapsed();
-    println!("bin saving took: {:?}", duration);
-    
-    start = Instant::now();
-    write_compressed(Path::new("grid_with_header.bin"), &buffer);
-    duration = start.elapsed();
-    println!("compressed saving took: {:?}", duration);
     
 
     // SimSettings::new()

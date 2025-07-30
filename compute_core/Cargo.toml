@@ -21,9 +21,13 @@ futures-intrusive = { workspace = true }
 rand  = { workspace = true }
 flate2 = "1.1"
 half = { workspace = true, features = ["bytemuck"]}
+regex = "1.11.1"
 
 [features]
 # Feature to enable async blocking for native compilation
 native = ["pollster"]
 # Feature to enable WASM-specific bindings
 wasm = ["wasm-bindgen", "wasm-bindgen-futures", "js-sys"]
+
+[dev-dependencies]
+pollster = { workspace = true }

@@ -7,6 +7,7 @@ use bincode::{Decode, Encode, config};
 use lz4_flex::{compress_prepend_size, decompress_size_prepended};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use numpy::PyArray2;
 use std::io::Cursor;
 use std::io::Read;
 use zstd::stream::{decode_all, encode_all};
@@ -108,7 +109,7 @@ pub struct MetaGrid {
 impl MetaGrid {
     // TODO add DEM variables, variable name (peak velocity, etc.), unit
     #[new]
-    fn new(width: u32, height: u32, data_type: DataType) -> Self {
+    pub fn new(width: u32, height: u32, data_type: DataType) -> Self {
         MetaGrid {
             magic_bytes: u32::from_le_bytes(*b"AVAG"),
             version: 1,
@@ -156,7 +157,7 @@ pub struct MetaParticle {
 #[pymethods]
 impl MetaParticle {
     #[new] // This makes it callable as `MyMetadata(name, timestamp, version)` in Python
-    fn new(length: u32, data_type: DataType) -> Self {
+    pub fn new(length: u32, data_type: DataType) -> Self {
         MetaParticle {
             magic_bytes: u32::from_le_bytes(*b"AVAP"),
             version: 1,
@@ -198,10 +199,11 @@ pub struct F32Data {
 #[pymethods]
 impl F32Data {
     #[new]
-    fn new(metadata: &MetaGrid, data: Vec<f32>) -> Self {
-        assert!(
-            metadata.width * metadata.height == data.len() as u32,
-            "Data length does not match metadata dimensions"
+    pub fn new(metadata: &MetaGrid, data: Vec<f32>) -> Self {
+        assert_eq!(
+            metadata.width * metadata.height,
+            data[0].len() as u32,
+            "Data width does not match metadata dimensions"
         );
         F32Data {
             metadata: metadata.clone(),
@@ -220,7 +222,7 @@ impl F32Data {
         self.__repr__()
     }
 
-    fn save(&self, path: &str) -> PyResult<()> {
+    pub fn save(&self, path: &str) -> PyResult<()> {
         let path = Path::new(path);
         // Serialize the F32Data object to a binary format
         let encoded_bytes = bincode::encode_to_vec(&self, config::standard())

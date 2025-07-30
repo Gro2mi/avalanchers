@@ -1,4 +1,5 @@
 use rand::Rng;
+use std::cmp::Ordering;
 
 pub struct Point {
     pub x: f32,
@@ -30,9 +31,30 @@ pub fn create_random_rgba_data(width: usize, height: usize) -> Vec<u8> {
 //     buf.into_inner()
 // }
 
+pub trait To2D<T> {
+    fn to_2d(self, width: usize) -> Vec<Vec<T>>;
+}
 
+// Trait for converting Vec<Vec<T>> -> Vec<T>
+pub trait To1D<T> {
+    fn to_1d(self) -> Vec<T>;
+}
 
+// Implement To2D for Vec<T>
+impl<T: Clone> To2D<T> for Vec<T> {
+    fn to_2d(self, width: usize) -> Vec<Vec<T>> {
+        assert!(width > 0, "Width must be greater than zero");
+        assert_eq!(0, self.len() % width, "Length of vector must be a multiple of width");
+        self.chunks(width).map(|chunk| chunk.to_vec()).collect()
+    }
+}
 
+// Implement To1D for Vec<Vec<T>>
+impl<T> To1D<T> for Vec<Vec<T>> {
+    fn to_1d(self) -> Vec<T> {
+        self.into_iter().flatten().collect()
+    }
+}
 
 pub fn linspace(start: f32, end: f32, num: usize) -> Vec<f32> {
     if num == 1 {
@@ -42,7 +64,7 @@ pub fn linspace(start: f32, end: f32, num: usize) -> Vec<f32> {
     (0..num).map(|i| start + i as f32 * step).collect()
 }
 
-pub fn to_2d(data: &[f32], width: usize, height: usize) -> Vec<Vec<f32>> {
+pub fn to_2d<T: Clone>(data: &[T], width: usize, height: usize) -> Vec<Vec<T>> {
     (0..height)
         .map(|row| {
             let start = row * width;
@@ -117,6 +139,53 @@ pub fn divide(vec: &mut Vec<f32>, value: f32) {
     } else {
         panic!("Division by zero in vector division");
     }
+}
+
+
+pub trait MaxValue<T> {
+    fn max_value(&self) -> Option<T>;
+}
+
+impl<T> MaxValue<T> for [T]
+where
+    T: PartialOrd + Copy,
+{
+    fn max_value(&self) -> Option<T> {
+        self.iter()
+            .copied()
+            .max_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Less))
+    }
+}
+
+impl<T> MaxValue<T> for [Vec<T>]
+where
+    T: PartialOrd + Copy,
+{
+    fn max_value(&self) -> Option<T> {
+        self.iter()
+            .flat_map(|row| row.iter().copied())
+            .max_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Less))
+    }
+}
+
+
+pub fn split_channels<T: Copy>(flat: &[T]) -> (Vec<T>, Vec<T>, Vec<T>, Vec<T>) {
+    assert!(flat.len() % 4 == 0, "Input length must be a multiple of 4");
+
+    let n = flat.len() / 4;
+    let mut r = Vec::with_capacity(n);
+    let mut g = Vec::with_capacity(n);
+    let mut b = Vec::with_capacity(n);
+    let mut a = Vec::with_capacity(n);
+
+    for chunk in flat.chunks_exact(4) {
+        r.push(chunk[0]);
+        g.push(chunk[1]);
+        b.push(chunk[2]);
+        a.push(chunk[3]);
+    }
+
+    (r, g, b, a)
 }
 
 #[cfg(test)]
@@ -245,5 +314,47 @@ mod tests {
         let mut v = vec![10.0, 20.0, 30.0];
         divide(&mut v, 10.0);
         assert_eq!(v, vec![1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn to_2d_converts_flat_vector_to_2d() {
+        let data = vec![1, 2, 3, 4, 5, 6];
+        let result = data.to_2d(2);
+        assert_eq!(result, vec![vec![1, 2], vec![3, 4], vec![5, 6]]);
+    }
+
+    #[test]
+    fn to_2d_empty_vector_returns_empty_2d_vector() {
+        let data: Vec<i32> = vec![];
+        let result = data.to_2d(1);
+        assert_eq!(result, Vec::<Vec<i32>>::new());
+    }
+
+    #[test]
+    #[should_panic(expected = "Width must be greater than zero")]
+    fn to_2d_panics_when_width_is_zero() {
+        let data = vec![1, 2, 3];
+        data.to_2d(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Length of vector must be a multiple of width")]
+    fn to_2d_panics_when_length_not_multiple_of_width() {
+        let data = vec![1, 2, 3];
+        data.to_2d(2);
+    }
+
+    #[test]
+    fn to_1d_flattens_2d_vector_to_1d() {
+        let data = vec![vec![1, 2], vec![3, 4], vec![5, 6]];
+        let result = data.to_1d();
+        assert_eq!(result, vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn to_1d_empty_2d_vector_returns_empty_vector() {
+        let data: Vec<Vec<i32>> = vec![];
+        let result = data.to_1d();
+        assert_eq!(result, Vec::<i32>::new());
     }
 }

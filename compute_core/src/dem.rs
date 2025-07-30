@@ -97,7 +97,7 @@ impl Dem {
     // }
 
     pub fn load_png_as_float32(path: PathBuf) -> Self {
-        let (rgba, width, height) = load_png(path.as_path()).expect("Failed to load PNG");
+        let (rgba, width, height) = read_png(path.as_path()).expect("Failed to load PNG");
         let bounds: Bounds = Dem::load_bounds(&path).expect("Failed to load bounds");
         println!("Loaded PNG {:?}: {} x {}", path.as_os_str(), width, height);
         let mut dem = Dem {

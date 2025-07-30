@@ -1,13 +1,9 @@
-use crate::buffers::{ComputeBuffers, create_buffers_and_texture_descriptions};
+use crate::buffers::{ComputeBuffers, create_buffers_and_texture_descriptions, BufferName, TextureName};
 use crate::shaders::ComputeShaderConfig;
-use anyhow::{Result, anyhow};
+use anyhow::{Ok, Result, anyhow};
+use data_processor::*;
 use std::collections::HashMap;
-use wgpu::{
-    Adapter, BufferUsages, CommandEncoderDescriptor, ComputePassDescriptor, Device,
-    DeviceDescriptor, Extent3d, Features, Instance, InstanceDescriptor, Limits, PowerPreference,
-    Queue, RequestAdapterOptions, TextureDescriptor, TextureDimension, TextureFormat,
-    TextureUsages,
-};
+use wgpu::{Adapter, BindingResource, BufferUsages, CommandEncoderDescriptor, ComputePassDescriptor, Device, DeviceDescriptor, Extent3d, Features, Instance, InstanceDescriptor, Limits, PowerPreference, Queue, RequestAdapterOptions, Sampler, TextureFormat, TextureUsages};
 
 pub mod buffers;
 pub mod dem;
@@ -15,13 +11,72 @@ pub mod settings;
 pub mod shaders;
 pub mod utils;
 
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct Particle {
+    pub position: [f32; 3],
+    pub mass: f32,
+    pub velocity: [f32; 3],
+    pub _pad0: f32, // padding to align next field
+    pub c: [f32; 4], // 2x2 matrix: [xx, xy, yx, yy]
+    pub stopped: u32,
+    pub _pad1: [u32; 3], // 3 * 4 bytes padding
+}
+
+impl Particle {
+    pub const BYTE_SIZE: usize = 16 * 4;
+
+    pub fn new() -> Self {
+        Self {
+            position: [0.0; 3],
+            mass: 0.0,
+            velocity: [0.0; 3],
+            _pad0: 0.0,
+            c: [0.0; 4],
+            stopped: 0,
+            _pad1: [0; 3],
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct SimInfo {
+    pub timestep: u32,
+    pub number_particles: u32,
+    pub elevation_threshold: f32,
+    pub max_velocity: f32,
+}
+
 pub struct ComputeOrchestrator {
     pub instance: Instance,
     pub adapter: Adapter,
     pub device: Device,
     pub queue: Queue,
+    pub workgroup_size_1d: u32,
+    pub workgroup_size_2d: u32,
     pub buffers: ComputeBuffers,
+    pub sampler: Sampler,
+    texture_size: Extent3d,
     shader_configs: HashMap<String, ComputeShaderConfig>,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct TimestepData {
+    pub velocity: [f32; 3],                   // 12 bytes
+    pub dt: f32,                              // 4 bytes
+    pub acceleration_tangential: [f32; 3],    // 12 bytes
+    pub acceleration_friction_magnitude: f32, // 4 bytes
+    pub position: [f32; 3],                   // 12 bytes
+    pub elevation: f32,                       // 4 bytes
+    pub normal: [f32; 3],                     // 12 bytes
+    pub acceleration_normal: [f32; 3],        // 12 bytes
+    pub _pad0: f32,                           // 4 bytes (padding)
+    pub uv: [f32; 2],                         // 8 bytes
+    pub g_eff: f32,                           // 4 bytes
+    pub _pad1: f32,                           // 4 bytes (padding to 96 bytes)
 }
 
 impl ComputeOrchestrator {
@@ -61,29 +116,54 @@ impl ComputeOrchestrator {
 
         let buffers = ComputeBuffers::new();
         let shader_configs = shaders::create_shader_configs(&device)?;
+        let texture_size = Extent3d {
+            width: 4,
+            height: 4,
+            depth_or_array_layers: 1,
+        };
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Linear Sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest, // Optional: adjust if needed
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            lod_min_clamp: 0.0,
+            lod_max_clamp: 100.0,
+            compare: None,
+            anisotropy_clamp: 1,
+            border_color: None,
+        });
 
         Ok(Self {
             instance,
             adapter,
             device,
             queue,
+            workgroup_size_1d: max_workgroup_x,
+            workgroup_size_2d: max_workgroup_xy,
             buffers,
             shader_configs,
+            texture_size,
+            sampler,
         })
     }
-
-    fn get_view(&self, name: &str) -> wgpu::BindingResource<'_> {
+    fn get_sampler(&self) -> BindingResource{
+        BindingResource::Sampler(&self.sampler)
+    }
+    fn get_view(&self, name: TextureName) -> BindingResource<'_> {
         let view = self
             .buffers
-            .get_texture_view(name)
+            .get_texture_view(&name)
             .ok_or_else(|| anyhow!("Texture view '{}' not found", name))
             .expect("Texture view not found");
-        wgpu::BindingResource::TextureView(view)
+        BindingResource::TextureView(view)
     }
 
-    fn get_buffer_binding(&self, name: &str) -> wgpu::BindingResource {
+    fn get_buffer_binding(&self, name: BufferName) -> BindingResource {
         self.buffers
-            .get_buffer(name)
+            .get_buffer(&name)
             .ok_or_else(|| anyhow!("Buffer '{}' not found", name))
             .expect("Buffer not found")
             .as_entire_binding()
@@ -93,7 +173,7 @@ impl ComputeOrchestrator {
     pub async fn run_shader(
         &self,
         shader_name: &str,
-        resources: &[wgpu::BindingResource<'_>], // Pass actual resources (buffer bindings or texture views)
+        resources: &[BindingResource<'_>], // Pass actual resources (buffer bindings or texture views)
         dispatch_workgroup_x: u32,
         dispatch_workgroup_y: u32,
         dispatch_workgroup_z: u32,
@@ -131,7 +211,7 @@ impl ComputeOrchestrator {
     pub async fn run_normals_shader(
         &self,
         shader_name: &str,
-        resources: &[wgpu::BindingResource<'_>], // Pass actual resources (buffer bindings or texture views)
+        resources: &[BindingResource<'_>], // Pass actual resources (buffer bindings or texture views)
         dispatch_workgroup_x: u32,
         dispatch_workgroup_y: u32,
         dispatch_workgroup_z: u32,
@@ -165,112 +245,37 @@ impl ComputeOrchestrator {
 
         Ok(())
     }
-    pub fn create_buffers(&mut self, sim_settings: &settings::SimSettings) -> Result<()> {
-        let texture_size = Extent3d {
+
+    pub fn create_buffers_and_texture_descriptions(
+        &mut self,
+        sim_settings: &settings::SimSettings,
+    ) -> Result<()> {
+        self.texture_size = Extent3d {
             width: sim_settings.grid_shape_x,
             height: sim_settings.grid_shape_y,
             depth_or_array_layers: 1,
         };
-        // Create buffers based on simulation settings and DEM data
-        self.buffers = create_buffers_and_texture_descriptions(&self.device, texture_size);
+        self.buffers = create_buffers_and_texture_descriptions(&self.device, self.texture_size);
         Ok(())
-    }
-
-    // --- Example of a texture-based chain ---
-    pub async fn run_texture_processing_chain(
-        &mut self, // `&mut self` because we're adding textures
-        &sim_settings: &settings::SimSettings,
-        dem: &dem::Dem,
-    ) -> Result<Vec<f32>> {
-        let texture_size = Extent3d {
-            width: sim_settings.grid_shape_x,
-            height: sim_settings.grid_shape_y,
-            depth_or_array_layers: 1,
-        };
-
-        let texture_format = TextureFormat::R32Float; // Single float per pixel
-
-        let dem_texture_desc = buffers::texture_descriptor(
-            "dem_texture",
-            texture_size,
-            TextureFormat::R32Float,
-            TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
-        );
-
-        let output_texture_desc = TextureDescriptor {
-            label: Some("Output Texture"),
-            size: texture_size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: TextureDimension::D2,
-            format: texture_format,
-            usage: TextureUsages::STORAGE_BINDING
-                | TextureUsages::COPY_DST
-                | TextureUsages::COPY_SRC,
-            view_formats: &[],
-        };
-
-        // Add input texture with data
-        self.buffers.add_texture_with_data(
-            &self.device,
-            &self.queue,
-            dem.data1d.as_slice(),
-            &dem_texture_desc,
-        )?;
-
-        // Add empty output texture
-        self.buffers.add_texture(&self.device, &output_texture_desc);
-
-        let input_view = self
-            .buffers
-            .get_texture_view("input_image")
-            .ok_or_else(|| anyhow!("Input texture view not found"))?;
-        let output_view = self
-            .buffers
-            .get_texture_view("output_image")
-            .ok_or_else(|| anyhow!("Output texture view not found"))?;
-
-        let dispatch_x = (sim_settings.grid_shape_x + 7) / 8; // Example: 8x8 workgroup size in shader
-        let dispatch_y = (sim_settings.grid_shape_y + 7) / 8;
-
-        println!("Running texture processing shader...");
-        self.run_shader(
-            "texture_process",
-            &[
-                wgpu::BindingResource::TextureView(input_view),
-                wgpu::BindingResource::TextureView(output_view),
-            ],
-            dispatch_x,
-            dispatch_y,
-            1,
-        )
-        .await?;
-
-        // Read the final output texture
-        let result: Vec<f32> = self
-            .buffers
-            .read_texture(&self.device, &self.queue, "output_image")
-            .await?;
-        Ok(result)
     }
 
     pub async fn run_normals(
         &mut self, // `&mut self` because we're adding textures
-        &sim_settings: &settings::SimSettings,
+        sim_settings: &settings::SimSettings,
         dem: &dem::Dem,
     ) -> Result<()> {
-        let texture_size = Extent3d {
+        self.texture_size = Extent3d {
             width: sim_settings.grid_shape_x,
             height: sim_settings.grid_shape_y,
             depth_or_array_layers: 1,
         };
 
-        self.buffers = create_buffers_and_texture_descriptions(&self.device, texture_size);
+        self.buffers = create_buffers_and_texture_descriptions(&self.device, self.texture_size);
 
         self.buffers.add_buffer_with_data(
             &self.device,
-            "sim_settings",
-            &sim_settings.as_bytes(),
+            BufferName::SimSettings,
+            sim_settings.as_bytes(),
             BufferUsages::UNIFORM | BufferUsages::COPY_DST,
         );
 
@@ -281,26 +286,58 @@ impl ComputeOrchestrator {
                 &self.device,
                 &self.queue,
                 dem.data1d.as_slice(),
-                &buffers::texture_descriptor(
-                    "dem_texture",
-                    texture_size,
+                TextureName::Dem,
+                    self.texture_size,
                     TextureFormat::R32Float,
                     texture_usage_input,
-                ),
             )
             .expect("Failed to add texture with data");
         println!("Running texture processing shader...");
-        let _ = self.buffers
-            .write_buffer(&self.queue, "sim_settings", &sim_settings.as_bytes());
+        let _ = self
+            .buffers
+            .write_buffer(&self.queue, BufferName::SimSettings, &sim_settings.as_bytes());
         self.run_shader(
             "compute_normals",
             &[
-                self.get_buffer_binding("sim_settings"),
-                self.get_view("dem_texture"),
-                self.get_view("wind_texture"),
-                self.get_view("normals_texture"),
-                self.get_view("slope_texture"),
-                self.get_buffer_binding("out_debug_normals_buffer"),
+                self.get_buffer_binding(BufferName::SimSettings),
+                self.get_view(TextureName::Dem),
+                self.get_view(TextureName::Wind),
+                self.get_view(TextureName::Normals),
+                self.get_view(TextureName::Slope),
+                self.get_buffer_binding(BufferName::OutDebugNormals),
+            ],
+            (sim_settings.grid_shape_x + 15) / 16,
+            (sim_settings.grid_shape_y + 15) / 16,
+            1,
+        )
+        .await?;
+        Ok(())
+    }
+    pub async fn run_load_release_areas(
+        &mut self, // `&mut self` because we're adding textures
+        data: &Vec<u8>,
+    ) -> Result<()> {
+        let texture_usage_input = TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST;
+
+        self.buffers
+            .add_texture_with_data(
+                &self.device,
+                &self.queue,
+                data,
+                TextureName::ReleaseAreasInput,
+                    self.texture_size,
+                    TextureFormat::Rgba8Uint,
+                    texture_usage_input,
+            )
+            .expect("Failed to add texture with data");
+        println!("Running texture processing shader...");
+        self.run_shader(
+            "load_release_areas",
+            &[
+                self.get_view(TextureName::ReleaseAreasInput),
+                self.get_view(TextureName::ReleaseAreas),
+                self.get_buffer_binding(BufferName::OutDebugRelease),
+                self.get_buffer_binding(BufferName::NumberReleaseCells),
             ],
             16,
             16,
@@ -309,35 +346,127 @@ impl ComputeOrchestrator {
         .await?;
         Ok(())
     }
+    pub async fn run_initialize_particles(
+        &mut self, // `&mut self` because we're adding textures
+        data: &Vec<u8>,
+    ) -> Result<()> {
+        println!("Running texture processing shader...");
+        self.run_shader(
+            "initialize_particles",
+            &[
+                self.get_buffer_binding(BufferName::SimSettings),
+                self.get_buffer_binding(BufferName::SimInfo),
+                self.get_view(TextureName::Dem),
+                self.get_view(TextureName::ReleaseAreas),
+                self.get_sampler(),
+                self.get_buffer_binding(BufferName::ParticleData),
+                self.get_buffer_binding(BufferName::CellCountGrid),
+                self.get_buffer_binding(BufferName::MaxVelocityGrid),
+            ],
+            16,
+            16,
+            1,
+        )
+        .await?;
+        Ok(())
+    }
+
     async fn get_texture<T: bytemuck::Pod + Send + Sync>(
         &self,
-        name: &str,
-    ) -> Result<Vec<T>> {
-        let result: Vec<T> = self
-            .buffers
+        name: TextureName,
+    ) -> Result<(Vec<T>, Vec<T>, Vec<T>, Vec<T>)> {
+        self.buffers
             .read_texture(&self.device, &self.queue, name)
-            .await?;
-        Ok(result)
+            .await
+    }
+
+    pub fn save_grid(&self, path: &str, data: Vec<f32>) -> Result<()> {
+        F32Data::new(
+            &MetaGrid::new(
+                self.texture_size.width,
+                self.texture_size.height,
+                DataType::F32,
+            ),
+            data,
+        )
+        .save(path)
+        .expect(&format!("Failed to save grid {}", path));
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::settings::Settings;
-    use half::f16;
-    use super::*;
+    use std::path::Path;
 
+    use super::*;
+    use crate::settings::Settings;
+    use data_processor::read_png;
+    use pollster;
+    use utils::MaxValue;
     #[test]
     fn test_compute_orchestrator_creation() {
-        let mut orchestrator = pollster::block_on(ComputeOrchestrator::new()).expect("Failed to create ComputeOrchestrator");
+        let mut orchestrator = pollster::block_on(ComputeOrchestrator::new())
+            .expect("Failed to create ComputeOrchestrator");
         let (sim_settings, dem) = Settings::create_from_path("../avaframe/avaInclinedPlane.png");
         pollster::block_on(orchestrator.run_normals(&sim_settings, &dem))
             .expect("Failed to run normals shader");
-        let slope_texture: Vec<f16> = pollster::block_on(orchestrator.get_texture("slope_texture"))
-            .expect("Failed to get slope_texture");
-        println!("Read slope_texture: {} {:?}", slope_texture.len(), slope_texture[200..220].to_vec());
-        let d: Vec<f32> = pollster::block_on(orchestrator.buffers.read_buffer(&orchestrator.device, "out_debug_normals_buffer")).expect("Failed to read out_debug_normals_buffer");
-        println!("Read out_debug_normals_buffer: {:?}", d);
+
+        let (slope_angle, slope_aspect, _, _) =
+            pollster::block_on(orchestrator.buffers.read_texture::<f32>(&orchestrator.device, &orchestrator.queue, TextureName::Slope))// get_texture::<f32>("slope"))
+                .expect("Failed to get slope texture");
+        assert!(slope_angle.iter().all(|&x| (x - 34.0).abs() < 2e-3));
+        assert!(slope_aspect.iter().all(|&x| (x - 90.0).abs() < 1e-6));
+        let (normal_x, normal_y, normal_z, profile_curvature) =
+            pollster::block_on(orchestrator.get_texture::<f32>(TextureName::Normals))
+                .expect("Failed to get normals texture");
+        let epsilon = 1e-4;
+        assert!(normal_x.iter().all(|&x| (x - 0.55919474).abs() < epsilon));
+        assert!(normal_y.iter().all(|&x| (x - 0.0).abs() < epsilon));
+        assert!(normal_z.iter().all(|&x| (x - 0.82903636).abs() < epsilon));
+        assert!(profile_curvature.iter().all(|&x| (x - 0.0).abs() < epsilon));
+        orchestrator
+            .save_grid("slope_aspect.bin", slope_aspect)
+            .expect("Failed to save slope_aspect");
+        orchestrator
+            .save_grid("slope_angle.bin", slope_angle)
+            .expect("Failed to save slope_angle");
+        orchestrator
+            .save_grid("profile_curvature.bin", profile_curvature)
+            .expect("Failed to save profile_curvature");
+        // println!("{}", slope_texture[5].to_f32());
+        let debug_buffer: Vec<f32> = pollster::block_on(orchestrator.buffers.read_buffer(
+            &orchestrator.device,
+            &orchestrator.queue,
+            BufferName::OutDebugNormals,
+        ))
+        .expect("Failed to read out_debug_normals_buffer");
+        println!("Read out_debug_normals_buffer: {:?}", debug_buffer);
+        print!("Debug normals: ");
+    }
+    #[test]
+    fn test_load_release_areas() {
+        let mut orchestrator = pollster::block_on(ComputeOrchestrator::new())
+            .expect("Failed to create ComputeOrchestrator");
+        let (sim_settings, _dem) = Settings::create_from_path("../avaframe/avaInclinedPlane.png");
+        let (data, _, _) = read_png(&Path::new("../avaframe/avaInclinedPlanereleaseTexture.png"))
+            .expect("Failed to read PNG");
+        println!("Max: {:?}", data.max_value());
+
+        orchestrator
+            .create_buffers_and_texture_descriptions(&sim_settings)
+            .expect("Failed to create buffers and texture descriptions");
+        pollster::block_on(orchestrator.run_load_release_areas(&data))
+            .expect("Failed to run load_release_areas shader");
+        let (release_thickness, _, _, _) =
+            pollster::block_on(orchestrator.get_texture::<f32>(TextureName::ReleaseAreas))
+                .expect("Failed to get release_areas");
+        println!(
+            "Read release_texture: len: {} max: {:?} {:?}",
+            release_thickness.len(),
+            release_thickness.max_value(),
+            release_thickness[1020..1040].to_vec(),
+        );
     }
 
     #[test]
