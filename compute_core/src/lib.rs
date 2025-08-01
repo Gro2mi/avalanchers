@@ -4,7 +4,7 @@ use anyhow::{Ok, Result, anyhow};
 use data_processor::*;
 use std::collections::HashMap;
 use wgpu::{Adapter, BindingResource, BufferUsages, CommandEncoderDescriptor, ComputePassDescriptor, Device, DeviceDescriptor, Extent3d, Features, Instance, InstanceDescriptor, Limits, PowerPreference, Queue, RequestAdapterOptions, Sampler, TextureFormat, TextureUsages};
-
+use log::{debug, info, warn, error};
 pub mod buffers;
 pub mod dem;
 pub mod settings;
@@ -49,19 +49,6 @@ pub struct SimInfo {
     pub max_velocity: f32,
 }
 
-pub struct ComputeOrchestrator {
-    pub instance: Instance,
-    pub adapter: Adapter,
-    pub device: Device,
-    pub queue: Queue,
-    pub workgroup_size_1d: u32,
-    pub workgroup_size_2d: u32,
-    pub buffers: ComputeBuffers,
-    pub sampler: Sampler,
-    texture_size: Extent3d,
-    shader_configs: HashMap<String, ComputeShaderConfig>,
-}
-
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct TimestepData {
@@ -79,6 +66,21 @@ pub struct TimestepData {
     pub _pad1: f32,                           // 4 bytes (padding to 96 bytes)
 }
 
+pub struct ComputeOrchestrator {
+    pub instance: Instance,
+    pub adapter: Adapter,
+    pub device: Device,
+    pub queue: Queue,
+    pub workgroup_size_1d: u32,
+    pub workgroup_size_2d: u32,
+    pub buffers: ComputeBuffers,
+    pub sampler: Sampler,
+    texture_size: Extent3d,
+    shader_configs: HashMap<String, ComputeShaderConfig>,
+    dispatch_workgroup_size_1d: u32,
+    dispatch_workgroup_size_2d: u32,
+}
+
 impl ComputeOrchestrator {
     pub async fn new() -> Result<Self> {
         let instance = Instance::new(&InstanceDescriptor::default());
@@ -90,19 +92,19 @@ impl ComputeOrchestrator {
             })
             .await
             .expect("Failed to find an appropriate adapter");
-        let max_workgroup_xy = utils::highest_power_of_two(
+        let workgroup_size_2d = utils::highest_power_of_two(
             (adapter.limits().max_compute_workgroup_size_x as f64).sqrt() as u32,
         );
         let max_invocations = adapter.limits().max_compute_invocations_per_workgroup;
-        let max_workgroup_x = max_invocations;
+        let workgroup_size_1d = max_invocations;
         let max_storage = adapter.limits().max_storage_buffer_binding_size;
         let (device, queue) = adapter
             .request_device(&DeviceDescriptor {
                 label: Some("Compute Device"),
                 required_features: Features::FLOAT32_FILTERABLE | Features::TIMESTAMP_QUERY,
                 required_limits: Limits {
-                    max_compute_workgroup_size_x: max_workgroup_x,
-                    max_compute_workgroup_size_y: max_workgroup_xy,
+                    max_compute_workgroup_size_x: workgroup_size_1d,
+                    max_compute_workgroup_size_y: workgroup_size_2d,
                     max_compute_workgroup_size_z: 1,
                     max_compute_invocations_per_workgroup: max_invocations,
                     max_storage_buffer_binding_size: max_storage,
@@ -115,7 +117,7 @@ impl ComputeOrchestrator {
             .expect("Failed to create device and queue");
 
         let buffers = ComputeBuffers::new();
-        let shader_configs = shaders::create_shader_configs(&device)?;
+        let shader_configs = shaders::create_shader_configs(&device, workgroup_size_1d, workgroup_size_2d)?;
         let texture_size = Extent3d {
             width: 4,
             height: 4,
@@ -141,12 +143,14 @@ impl ComputeOrchestrator {
             adapter,
             device,
             queue,
-            workgroup_size_1d: max_workgroup_x,
-            workgroup_size_2d: max_workgroup_xy,
+            workgroup_size_1d,
+            workgroup_size_2d,
             buffers,
             shader_configs,
             texture_size,
             sampler,
+            dispatch_workgroup_size_2d: 0,
+            dispatch_workgroup_size_1d: 0,
         })
     }
     fn get_sampler(&self) -> BindingResource{
@@ -178,6 +182,9 @@ impl ComputeOrchestrator {
         dispatch_workgroup_y: u32,
         dispatch_workgroup_z: u32,
     ) -> Result<()> {
+        assert_ne!(dispatch_workgroup_x, 0);
+        assert_ne!(dispatch_workgroup_y, 0);
+        assert_ne!(dispatch_workgroup_z, 0);
         let config = self
             .shader_configs
             .get(shader_name)
@@ -270,6 +277,8 @@ impl ComputeOrchestrator {
             depth_or_array_layers: 1,
         };
 
+        self.dispatch_workgroup_size_2d = (sim_settings.grid_shape_x + self.workgroup_size_2d - 1) / self.workgroup_size_2d;
+
         self.buffers = create_buffers_and_texture_descriptions(&self.device, self.texture_size);
 
         self.buffers.add_buffer_with_data(
@@ -293,9 +302,9 @@ impl ComputeOrchestrator {
             )
             .expect("Failed to add texture with data");
         println!("Running texture processing shader...");
-        let _ = self
-            .buffers
+        let _ = self.buffers
             .write_buffer(&self.queue, BufferName::SimSettings, &sim_settings.as_bytes());
+
         self.run_shader(
             "compute_normals",
             &[
@@ -306,8 +315,8 @@ impl ComputeOrchestrator {
                 self.get_view(TextureName::Slope),
                 self.get_buffer_binding(BufferName::OutDebugNormals),
             ],
-            (sim_settings.grid_shape_x + 15) / 16,
-            (sim_settings.grid_shape_y + 15) / 16,
+            self.dispatch_workgroup_size_2d,
+            self.dispatch_workgroup_size_2d,
             1,
         )
         .await?;
@@ -339,16 +348,15 @@ impl ComputeOrchestrator {
                 self.get_buffer_binding(BufferName::OutDebugRelease),
                 self.get_buffer_binding(BufferName::NumberReleaseCells),
             ],
-            16,
-            16,
+            self.dispatch_workgroup_size_2d,
+            self.dispatch_workgroup_size_2d,
             1,
         )
         .await?;
         Ok(())
     }
     pub async fn run_initialize_particles(
-        &mut self, // `&mut self` because we're adding textures
-        data: &Vec<u8>,
+        &mut self,
     ) -> Result<()> {
         println!("Running texture processing shader...");
         self.run_shader(
@@ -359,12 +367,12 @@ impl ComputeOrchestrator {
                 self.get_view(TextureName::Dem),
                 self.get_view(TextureName::ReleaseAreas),
                 self.get_sampler(),
-                self.get_buffer_binding(BufferName::ParticleData),
+                self.get_buffer_binding(BufferName::Particles),
                 self.get_buffer_binding(BufferName::CellCountGrid),
                 self.get_buffer_binding(BufferName::MaxVelocityGrid),
             ],
-            16,
-            16,
+            self.workgroup_size_2d,
+            self.workgroup_size_2d,
             1,
         )
         .await?;
@@ -384,12 +392,11 @@ impl ComputeOrchestrator {
         F32Data::new(
             &MetaGrid::new(
                 self.texture_size.width,
-                self.texture_size.height,
-                DataType::F32,
+                self.texture_size.height,5.0, 1.0, 0, 0.0, 0.0, DataType::F32, Variable::Undefined, Unit::Dimensionless
             ),
             data,
         )
-        .save(path)
+        .save(path.as_ref())
         .expect(&format!("Failed to save grid {}", path));
         Ok(())
     }
@@ -403,7 +410,7 @@ mod tests {
     use crate::settings::Settings;
     use data_processor::read_png;
     use pollster;
-    use utils::MaxValue;
+    use utils::{MinValue, MaxValue, HistFloat};
     #[test]
     fn test_compute_orchestrator_creation() {
         let mut orchestrator = pollster::block_on(ComputeOrchestrator::new())
@@ -415,24 +422,17 @@ mod tests {
         let (slope_angle, slope_aspect, _, _) =
             pollster::block_on(orchestrator.buffers.read_texture::<f32>(&orchestrator.device, &orchestrator.queue, TextureName::Slope))// get_texture::<f32>("slope"))
                 .expect("Failed to get slope texture");
-        assert!(slope_angle.iter().all(|&x| (x - 34.0).abs() < 2e-3));
-        assert!(slope_aspect.iter().all(|&x| (x - 90.0).abs() < 1e-6));
         let (normal_x, normal_y, normal_z, profile_curvature) =
             pollster::block_on(orchestrator.get_texture::<f32>(TextureName::Normals))
                 .expect("Failed to get normals texture");
-        let epsilon = 1e-4;
-        assert!(normal_x.iter().all(|&x| (x - 0.55919474).abs() < epsilon));
-        assert!(normal_y.iter().all(|&x| (x - 0.0).abs() < epsilon));
-        assert!(normal_z.iter().all(|&x| (x - 0.82903636).abs() < epsilon));
-        assert!(profile_curvature.iter().all(|&x| (x - 0.0).abs() < epsilon));
         orchestrator
-            .save_grid("slope_aspect.bin", slope_aspect)
+            .save_grid("slope_aspect.bin", slope_aspect.clone())
             .expect("Failed to save slope_aspect");
         orchestrator
-            .save_grid("slope_angle.bin", slope_angle)
+            .save_grid("slope_angle.bin", slope_angle.clone())
             .expect("Failed to save slope_angle");
         orchestrator
-            .save_grid("profile_curvature.bin", profile_curvature)
+            .save_grid("profile_curvature.bin", profile_curvature.clone())
             .expect("Failed to save profile_curvature");
         // println!("{}", slope_texture[5].to_f32());
         let debug_buffer: Vec<f32> = pollster::block_on(orchestrator.buffers.read_buffer(
@@ -442,7 +442,17 @@ mod tests {
         ))
         .expect("Failed to read out_debug_normals_buffer");
         println!("Read out_debug_normals_buffer: {:?}", debug_buffer);
-        print!("Debug normals: ");
+        assert!(
+            slope_angle.iter().all(|&x| (x - 34.00012).abs() < 2e-3),
+            "Slope angle values are not as expected. Min: {:?}, Max: {:?}\nHist:\n{:?}",
+            slope_angle.min_value(), slope_angle.max_value(), slope_angle.hist_float()
+        );
+        assert!(slope_aspect.iter().all(|&x| (x - 90.0).abs() < 1e-6));
+        let epsilon = 1e-4;
+        assert!(normal_x.iter().all(|&x| (x - 0.55919474).abs() < epsilon));
+        assert!(normal_y.iter().all(|&x| (x - 0.0).abs() < epsilon));
+        assert!(normal_z.iter().all(|&x| (x - 0.82903636).abs() < epsilon));
+        assert!(profile_curvature.iter().all(|&x| (x - 0.0).abs() < epsilon));
     }
     #[test]
     fn test_load_release_areas() {

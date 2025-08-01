@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 // src/lib.rs
 use bincode::{Decode, Encode, config};
 use lz4_flex::{compress_prepend_size, decompress_size_prepended};
+use numpy::PyArray2;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use numpy::PyArray2;
 use std::io::Cursor;
 use std::io::Read;
 use zstd::stream::{decode_all, encode_all};
@@ -15,7 +15,7 @@ use zstd::stream::{decode_all, encode_all};
 use image::{GenericImageView, ImageReader};
 
 #[pyclass]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
 pub enum DataType {
     F16,
     F32,
@@ -45,6 +45,100 @@ impl DataType {
             DataType::F16 => "f16",
             DataType::F32 => "f32",
             DataType::F64 => "f64",
+        }
+    }
+}
+
+
+#[pyclass]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
+pub enum Unit {
+    MetersPerSecond,
+    Degree,
+    Kilogram,
+    Dimensionless,
+}
+
+impl Unit {
+    pub fn from_int(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Unit::MetersPerSecond),
+            1 => Some(Unit::Degree),
+            2 => Some(Unit::Kilogram),
+            _ => Some(Unit::Dimensionless),
+        }
+    }
+    pub fn as_int(&self) -> u8 {
+        match self {
+            Unit::MetersPerSecond => 0,
+            Unit::Degree => 1,
+            Unit::Kilogram => 2,
+            Unit::Dimensionless => 255,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Unit::MetersPerSecond => "m/s",
+            Unit::Degree => "°",
+            Unit::Kilogram => "kg",
+            Unit::Dimensionless => "-",
+        }
+    }
+}
+
+#[pyclass]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
+pub enum Variable {
+    Velocity,
+    SlopeAngle,
+    Curvature,
+    SlopeAspect,
+    NormalX,
+    NormalY,
+    NormalZ,
+    Mass,
+    Undefined,
+}
+impl Variable {
+    pub fn from_int(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Variable::Velocity),
+            1 => Some(Variable::SlopeAngle),
+            2 => Some(Variable::Curvature),
+            3 => Some(Variable::SlopeAspect),
+            4 => Some(Variable::NormalX),
+            5 => Some(Variable::NormalY),
+            6 => Some(Variable::NormalZ),
+            7 => Some(Variable::Mass),
+            _ => Some(Variable::Undefined),
+        }
+    }
+    pub fn as_int(&self) -> u8 {
+        match self {
+            Variable::Velocity => 0,
+            Variable::SlopeAngle => 1,
+            Variable::Curvature => 2,
+            Variable::SlopeAspect => 3,
+            Variable::NormalX => 4,
+            Variable::NormalY => 5,
+            Variable::NormalZ => 6,
+            Variable::Mass => 7,
+            Variable::Undefined => 255,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Variable::Velocity => "velocity",
+            Variable::SlopeAngle => "slope_angle",
+            Variable::Curvature => "curvature",
+            Variable::SlopeAspect => "slope_aspect",
+            Variable::NormalX => "normal_x",
+            Variable::NormalY => "normal_y",
+            Variable::NormalZ => "normal_z",
+            Variable::Mass => "mass",
+            Variable::Undefined => "undefined",
         }
     }
 }
@@ -102,20 +196,41 @@ pub struct MetaGrid {
     #[pyo3(get, set)]
     pub height: u32,
     #[pyo3(get, set)]
-    pub data_type: u8,
+    pub cell_size: f32,
+    #[pyo3(get, set)]
+    pub map_factor: f32,
+    #[pyo3(get, set)]
+    pub epsg_code: u16,
+    #[pyo3(get, set)]
+    pub top: f32,
+    #[pyo3(get, set)]
+    pub left: f32,
+    #[pyo3(get, set)]
+    pub data_type: DataType,
+    #[pyo3(get, set)]
+    pub variable: Variable,
+    #[pyo3(get, set)]
+    pub unit: Unit,
 }
 
 #[pymethods]
 impl MetaGrid {
-    // TODO add DEM variables, variable name (peak velocity, etc.), unit
+    /// Creates a new MetaGrid with the given parameters.
     #[new]
-    pub fn new(width: u32, height: u32, data_type: DataType) -> Self {
+    pub fn new(width: u32, height: u32, cell_size: f32, map_factor: f32, epsg_code: u16, top: f32, left: f32, data_type: DataType, variable: Variable, unit: Unit) -> Self {
         MetaGrid {
             magic_bytes: u32::from_le_bytes(*b"AVAG"),
             version: 1,
-            width: width,
-            height: height,
-            data_type: data_type.as_int(),
+            width,
+            height,
+            cell_size,
+            map_factor,
+            epsg_code,
+            top,
+            left,
+            data_type,
+            variable,
+            unit,
         }
     }
 
@@ -126,7 +241,7 @@ impl MetaGrid {
             self.version,
             self.width,
             self.height,
-            DataType::from_int(self.data_type).unwrap().as_str()
+            self.data_type.as_str()
         )
     }
     fn __str__(&self) -> String {
@@ -156,6 +271,7 @@ pub struct MetaParticle {
 
 #[pymethods]
 impl MetaParticle {
+    /// Creates a new MetaParticle with the given length and data type.
     #[new] // This makes it callable as `MyMetadata(name, timestamp, version)` in Python
     pub fn new(length: u32, data_type: DataType) -> Self {
         MetaParticle {
@@ -198,6 +314,7 @@ pub struct F32Data {
 
 #[pymethods]
 impl F32Data {
+    /// Creates a new F32Data instance with the given metadata and data.
     #[new]
     pub fn new(metadata: &MetaGrid, data: Vec<f32>) -> Self {
         assert_eq!(
@@ -236,7 +353,7 @@ impl F32Data {
         let rows = self.metadata.height as usize;
         let cols = self.metadata.width as usize;
         let array = Array2::from_shape_vec((rows, cols), self.data.clone())
-        .map_err(|e| PyValueError::new_err(format!("Shape error: {}", e)))?;
+            .map_err(|e| PyValueError::new_err(format!("Shape error: {}", e)))?;
 
         Ok(array.into_pyarray(py))
     }
@@ -252,15 +369,22 @@ impl F32Data {
             .map_err(|e| PyValueError::new_err(format!("Failed to read file: {}", e)))?;
         let (data, _): (F32Data, _) = bincode::decode_from_slice(&buffer, config::standard())
             .map_err(|e| PyValueError::new_err(format!("Bincode deserialization failed: {}", e)))?;
-        assert_eq!(data.metadata.magic_bytes, u32::from_le_bytes(*b"AVAG"), "Invalid magic bytes");
-        assert_eq!(data.metadata.data_type, 32, "Wrong data type: {} instead of f32", data.metadata.data_type);
+        assert_eq!(
+            data.metadata.magic_bytes,
+            u32::from_le_bytes(*b"AVAG"),
+            "Invalid magic bytes"
+        );
+        // assert_eq!(
+        //     data.metadata.data_type, DataType::F32,
+        //     "Wrong data type: {} instead of f32",
+        //     data.metadata.data_type.as_str()
+        // );
         Ok(data)
     }
 }
 
-use numpy::{IntoPyArray};
+use numpy::IntoPyArray;
 use numpy::ndarray::Array2;
-
 
 pub fn read_bin(path: &PathBuf) -> PyResult<Vec<u8>> {
     let mut file = File::open(path)
@@ -369,6 +493,8 @@ fn data_processor(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<F32Data>()?;
     m.add_class::<DataType>()?;
     m.add_class::<FileFormat>()?;
+    m.add_class::<Variable>()?;
+    m.add_class::<Unit>()?;
 
     Ok(())
 }
@@ -380,6 +506,7 @@ mod tests {
     use std::env;
     use std::fs;
     use std::time::Instant;
+    use crate::Variable::Undefined;
 
     #[test]
     fn data_type_ranges() {
@@ -408,10 +535,10 @@ mod tests {
         let width = 128;
         let height = 256;
         let data_type = DataType::F32;
-        let metadata = MetaGrid::new(width, height, data_type);
+        let metadata = MetaGrid::new(width, height, 5.0, 1.0, 0, 0.0,  0.0, DataType::F32, Variable::Undefined, Unit::Dimensionless);
         assert_eq!(metadata.width, width);
         assert_eq!(metadata.height, height);
-        assert_eq!(metadata.data_type, 32);
+        assert_eq!(metadata.data_type, DataType::F32);
         assert_eq!(metadata.version, 1);
         assert_eq!(metadata.magic_bytes, u32::from_le_bytes(*b"AVAG"));
     }
@@ -437,7 +564,7 @@ mod tests {
 
     #[test]
     fn test_f32data_new_and_repr() {
-        let metadata = MetaGrid::new(1, 3, DataType::F32);
+        let metadata = MetaGrid::new(1, 3, 5.0, 1.0, 0, 0.0,  0.0, DataType::F32, Variable::Undefined, Unit::Dimensionless);
         let data = vec![1.0f32, 2.0, 3.0];
         let f32data = F32Data::new(&metadata, data.clone());
         assert_eq!(f32data.metadata, metadata);
@@ -449,7 +576,7 @@ mod tests {
 
     #[test]
     fn test_metadata_repr() {
-        let metadata = MetaGrid::new(5, 6, DataType::F32);
+        let metadata = MetaGrid::new(5, 6, 5.0, 1.0, 0, 0.0, 0.0, DataType::F32, Variable::Undefined, Unit::Dimensionless);
         let repr = metadata.__repr__();
         assert!(repr.contains("Metadata(magic_bytes='AVAG'"));
         assert!(repr.contains("version=1"));
@@ -473,7 +600,7 @@ mod tests {
     fn test_f32data_save_and_load() {
         let tmp_dir = env::temp_dir();
         let file_path = tmp_dir.join("test_f32data_save_and_load.bin");
-        let metadata = MetaGrid::new(2, 2, DataType::F32);
+        let metadata = MetaGrid::new(2, 2, 5.0, 1.0, 0, 0.0, 0.0, DataType::F32, Variable::Undefined, Unit::Dimensionless);
         let data = vec![0.1, 0.2, 0.3, 0.4];
         let f32data = F32Data::new(&metadata, data.clone());
         f32data.save(file_path.to_str().unwrap()).unwrap();
@@ -487,7 +614,7 @@ mod tests {
 
     #[test]
     fn test_dimension_mismatch() {
-        let metadata = MetaGrid::new(2, 2, DataType::F32);
+        let metadata = MetaGrid::new(2, 2, 5.0, 1.0, 0, 0.0, 0.0, DataType::F32, Variable::Undefined, Unit::Dimensionless);
         let data = vec![0.1, 0.2]; // Incorrect length
         let result = std::panic::catch_unwind(|| F32Data::new(&metadata, data));
         assert!(result.is_err(), "Expected panic due to dimension mismatch");

@@ -20,7 +20,7 @@ pub enum BufferName {
     VelocityGrid,
     MaxVelocityGrid,
     SimSettings,
-    ParticleData,
+    Particles,
 }
 
 impl BufferName {
@@ -36,7 +36,7 @@ impl BufferName {
             BufferName::VelocityGrid => "velocity_grid",
             BufferName::MaxVelocityGrid => "max_velocity_grid",
             BufferName::SimSettings => "sim_settings",
-            BufferName::ParticleData => "particle_data",
+            BufferName::Particles => "particle_data",
         }
     }
 }

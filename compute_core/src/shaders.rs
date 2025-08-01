@@ -15,12 +15,14 @@ fn read_shader_source(name: &str) -> String {
     let path = format!("../wgsl/{}.wgsl", name);
     fs::read_to_string(&path).expect(&format!("Failed to read shader file {}", &path))
 }
-fn load_shader_source(name: &str) -> &'static str {
+fn load_shader_source(name: &str, workgroup_size_1d: u32, workgroup_size_2d: u32) -> &'static str {
     let import_re = Regex::new(r#"import\s+([a-zA-Z0-9_./-]+)\.wgsl"#).unwrap();
-    let shader_source = read_shader_source(name).replace("WORKGROUP_SIZE", "256");
+    let shader_source = read_shader_source(name)
+        .replace("WORKGROUP_SIZE_1D", &workgroup_size_1d.to_string())
+        .replace("WORKGROUP_SIZE_2D", &workgroup_size_2d.to_string());
     let processed = import_re.replace_all(&shader_source, |caps: &regex::Captures| {
         let import_name = &caps[1];
-        load_shader_source(import_name)
+        load_shader_source(import_name,workgroup_size_1d, workgroup_size_2d)
     });
     Box::leak(processed.into_owned().into_boxed_str())
 }
@@ -121,7 +123,7 @@ impl ComputeShaderConfig {
 }
 
 pub fn create_shader_configs(
-    device: &Device,
+    device: &Device, workgroup_size_1d: u32, workgroup_size_2d: u32,
 ) -> Result<std::collections::HashMap<String, ComputeShaderConfig>> {
     let mut shader_configs = std::collections::HashMap::new();
     shader_configs.insert(
@@ -129,7 +131,7 @@ pub fn create_shader_configs(
         ComputeShaderConfig::new(
             &device,
             "compute_normals".to_string(),
-            load_shader_source("compute_normals"),
+            load_shader_source("compute_normals", workgroup_size_1d, workgroup_size_2d),
             &[
                 // Binding 0: Uniform buffer (sim_settings_buffer)
                 BindingType::Buffer {
@@ -211,7 +213,7 @@ pub fn create_shader_configs(
         ComputeShaderConfig::new(
             &device,
             "roughness".to_string(),
-            load_shader_source("roughness"),
+            load_shader_source("roughness", workgroup_size_1d, workgroup_size_2d),
             &[
                 // Binding 0: Uniform buffer (sim_settings_buffer)
                 BindingType::Buffer {
@@ -246,7 +248,7 @@ pub fn create_shader_configs(
         ComputeShaderConfig::new(
             &device,
             "compute_release_areas".to_string(),
-            load_shader_source("compute_release_areas"),
+            load_shader_source("compute_release_areas", workgroup_size_1d, workgroup_size_2d),
             &[
                 // Binding 0: Uniform buffer (sim_settings_buffer)
                 BindingType::Buffer {
@@ -299,7 +301,7 @@ pub fn create_shader_configs(
         ComputeShaderConfig::new(
             &device,
             "initialize_particles".to_string(),
-            load_shader_source("initialize_particles"),
+            load_shader_source("initialize_particles", workgroup_size_1d, workgroup_size_2d),
             &[
                 // Binding 0: Uniform buffer (sim_settings)
                 BindingType::Buffer {
@@ -359,7 +361,7 @@ pub fn create_shader_configs(
         ComputeShaderConfig::new(
             &device,
             "compute_particles".to_string(),
-            load_shader_source("compute_particles"),
+            load_shader_source("compute_particles", workgroup_size_1d, workgroup_size_2d),
             &[
                 // Binding 0: Uniform buffer (sim_settings)
                 BindingType::Buffer {
@@ -431,7 +433,7 @@ pub fn create_shader_configs(
         ComputeShaderConfig::new(
             &device,
             "reset_max_velocity".to_string(),
-            load_shader_source("reset_max_velocity"),
+            load_shader_source("reset_max_velocity", workgroup_size_1d, workgroup_size_2d),
             &[
                 // Binding 0: Uniform buffer (sim_settings)
                 BindingType::Buffer {

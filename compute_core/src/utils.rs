@@ -168,6 +168,113 @@ where
     }
 }
 
+pub trait MinValue<T> {
+    fn min_value(&self) -> Option<T>;
+}
+impl<T> MinValue<T> for [T]
+where
+    T: PartialOrd + Copy,
+{
+    fn min_value(&self) -> Option<T> {
+        self.iter()
+            .copied()
+            .min_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Greater))
+    }
+}
+
+impl<T> MinValue<T> for [Vec<T>]
+where
+    T: PartialOrd + Copy,
+{
+    fn min_value(&self) -> Option<T> {
+        self.iter()
+            .flat_map(|row| row.iter().copied())
+            .min_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Greater))
+    }
+}
+pub trait MeanValue<T> {
+    fn mean_value(&self) -> Option<T>;
+}
+
+impl<T> MeanValue<T> for [T]
+where
+    T: Copy + std::ops::Add<Output = T> + std::ops::Div<Output = T> + From<u32>,
+{
+    fn mean_value(&self) -> Option<T> {
+        if self.is_empty() {
+            None
+        } else {
+            let sum = self.iter().copied().fold(T::from(0), |a, b| a + b);
+            Some(sum / T::from(self.len() as u32))
+        }
+    }
+}
+
+impl<T> MeanValue<T> for [Vec<T>]
+where
+    T: Copy + std::ops::Add<Output = T> + std::ops::Div<Output = T> + From<u32>,
+{
+    fn mean_value(&self) -> Option<T> {
+        let mut count = 0u32;
+        let mut sum = None;
+        for row in self {
+            for &val in row {
+                sum = Some(match sum {
+                    Some(acc) => acc + val,
+                    None => val,
+                });
+                count += 1;
+            }
+        }
+        sum.map(|s| s / T::from(count))
+    }
+}
+
+pub trait Hist<T> {
+    fn hist(&self) -> std::collections::HashMap<T, usize>;
+}
+
+impl<T: Eq + std::hash::Hash + Copy> Hist<T> for [T] {
+    fn hist(&self) -> std::collections::HashMap<T, usize> {
+        let mut map = std::collections::HashMap::new();
+        for &item in self {
+            *map.entry(item).or_insert(0) += 1;
+        }
+        map
+    }
+}
+pub trait HistFloat<T> {
+    fn hist_float(&self) -> std::collections::HashMap<i64, usize>;
+    fn print_hist(&self);
+}
+impl<T: Into<f64> + Copy> HistFloat<i64> for [T] {
+    fn hist_float(&self) -> std::collections::HashMap<i64, usize> {
+        let mut map = std::collections::HashMap::new();
+        for &item in self {
+            let rounded = (item.into()).round() as i64;
+            *map.entry(rounded).or_insert(0) += 1;
+        }
+        map
+    }
+    fn print_hist(&self) {
+        let hist = self.hist_float();
+        if hist.is_empty() {
+            println!("(empty histogram)");
+            return;
+        }
+        let max_count = *hist.values().max().unwrap_or(&1);
+        let mut keys: Vec<_> = hist.keys().cloned().collect();
+        keys.sort();
+        for k in keys {
+            let count = hist[&k];
+            let bar_len = (count * 40 / max_count).max(1);
+            let bar = std::iter::repeat('#').take(bar_len).collect::<String>();
+            println!("{:>5}: {:<40} ({})", k, bar, count);
+        }
+    }
+}
+
+
 
 pub fn split_channels<T: Copy>(flat: &[T]) -> (Vec<T>, Vec<T>, Vec<T>, Vec<T>) {
     assert!(flat.len() % 4 == 0, "Input length must be a multiple of 4");

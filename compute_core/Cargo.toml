@@ -22,6 +22,7 @@ rand  = { workspace = true }
 flate2 = "1.1"
 half = { workspace = true, features = ["bytemuck"]}
 regex = "1.11.1"
+log = { workspace = true }
 
 [features]
 # Feature to enable async blocking for native compilation
