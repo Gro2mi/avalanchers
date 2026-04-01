@@ -1,0 +1,19 @@
+[package]
+name = "python_bindings"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "avalanchers"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { workspace = true }
+numpy = { workspace = true }
+ndarray = { workspace = true }
+pyo3-log = { workspace = true }
+tracing = { workspace = true }
+
+
+compute_core = { workspace = true }
+data_processor = { workspace = true }

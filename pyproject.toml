@@ -1,0 +1,17 @@
+[build-system]
+requires = ["maturin>=1.9.4,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "avalanchers"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=2.0",
+    "matplotlib>=3.5"
+]
+
+[tool.maturin]
+# Point to the specific crate in your workspace
+manifest-path = "crates/python_bindings/Cargo.toml"
+module-name = "avalanchers"

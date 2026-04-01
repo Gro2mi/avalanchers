@@ -1,0 +1,26 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "chrome",
+            "name": "AvaSim",
+            "request": "launch",
+            "url": "http://localhost:8000/index.html?debug=vscode"
+        },
+        // & "C:\Program Files\Google\Chrome\Application\chrome.exe" http://localhost:8000/index.html?debug=vscode --remote-debugging-port=9222 --user-data-dir="$(Get-Location).Path\chrome-debug-profile" --force_high_performance_gpu
+        {
+            "name": "Attach WebGPU Inspector",
+            "type": "chrome", // Or "chrome" for older versions
+            "request": "attach",
+            "port": 9222, // Must match the port you used above
+            "url": "http://localhost:8000/index.html?debug=vscode",
+            "webRoot": "${workspaceFolder}"
+        },
+        {
+            "type": "chrome",
+            "name": "AvaSimSecure",
+            "request": "launch",
+            "url": "https://192.168.1.150/index.html?debug=vscode"
+        }
+    ]
+}

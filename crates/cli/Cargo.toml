@@ -1,0 +1,11 @@
+[package]
+name = "cli"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+compute_core = { workspace = true }
+data_processor = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true } # Need to add this as well
+tracing = { workspace = true}

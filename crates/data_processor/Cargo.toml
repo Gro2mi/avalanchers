@@ -1,0 +1,20 @@
+[package]
+name = "data_processor"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "data_processor"
+crate-type = ["cdylib", "rlib"] # This is essential for Python bindings
+
+[dependencies]
+bincode = { workspace = true}
+half = { workspace = true}
+lz4_flex = { workspace = true}
+image = { workspace = true}
+zstd = { workspace = true}
+xz2 = { workspace = true}
+tracing = { workspace = true}
+
+[dev-dependencies]
+criterion = "0.7"

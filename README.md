@@ -22,3 +22,34 @@ Requirements: Python (or Webserver), Browser with [WebGPU support](https://caniu
   2. Start Chrome with high performance gpu flag `"C:\Program Files\Google\Chrome\Application\chrome.exe" --force_high_performance_gpu`
   3. Activate flag in Chrome `chrome://flags/#force-high-performance-gpu`. I still get slow runs about 50% of the time even though it actually runs on the fast GPU
   4. Activate the dedicated GPU for Chrome in the system settings.
+
+
+## Development Setup
+
+Install Rust, follow guide: [https://rust-lang.org/tools/install/]()
+
+```
+# python bindings
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install maturin
+
+# wasm bindings
+cargo install wasm-bindgen-cli
+
+```
+
+
+## Build
+
+```
+# cli tool
+cargo build -p cli --release
+
+# python bindings
+maturin develop
+
+# wasm bindings
+wasm-pack build crates/wasm_bindings --target web --out-dir ../../frontend/js/pkg
+
+```
