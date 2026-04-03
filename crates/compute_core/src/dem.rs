@@ -4,7 +4,7 @@ use crate::utils::*;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 
-use tracing::{trace, debug, info, warn, error};
+use tracing::debug;
 
 pub struct Bounds {
     pub xmin: f32,
@@ -97,18 +97,19 @@ impl Dem {
     // }
 
     pub fn load_png_as_float32(path: PathBuf) -> Self {
-        let (rgba, width, height) = data_processor::read_png(path.as_path()).expect("Failed to load PNG");
+        let (rgba, width, height) =
+            data_processor::read_png(path.as_path()).expect("Failed to load PNG");
         let bounds: Bounds = Dem::load_bounds(&path).expect("Failed to load bounds");
         debug!("Loaded PNG {:?}: {} x {}", path.as_os_str(), width, height);
         let mut dem = Dem {
-            width: width,
-            height: height,
+            width,
+            height,
             data1d: data_processor::rgba_bytes_to_f32(&rgba),
             data: Vec::new(),
             x: linspace(bounds.xmin, bounds.xmax, width),
             y: linspace(bounds.ymin, bounds.ymax, height),
             cell_size: (bounds.xmax - bounds.xmin) / (width - 1) as f32,
-            bounds: bounds,
+            bounds,
             map_factor: 1.0,
         };
         dem.data = to_2d(&dem.data1d, width, height);
@@ -131,9 +132,7 @@ impl Dem {
         }
     }
     fn parse_bounds_lines<I: Iterator<Item = String>>(lines: I) -> Option<Bounds> {
-        let vals: Vec<f32> = lines
-            .filter_map(|l| l.trim().parse::<f32>().ok())
-            .collect();
+        let vals: Vec<f32> = lines.filter_map(|l| l.trim().parse::<f32>().ok()).collect();
         if vals.len() == 4 {
             Some(Bounds {
                 xmin: vals[0],
@@ -149,10 +148,12 @@ impl Dem {
     fn load_bounds(path: &PathBuf) -> Result<Bounds, String> {
         let mut aabb_path = path.clone();
         aabb_path.set_extension("aabb");
-        let file = File::open(&aabb_path).map_err(|e| format!("Failed to open bounds file: {}", e))?;
+        let file =
+            File::open(&aabb_path).map_err(|e| format!("Failed to open bounds file: {}", e))?;
         let reader = BufReader::new(file);
         let lines = reader.lines().filter_map(|l| l.ok());
-        Self::parse_bounds_lines(lines).ok_or_else(|| "Failed to parse bounds from file".to_string())
+        Self::parse_bounds_lines(lines)
+            .ok_or_else(|| "Failed to parse bounds from file".to_string())
     }
 
     // #[cfg(feature = "reqwest")]
@@ -281,9 +282,10 @@ mod tests {
     #[test_log::test]
     fn test_fetch_bounds_returns_default() {
         let path = PathBuf::from("dummy/path");
-        let result = std::panic::catch_unwind(|| {
-            Dem::load_bounds(&path).unwrap()
-        });
-        assert!(result.is_err(), "Expected panic when loading bounds from a non-existent file");
+        let result = std::panic::catch_unwind(|| Dem::load_bounds(&path).unwrap());
+        assert!(
+            result.is_err(),
+            "Expected panic when loading bounds from a non-existent file"
+        );
     }
 }

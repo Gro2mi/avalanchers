@@ -35,7 +35,7 @@ image = "0.25"
 half = "2.6"
 
 # python
-pyo3 = "0.28"
+pyo3 = { version = "0.28", features = ["extension-module", "abi3-py37"] }
 numpy = "0.28" 
 ndarray = "0.17"
 pyo3-log = "0.13"

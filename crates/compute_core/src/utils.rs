@@ -44,7 +44,11 @@ pub trait To1D<T> {
 impl<T: Clone> To2D<T> for Vec<T> {
     fn to_2d(self, width: usize) -> Vec<Vec<T>> {
         assert!(width > 0, "Width must be greater than zero");
-        assert_eq!(0, self.len() % width, "Length of vector must be a multiple of width");
+        assert_eq!(
+            0,
+            self.len() % width,
+            "Length of vector must be a multiple of width"
+        );
         self.chunks(width).map(|chunk| chunk.to_vec()).collect()
     }
 }
@@ -140,7 +144,6 @@ pub fn divide(vec: &mut Vec<f32>, value: f32) {
         panic!("Division by zero in vector division");
     }
 }
-
 
 pub trait MaxValue<T> {
     fn max_value(&self) -> Option<T>;
@@ -273,8 +276,6 @@ impl<T: Into<f64> + Copy> HistFloat<i64> for [T] {
         }
     }
 }
-
-
 
 pub fn split_channels<T: Copy>(flat: &[T]) -> (Vec<T>, Vec<T>, Vec<T>, Vec<T>) {
     assert!(flat.len() % 4 == 0, "Input length must be a multiple of 4");

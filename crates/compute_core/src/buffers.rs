@@ -116,7 +116,10 @@ impl ComputeBuffers {
     fn poll(&self, device: &Device) {
         #[cfg(not(target_arch = "wasm32"))]
         device
-            .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
             .expect("Failed to poll device");
         #[cfg(target_arch = "wasm32")]
         device

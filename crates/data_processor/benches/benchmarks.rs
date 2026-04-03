@@ -16,7 +16,6 @@ fn my_benchmark(c: &mut Criterion) {
             println!("Benchmark finished")
         });
     });
-    
 }
 
 criterion_group!(benches, my_benchmark);

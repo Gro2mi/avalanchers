@@ -1,13 +1,16 @@
 // compute_cli/src/main.rs
-use std::{env, time::Instant};
-use std::path::{PathBuf};
-use clap::Parser;
 use anyhow::Result;
-use compute_core::{dem::Dem, settings::{Settings, SimSettings}}; // Import from your new crate
+use clap::Parser;
 use compute_core::utils::*;
 use compute_core::*;
+use compute_core::{
+    dem::Dem,
+    settings::{Settings, SimSettings},
+}; // Import from your new crate
 use data_processor::*;
-use tracing::{trace, debug, info, warn, error};
+use std::path::PathBuf;
+use std::{env, time::Instant};
+use tracing::{debug, error, info, trace, warn};
 
 #[derive(Parser, Debug)]
 #[command(name = "Avalanche Simulation")]
@@ -38,9 +41,7 @@ fn main() -> Result<()> {
             PathBuf::from("settings.json")
         }
         None => {
-            error!(
-                "Warning: No file path provided. Using settings.json instead."
-            );
+            error!("Warning: No file path provided. Using settings.json instead.");
             PathBuf::from("settings.json")
         }
     };
@@ -58,7 +59,6 @@ fn main() -> Result<()> {
     let sim_settings = SimSettings::from_settings(&settings, &dem);
     // sim_settings.set_dem(&dem);
     info!("Loaded simSettings: {:?}", sim_settings);
-    
 
     // SimSettings::new()
     //     .to_json(file_path)

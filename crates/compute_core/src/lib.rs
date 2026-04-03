@@ -16,14 +16,14 @@ pub mod settings;
 pub mod shaders;
 pub mod utils;
 use data_processor::*;
-use tracing::{trace, debug, info, warn, error};
+use tracing::{debug, info, trace};
 
 use std::sync::Once;
-use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 static INIT: Once = Once::new();
 
-/// Initializes the global tracing subscriber. 
+/// Initializes the global tracing subscriber.
 /// Safe to call multiple times; subsequent calls do nothing.
 pub fn init_logging() {
     let filter = EnvFilter::new("warn,compute_core=debug,data_processor=debug,cli=debug");
@@ -32,7 +32,7 @@ pub fn init_logging() {
             .with(fmt::layer().with_target(false)) // Clean console output
             .with(filter) // Default level
             .init();
-        
+
         info!("Simulation logging initialized");
     });
 }
@@ -118,9 +118,9 @@ impl ComputeOrchestrator {
             .await
             .expect("Failed to find an appropriate adapter");
         trace!("Adapter: {:?}", adapter);
-        
+
         trace!("Adapter limits: {:?}", adapter.limits());
-        
+
         debug!("Adapter: {:?}", adapter);
         let workgroup_size_2d = utils::highest_power_of_two(
             (adapter.limits().max_compute_workgroup_size_x as f64).sqrt() as u32,
@@ -475,23 +475,21 @@ impl ComputeOrchestrator {
     }
 
     pub fn save_grid(&self, path: &str, data: Vec<f32>) -> Result<()> {
-        F32Data::new(
-            &MetaGrid::new(
-                self.texture_size.width,
-                self.texture_size.height,
-                5.0,
-                1.0,
-                0,
-                0.0,
-                0.0,
-                DataType::F32,
-                Variable::Undefined,
-                Unit::Dimensionless,
-            ),
-            data,
-        )
-        .save(path.as_ref())
-        .expect(&format!("Failed to save grid {}", path));
+        let params = MetaGridParams {
+            width: self.texture_size.width,
+            height: self.texture_size.height,
+            cell_size: 5.0,
+            map_factor: 1.0,
+            epsg_code: 4326,
+            top: 0.0,
+            left: 0.0,
+            data_type: DataType::F32,
+            variable: Variable::Undefined,
+            unit: Unit::Dimensionless,
+        };
+        F32Data::new(&MetaGrid::new(params), data)
+            .save(path.as_ref())
+            .expect(&format!("Failed to save grid {}", path));
         Ok(())
     }
 }
@@ -558,8 +556,7 @@ mod tests {
         let mut orchestrator = pollster::block_on(ComputeOrchestrator::new())
             .expect("Failed to create ComputeOrchestrator");
         let (sim_settings, _dem) = Settings::create_from_path(INCLINED_PLANE_PATH);
-        let (data, _, _) = read_png(&Path::new(RELEASE_TEXTURE_PATH))
-            .expect("Failed to read PNG");
+        let (data, _, _) = read_png(&Path::new(RELEASE_TEXTURE_PATH)).expect("Failed to read PNG");
         info!("Max: {:?}", data.max_value());
 
         orchestrator
@@ -585,15 +582,15 @@ mod tests {
         let (sim_settings, dem) = Settings::create_from_path(INCLINED_PLANE_PATH);
         pollster::block_on(orchestrator.run_normals(&sim_settings, &dem))
             .expect("Failed to run normals shader");
-        let (data, _, _) = read_png(&Path::new(RELEASE_TEXTURE_PATH))
-            .expect("Failed to read PNG");
+        let (data, _, _) = read_png(&Path::new(RELEASE_TEXTURE_PATH)).expect("Failed to read PNG");
         pollster::block_on(orchestrator.run_load_release_areas(&data))
             .expect("Failed to run load_release_areas shader");
         let number_release_cells =
             block_on(orchestrator.read_buffer::<u32>(BufferName::NumberReleaseCells))
                 .expect("Failed to read number_release_cells buffer")[0];
         assert_eq!(number_release_cells, 3245);
-        let number_particles = (number_release_cells * sim_settings.released_particles_per_cell) as usize;
+        let number_particles =
+            (number_release_cells * sim_settings.released_particles_per_cell) as usize;
         orchestrator.buffers.add_buffer(
             &orchestrator.device,
             BufferName::Particles,

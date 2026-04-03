@@ -44,7 +44,6 @@ impl DataType {
     }
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
 pub enum Unit {
     MetersPerSecond,
@@ -143,7 +142,7 @@ pub enum FileFormat {
     Png,
 }
 impl FileFormat {
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn from_fileformat_str(value: &str) -> Option<Self> {
         match value.to_lowercase().as_str() {
             "binary" => Some(FileFormat::Binary),
             "compressedbinary" => Some(FileFormat::Lz4),
@@ -176,6 +175,19 @@ impl FileFormat {
     }
 }
 
+pub struct MetaGridParams {
+    pub width: u32,
+    pub height: u32,
+    pub cell_size: f32,
+    pub map_factor: f32,
+    pub epsg_code: u16,
+    pub top: f32,
+    pub left: f32,
+    pub data_type: DataType,
+    pub variable: Variable,
+    pub unit: Unit,
+}
+
 #[derive(Encode, Decode, PartialEq, Debug, Clone)]
 pub struct MetaGrid {
     magic_bytes: u32,
@@ -194,20 +206,20 @@ pub struct MetaGrid {
 
 impl MetaGrid {
     /// Creates a new MetaGrid with the given parameters.
-    pub fn new(width: u32, height: u32, cell_size: f32, map_factor: f32, epsg_code: u16, top: f32, left: f32, data_type: DataType, variable: Variable, unit: Unit) -> Self {
+    pub fn new(params: MetaGridParams) -> Self {
         MetaGrid {
             magic_bytes: u32::from_le_bytes(*b"AVAG"),
             version: 1,
-            width,
-            height,
-            cell_size,
-            map_factor,
-            epsg_code,
-            top,
-            left,
-            data_type,
-            variable,
-            unit,
+            width: params.width,
+            height: params.height,
+            cell_size: params.cell_size,
+            map_factor: params.map_factor,
+            epsg_code: params.epsg_code,
+            top: params.top,
+            left: params.left,
+            data_type: params.data_type,
+            variable: params.variable,
+            unit: params.unit,
         }
     }
 
@@ -247,7 +259,7 @@ impl MetaParticle {
         MetaParticle {
             magic_bytes: u32::from_le_bytes(*b"AVAP"),
             version: 1,
-            length: length,
+            length,
             data_type: data_type.as_int(),
         }
     }
@@ -306,7 +318,7 @@ impl F32Data {
 
     pub fn save(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
         let path = Path::new(path);
-        let encoded_bytes = bincode::encode_to_vec(&self, config::standard())
+        let encoded_bytes = bincode::encode_to_vec(self, config::standard())
             .map_err(|e| format!("Bincode serialization failed: {}", e))?;
         write_bin(path, &encoded_bytes);
         Ok(())
@@ -334,10 +346,10 @@ pub fn read_bin(path: &PathBuf) -> io::Result<Vec<u8>> {
 pub fn write_bin(path: &Path, buffer: &[u8]) {
     let file = File::create(path.with_extension("bin")).expect("Failed to create file");
     let mut writer = BufWriter::with_capacity(16 * 1024 * 1024, file); // 16 MB buffer
-    writer.write_all(&buffer).expect("Failed to write data");
+    writer.write_all(buffer).expect("Failed to write data");
 }
 
-pub fn write_lz4_bin(path: &Path, buffer: &Vec<u8>) {
+pub fn write_lz4_bin(path: &Path, buffer: &[u8]) {
     let file = File::create(path.with_extension("lz4")).expect("Failed to create file");
     let compressed_data = compress_prepend_size(buffer);
     let mut writer = BufWriter::with_capacity(16 * 1024 * 1024, file); // 16 MB buffer
@@ -363,9 +375,7 @@ pub fn write_zstd(path: &Path, buffer: &Vec<u8>) {
 }
 
 pub fn read_zstd_bin(path: &Path) -> io::Result<Vec<u8>> {
-    read_bin(&path.with_extension("zst")).and_then(|buffer| {
-        decode_all(Cursor::new(&buffer[..]))
-    })
+    read_bin(&path.with_extension("zst")).and_then(|buffer| decode_all(Cursor::new(&buffer[..])))
 }
 
 use std::io::BufReader;
@@ -421,7 +431,6 @@ pub fn f32_to_rgba_bytes(data: &[f32]) -> Vec<u8> {
     data.iter().flat_map(|f| f.to_le_bytes()).collect()
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,12 +463,21 @@ mod tests {
     }
     #[test_log::test]
     fn test_metadata_new_grid() {
-        let width = 128;
-        let height = 256;
-        let data_type = DataType::F32;
-        let metadata = MetaGrid::new(width, height, 5.0, 1.0, 0, 0.0,  0.0, DataType::F32, Variable::Undefined, Unit::Dimensionless);
-        assert_eq!(metadata.width, width);
-        assert_eq!(metadata.height, height);
+        let params = MetaGridParams {
+            width: 128,
+            height: 256,
+            cell_size: 5.0,
+            map_factor: 1.0,
+            epsg_code: 4326,
+            top: 0.0,
+            left: 0.0,
+            data_type: DataType::F32,
+            variable: Variable::Undefined,
+            unit: Unit::Dimensionless,
+        };
+        let metadata = MetaGrid::new(params);
+        assert_eq!(metadata.width, params.width);
+        assert_eq!(metadata.height, params.height);
         assert_eq!(metadata.data_type, DataType::F32);
         assert_eq!(metadata.version, 1);
         assert_eq!(metadata.magic_bytes, u32::from_le_bytes(*b"AVAG"));
@@ -486,7 +504,20 @@ mod tests {
 
     #[test_log::test]
     fn test_f32data_new_and_repr() {
-        let metadata = MetaGrid::new(1, 3, 5.0, 1.0, 0, 0.0,  0.0, DataType::F32, Variable::Undefined, Unit::Dimensionless);
+        let params = MetaGridParams {
+            width: 1,
+            height: 3,
+            cell_size: 5.0,
+            map_factor: 1.0,
+            epsg_code: 4326,
+            top: 0.0,
+            left: 0.0,
+            data_type: DataType::F32,
+            variable: Variable::Undefined,
+            unit: Unit::Dimensionless,
+        };
+        let metadata = MetaGrid::new(params);
+
         let data = vec![1.0f32, 2.0, 3.0];
         let f32data = F32Data::new(&metadata, data.clone());
         assert_eq!(f32data.metadata, metadata);
@@ -498,7 +529,19 @@ mod tests {
 
     #[test_log::test]
     fn test_metadata_repr() {
-        let metadata = MetaGrid::new(5, 6, 5.0, 1.0, 0, 0.0, 0.0, DataType::F32, Variable::Undefined, Unit::Dimensionless);
+        let params = MetaGridParams {
+            width: 5,
+            height: 6,
+            cell_size: 5.0,
+            map_factor: 1.0,
+            epsg_code: 4326,
+            top: 0.0,
+            left: 0.0,
+            data_type: DataType::F32,
+            variable: Variable::Undefined,
+            unit: Unit::Dimensionless,
+        };
+        let metadata = MetaGrid::new(params);
         let repr = metadata.__repr__();
         assert!(repr.contains("Metadata(magic_bytes='AVAG'"));
         assert!(repr.contains("version=1"));
@@ -522,7 +565,20 @@ mod tests {
     fn test_f32data_save_and_load() {
         let tmp_dir = env::temp_dir();
         let file_path = tmp_dir.join("test_f32data_save_and_load.bin");
-        let metadata = MetaGrid::new(2, 2, 5.0, 1.0, 0, 0.0, 0.0, DataType::F32, Variable::Undefined, Unit::Dimensionless);
+
+        let params = MetaGridParams {
+            width: 2,
+            height: 2,
+            cell_size: 5.0,
+            map_factor: 1.0,
+            epsg_code: 4326,
+            top: 0.0,
+            left: 0.0,
+            data_type: DataType::F32,
+            variable: Variable::Undefined,
+            unit: Unit::Dimensionless,
+        };
+        let metadata = MetaGrid::new(params);
         let data = vec![0.1, 0.2, 0.3, 0.4];
         let f32data = F32Data::new(&metadata, data.clone());
         f32data.save(file_path.to_str().unwrap()).unwrap();
@@ -536,20 +592,38 @@ mod tests {
 
     #[test_log::test]
     fn test_dimension_mismatch() {
-        let metadata = MetaGrid::new(2, 2, 5.0, 1.0, 0, 0.0, 0.0, DataType::F32, Variable::Undefined, Unit::Dimensionless);
+        let params = MetaGridParams {
+            width: 2,
+            height: 2,
+            cell_size: 5.0,
+            map_factor: 1.0,
+            epsg_code: 4326,
+            top: 0.0,
+            left: 0.0,
+            data_type: DataType::F32,
+            variable: Variable::Undefined,
+            unit: Unit::Dimensionless,
+        };
+        let metadata = MetaGrid::new(params);
         let data = vec![0.1, 0.2]; // Incorrect length
         let result = std::panic::catch_unwind(|| F32Data::new(&metadata, data));
         assert!(result.is_err(), "Expected panic due to dimension mismatch");
     }
     #[test_log::test]
     fn test_file_format_from_str_and_as_str() {
-        assert_eq!(FileFormat::from_str("binary"), Some(FileFormat::Binary));
         assert_eq!(
-            FileFormat::from_str("compressedbinary"),
+            FileFormat::from_fileformat_str("binary"),
+            Some(FileFormat::Binary)
+        );
+        assert_eq!(
+            FileFormat::from_fileformat_str("compressedbinary"),
             Some(FileFormat::Lz4)
         );
-        assert_eq!(FileFormat::from_str("png"), Some(FileFormat::Png));
-        assert_eq!(FileFormat::from_str("unknown"), None);
+        assert_eq!(
+            FileFormat::from_fileformat_str("png"),
+            Some(FileFormat::Png)
+        );
+        assert_eq!(FileFormat::from_fileformat_str("unknown"), None);
 
         assert_eq!(FileFormat::Binary.as_str(), "binary");
         assert_eq!(FileFormat::Lz4.as_str(), "compressedbinary");

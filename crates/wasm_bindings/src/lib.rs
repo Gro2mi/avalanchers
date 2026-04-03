@@ -1,5 +1,5 @@
-use wasm_bindgen::prelude::*;
 use compute_core::*;
+use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
 extern "C" {
@@ -12,7 +12,7 @@ extern "C" {
 pub fn greet(name: &str) {
     // The format! macro is safe, but the FFI call to alert is not.
     let message = format!("Hello, {}!", name);
-    
+
     unsafe {
         alert(&message);
     }

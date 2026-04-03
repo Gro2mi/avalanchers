@@ -124,7 +124,9 @@ impl ComputeShaderConfig {
 }
 
 pub fn create_shader_configs(
-    device: &Device, workgroup_size_1d: u32, workgroup_size_2d: u32,
+    device: &Device,
+    workgroup_size_1d: u32,
+    workgroup_size_2d: u32,
 ) -> Result<std::collections::HashMap<String, ComputeShaderConfig>> {
     let mut shader_configs = std::collections::HashMap::new();
     shader_configs.insert(
@@ -249,7 +251,11 @@ pub fn create_shader_configs(
         ComputeShaderConfig::new(
             &device,
             "compute_release_areas".to_string(),
-            load_shader_source("compute_release_areas", workgroup_size_1d, workgroup_size_2d),
+            load_shader_source(
+                "compute_release_areas",
+                workgroup_size_1d,
+                workgroup_size_2d,
+            ),
             &[
                 // Binding 0: Uniform buffer (sim_settings_buffer)
                 BindingType::Buffer {
