@@ -2,36 +2,116 @@ name: Rust CI
 
 on:
   push:
-    branches: [main]
+    branches: ["**"]
+    tags: ["v*"]
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
-    runs-on: ubuntu-latest
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Build all 3 on release tags; only Ubuntu on standard push/PR
+        os: >-
+          ${{ startsWith(github.ref, 'refs/tags/v')
+            && fromJSON('["ubuntu-latest", "macos-latest", "windows-latest"]')
+            || fromJSON('["ubuntu-latest"]')
+          }}
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Set up Rust
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable  # or "1.88.0", etc.
-          override: true
+          targets: wasm32-unknown-unknown
+          components: clippy, rustfmt
 
-    #   - name: Install wasm32 target
-    #     run: rustup target add wasm32-unknown-unknown
-      - name: Build
-        run: cargo build --verbose
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
+      - name: Install wasm-pack
+        if: matrix.os == 'ubuntu-latest'
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
-      - name: Run tests
-        run: cargo test --verbose
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
 
-      - name: Clippy (linter)
-        run: cargo clippy -- -D warnings
+      - name: Install Dependencies (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev
 
-      - name: Format check
-        run: cargo fmt -- --check
+      - name: Check & Test
+        run: |
+          cargo fmt --check
+          cargo clippy -- -D warnings
+          cargo test --verbose
 
+      # --- ARTIFACT GENERATION ---
+
+      - name: Build CLI Binary
+        run: cargo build --release
+
+      - name: Prepare CLI Artifacts
+        shell: bash
+        run: |
+          mkdir -p bin_dist
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            cp target/release/*.exe bin_dist/
+          else
+            # Find the binary (assuming it's named after your project) 
+            # and rename it to include the OS for clarity in the release
+            cp target/release/${{ github.event.repository.name }} bin_dist/${{ github.event.repository.name }}-${{ matrix.os }} || true
+          fi
+
+      - name: Build Python Wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --out dist --find-interpreter
+
+      - name: Build WASM (Ubuntu Only)
+        if: matrix.os == 'ubuntu-latest'
+        run: wasm-pack build --release --out-dir wasm_dist
+
+      # --- UPLOAD ---
+
+      - name: Upload All Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-${{ matrix.os }}
+          path: |
+            dist/*.whl
+            bin_dist/*
+            wasm_dist/*.wasm
+            wasm_dist/*.js
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release_assets
+          pattern: artifacts-*
+          merge-multiple: true
+
+      - name: GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release_assets/**/*
+          generate_release_notes: true
