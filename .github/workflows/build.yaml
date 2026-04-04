@@ -16,7 +16,7 @@ jobs:
     name: Build on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         # Build all 3 on release tags; only Ubuntu on standard push/PR
         os: >-
@@ -34,6 +34,30 @@ jobs:
           targets: wasm32-unknown-unknown
           components: clippy, rustfmt
 
+      - name: Install Graphics Stack (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        env:
+          # Force the use of the Software Rasterizer
+          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            libegl1-mesa-dev \
+            libgl1-mesa-dri \
+            libxcb-xfixes0-dev \
+            mesa-vulkan-drivers \
+            libvulkan-dev \
+            vulkan-tools
+
+      - name: Verify Software GPU
+        if: matrix.os == 'ubuntu-latest'
+        env:
+          # Tell Vulkan to look in the standard ICD directory
+          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
+        run: |
+          # If the first path failed, let's find where it actually is:
+          ls /usr/share/vulkan/icd.d/
+          vulkaninfo --summary || echo "Vulkan summary failed, attempting test anyway..."
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -48,13 +72,38 @@ jobs:
 
       - name: Install Dependencies (Linux)
         if: matrix.os == 'ubuntu-latest'
-        run: sudo apt-get update && sudo apt-get install -y llvm-dev libclang-dev
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq llvm-dev libclang-dev
 
       - name: Check & Test
+        env:
+            # This forces wgpu to use the software adapter
+            WGPU_BACKEND: vulkan 
+            VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
         run: |
           cargo fmt --check
-          cargo clippy -- -D warnings
-          cargo test --verbose
+          cargo clippy -q -- -D warnings
+          cargo test -q
+
+      - name: Run Coverage & Tests (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        env:
+          # This forces wgpu to use the software adapter
+          WGPU_BACKEND: vulkan 
+          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
+        run: |
+          cargo tarpaulin \
+            --out html --out lcov \
+            --output-dir coverage_report \
+            --run-types Tests \
+            --verbose \
+            --skip-clean
+
+      - name: Upload Coverage Results
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: code-coverage-report
+          path: coverage_report/
 
       # --- ARTIFACT GENERATION ---
 
