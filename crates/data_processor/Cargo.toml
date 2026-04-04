@@ -18,3 +18,4 @@ tracing = { workspace = true}
 
 [dev-dependencies]
 criterion = "0.7"
+test-log = { workspace = true}

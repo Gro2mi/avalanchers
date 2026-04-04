@@ -206,7 +206,7 @@ pub struct MetaGrid {
 
 impl MetaGrid {
     /// Creates a new MetaGrid with the given parameters.
-    pub fn new(params: MetaGridParams) -> Self {
+    pub fn new(params: &MetaGridParams) -> Self {
         MetaGrid {
             magic_bytes: u32::from_le_bytes(*b"AVAG"),
             version: 1,
@@ -475,7 +475,7 @@ mod tests {
             variable: Variable::Undefined,
             unit: Unit::Dimensionless,
         };
-        let metadata = MetaGrid::new(params);
+        let metadata = MetaGrid::new(&params);
         assert_eq!(metadata.width, params.width);
         assert_eq!(metadata.height, params.height);
         assert_eq!(metadata.data_type, DataType::F32);
@@ -516,7 +516,7 @@ mod tests {
             variable: Variable::Undefined,
             unit: Unit::Dimensionless,
         };
-        let metadata = MetaGrid::new(params);
+        let metadata = MetaGrid::new(&params);
 
         let data = vec![1.0f32, 2.0, 3.0];
         let f32data = F32Data::new(&metadata, data.clone());
@@ -541,7 +541,7 @@ mod tests {
             variable: Variable::Undefined,
             unit: Unit::Dimensionless,
         };
-        let metadata = MetaGrid::new(params);
+        let metadata = MetaGrid::new(&params);
         let repr = metadata.__repr__();
         assert!(repr.contains("Metadata(magic_bytes='AVAG'"));
         assert!(repr.contains("version=1"));
@@ -578,7 +578,7 @@ mod tests {
             variable: Variable::Undefined,
             unit: Unit::Dimensionless,
         };
-        let metadata = MetaGrid::new(params);
+        let metadata = MetaGrid::new(&params);
         let data = vec![0.1, 0.2, 0.3, 0.4];
         let f32data = F32Data::new(&metadata, data.clone());
         f32data.save(file_path.to_str().unwrap()).unwrap();
@@ -604,7 +604,7 @@ mod tests {
             variable: Variable::Undefined,
             unit: Unit::Dimensionless,
         };
-        let metadata = MetaGrid::new(params);
+        let metadata = MetaGrid::new(&params);
         let data = vec![0.1, 0.2]; // Incorrect length
         let result = std::panic::catch_unwind(|| F32Data::new(&metadata, data));
         assert!(result.is_err(), "Expected panic due to dimension mismatch");
@@ -697,7 +697,7 @@ mod tests {
         // XZ :   1.9335498s    2158308 bytes   243.1962ms
         let tmp_dir = env::temp_dir();
         let file_path = tmp_dir.join("test_write_file");
-        let png_path = PathBuf::from("../avaframe/avaArzlerUni.png");
+        let png_path = PathBuf::from("../../data/avaframe/avaArzlerUni.png");
         print!("Start PNG: ");
         print_file_size(&png_path);
         println!();

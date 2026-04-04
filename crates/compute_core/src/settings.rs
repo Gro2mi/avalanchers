@@ -32,6 +32,12 @@ pub struct SimSettings {
     pub roughness_threshold: f32,
 }
 
+impl Default for SimSettings {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SimSettings {
     pub fn new() -> Self {
         Self {
@@ -214,13 +220,13 @@ impl Settings {
 
     pub fn create_from_json(file_path: &str) -> (SimSettings, Dem) {
         let settings =
-            Settings::from_json(&file_path).expect("Failed to load settings from JSON file");
-        return settings.create();
+            Settings::from_json(file_path).expect("Failed to load settings from JSON file");
+        settings.create()
     }
     pub fn create_from_path(file_path: &str) -> (SimSettings, Dem) {
         let mut settings = Settings::new();
         settings.dem_path = file_path.to_string();
-        return settings.create();
+        settings.create()
     }
     pub fn create(&self) -> (SimSettings, Dem) {
         let dem_path = std::path::PathBuf::from(&self.dem_path);
@@ -229,7 +235,7 @@ impl Settings {
             std::process::exit(1);
         }
         let dem = Dem::load_png_as_float32(dem_path);
-        let sim_settings = SimSettings::from_settings(&self, &dem);
+        let sim_settings = SimSettings::from_settings(self, &dem);
         (sim_settings, dem)
     }
 }

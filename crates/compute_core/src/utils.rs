@@ -86,7 +86,7 @@ pub fn highest_power_of_two(n: u32) -> u32 {
     }
 }
 
-pub fn bilinear_interpolate(x: f32, y: f32, grid: &Vec<Vec<f32>>) -> Option<f32> {
+pub fn bilinear_interpolate(x: f32, y: f32, grid: &[Vec<f32>]) -> Option<f32> {
     let x0 = x.floor() as isize;
     let x1 = x.ceil() as isize;
     let y0 = y.floor() as isize;
@@ -117,25 +117,25 @@ pub fn bilinear_interpolate(x: f32, y: f32, grid: &Vec<Vec<f32>>) -> Option<f32>
     Some(r1 * (1.0 - fy) + r2 * fy)
 }
 
-pub fn subtract(vec: &mut Vec<f32>, value: f32) {
+pub fn subtract(vec: &mut [f32], value: f32) {
     for v in vec.iter_mut() {
         *v -= value;
     }
 }
 
-pub fn add(vec: &mut Vec<f32>, value: f32) {
+pub fn add(vec: &mut [f32], value: f32) {
     for v in vec.iter_mut() {
         *v += value;
     }
 }
 
-pub fn multiply(vec: &mut Vec<f32>, value: f32) {
+pub fn multiply(vec: &mut [f32], value: f32) {
     for v in vec.iter_mut() {
         *v *= value;
     }
 }
 
-pub fn divide(vec: &mut Vec<f32>, value: f32) {
+pub fn divide(vec: &mut [f32], value: f32) {
     if value != 0.0 {
         for v in vec.iter_mut() {
             *v /= value;
@@ -271,14 +271,17 @@ impl<T: Into<f64> + Copy> HistFloat<i64> for [T] {
         for k in keys {
             let count = hist[&k];
             let bar_len = (count * 40 / max_count).max(1);
-            let bar = std::iter::repeat('#').take(bar_len).collect::<String>();
+            let bar = std::iter::repeat_n('#', bar_len).collect::<String>();
             println!("{:>5}: {:<40} ({})", k, bar, count);
         }
     }
 }
 
 pub fn split_channels<T: Copy>(flat: &[T]) -> (Vec<T>, Vec<T>, Vec<T>, Vec<T>) {
-    assert!(flat.len() % 4 == 0, "Input length must be a multiple of 4");
+    assert!(
+        flat.len().is_multiple_of(4),
+        "Input length must be a multiple of 4"
+    );
 
     let n = flat.len() / 4;
     let mut r = Vec::with_capacity(n);

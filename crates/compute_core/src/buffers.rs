@@ -94,7 +94,7 @@ use crate::utils::split_channels;
 
 // Helper function for alignment
 fn align_up(value: u32, alignment: u32) -> u32 {
-    (value + alignment - 1) / alignment * alignment
+    value.div_ceil(alignment) * alignment
 }
 
 // --- 1. Buffer and Texture Management (UPDATED) ---
@@ -102,6 +102,12 @@ pub struct ComputeBuffers {
     buffers: HashMap<BufferName, Buffer>,
     textures: HashMap<TextureName, Texture>,
     texture_views: HashMap<TextureName, TextureView>, // Store views as they are used in bind groups
+}
+
+impl Default for ComputeBuffers {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ComputeBuffers {
@@ -156,7 +162,7 @@ impl ComputeBuffers {
             let remainder = bytes.len() % 16;
             if remainder != 0 {
                 let pad = 16 - remainder;
-                bytes.extend(std::iter::repeat(0u8).take(pad));
+                bytes.extend(std::iter::repeat_n(0u8, pad));
             }
         }
         let buffer = device.create_buffer_init(&BufferInitDescriptor {
@@ -237,7 +243,7 @@ impl ComputeBuffers {
             .get_buffer(&buffer_name)
             .ok_or_else(|| anyhow!("Buffer '{}' not found for writing", buffer_name))?;
 
-        let expected_size = (data.len() * size_of::<T>()) as u64;
+        let expected_size = std::mem::size_of_val(data) as u64;
         if expected_size > buffer.size() {
             return Err(anyhow!(
                 "Data size ({}) exceeds buffer '{}' capacity ({}).",
@@ -274,6 +280,7 @@ impl ComputeBuffers {
     /// Adds a new texture with initial data, handling 256-byte row alignment.
     /// Data is expected to be in a format compatible with `texture_format` (e.g., f32 for R32Float).
     /// `T` must be a POD type that can be cast to bytes.
+    #[allow(clippy::too_many_arguments)]
     pub fn add_texture_with_data<T: bytemuck::Pod + Send + Sync>(
         &mut self,
         device: &Device,
@@ -455,7 +462,7 @@ impl ComputeBuffers {
 
         drop(padded_data_bytes); // Unmap
         staging_buffer.unmap();
-        Ok(split_channels::<T>(&bytemuck::cast_slice::<u8, T>(
+        Ok(split_channels::<T>(bytemuck::cast_slice::<u8, T>(
             &unpadded_data_bytes,
         )))
     }
@@ -574,98 +581,98 @@ pub fn create_buffers_and_texture_descriptions(
     let atomic_grid_size = (texture_size.width * texture_size.height * 4) as usize;
 
     compute_buffers.add_texture(
-        &device,
+        device,
         TextureName::Wind,
         texture_size,
         TextureFormat::Rgba32Float,
         texture_usage_input,
     );
     compute_buffers.add_texture(
-        &device,
+        device,
         TextureName::Normals,
         texture_size,
         TextureFormat::Rgba32Float,
         texture_usage_default,
     );
     compute_buffers.add_texture(
-        &device,
+        device,
         TextureName::Slope,
         texture_size,
         TextureFormat::Rgba32Float,
         texture_usage_default,
     );
     compute_buffers.add_texture(
-        &device,
+        device,
         TextureName::Roughness,
         texture_size,
         TextureFormat::Rgba32Float,
         texture_usage_default,
     );
     compute_buffers.add_texture(
-        &device,
+        device,
         TextureName::ReleaseAreas,
         texture_size,
         TextureFormat::Rgba32Float,
         texture_usage_default,
     );
     compute_buffers.add_texture(
-        &device,
+        device,
         TextureName::Landcover,
         texture_size,
         TextureFormat::Rgba8Uint,
         texture_usage_input,
     );
     compute_buffers.add_buffer(
-        &device,
+        device,
         BufferName::OutDebugNormals,
         DEBUG_BUFFER_SIZE,
         buffer_usage_output,
     );
 
     compute_buffers.add_buffer(
-        &device,
+        device,
         BufferName::OutDebugRelease,
         DEBUG_BUFFER_SIZE,
         buffer_usage_output,
     );
     compute_buffers.add_buffer(
-        &device,
+        device,
         BufferName::NumberReleaseCells,
         4,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
     );
     compute_buffers.add_buffer(
-        &device,
+        device,
         BufferName::NumberReleaseCells,
         4,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
     );
     compute_buffers.add_buffer(
-        &device,
+        device,
         BufferName::SimInfo,
         size_of::<SimInfo>(),
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
     );
     compute_buffers.add_buffer(
-        &device,
+        device,
         BufferName::NumberParticles,
         4,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC,
     );
     compute_buffers.add_buffer(
-        &device,
+        device,
         BufferName::CellCountGrid,
         atomic_grid_size,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC,
     );
     compute_buffers.add_buffer(
-        &device,
+        device,
         BufferName::VelocityGrid,
         atomic_grid_size,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC,
     );
     compute_buffers.add_buffer(
-        &device,
+        device,
         BufferName::MaxVelocityGrid,
         atomic_grid_size,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,

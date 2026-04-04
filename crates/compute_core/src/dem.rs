@@ -1,4 +1,4 @@
-use std::{path::PathBuf, vec::Vec};
+use std::{path::Path, path::PathBuf, vec::Vec};
 
 use crate::utils::*;
 use std::fs::File;
@@ -23,6 +23,12 @@ pub struct Dem {
     pub y: Vec<f32>,
     pub cell_size: f32,
     pub map_factor: f32,
+}
+
+impl Default for Dem {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Dem {
@@ -145,13 +151,13 @@ impl Dem {
         }
     }
 
-    fn load_bounds(path: &PathBuf) -> Result<Bounds, String> {
-        let mut aabb_path = path.clone();
+    fn load_bounds(path: &Path) -> Result<Bounds, String> {
+        let mut aabb_path = path.to_path_buf();
         aabb_path.set_extension("aabb");
         let file =
             File::open(&aabb_path).map_err(|e| format!("Failed to open bounds file: {}", e))?;
         let reader = BufReader::new(file);
-        let lines = reader.lines().filter_map(|l| l.ok());
+        let lines = reader.lines().map_while(Result::ok);
         Self::parse_bounds_lines(lines)
             .ok_or_else(|| "Failed to parse bounds from file".to_string())
     }

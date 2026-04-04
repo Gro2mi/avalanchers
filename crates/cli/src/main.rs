@@ -1,16 +1,13 @@
 // compute_cli/src/main.rs
 use anyhow::Result;
 use clap::Parser;
-use compute_core::utils::*;
-use compute_core::*;
 use compute_core::{
     dem::Dem,
     settings::{Settings, SimSettings},
 }; // Import from your new crate
-use data_processor::*;
 use std::path::PathBuf;
 use std::{env, time::Instant};
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, error, info};
 
 #[derive(Parser, Debug)]
 #[command(name = "Avalanche Simulation")]

@@ -13,8 +13,8 @@ pub const SHADER_UTILS: &str = include_str!("../wgsl/utils.wgsl");
 
 fn read_shader_source(name: &str) -> String {
     let path = format!("wgsl/{}.wgsl", name);
-    let shader = fs::read_to_string(&path).expect(&format!("Failed to read shader file {}", &path));
-    shader
+
+    fs::read_to_string(&path).unwrap_or_else(|_| panic!("Failed to read shader file {}", &path))
 }
 fn load_shader_source(name: &str, workgroup_size_1d: u32, workgroup_size_2d: u32) -> &'static str {
     let import_re = Regex::new(r#"import\s+([a-zA-Z0-9_./-]+)\.wgsl"#).unwrap();
@@ -65,7 +65,7 @@ impl ComputeShaderConfig {
             bgl_entries.push(BindGroupLayoutEntry {
                 binding: i as u32,
                 visibility: ShaderStages::COMPUTE,
-                ty: binding_type.clone(), // Clone BindingType
+                ty: *binding_type, // Clone BindingType
                 count: None,
             });
         }
@@ -132,7 +132,7 @@ pub fn create_shader_configs(
     shader_configs.insert(
         "compute_normals".to_string(),
         ComputeShaderConfig::new(
-            &device,
+            device,
             "compute_normals".to_string(),
             load_shader_source("compute_normals", workgroup_size_1d, workgroup_size_2d),
             &[
@@ -179,7 +179,7 @@ pub fn create_shader_configs(
     shader_configs.insert(
         "load_release_areas".to_string(),
         ComputeShaderConfig::new(
-            &device,
+            device,
             "load_release_areas".to_string(),
             load_shader_source("load_release_areas", workgroup_size_1d, workgroup_size_2d),
             &[
@@ -214,7 +214,7 @@ pub fn create_shader_configs(
     shader_configs.insert(
         "roughness".to_string(),
         ComputeShaderConfig::new(
-            &device,
+            device,
             "roughness".to_string(),
             load_shader_source("roughness", workgroup_size_1d, workgroup_size_2d),
             &[
@@ -249,7 +249,7 @@ pub fn create_shader_configs(
     shader_configs.insert(
         "compute_release_areas".to_string(),
         ComputeShaderConfig::new(
-            &device,
+            device,
             "compute_release_areas".to_string(),
             load_shader_source(
                 "compute_release_areas",
@@ -306,7 +306,7 @@ pub fn create_shader_configs(
     shader_configs.insert(
         "initialize_particles".to_string(),
         ComputeShaderConfig::new(
-            &device,
+            device,
             "initialize_particles".to_string(),
             load_shader_source("initialize_particles", workgroup_size_1d, workgroup_size_2d),
             &[
@@ -366,7 +366,7 @@ pub fn create_shader_configs(
     shader_configs.insert(
         "compute_particles".to_string(),
         ComputeShaderConfig::new(
-            &device,
+            device,
             "compute_particles".to_string(),
             load_shader_source("compute_particles", workgroup_size_1d, workgroup_size_2d),
             &[
@@ -438,7 +438,7 @@ pub fn create_shader_configs(
     shader_configs.insert(
         "reset_max_velocity".to_string(),
         ComputeShaderConfig::new(
-            &device,
+            device,
             "reset_max_velocity".to_string(),
             load_shader_source("reset_max_velocity", workgroup_size_1d, workgroup_size_2d),
             &[

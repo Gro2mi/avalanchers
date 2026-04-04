@@ -1,7 +1,7 @@
 // use numpy::{PyArrayDyn, PyReadonlyArrayDyn, IntoPyArray};
 
 use pyo3::prelude::*;
-use tracing::{debug, error, info, warn};
+use tracing::info;
 
 #[pymodule]
 fn avalanchers(m: &Bound<'_, PyModule>) -> PyResult<()> {

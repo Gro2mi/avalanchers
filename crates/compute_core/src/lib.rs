@@ -49,6 +49,12 @@ pub struct Particle {
     pub _pad1: [u32; 3], // 3 * 4 bytes padding
 }
 
+impl Default for Particle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Particle {
     pub const BYTE_SIZE: usize = 16 * 4;
 
@@ -90,7 +96,7 @@ pub struct TimestepData {
     pub g_eff: f32,                           // 4 bytes
     pub _pad1: f32,                           // 4 bytes (padding to 96 bytes)
 }
-
+#[expect(dead_code)]
 pub struct ComputeOrchestrator {
     pub instance: Instance,
     pub adapter: Adapter,
@@ -311,7 +317,7 @@ impl ComputeOrchestrator {
         };
 
         self.dispatch_workgroup_size_2d =
-            (sim_settings.grid_shape_x + self.workgroup_size_2d - 1) / self.workgroup_size_2d;
+            sim_settings.grid_shape_x.div_ceil(self.workgroup_size_2d);
 
         self.buffers = create_buffers_and_texture_descriptions(&self.device, self.texture_size);
 
@@ -340,7 +346,7 @@ impl ComputeOrchestrator {
         let _ = self.buffers.write_buffer(
             &self.queue,
             BufferName::SimSettings,
-            &sim_settings.as_bytes(),
+            sim_settings.as_bytes(),
         );
 
         self.run_shader(
@@ -362,7 +368,7 @@ impl ComputeOrchestrator {
     }
     pub async fn run_load_release_areas(
         &mut self, // `&mut self` because we're adding textures
-        data: &Vec<u8>,
+        data: &[u8],
     ) -> Result<()> {
         let texture_usage_input = TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST;
 
@@ -451,7 +457,7 @@ impl ComputeOrchestrator {
         .await?;
         Ok(())
     }
-
+    #[allow(dead_code)]
     async fn read_texture<T: bytemuck::Pod + Send + Sync>(
         &self,
         name: TextureName,
@@ -460,6 +466,7 @@ impl ComputeOrchestrator {
             .read_texture(&self.device, &self.queue, name)
             .await
     }
+    #[allow(dead_code)]
     async fn read_buffer<T: bytemuck::Pod + Send + Sync>(
         &self,
         name: BufferName,
@@ -468,6 +475,7 @@ impl ComputeOrchestrator {
             .read_buffer(&self.device, &self.queue, name)
             .await
     }
+    #[expect(dead_code)]
     async fn add_buffer<T: bytemuck::Pod + Send + Sync>(&self, name: BufferName) -> Result<Vec<T>> {
         self.buffers
             .read_buffer(&self.device, &self.queue, name)
@@ -487,9 +495,9 @@ impl ComputeOrchestrator {
             variable: Variable::Undefined,
             unit: Unit::Dimensionless,
         };
-        F32Data::new(&MetaGrid::new(params), data)
+        F32Data::new(&MetaGrid::new(&params), data)
             .save(path.as_ref())
-            .expect(&format!("Failed to save grid {}", path));
+            .unwrap_or_else(|_| panic!("Failed to save grid {}", path));
         Ok(())
     }
 }
