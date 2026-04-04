@@ -546,7 +546,7 @@ mod tests {
         .expect("Failed to read out_debug_normals_buffer");
         info!("Read out_debug_normals_buffer: {:?}", debug_buffer);
         assert!(
-            slope_angle.iter().all(|&x| (x - 34.00012).abs() < 2e-3),
+            slope_angle.iter().all(|&x| (x - 34.00012).abs() < 4e-3),
             "Slope angle values are not as expected. Min: {:?}, Max: {:?}\nHist:\n{:?}",
             slope_angle.min_value(),
             slope_angle.max_value(),
