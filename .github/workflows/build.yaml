@@ -57,7 +57,7 @@ jobs:
         run: |
           # If the first path failed, let's find where it actually is:
           ls /usr/share/vulkan/icd.d/
-          vulkaninfo --summary || echo "Vulkan summary failed, attempting test anyway..."
+          vulkaninfo --summary
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -83,6 +83,19 @@ jobs:
           cargo fmt --check
           cargo clippy -q -- -D warnings
           cargo test -q
+
+      # --- COVERAGE (Ubuntu Only) ---
+      - name: Install Tarpaulin
+        if: matrix.os == 'ubuntu-latest'
+        # Using a binary install is much faster than 'cargo install'
+        run: |
+          curl -s https://api.github.com/repos/xd009642/tarpaulin/releases/latest \
+          | grep "browser_download_url.*x86_64-unknown-linux-musl.tar.gz" \
+          | cut -d : -f 2,3 \
+          | tr -d \" \
+          | wget -qi -
+          tar -xzf cargo-tarpaulin-*.tar.gz
+          mv cargo-tarpaulin ~/.cargo/bin/
 
       - name: Run Coverage & Tests (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
