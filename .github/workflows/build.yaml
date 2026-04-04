@@ -110,7 +110,7 @@ jobs:
 
       - name: Build WASM (Ubuntu Only)
         if: matrix.os == 'ubuntu-latest'
-        run: wasm-pack build --release --out-dir wasm_dist
+        run: wasm-pack build crates/wasm_bindings --target web --release --out-dir wasm_dist
 
       # --- UPLOAD ---
 
