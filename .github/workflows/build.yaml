@@ -27,6 +27,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -58,10 +61,6 @@ jobs:
           # If the first path failed, let's find where it actually is:
           ls /usr/share/vulkan/icd.d/
           vulkaninfo --summary
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
 
       - name: Install wasm-pack
         if: matrix.os == 'ubuntu-latest'
@@ -88,7 +87,7 @@ jobs:
       # --- ARTIFACT GENERATION ---
 
       - name: Build CLI Binary
-        run: cargo build --release
+        run: cargo build -p cli --release
 
       - name: Prepare CLI Artifacts
         shell: bash
@@ -99,7 +98,7 @@ jobs:
           else
             # Find the binary (assuming it's named after your project) 
             # and rename it to include the OS for clarity in the release
-            cp target/release/${{ github.event.repository.name }} bin_dist/${{ github.event.repository.name }}-${{ matrix.os }} || true
+            cp target/release/cli bin_dist/avalanchers-cli-${{ matrix.os }} || true
           fi
 
       - name: Build Python Wheels
