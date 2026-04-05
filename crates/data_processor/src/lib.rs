@@ -3,9 +3,13 @@ use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use bincode::{Decode, Encode, config};
-use lz4_flex::{compress_prepend_size, decompress_size_prepended};
+use std::io::BufReader;
 use std::io::Cursor;
 use std::io::Read;
+
+use lz4_flex::{compress_prepend_size, decompress_size_prepended};
+#[cfg(not(target_arch = "wasm32"))]
+use xz2::{read::XzDecoder, write::XzEncoder};
 use zstd::stream::{decode_all, encode_all};
 
 use image::{GenericImageView, ImageReader};
@@ -378,27 +382,38 @@ pub fn read_zstd_bin(path: &Path) -> io::Result<Vec<u8>> {
     read_bin(&path.with_extension("zst")).and_then(|buffer| decode_all(Cursor::new(&buffer[..])))
 }
 
-use std::io::BufReader;
-use xz2::read::XzDecoder;
-use xz2::write::XzEncoder;
 pub fn write_xz(path: &Path, buffer: &Vec<u8>) {
-    let mut encoder = XzEncoder::new(
-        BufWriter::new(File::create(path.with_extension("xz")).expect("Failed to create file")),
-        6,
-    ); // level 0-9
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut encoder = XzEncoder::new(
+            BufWriter::new(File::create(path.with_extension("xz")).expect("Failed to create file")),
+            6,
+        ); // level 0-9
 
-    std::io::copy(&mut BufReader::new(Cursor::new(buffer)), &mut encoder)
-        .expect("Failed to write data");
-    encoder.finish().expect("Failed to finish encoding");
+        std::io::copy(&mut BufReader::new(Cursor::new(buffer)), &mut encoder)
+            .expect("Failed to write data");
+        encoder.finish().expect("Failed to finish encoding");
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        panic!(panic!("XZ compression is not supported on this platform");)
+    }
 }
 
 pub fn read_xz(path: &Path) -> io::Result<Vec<u8>> {
-    let compressed = File::open(path.with_extension("xz")).expect("Failed to open file");
-    let mut decoder = XzDecoder::new(BufReader::new(compressed));
-    let mut decompressed = Vec::new();
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let compressed = File::open(path.with_extension("xz")).expect("Failed to open file");
+        let mut decoder = XzDecoder::new(BufReader::new(compressed));
+        let mut decompressed = Vec::new();
 
-    std::io::copy(&mut decoder, &mut decompressed)?;
-    Ok(decompressed)
+        std::io::copy(&mut decoder, &mut decompressed)?;
+        Ok(decompressed)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        panic!(panic!("XZ compression is not supported on this platform");)
+    }
 }
 
 pub fn write_png(
