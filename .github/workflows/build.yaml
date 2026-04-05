@@ -72,7 +72,7 @@ jobs:
       - name: Install Dependencies (Linux)
         if: matrix.os == 'ubuntu-latest'
         run: sudo apt-get update -qq && sudo apt-get install -y -qq llvm-dev libclang-dev python3-dev
-        
+
       - name: Build WASM (Ubuntu Only)
         if: matrix.os == 'ubuntu-latest'
         run: wasm-pack build crates/wasm_bindings --target web --release --out-dir wasm_dist
@@ -164,8 +164,8 @@ jobs:
           mkdir -p staging_all/wasm
           cp -r dist/*.whl staging_all/ 2>/dev/null || true
           cp -r bin_dist/* staging_all/ 2>/dev/null || true
-          cp -r wasm_dist/*.wasm staging_all/wasm 2>/dev/null || true
-          cp -r wasm_dist/*.js staging_all/wasm 2>/dev/null || true
+          cp -r crates/wasm_bindings/wasm_dist/*.wasm staging_all/wasm 2>/dev/null || true
+          cp -r crates/wasm_bindings/wasm_dist/*.js staging_all/wasm 2>/dev/null || true
 
       - name: Upload All Artifacts
         uses: actions/upload-artifact@v6
