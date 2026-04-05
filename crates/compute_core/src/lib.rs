@@ -369,7 +369,7 @@ impl ComputeOrchestrator {
     pub async fn run_load_release_areas(
         &mut self, // `&mut self` because we're adding textures
         data: &[u8],
-    ) -> Result<()> {
+    ) -> Result<u32> {
         let texture_usage_input = TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST;
 
         self.buffers
@@ -397,7 +397,9 @@ impl ComputeOrchestrator {
             1,
         )
         .await?;
-        Ok(())
+    
+        let number_release_cells: u32 = self.read_buffer::<u32>(BufferName::NumberReleaseCells).await.expect("Failed to read number_release_cells buffer")[0];
+        Ok(number_release_cells)
     }
     pub async fn run_initialize_particles(&mut self) -> Result<()> {
         debug!("Running texture processing shader...");
@@ -466,7 +468,6 @@ impl ComputeOrchestrator {
             .read_texture(&self.device, &self.queue, name)
             .await
     }
-    #[allow(dead_code)]
     async fn read_buffer<T: bytemuck::Pod + Send + Sync>(
         &self,
         name: BufferName,
@@ -510,7 +511,6 @@ mod tests {
     use crate::settings::Settings;
     use data_processor::read_png;
     use pollster;
-    use pollster::block_on;
     use utils::{HistFloat, MaxValue, MinValue};
     const INCLINED_PLANE_PATH: &str = "../../data/avaframe/avaInclinedPlane.png";
     const RELEASE_TEXTURE_PATH: &str = "../../data/avaframe/avaInclinedPlanereleaseTexture.png";
@@ -570,7 +570,7 @@ mod tests {
         orchestrator
             .create_buffers_and_texture_descriptions(&sim_settings)
             .expect("Failed to create buffers and texture descriptions");
-        pollster::block_on(orchestrator.run_load_release_areas(&data))
+        let number_release_cells: u32 = pollster::block_on(orchestrator.run_load_release_areas(&data))
             .expect("Failed to run load_release_areas shader");
         let (release_thickness, _, _, _) =
             pollster::block_on(orchestrator.read_texture::<f32>(TextureName::ReleaseAreas))
@@ -581,6 +581,8 @@ mod tests {
             release_thickness.max_value(),
             release_thickness[1020..1040].to_vec(),
         );
+        assert_eq!(number_release_cells, 3245);
+        info!("Read number_release_cells: {:?}", number_release_cells);
     }
 
     #[test_log::test]
@@ -591,11 +593,8 @@ mod tests {
         pollster::block_on(orchestrator.run_normals(&sim_settings, &dem))
             .expect("Failed to run normals shader");
         let (data, _, _) = read_png(&Path::new(RELEASE_TEXTURE_PATH)).expect("Failed to read PNG");
-        pollster::block_on(orchestrator.run_load_release_areas(&data))
+        let number_release_cells: u32 = pollster::block_on(orchestrator.run_load_release_areas(&data))
             .expect("Failed to run load_release_areas shader");
-        let number_release_cells =
-            block_on(orchestrator.read_buffer::<u32>(BufferName::NumberReleaseCells))
-                .expect("Failed to read number_release_cells buffer")[0];
         assert_eq!(number_release_cells, 3245);
         let number_particles =
             (number_release_cells * sim_settings.released_particles_per_cell) as usize;
@@ -608,6 +607,7 @@ mod tests {
         info!("Read number_release_cells: {:?}", number_release_cells);
         pollster::block_on(orchestrator.run_initialize_particles())
             .expect("Failed to run initialize_particles shader");
+        
         // pollster::block_on(orchestrator.comp())
         //     .expect("Failed to run initialize_particles shader");
         // pollster::block_on(orchestrator.read_texture::<f32>(TextureName::CellCount))
