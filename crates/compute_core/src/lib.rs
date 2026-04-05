@@ -397,8 +397,11 @@ impl ComputeOrchestrator {
             1,
         )
         .await?;
-    
-        let number_release_cells: u32 = self.read_buffer::<u32>(BufferName::NumberReleaseCells).await.expect("Failed to read number_release_cells buffer")[0];
+
+        let number_release_cells: u32 = self
+            .read_buffer::<u32>(BufferName::NumberReleaseCells)
+            .await
+            .expect("Failed to read number_release_cells buffer")[0];
         Ok(number_release_cells)
     }
     pub async fn run_initialize_particles(&mut self) -> Result<()> {
@@ -570,8 +573,9 @@ mod tests {
         orchestrator
             .create_buffers_and_texture_descriptions(&sim_settings)
             .expect("Failed to create buffers and texture descriptions");
-        let number_release_cells: u32 = pollster::block_on(orchestrator.run_load_release_areas(&data))
-            .expect("Failed to run load_release_areas shader");
+        let number_release_cells: u32 =
+            pollster::block_on(orchestrator.run_load_release_areas(&data))
+                .expect("Failed to run load_release_areas shader");
         let (release_thickness, _, _, _) =
             pollster::block_on(orchestrator.read_texture::<f32>(TextureName::ReleaseAreas))
                 .expect("Failed to get release_areas");
@@ -593,8 +597,9 @@ mod tests {
         pollster::block_on(orchestrator.run_normals(&sim_settings, &dem))
             .expect("Failed to run normals shader");
         let (data, _, _) = read_png(&Path::new(RELEASE_TEXTURE_PATH)).expect("Failed to read PNG");
-        let number_release_cells: u32 = pollster::block_on(orchestrator.run_load_release_areas(&data))
-            .expect("Failed to run load_release_areas shader");
+        let number_release_cells: u32 =
+            pollster::block_on(orchestrator.run_load_release_areas(&data))
+                .expect("Failed to run load_release_areas shader");
         assert_eq!(number_release_cells, 3245);
         let number_particles =
             (number_release_cells * sim_settings.released_particles_per_cell) as usize;
@@ -607,7 +612,7 @@ mod tests {
         info!("Read number_release_cells: {:?}", number_release_cells);
         pollster::block_on(orchestrator.run_initialize_particles())
             .expect("Failed to run initialize_particles shader");
-        
+
         // pollster::block_on(orchestrator.comp())
         //     .expect("Failed to run initialize_particles shader");
         // pollster::block_on(orchestrator.read_texture::<f32>(TextureName::CellCount))

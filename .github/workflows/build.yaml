@@ -16,7 +16,7 @@ jobs:
     name: Build on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         # Build all 3 on release tags; only Ubuntu on standard push/PR
         os: >-
@@ -153,7 +153,7 @@ jobs:
           args: --release --out dist --find-interpreter
 
       - name: Build WASM (Ubuntu Only)
-        if: false && matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-latest'
         run: wasm-pack build crates/wasm_bindings --target web --release --out-dir wasm_dist
 
       # --- UPLOAD ---
