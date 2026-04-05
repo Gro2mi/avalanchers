@@ -396,7 +396,7 @@ pub fn write_xz(path: &Path, buffer: &Vec<u8>) {
     }
     #[cfg(target_arch = "wasm32")]
     {
-        panic!(panic!("XZ compression is not supported on this platform");)
+        panic!("XZ compression is not supported on this platform");
     }
 }
 
@@ -412,7 +412,7 @@ pub fn read_xz(path: &Path) -> io::Result<Vec<u8>> {
     }
     #[cfg(target_arch = "wasm32")]
     {
-        panic!(panic!("XZ compression is not supported on this platform");)
+        panic!("XZ compression is not supported on this platform");
     }
 }
 
