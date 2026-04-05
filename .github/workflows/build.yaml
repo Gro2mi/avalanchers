@@ -72,6 +72,10 @@ jobs:
       - name: Install Dependencies (Linux)
         if: matrix.os == 'ubuntu-latest'
         run: sudo apt-get update -qq && sudo apt-get install -y -qq llvm-dev libclang-dev python3-dev
+        
+      - name: Build WASM (Ubuntu Only)
+        if: matrix.os == 'ubuntu-latest'
+        run: wasm-pack build crates/wasm_bindings --target web --release --out-dir wasm_dist
 
       - name: Check & Test
         env:
@@ -151,10 +155,6 @@ jobs:
         with:
           command: build
           args: --release --out dist --find-interpreter
-
-      - name: Build WASM (Ubuntu Only)
-        if: matrix.os == 'ubuntu-latest'
-        run: wasm-pack build crates/wasm_bindings --target web --release --out-dir wasm_dist
 
       # --- UPLOAD ---
       - name: Prepare Artifacts for Upload
