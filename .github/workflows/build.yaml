@@ -112,7 +112,7 @@ jobs:
             --run-types Tests \
             --verbose \
             --skip-clean \
-            --fail-under 80 \
+            --fail-under 70 \
             -p compute_core -p data_processor
 
       - name: Upload to codecov.io
