@@ -123,11 +123,9 @@ jobs:
       # --- ARTIFACT GENERATION ---
 
       - name: Build CLI Binary
-        if: false
         run: cargo build -p cli --release
 
       - name: Prepare CLI Artifacts
-        if: false
         shell: bash
         run: |
           mkdir -p bin_dist
@@ -140,7 +138,6 @@ jobs:
           fi
 
       - name: Build Python Wheels
-        if: false
         uses: PyO3/maturin-action@v1
         with:
           command: build
