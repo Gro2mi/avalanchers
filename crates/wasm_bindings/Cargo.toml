@@ -16,4 +16,5 @@ wasm-bindgen = { workspace = true }
 #js-sys = { workspace = true }
 #web-sys = { workspace = true, features = ["Window", "Document"] } # if you need it
 #anyhow = { workspace = true } # Need to add this as well
-getrandom = { version = "0.3", features = ["wasm_js"] }
+getrandom03 = { version = "0.3", features = ["wasm_js"], package = "getrandom" }
+getrandom = { version = "0.4", features = ["wasm_js"] }
