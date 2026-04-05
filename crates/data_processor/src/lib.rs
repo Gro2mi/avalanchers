@@ -3,6 +3,7 @@ use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use bincode::{Decode, Encode, config};
+#[cfg(not(target_arch = "wasm32"))]
 use std::io::BufReader;
 use std::io::Cursor;
 use std::io::Read;
@@ -382,6 +383,7 @@ pub fn read_zstd_bin(path: &Path) -> io::Result<Vec<u8>> {
     read_bin(&path.with_extension("zst")).and_then(|buffer| decode_all(Cursor::new(&buffer[..])))
 }
 
+#[allow(unused_variables)]
 pub fn write_xz(path: &Path, buffer: &Vec<u8>) {
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -400,6 +402,7 @@ pub fn write_xz(path: &Path, buffer: &Vec<u8>) {
     }
 }
 
+#[allow(unused_variables)]
 pub fn read_xz(path: &Path) -> io::Result<Vec<u8>> {
     #[cfg(not(target_arch = "wasm32"))]
     {

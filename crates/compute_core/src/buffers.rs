@@ -129,7 +129,7 @@ impl ComputeBuffers {
             .expect("Failed to poll device");
         #[cfg(target_arch = "wasm32")]
         device
-            .poll(wgpu::Maintain::Poll)
+            .poll(wgpu::PollType::Poll)
             .expect("Failed to poll device");
     }
 
