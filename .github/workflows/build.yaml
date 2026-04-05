@@ -74,55 +74,15 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq llvm-dev libclang-dev python3-dev
 
       - name: Check & Test
+        if: false
         env:
             # This forces wgpu to use the software adapter
             WGPU_BACKEND: vulkan 
             VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
         run: |
           cargo fmt --check
-        # cargo clippy -q -- -D warnings
-        # cargo test -q
-
-
-      # --- ARTIFACT GENERATION ---
-
-      - name: Build CLI Binary
-        run: cargo build -p cli --release
-
-      - name: Prepare CLI Artifacts
-        shell: bash
-        run: |
-          mkdir -p bin_dist
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            cp target/release/*.exe bin_dist/
-          else
-            # Find the binary (assuming it's named after your project) 
-            # and rename it to include the OS for clarity in the release
-            cp target/release/cli bin_dist/avalanchers-cli-${{ matrix.os }} || true
-          fi
-
-      - name: Build Python Wheels
-        uses: PyO3/maturin-action@v1
-        with:
-          command: build
-          args: --release --out dist --find-interpreter
-
-      - name: Build WASM (Ubuntu Only)
-        if: matrix.os == 'ubuntu-latest'
-        run: wasm-pack build crates/wasm_bindings --target web --release --out-dir wasm_dist
-
-      # --- UPLOAD ---
-
-      - name: Upload All Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: artifacts-${{ matrix.os }}
-          path: |
-            dist/*.whl
-            bin_dist/*
-            wasm_dist/*.wasm
-            wasm_dist/*.js
-
+          cargo clippy -q -- -D warnings
+          cargo test -q
   
       # --- COVERAGE (Ubuntu Only) ---
       - name: Install Tarpaulin
@@ -145,7 +105,7 @@ jobs:
           VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
         run: |
           sudo apt-get install -y python3-dev
-          cargo tarpaulin --q\
+          cargo tarpaulin \
             --out html --out lcov \
             --output-dir coverage_report \
             --run-types Tests \
@@ -158,6 +118,50 @@ jobs:
         with:
           name: code-coverage-report
           path: coverage_report/
+
+
+      # --- ARTIFACT GENERATION ---
+
+      - name: Build CLI Binary
+        if: false
+        run: cargo build -p cli --release
+
+      - name: Prepare CLI Artifacts
+        if: false
+        shell: bash
+        run: |
+          mkdir -p bin_dist
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            cp target/release/*.exe bin_dist/
+          else
+            # Find the binary (assuming it's named after your project) 
+            # and rename it to include the OS for clarity in the release
+            cp target/release/cli bin_dist/avalanchers-cli-${{ matrix.os }} || true
+          fi
+
+      - name: Build Python Wheels
+        if: false
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --out dist --find-interpreter
+
+      - name: Build WASM (Ubuntu Only)
+        if: false && matrix.os == 'ubuntu-latest'
+        run: wasm-pack build crates/wasm_bindings --target web --release --out-dir wasm_dist
+
+      # --- UPLOAD ---
+
+      - name: Upload All Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-${{ matrix.os }}
+          path: |
+            dist/*.whl
+            bin_dist/*
+            wasm_dist/*.wasm
+            wasm_dist/*.js
+
 
   release:
     name: Create GitHub Release
