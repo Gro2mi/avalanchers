@@ -9,23 +9,66 @@ use wgpu::{
     ComputePipelineDescriptor, Device, PipelineLayoutDescriptor, ShaderModuleDescriptor,
     ShaderSource, ShaderStages, StorageTextureAccess, TextureFormat, TextureViewDimension,
 };
+
+use crate::buffers::{BufferName, TextureName};
 pub const SHADER_UTILS: &str = include_str!("../wgsl/utils.wgsl");
+
+#[derive(Eq, Hash, PartialEq, Clone)]
+pub enum ShaderName {
+    ComputeNormals,
+    ResetMaxVelocity,
+    LoadReleaseAreas,
+    ComputeRoughness,
+    ComputeReleaseAreas,
+    InitializeParticles,
+    ComputeParticles,
+}
+
+impl ShaderName {
+    pub fn to_str(&self) -> &'static str {
+        match self {
+            ShaderName::ComputeNormals => "compute_normals",
+            ShaderName::ResetMaxVelocity => "reset_max_velocity",
+            ShaderName::LoadReleaseAreas => "load_release_areas",
+            ShaderName::ComputeRoughness => "compute_roughness",
+            ShaderName::ComputeReleaseAreas => "compute_release_areas",
+            ShaderName::InitializeParticles => "initialize_particles",
+            ShaderName::ComputeParticles => "compute_particles",
+        }
+    }
+}
+impl std::fmt::Display for ShaderName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.to_str())
+    }
+}
 
 fn read_shader_source(name: &str) -> String {
     let path = format!("wgsl/{}.wgsl", name);
 
     fs::read_to_string(&path).unwrap_or_else(|_| panic!("Failed to read shader file {}", &path))
 }
-fn load_shader_source(name: &str, workgroup_size_1d: u32, workgroup_size_2d: u32) -> &'static str {
+fn load_shader_source_string(
+    name: &str,
+    workgroup_size_1d: u32,
+    workgroup_size_2d: u32,
+) -> &'static str {
     let import_re = Regex::new(r#"import\s+([a-zA-Z0-9_./-]+)\.wgsl"#).unwrap();
     let shader_source = read_shader_source(name)
         .replace("WORKGROUP_SIZE_1D", &workgroup_size_1d.to_string())
         .replace("WORKGROUP_SIZE_2D", &workgroup_size_2d.to_string());
     let processed = import_re.replace_all(&shader_source, |caps: &regex::Captures| {
         let import_name = &caps[1];
-        load_shader_source(import_name, workgroup_size_1d, workgroup_size_2d)
+        load_shader_source_string(import_name, workgroup_size_1d, workgroup_size_2d)
     });
     Box::leak(processed.into_owned().into_boxed_str())
+}
+fn load_shader_source(
+    name: ShaderName,
+    workgroup_size_1d: u32,
+    workgroup_size_2d: u32,
+) -> &'static str {
+    load_shader_source_string(name.to_str(), workgroup_size_1d, workgroup_size_2d)
 }
 
 // pub const SHADER_COMPUTE_NORMALS: &str = concat!(
@@ -47,22 +90,29 @@ fn load_shader_source(name: &str, workgroup_size_1d: u32, workgroup_size_2d: u32
 // pub const SHADER_: &str = include_str!("../../wgsl/.wgsl");
 
 pub struct ComputeShaderConfig {
-    pub name: String,
+    pub name: ShaderName,
     pub shader_src: &'static str,
     pub bind_group_layout: BindGroupLayout,
     pub pipeline: ComputePipeline,
+    pub binding_names: Vec<String>,
+    pub binding_types: Vec<BindingType>,
 }
 
 impl ComputeShaderConfig {
     pub fn new(
         device: &Device,
-        name: String,
+        name: ShaderName,
         shader_src: &'static str,
-        bindings: &[BindingType], // Now takes BindingType directly
+        bindings: &[(String, BindingType)],
     ) -> Result<Self> {
-        let mut bgl_entries = Vec::new();
-        for (i, binding_type) in bindings.iter().enumerate() {
-            bgl_entries.push(BindGroupLayoutEntry {
+        let mut binding_names = Vec::new();
+        let mut binding_types = Vec::new();
+        let mut binding_group_layout_entries = Vec::new();
+        for (i, (binding_name, binding_type)) in bindings.iter().enumerate() {
+            binding_names.push(binding_name.clone());
+            binding_types.push(*binding_type);
+
+            binding_group_layout_entries.push(BindGroupLayoutEntry {
                 binding: i as u32,
                 visibility: ShaderStages::COMPUTE,
                 ty: *binding_type, // Clone BindingType
@@ -72,7 +122,7 @@ impl ComputeShaderConfig {
 
         let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: Some(&format!("{} Bind Group Layout", name)),
-            entries: &bgl_entries,
+            entries: &binding_group_layout_entries,
         });
 
         let shader_module = device.create_shader_module(ShaderModuleDescriptor {
@@ -90,7 +140,7 @@ impl ComputeShaderConfig {
             label: Some(&format!("{} Compute Pipeline", name)),
             layout: Some(&pipeline_layout),
             module: &shader_module,
-            entry_point: Some(&name),
+            entry_point: Some(&name.to_str()),
             compilation_options: Default::default(),
             cache: None,
         });
@@ -100,6 +150,8 @@ impl ComputeShaderConfig {
             shader_src,
             bind_group_layout,
             pipeline,
+            binding_names,
+            binding_types,
         })
     }
 
@@ -127,341 +179,597 @@ pub fn create_shader_configs(
     device: &Device,
     workgroup_size_1d: u32,
     workgroup_size_2d: u32,
-) -> Result<std::collections::HashMap<String, ComputeShaderConfig>> {
+) -> Result<std::collections::HashMap<ShaderName, ComputeShaderConfig>> {
     let mut shader_configs = std::collections::HashMap::new();
     shader_configs.insert(
-        "compute_normals".to_string(),
+        ShaderName::ComputeNormals,
         ComputeShaderConfig::new(
             device,
-            "compute_normals".to_string(),
-            load_shader_source("compute_normals", workgroup_size_1d, workgroup_size_2d),
-            &[
-                // Binding 0: Uniform buffer (sim_settings_buffer)
-                BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                // Binding 1: Texture (dem_texture)
-                BindingType::Texture {
-                    multisampled: false,
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                },
-                // Binding 2: Texture (wind_texture)
-                BindingType::Texture {
-                    multisampled: false,
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                },
-                // Binding 3: Texture (normals_texture)
-                BindingType::StorageTexture {
-                    access: StorageTextureAccess::WriteOnly,
-                    format: TextureFormat::Rgba32Float,
-                    view_dimension: TextureViewDimension::D2,
-                },
-                // Binding 4: Texture (slope_texture)
-                BindingType::StorageTexture {
-                    access: StorageTextureAccess::WriteOnly,
-                    format: TextureFormat::Rgba32Float,
-                    view_dimension: TextureViewDimension::D2,
-                },
-                // Binding 5: Storage buffer (out_debug_normals)
-                BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-            ],
-        )?,
-    );
-
-    shader_configs.insert(
-        "load_release_areas".to_string(),
-        ComputeShaderConfig::new(
-            device,
-            "load_release_areas".to_string(),
-            load_shader_source("load_release_areas", workgroup_size_1d, workgroup_size_2d),
-            &[
-                // Binding 0: Texture (release_areas_in)
-                BindingType::Texture {
-                    multisampled: false,
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    sample_type: wgpu::TextureSampleType::Uint,
-                },
-                // Binding 1: Storage texture (release_areas_out)
-                BindingType::StorageTexture {
-                    access: StorageTextureAccess::WriteOnly,
-                    format: TextureFormat::Rgba32Float,
-                    view_dimension: TextureViewDimension::D2,
-                },
-                // Binding 2: Storage buffer (out_debug_release)
-                BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                // Binding 3: Storage buffer (number_release_cells)
-                BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-            ],
-        )?,
-    );
-
-    shader_configs.insert(
-        "roughness".to_string(),
-        ComputeShaderConfig::new(
-            device,
-            "roughness".to_string(),
-            load_shader_source("roughness", workgroup_size_1d, workgroup_size_2d),
-            &[
-                // Binding 0: Uniform buffer (sim_settings_buffer)
-                BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                // Binding 1: Texture (normals_texture)
-                BindingType::Texture {
-                    multisampled: false,
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                },
-                // Binding 2: Texture (landcover_texture)
-                BindingType::Texture {
-                    multisampled: false,
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    sample_type: wgpu::TextureSampleType::Uint,
-                },
-                // Binding 3: Storage texture (roughness_texture)
-                BindingType::StorageTexture {
-                    access: StorageTextureAccess::WriteOnly,
-                    format: TextureFormat::Rgba32Float,
-                    view_dimension: TextureViewDimension::D2,
-                },
-            ],
-        )?,
-    );
-
-    shader_configs.insert(
-        "compute_release_areas".to_string(),
-        ComputeShaderConfig::new(
-            device,
-            "compute_release_areas".to_string(),
+            ShaderName::ComputeNormals,
             load_shader_source(
-                "compute_release_areas",
+                ShaderName::ComputeNormals,
                 workgroup_size_1d,
                 workgroup_size_2d,
             ),
             &[
                 // Binding 0: Uniform buffer (sim_settings_buffer)
-                BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                // Binding 1: Texture (dem_texture)
-                BindingType::Texture {
-                    multisampled: false,
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                },
-                // Binding 2: Texture (slope_texture)
-                BindingType::Texture {
-                    multisampled: false,
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                },
-                // Binding 3: Texture (roughness_texture)
-                BindingType::Texture {
-                    multisampled: false,
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                },
-                // Binding 4: Storage texture (release_areas_out)
-                BindingType::StorageTexture {
-                    access: StorageTextureAccess::WriteOnly,
-                    format: TextureFormat::Rgba32Float,
-                    view_dimension: TextureViewDimension::D2,
-                },
-                // Binding 5: Storage buffer (out_debug_release)
-                BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                // Binding 6: Storage buffer (out_debug_release)
-                BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
+                (
+                    BufferName::SimSettings.to_string(),
+                    BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                // Binding 1:
+                (
+                    TextureName::Dem.to_string(),
+                    BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                ),
+                // Binding 2:
+                (
+                    TextureName::Wind.to_string(),
+                    BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    },
+                ),
+                // Binding 3:
+                (
+                    TextureName::Normals.to_string(),
+                    // Binding 3: Texture (normals_texture)
+                    BindingType::StorageTexture {
+                        access: StorageTextureAccess::WriteOnly,
+                        format: TextureFormat::Rgba32Float,
+                        view_dimension: TextureViewDimension::D2,
+                    },
+                ),
+                // Binding 4:
+                (
+                    TextureName::Slope.to_string(),
+                    BindingType::StorageTexture {
+                        access: StorageTextureAccess::WriteOnly,
+                        format: TextureFormat::Rgba32Float,
+                        view_dimension: TextureViewDimension::D2,
+                    },
+                ),
+                // Binding 5:
+                (
+                    BufferName::OutDebugNormals.to_string(),
+                    BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
             ],
         )?,
     );
 
     shader_configs.insert(
-        "initialize_particles".to_string(),
+        ShaderName::LoadReleaseAreas,
         ComputeShaderConfig::new(
             device,
-            "initialize_particles".to_string(),
-            load_shader_source("initialize_particles", workgroup_size_1d, workgroup_size_2d),
+            ShaderName::LoadReleaseAreas,
+            load_shader_source(
+                ShaderName::LoadReleaseAreas,
+                workgroup_size_1d,
+                workgroup_size_2d,
+            ),
             &[
-                // Binding 0: Uniform buffer (sim_settings)
-                BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                // Binding 1: Uniform buffer (sim_info)
-                BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                // Binding 2: Texture (dem_texture)
-                BindingType::Texture {
-                    multisampled: false,
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                },
-                // Binding 3: Storage texture (release_areas)
-                BindingType::Texture {
-                    multisampled: false,
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                },
-                // Binding 4: Sampler
-                wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                // Binding 5: Buffer particles
-                BindingType::Buffer {
-                    ty: BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                // Binding 6: Buffer number of released particles
-                BindingType::Buffer {
-                    ty: BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: Some(NonZero::new(4).unwrap()),
-                },
-                // Binding 7: atomic_cell_count_buffer
-                BindingType::Buffer {
-                    ty: BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                // Binding 8: atomic_velocity_buffer
-                BindingType::Buffer {
-                    ty: BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
+                // Binding 0:
+                (
+                    TextureName::ReleaseAreasInput.to_string(),
+                    BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Uint,
+                    },
+                ),
+                // Binding 1:
+                (
+                    TextureName::ReleaseAreas.to_string(),
+                    BindingType::StorageTexture {
+                        access: StorageTextureAccess::WriteOnly,
+                        format: TextureFormat::Rgba32Float,
+                        view_dimension: TextureViewDimension::D2,
+                    },
+                ),
+                // Binding 2:
+                (
+                    BufferName::NumberReleaseCells.to_string(),
+                    BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                // Binding 3:
+                (
+                    BufferName::OutDebugRelease.to_string(),
+                    BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+            ],
+        )?,
+    );
+
+    shader_configs.insert(
+        ShaderName::ComputeRoughness,
+        ComputeShaderConfig::new(
+            device,
+            ShaderName::ComputeRoughness,
+            load_shader_source(
+                ShaderName::ComputeRoughness,
+                workgroup_size_1d,
+                workgroup_size_2d,
+            ),
+            &[
+                // Binding 0:
+                (
+                    BufferName::SimSettings.to_string(),
+                    // Binding 0: Uniform buffer (sim_settings_buffer)
+                    BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                // Binding 1:
+                (
+                    TextureName::Normals.to_string(),
+                    BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                ),
+                // Binding 2:
+                (
+                    TextureName::Landcover.to_string(),
+                    BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Uint,
+                    },
+                ),
+                // Binding 3:
+                (
+                    TextureName::Roughness.to_string(),
+                    BindingType::StorageTexture {
+                        access: StorageTextureAccess::WriteOnly,
+                        format: TextureFormat::Rgba32Float,
+                        view_dimension: TextureViewDimension::D2,
+                    },
+                ),
+            ],
+        )?,
+    );
+
+    shader_configs.insert(
+        ShaderName::ComputeReleaseAreas,
+        ComputeShaderConfig::new(
+            device,
+            ShaderName::ComputeReleaseAreas,
+            load_shader_source(
+                ShaderName::ComputeReleaseAreas,
+                workgroup_size_1d,
+                workgroup_size_2d,
+            ),
+            &[
+                // Binding 0:
+                (
+                    BufferName::SimSettings.to_string(),
+                    BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                // Binding 2:
+                (
+                    TextureName::Dem.to_string(),
+                    BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                ),
+                // Binding 2:
+                (
+                    TextureName::Slope.to_string(),
+                    BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                ),
+                // Binding 3:
+                (
+                    TextureName::Roughness.to_string(),
+                    BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                ),
+                // Binding 4:
+                (
+                    TextureName::ReleaseAreas.to_string(),
+                    BindingType::StorageTexture {
+                        access: StorageTextureAccess::WriteOnly,
+                        format: TextureFormat::Rgba32Float,
+                        view_dimension: TextureViewDimension::D2,
+                    },
+                ),
+                // Binding 5:
+                (
+                    BufferName::OutDebugRelease.to_string(),
+                    BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                // Binding 6:
+                (
+                    BufferName::NumberReleaseCells.to_string(),
+                    BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+            ],
+        )?,
+    );
+
+    shader_configs.insert(
+        ShaderName::InitializeParticles,
+        ComputeShaderConfig::new(
+            device,
+            ShaderName::InitializeParticles,
+            load_shader_source(
+                ShaderName::InitializeParticles,
+                workgroup_size_1d,
+                workgroup_size_2d,
+            ),
+            &[
+                // Binding 0: Uniform buffer
+                (
+                    BufferName::SimSettings.to_string(),
+                    BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                // Binding 1:
+                (
+                    BufferName::SimInfo.to_string(),
+                    BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                // Binding 2:
+                (
+                    TextureName::Dem.to_string(),
+                    BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                ),
+                // Binding 3:
+                (
+                    TextureName::ReleaseAreas.to_string(),
+                    BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                ),
+                // Binding 4:
+                (
+                    "Sampler".to_string(),
+                    wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                ),
+                // Binding 5:
+                (
+                    BufferName::Particles.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                // Binding 6:
+                (
+                    BufferName::NumberReleaseParticles.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: Some(NonZero::new(4).unwrap()),
+                    },
+                ),
+                // Binding 7:
+                (
+                    BufferName::CellCountGrid.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                // Binding 8:
+                (
+                    BufferName::VelocityGrid.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
             ],
         )?,
     );
     shader_configs.insert(
-        "compute_particles".to_string(),
+        ShaderName::ComputeParticles,
         ComputeShaderConfig::new(
             device,
-            "compute_particles".to_string(),
-            load_shader_source("compute_particles", workgroup_size_1d, workgroup_size_2d),
+            ShaderName::ComputeParticles,
+            load_shader_source(
+                ShaderName::ComputeParticles,
+                workgroup_size_1d,
+                workgroup_size_2d,
+            ),
             &[
-                // Binding 0: Uniform buffer (sim_settings)
-                BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                // Binding 1: Uniform buffer (sim_info)
-                BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                // Binding 2: Texture (dem_texture)
-                BindingType::Texture {
-                    multisampled: false,
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                },
-                // Binding 3: Storage texture (release_areas)
-                BindingType::Texture {
-                    multisampled: false,
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                },
-                // Binding 4: Sampler
-                wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                // Binding 5: Buffer particles
-                BindingType::Buffer {
-                    ty: BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                // Binding 6: maxVelocityAtomicBuffer
-                BindingType::Buffer {
-                    ty: BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                // Binding 7: atomic_cellcount_buffer
-                BindingType::Buffer {
-                    ty: BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                // Binding 8: atomic_velocity_buffer
-                BindingType::Buffer {
-                    ty: BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                // Binding 9: timestep_data
-                BindingType::Buffer {
-                    ty: BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                // Binding 10:  debug_buffer
-                BindingType::Buffer {
-                    ty: BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
+                // Binding 0:
+                (
+                    BufferName::SimSettings.to_string(),
+                    BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                // Binding 1:
+                (
+                    BufferName::SimInfo.to_string(),
+                    BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                // Binding 2:
+                (
+                    TextureName::Dem.to_string(),
+                    BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                ),
+                // Binding 3:
+                (
+                    TextureName::ReleaseAreas.to_string(),
+                    BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                ),
+                // Binding 4:
+                (
+                    "Sampler".to_string(),
+                    wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                ),
+                // Binding 5:
+                (
+                    BufferName::Particles.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                // Binding 6:
+                (
+                    BufferName::MaxVelocityGrid.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                // Binding 7:
+                (
+                    BufferName::CellCountGrid.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                // Binding 8:
+                (
+                    BufferName::VelocityGrid.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                // Binding 9:
+                (
+                    BufferName::TimestepData.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                // Binding 10:
+                (
+                    BufferName::OutDebugNormals.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
             ],
         )?,
     );
     shader_configs.insert(
-        "reset_max_velocity".to_string(),
+        ShaderName::ResetMaxVelocity,
         ComputeShaderConfig::new(
             device,
-            "reset_max_velocity".to_string(),
-            load_shader_source("reset_max_velocity", workgroup_size_1d, workgroup_size_2d),
+            ShaderName::ResetMaxVelocity,
+            load_shader_source(
+                ShaderName::ResetMaxVelocity,
+                workgroup_size_1d,
+                workgroup_size_2d,
+            ),
             &[
-                // Binding 0: Uniform buffer (sim_settings)
-                BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                // Binding 1: Uniform buffer (sim_info)
-                BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                // Binding 2: maxVelocityAtomicBuffer
-                BindingType::Buffer {
-                    ty: BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
+                // Binding 0:
+                (
+                    BufferName::SimSettings.to_string(),
+                    BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                // Binding 1:
+                (
+                    BufferName::SimInfo.to_string(),
+                    BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                // Binding 2:
+                (
+                    BufferName::MaxVelocityGrid.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
             ],
         )?,
     );
     Ok(shader_configs)
 }
+
+pub fn generate_shader_report(
+    configs: &std::collections::HashMap<ShaderName, ComputeShaderConfig>,
+) -> String {
+    let mut html = String::from(
+        r#"
+    <style>
+        .shader-table {
+            font-family: 'Inter', system-ui, sans-serif;
+            border-collapse: collapse;
+            width: 100%;
+            max-width: 900px;
+            margin: 20px auto;
+            background: #1e1e2e;
+            color: #cdd6f4;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.5);
+        }
+        .shader-table th {
+            background: #89b4fa;
+            color: #11111b;
+            padding: 12px;
+            text-align: left;
+            font-size: 1.1rem;
+        }
+        .shader-table td {
+            padding: 10px 15px;
+            border-bottom: 1px solid #313244;
+        }
+        .binding-idx { color: #fab387; font-weight: bold; width: 30px; }
+        .io-tag { font-size: 0.8rem; padding: 2px 6px; border-radius: 4px; font-weight: bold; }
+        .input { background: #a6e3a1; color: #11111b; }
+        .output { background: #f38ba8; color: #11111b; }
+        .type-info { color: #9399b2; font-style: italic; font-size: 0.9rem; }
+        .res-name { font-family: 'JetBrains Mono', monospace; }
+        tr:hover { background: #313244; }
+    </style>
+    "#,
+    );
+
+    for (name, config) in configs {
+        html.push_str(&format!(
+            r#"<table class="shader-table">
+            <thead><tr><th colspan="3">Shader: {}</th></tr></thead>
+            <tbody>"#,
+            name.to_str()
+        ));
+
+        // Note: You'll need to store 'bindings' info in your struct to iterate here
+        // For this example, I'm assuming you've added `pub raw_bindings: Vec<BindingType>` to your struct
+        for (i, entry) in config.binding_types.iter().enumerate() {
+            let (io_label, io_class, details) = match entry {
+                wgpu::BindingType::Buffer { ty, .. } => {
+                    let is_out =
+                        matches!(ty, wgpu::BufferBindingType::Storage { read_only: false });
+                    (
+                        if is_out { "OUT" } else { "IN" },
+                        if is_out { "output" } else { "input" },
+                        format!("{:?}", ty),
+                    )
+                }
+                wgpu::BindingType::Texture { sample_type, .. } => {
+                    ("IN", "input", format!("Tex ({:?})", sample_type))
+                }
+                wgpu::BindingType::StorageTexture {
+                    access: _, format, ..
+                } => ("OUT", "output", format!("StorageTex ({:?})", format)),
+                wgpu::BindingType::Sampler(ty) => ("IN", "input", format!("Sampler ({:?})", ty)),
+                &BindingType::AccelerationStructure { .. } | &BindingType::ExternalTexture => {
+                    todo!()
+                }
+            };
+
+            // If you added binding_names to your struct:
+            let resource_name = config
+                .binding_names
+                .get(i)
+                .cloned()
+                .unwrap_or_else(|| "unnamed".to_string());
+
+            html.push_str(&format!(
+                r#"<tr>
+                    <td class="binding-idx">{}</td>
+                    <td class="res-name">{} <span class="type-info">{}</span></td>
+                    <td style="text-align: right;">
+                        <span class="io-tag {}">{}</span>
+                    </td>
+                </tr>"#,
+                i, resource_name, details, io_class, io_label
+            ));
+        }
+        html.push_str("</tbody></table>");
+    }
+    std::fs::write("shader_report.html", &html).expect("Unable to write shader report to file.");
+    html
+}
+

@@ -1,7 +1,7 @@
 use crate::buffers::{
     BufferName, ComputeBuffers, TextureName, create_buffers_and_texture_descriptions,
 };
-use crate::shaders::ComputeShaderConfig;
+use crate::shaders::{ComputeShaderConfig, ShaderName, generate_shader_report};
 use anyhow::{Ok, Result, anyhow};
 use std::collections::HashMap;
 use wgpu::{
@@ -107,7 +107,7 @@ pub struct ComputeOrchestrator {
     pub buffers: ComputeBuffers,
     pub sampler: Sampler,
     texture_size: Extent3d,
-    shader_configs: HashMap<String, ComputeShaderConfig>,
+    shader_configs: HashMap<ShaderName, ComputeShaderConfig>,
     dispatch_workgroup_size_1d: u32,
     dispatch_workgroup_size_2d: u32,
 }
@@ -192,6 +192,9 @@ impl ComputeOrchestrator {
             dispatch_workgroup_size_1d: workgroup_size_1d,
         })
     }
+    fn generate_shader_report(&self) -> String {
+        generate_shader_report(&self.shader_configs)
+    }
     fn get_sampler(&self) -> BindingResource<'_> {
         BindingResource::Sampler(&self.sampler)
     }
@@ -215,7 +218,7 @@ impl ComputeOrchestrator {
     // `run_shader` now takes `resources` directly for flexibility
     pub async fn run_shader(
         &self,
-        shader_name: &str,
+        shader_name: &ShaderName,
         resources: &[BindingResource<'_>], // Pass actual resources (buffer bindings or texture views)
         dispatch_workgroup_x: u32,
         dispatch_workgroup_y: u32,
@@ -256,7 +259,7 @@ impl ComputeOrchestrator {
 
     pub async fn run_normals_shader(
         &self,
-        shader_name: &str,
+        shader_name: &ShaderName,
         resources: &[BindingResource<'_>], // Pass actual resources (buffer bindings or texture views)
         dispatch_workgroup_x: u32,
         dispatch_workgroup_y: u32,
@@ -350,7 +353,7 @@ impl ComputeOrchestrator {
         );
 
         self.run_shader(
-            "compute_normals",
+            &ShaderName::ComputeNormals,
             &[
                 self.get_buffer_binding(BufferName::SimSettings),
                 self.get_view(TextureName::Dem),
@@ -385,7 +388,7 @@ impl ComputeOrchestrator {
             .expect("Failed to add texture with data");
         debug!("Running texture processing shader...");
         self.run_shader(
-            "load_release_areas",
+            &ShaderName::LoadReleaseAreas,
             &[
                 self.get_view(TextureName::ReleaseAreasInput),
                 self.get_view(TextureName::ReleaseAreas),
@@ -414,7 +417,7 @@ impl ComputeOrchestrator {
             false,
         );
         self.run_shader(
-            "initialize_particles",
+            &ShaderName::InitializeParticles,
             &[
                 self.get_buffer_binding(BufferName::SimSettings),
                 self.get_buffer_binding(BufferName::SimInfo),
@@ -443,7 +446,7 @@ impl ComputeOrchestrator {
             false,
         );
         self.run_shader(
-            "initialize_particles",
+            &ShaderName::ComputeParticles,
             &[
                 self.get_buffer_binding(BufferName::SimSettings),
                 self.get_buffer_binding(BufferName::SimInfo),
@@ -620,5 +623,13 @@ mod tests {
         // orchestrator
         //     .save_grid("slope_aspect.bin", slope_aspect.clone())
         //     .expect("Failed to save slope_aspect");
+    }
+    
+    #[test_log::test]
+    fn test_shader_report_generation() {
+        let orchestrator = pollster::block_on(ComputeOrchestrator::new())
+            .expect("Failed to create ComputeOrchestrator");
+        orchestrator.generate_shader_report();
+        
     }
 }

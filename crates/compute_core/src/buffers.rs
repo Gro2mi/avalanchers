@@ -22,6 +22,7 @@ pub enum BufferName {
     SimSettings,
     Particles,
     ParticleIndex,
+    TimestepData,
 }
 
 impl BufferName {
@@ -39,7 +40,12 @@ impl BufferName {
             BufferName::SimSettings => "sim_settings",
             BufferName::Particles => "particles",
             BufferName::ParticleIndex => "particle_index",
+            BufferName::TimestepData => "timestep_data",
         }
+    }
+
+    pub fn to_string(&self) -> String {
+        self.to_str().to_string()
     }
 }
 impl std::fmt::Display for BufferName {
@@ -75,6 +81,10 @@ impl TextureName {
             TextureName::ReleaseAreasInput => "release_areas_input",
             TextureName::CellCount => "cell_count",
         }
+    }
+
+    pub fn to_string(&self) -> String {
+        self.to_str().to_string()
     }
 }
 impl std::fmt::Display for TextureName {
