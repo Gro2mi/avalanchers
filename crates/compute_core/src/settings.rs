@@ -256,7 +256,7 @@ mod tests {
     use tempfile::NamedTempFile;
 
     fn create_test_dem() -> Dem {
-        let mut dem = Dem::new();
+        let mut dem = Dem::default();
         dem.cell_size = 1.0;
         dem.width = 10;
         dem.height = 20;

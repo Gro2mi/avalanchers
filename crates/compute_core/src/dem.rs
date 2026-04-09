@@ -27,12 +27,6 @@ pub struct Dem {
 
 impl Default for Dem {
     fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Dem {
-    pub fn new() -> Self {
         Dem {
             width: 0,
             height: 0,
@@ -48,6 +42,23 @@ impl Dem {
             y: Vec::new(),
             cell_size: 1.0,
             map_factor: 1.0,
+        }
+    }
+}
+
+impl Dem {
+    pub fn new(path: &String) -> Self {
+        match Path::new(path).extension().and_then(|s| s.to_str()) {
+            Some(ext) if ext.eq_ignore_ascii_case("asc") => {
+                panic!("ASC format not supported yet");
+                // return Self::load_asc(path);
+            }
+            Some(ext) if ext.eq_ignore_ascii_case("png") => {
+                Self::load_png_as_float32(PathBuf::from(path))
+            }
+            _ => {
+                panic!("Unsupported DEM format: {:?}", Path::new(path).extension());
+            }
         }
     }
 
@@ -176,10 +187,11 @@ impl Dem {
 mod tests {
     use super::*;
     use std::f32::consts::PI;
+    const PARABOLA_PATH: &str = "../../data/avaframe/avaParabola.png";
 
     #[test_log::test]
     fn test_dem_new_defaults() {
-        let dem = Dem::new();
+        let dem = Dem::default();
         assert_eq!(dem.width, 0);
         assert_eq!(dem.height, 0);
         assert_eq!(dem.bounds.xmin, 0.0);
@@ -196,7 +208,7 @@ mod tests {
 
     #[test_log::test]
     fn test_get_index() {
-        let mut dem = Dem::new();
+        let mut dem = Dem::new(&PARABOLA_PATH.to_string());
         dem.bounds.xmin = 100.0;
         dem.bounds.xmax = 1000.0;
         dem.bounds.ymin = 300.0;

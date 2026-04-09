@@ -7,5 +7,6 @@ edition = "2024"
 compute_core = { workspace = true }
 data_processor = { workspace = true }
 clap = { workspace = true }
-anyhow = { workspace = true } # Need to add this as well
+anyhow = { workspace = true }
 tracing = { workspace = true}
+pollster = { workspace = true}

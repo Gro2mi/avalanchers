@@ -37,6 +37,7 @@ pub fn init_logging() {
     });
 }
 
+#[derive(Debug, Clone, Copy)]
 pub enum SimulationState {
     Uninitialized,
     DemLoaded,
@@ -50,6 +51,7 @@ pub enum SimulationState {
 pub struct Simulation {
     pub orchestrator: ComputeOrchestrator,
     pub sim_settings: settings::SimSettings,
+    pub dem_path: String,
     pub sim_info: SimInfo,
     pub dem: dem::Dem,
     pub normals: Vec<f32>,
@@ -59,6 +61,30 @@ pub struct Simulation {
     pub return_all_textures: bool,
     pub number_particles: usize,
     state: SimulationState,
+}
+
+impl Simulation {
+    pub async fn new(dem_path: String) -> Result<Self> {
+        let orchestrator = ComputeOrchestrator::new().await?;
+        let dem = dem::Dem::new(&dem_path);
+        Ok(Self {
+            orchestrator,
+            sim_settings: settings::SimSettings::default(),
+            dem_path,
+            sim_info: SimInfo::default(),
+            dem,
+            normals: Vec::new(),
+            slope: Vec::new(),
+            cell_count: Vec::new(),
+            max_velocity: Vec::new(),
+            return_all_textures: false,
+            number_particles: 0,
+            state: SimulationState::Uninitialized,
+        })
+    }
+    pub async fn get_state(&self) -> SimulationState {
+        self.state
+    }
 }
 
 #[repr(C)]
@@ -102,6 +128,17 @@ pub struct SimInfo {
     pub number_particles: u32,
     pub elevation_threshold: f32,
     pub max_velocity: f32,
+}
+
+impl Default for SimInfo {
+    fn default() -> Self {
+        Self {
+            timestep: 0,
+            number_particles: 0,
+            elevation_threshold: 0.0,
+            max_velocity: 0.0,
+        }
+    }
 }
 
 #[repr(C)]
@@ -207,7 +244,7 @@ impl ComputeOrchestrator {
         });
         let dispatch_workgroup_size_x_2d = 0;
         let dispatch_workgroup_size_y_2d = 0;
-        let dispatch_workgroup_size_1d = 0;
+        let dispatch_number_workgroups_1d = 0;
 
         Ok(Self {
             instance,
@@ -220,7 +257,7 @@ impl ComputeOrchestrator {
             sampler,
             dispatch_number_workgroups_x_2d: dispatch_workgroup_size_x_2d,
             dispatch_number_workgroups_y_2d: dispatch_workgroup_size_y_2d,
-            dispatch_workgroup_size_1d,
+            dispatch_number_workgroups_1d,
         })
     }
 
@@ -424,7 +461,7 @@ impl ComputeOrchestrator {
             .await
             .expect("Failed to read number_release_cells buffer")[0];
         // TODO calculate this in initialize particles once Simulation object is set up
-        self.dispatch_workgroup_size_1d = (number_release_cells
+        self.dispatch_number_workgroups_1d = (number_release_cells
             * sim_settings.released_particles_per_cell)
             .div_ceil(WorkgroupSize::SIZE_1D);
 
@@ -448,7 +485,7 @@ impl ComputeOrchestrator {
                 self.get_buffer_binding(BufferName::CellCountGrid),
                 self.get_buffer_binding(BufferName::MaxVelocityGrid),
             ],
-            self.dispatch_workgroup_size_1d,
+            self.dispatch_number_workgroups_1d,
             1,
             1,
         )
@@ -478,7 +515,7 @@ impl ComputeOrchestrator {
                 self.get_buffer_binding(BufferName::CellCountGrid),
                 self.get_buffer_binding(BufferName::MaxVelocityGrid),
             ],
-            self.dispatch_workgroup_size_1d,
+            self.dispatch_number_workgroups_1d,
             1,
             1,
         )

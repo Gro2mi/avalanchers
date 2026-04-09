@@ -2,9 +2,10 @@
 use anyhow::Result;
 use clap::Parser;
 use compute_core::{
+    Simulation,
     dem::Dem,
     settings::{Settings, SimSettings},
-}; // Import from your new crate
+}; // Import from
 use std::path::PathBuf;
 use std::{env, time::Instant};
 use tracing::{debug, error, info};
@@ -56,6 +57,9 @@ fn main() -> Result<()> {
     let sim_settings = SimSettings::from_settings(&settings, &dem);
     // sim_settings.set_dem(&dem);
     info!("Loaded simSettings: {:?}", sim_settings);
+
+    let mut simulation = pollster::block_on(Simulation::new(settings.dem_path.clone()))?;
+    simulation.number_particles = 4;
 
     // SimSettings::new()
     //     .to_json(file_path)
