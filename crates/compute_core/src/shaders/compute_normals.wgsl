@@ -1,4 +1,4 @@
-import utils.wgsl;
+// import utils.wgsl;
 
 @group(0) @binding(1) var dem_texture: texture_2d<f32>;
 @group(0) @binding(2) var wind_shelter_texture: texture_2d<f32>;
@@ -8,8 +8,7 @@ import utils.wgsl;
 @group(0) @binding(5) var<storage, read_write> debug: array<f32>;
 
 
-
-@compute @workgroup_size(WORKGROUP_SIZE_2D, WORKGROUP_SIZE_2D, 1)
+@compute @workgroup_size(16, 16, 1)
 fn compute_normals(@builtin(global_invocation_id) cell: vec3<u32>) {
     // exit if thread cell is outscelle image dimensions (i.e. thread is not supposed to be doing any work)
     if (cell.x >= sim_settings.grid_shape.x || cell.y >= sim_settings.grid_shape.y) {

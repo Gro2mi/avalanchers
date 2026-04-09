@@ -1,5 +1,5 @@
-import utils.wgsl;
-import random.wgsl;
+// import utils.wgsl;
+// import random.wgsl;
 
 @group(0) @binding(1) var<storage, read_write> sim_info: SimInfo;
 @group(0) @binding(2) var dem_texture: texture_2d<f32>;
@@ -14,7 +14,7 @@ import random.wgsl;
 // @group(0) @binding(10) var<storage, read_write> tracked_particle_ids: array<u32>;
 
 
-@compute @workgroup_size(WORKGROUP_SIZE_2D, WORKGROUP_SIZE_2D, 1)
+@compute @workgroup_size(16, 16, 1)
 fn initialize_particles(@builtin(global_invocation_id) cell: vec3<u32>) {
     let seed = 42u;
     if(cell.x == 0 && cell.y == 0) {

@@ -1,4 +1,4 @@
-import utils.wgsl;
+// import utils.wgsl;
 
 @group(0) @binding(1) var<storage, read_write> sim_info: SimInfo;
 @group(0) @binding(2) var<storage, read_write> max_velocity: AtomicValue;

@@ -1,4 +1,4 @@
-import utils.wgsl;
+// import utils.wgsl;
 
 // @group(0) @binding(0) var<uniform> sim_settings: sim_settings;
 @group(0) @binding(1) var dem_texture: texture_2d<f32>;
@@ -27,7 +27,7 @@ const broadleaf_evergreen_trees = vec4u(0, 255, 8, 255);
 //     return landcover_value > 0.5; // adjust threshold as needed
 // }
 
-@compute @workgroup_size(WORKGROUP_SIZE_2D, WORKGROUP_SIZE_2D, 1)
+@compute @workgroup_size(16, 16, 1)
 fn compute_release_areas(@builtin(global_invocation_id) id: vec3<u32>) {
     // exit if thread id is outside image dimensions (i.e. thread is not supposed to be doing any work)
     let texture_size = textureDimensions(release_areas_texture);

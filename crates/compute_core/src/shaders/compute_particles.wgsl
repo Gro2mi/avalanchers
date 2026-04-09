@@ -1,4 +1,4 @@
-import utils.wgsl;
+// import utils.wgsl;
 
 struct TimestepDataArray {
   trajectories: array<TimestepData, 3>,
@@ -31,13 +31,12 @@ struct TimestepData {
 @group(0) @binding(8) var<storage, read_write> atomic_velocity_buffer: array<atomic<u32>>; // trajectory texture
 @group(0) @binding(9) var<storage, read_write> out_timestep_data: array<TimestepDataArray>; // trajectory data, fixed size 3
 @group(0) @binding(10) var<storage, read_write> out_debug: array<f32>;
-
 // @group(0) @binding(11) var<storage, read_write> atomicBuffer: AtomicData;
 
-const density: f32 = 200.0;
-var<workgroup> sharedMaxVelocity: array<f32, WORKGROUP_SIZE_1D>;
 
-@compute @workgroup_size(WORKGROUP_SIZE_1D)
+const density: f32 = 200.0;
+
+@compute @workgroup_size(64)
 fn compute_particles(
     @builtin(global_invocation_id) pId: vec3<u32>, 
     @builtin(local_invocation_id) lId: vec3<u32>) {
@@ -71,10 +70,10 @@ fn compute_particles(
         out_debug[15] = f32(sim_settings.world_size.y);
         out_debug[16] = f32(sim_settings.world_size.x);
     }
-    let normal = getNormal(uv);
+    let normal = get_normal(uv);
     particle.velocity = particle.velocity - dot(particle.velocity, normal) * normal; 
     
-    // let curvature_acceleration = getCurvature(uv) * length(particle.velocity) * length(particle.velocity);
+    // let curvature_acceleration = get_curvature(uv) * length(particle.velocity) * length(particle.velocity);
     const acceleration_gravity = vec3f(0.0, 0.0, -g);
     let acceleration_normal = g * normal.z * normal;
 
@@ -267,10 +266,10 @@ fn get_normal_and_curvature(uv: vec2f) -> vec4f {
     return textureSampleLevel(normals_texture, tex_sampler, uv, 0); // convert from [0, 1] to [-1, 1
 }
 
-fn getNormal(uv: vec2f) -> vec3f {
+fn get_normal(uv: vec2f) -> vec3f {
     return get_normal_and_curvature(uv).xyz;
 }
-fn getCurvature(uv: vec2f) -> f32 {
+fn get_curvature(uv: vec2f) -> f32 {
     return get_normal_and_curvature(uv).w;
 }
 

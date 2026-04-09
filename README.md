@@ -25,31 +25,62 @@ Requirements: Python (or Webserver), Browser with [WebGPU support](https://caniu
 
 ## Development Setup
 
+### Windows
+
 Install Rust, follow guide: [https://rust-lang.org/tools/install/]()
+Install Python
 
 ```
+# wasm bindings
+cargo install wasm-bindgen-cli
+cargo install wasm-pack
+
+# coverage
+cargo install cargo-tarpaulin
+
 # python bindings
 python -m venv .venv
-source .venv/bin/activate
+.venv\Scripts\Activate.ps1  
 python -m pip install maturin
+
+```
+
+### Linux
+
+#### Install dependencies
+
+Install Rust, follow guide: [https://rust-lang.org/tools/install/]() (WSL (2026.04.04): `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`)
+Install Python
+
+```
+sudo apt update
+sudo apt install -y python3-venv python3-dev build-essential clang lld pkg-config libssl-dev
 
 # wasm bindings
 cargo install wasm-bindgen-cli
+cargo install wasm-pack
 
+# python bindings
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install maturin
 ```
 
 ## Build
 
 ```
+
 # cli tool
+
 cargo build -p cli --release
 
 # python bindings
+
 maturin develop
 
 # wasm bindings
-wasm-pack build crates/wasm_bindings --target web --out-dir ../../frontend/js/pkg
 
+wasm-pack build crates/wasm_bindings --target web --out-dir ../../frontend/js/pkg
 
 ```
 

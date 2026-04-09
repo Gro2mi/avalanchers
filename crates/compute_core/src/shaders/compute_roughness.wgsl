@@ -1,11 +1,11 @@
-import utils.wgsl;
+// import utils.wgsl;
 
 @group(0) @binding(1) var normals_texture: texture_2d<f32>;
 @group(0) @binding(2) var forest_texture: texture_2d<u32>;
 @group(0) @binding(3) var roughness_texture: texture_storage_2d<rgba32float, write>;
 
 
-@compute @workgroup_size(WORKGROUP_SIZE_2D, WORKGROUP_SIZE_2D, 1)
+@compute @workgroup_size(16, 16, 1)
 fn compute_roughness(@builtin(global_invocation_id) id: vec3<u32>) {
     let threshold = sim_settings.roughness_threshold;
     let cell = id.xy;

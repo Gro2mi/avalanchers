@@ -11,7 +11,7 @@ use wgpu::{
 };
 
 use crate::buffers::{BufferName, TextureName};
-pub const SHADER_UTILS: &str = include_str!("../wgsl/utils.wgsl");
+pub const SHADER_UTILS: &str = include_str!("shaders/utils.wgsl");
 
 #[derive(Eq, Hash, PartialEq, Clone)]
 pub enum ShaderName {
@@ -37,6 +37,7 @@ impl ShaderName {
         }
     }
 }
+
 impl std::fmt::Display for ShaderName {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.to_str())
@@ -44,31 +45,22 @@ impl std::fmt::Display for ShaderName {
 }
 
 fn read_shader_source(name: &str) -> String {
-    let path = format!("wgsl/{}.wgsl", name);
-
+    let path = format!("src/shaders/{}.wgsl", name);
     fs::read_to_string(&path).unwrap_or_else(|_| panic!("Failed to read shader file {}", &path))
 }
-fn load_shader_source_string(
-    name: &str,
-    workgroup_size_1d: u32,
-    workgroup_size_2d: u32,
-) -> &'static str {
-    let import_re = Regex::new(r#"import\s+([a-zA-Z0-9_./-]+)\.wgsl"#).unwrap();
-    let shader_source = read_shader_source(name)
-        .replace("WORKGROUP_SIZE_1D", &workgroup_size_1d.to_string())
-        .replace("WORKGROUP_SIZE_2D", &workgroup_size_2d.to_string());
+
+fn load_shader_source_string(name: &str) -> &'static str {
+    let import_re = Regex::new(r#"//\s+import\s+([a-zA-Z0-9_./-]+)\.wgsl"#).unwrap();
+    let shader_source = read_shader_source(name);
     let processed = import_re.replace_all(&shader_source, |caps: &regex::Captures| {
         let import_name = &caps[1];
-        load_shader_source_string(import_name, workgroup_size_1d, workgroup_size_2d)
+        load_shader_source_string(import_name)
     });
     Box::leak(processed.into_owned().into_boxed_str())
 }
-fn load_shader_source(
-    name: ShaderName,
-    workgroup_size_1d: u32,
-    workgroup_size_2d: u32,
-) -> &'static str {
-    load_shader_source_string(name.to_str(), workgroup_size_1d, workgroup_size_2d)
+
+fn load_shader_source(name: ShaderName) -> &'static str {
+    load_shader_source_string(name.to_str())
 }
 
 // pub const SHADER_COMPUTE_NORMALS: &str = concat!(
@@ -140,7 +132,7 @@ impl ComputeShaderConfig {
             label: Some(&format!("{} Compute Pipeline", name)),
             layout: Some(&pipeline_layout),
             module: &shader_module,
-            entry_point: Some(&name.to_str()),
+            entry_point: Some(name.to_str()),
             compilation_options: Default::default(),
             cache: None,
         });
@@ -177,8 +169,6 @@ impl ComputeShaderConfig {
 
 pub fn create_shader_configs(
     device: &Device,
-    workgroup_size_1d: u32,
-    workgroup_size_2d: u32,
 ) -> Result<std::collections::HashMap<ShaderName, ComputeShaderConfig>> {
     let mut shader_configs = std::collections::HashMap::new();
     shader_configs.insert(
@@ -186,11 +176,7 @@ pub fn create_shader_configs(
         ComputeShaderConfig::new(
             device,
             ShaderName::ComputeNormals,
-            load_shader_source(
-                ShaderName::ComputeNormals,
-                workgroup_size_1d,
-                workgroup_size_2d,
-            ),
+            load_shader_source(ShaderName::ComputeNormals),
             &[
                 // Binding 0: Uniform buffer (sim_settings_buffer)
                 (
@@ -256,11 +242,7 @@ pub fn create_shader_configs(
         ComputeShaderConfig::new(
             device,
             ShaderName::LoadReleaseAreas,
-            load_shader_source(
-                ShaderName::LoadReleaseAreas,
-                workgroup_size_1d,
-                workgroup_size_2d,
-            ),
+            load_shader_source(ShaderName::LoadReleaseAreas),
             &[
                 // Binding 0:
                 (
@@ -307,11 +289,7 @@ pub fn create_shader_configs(
         ComputeShaderConfig::new(
             device,
             ShaderName::ComputeRoughness,
-            load_shader_source(
-                ShaderName::ComputeRoughness,
-                workgroup_size_1d,
-                workgroup_size_2d,
-            ),
+            load_shader_source(ShaderName::ComputeRoughness),
             &[
                 // Binding 0:
                 (
@@ -359,11 +337,7 @@ pub fn create_shader_configs(
         ComputeShaderConfig::new(
             device,
             ShaderName::ComputeReleaseAreas,
-            load_shader_source(
-                ShaderName::ComputeReleaseAreas,
-                workgroup_size_1d,
-                workgroup_size_2d,
-            ),
+            load_shader_source(ShaderName::ComputeReleaseAreas),
             &[
                 // Binding 0:
                 (
@@ -437,11 +411,7 @@ pub fn create_shader_configs(
         ComputeShaderConfig::new(
             device,
             ShaderName::InitializeParticles,
-            load_shader_source(
-                ShaderName::InitializeParticles,
-                workgroup_size_1d,
-                workgroup_size_2d,
-            ),
+            load_shader_source(ShaderName::InitializeParticles),
             &[
                 // Binding 0: Uniform buffer
                 (
@@ -528,11 +498,7 @@ pub fn create_shader_configs(
         ComputeShaderConfig::new(
             device,
             ShaderName::ComputeParticles,
-            load_shader_source(
-                ShaderName::ComputeParticles,
-                workgroup_size_1d,
-                workgroup_size_2d,
-            ),
+            load_shader_source(ShaderName::ComputeParticles),
             &[
                 // Binding 0:
                 (
@@ -637,11 +603,7 @@ pub fn create_shader_configs(
         ComputeShaderConfig::new(
             device,
             ShaderName::ResetMaxVelocity,
-            load_shader_source(
-                ShaderName::ResetMaxVelocity,
-                workgroup_size_1d,
-                workgroup_size_2d,
-            ),
+            load_shader_source(ShaderName::ResetMaxVelocity),
             &[
                 // Binding 0:
                 (
@@ -772,4 +734,3 @@ pub fn generate_shader_report(
     std::fs::write("shader_report.html", &html).expect("Unable to write shader report to file.");
     html
 }
-

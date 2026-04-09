@@ -26,7 +26,7 @@ static INIT: Once = Once::new();
 /// Initializes the global tracing subscriber.
 /// Safe to call multiple times; subsequent calls do nothing.
 pub fn init_logging() {
-    let filter = EnvFilter::new("warn,compute_core=debug,data_processor=debug,cli=debug");
+    let filter = EnvFilter::new("warn,compute_core=trace,data_processor=debug,cli=debug");
     INIT.call_once(|| {
         tracing_subscriber::registry()
             .with(fmt::layer().with_target(false)) // Clean console output
@@ -35,6 +35,30 @@ pub fn init_logging() {
 
         info!("Simulation logging initialized");
     });
+}
+
+pub enum SimulationState {
+    Uninitialized,
+    DemLoaded,
+    NormalsComputed,
+    ReleaseAreasComputed,
+    ParticlesInitialized,
+    Running,
+    Finished,
+}
+
+pub struct Simulation {
+    pub orchestrator: ComputeOrchestrator,
+    pub sim_settings: settings::SimSettings,
+    pub sim_info: SimInfo,
+    pub dem: dem::Dem,
+    pub normals: Vec<f32>,
+    pub slope: Vec<f32>,
+    pub cell_count: Vec<u32>,
+    pub max_velocity: Vec<f32>,
+    pub return_all_textures: bool,
+    pub number_particles: usize,
+    state: SimulationState,
 }
 
 #[repr(C)]
@@ -96,20 +120,25 @@ pub struct TimestepData {
     pub g_eff: f32,                           // 4 bytes
     pub _pad1: f32,                           // 4 bytes (padding to 96 bytes)
 }
-#[expect(dead_code)]
+
+pub struct WorkgroupSize {}
+impl WorkgroupSize {
+    const SIZE_1D: u32 = 64;
+    const SIZE_2D: u32 = 16;
+}
+
 pub struct ComputeOrchestrator {
     pub instance: Instance,
     pub adapter: Adapter,
     pub device: Device,
     pub queue: Queue,
-    pub workgroup_size_1d: u32,
-    pub workgroup_size_2d: u32,
     pub buffers: ComputeBuffers,
     pub sampler: Sampler,
     texture_size: Extent3d,
     shader_configs: HashMap<ShaderName, ComputeShaderConfig>,
-    dispatch_workgroup_size_1d: u32,
-    dispatch_workgroup_size_2d: u32,
+    dispatch_number_workgroups_x_2d: u32,
+    dispatch_number_workgroups_y_2d: u32,
+    dispatch_number_workgroups_1d: u32,
 }
 
 impl ComputeOrchestrator {
@@ -128,22 +157,23 @@ impl ComputeOrchestrator {
         trace!("Adapter limits: {:?}", adapter.limits());
 
         debug!("Adapter: {:?}", adapter);
-        let workgroup_size_2d = utils::highest_power_of_two(
-            (adapter.limits().max_compute_workgroup_size_x as f64).sqrt() as u32,
-        );
-        debug!("Workgroup size 2D: {}", workgroup_size_2d);
-        let max_invocations = adapter.limits().max_compute_invocations_per_workgroup;
-        let workgroup_size_1d = max_invocations;
+        // let workgroup_size_2d = utils::highest_power_of_two(
+        //     (adapter.limits().max_compute_workgroup_size_x as f64).sqrt() as u32,
+        // );
+        // debug!("Workgroup size 2D: {}", workgroup_size_2d);
+        // let max_invocations = adapter.limits().max_compute_invocations_per_workgroup;
+        // let workgroup_size_1d = max_invocations;
         let max_storage = adapter.limits().max_storage_buffer_binding_size;
         let (device, queue) = adapter
             .request_device(&DeviceDescriptor {
                 label: Some("Compute Device"),
                 required_features: Features::FLOAT32_FILTERABLE | Features::TIMESTAMP_QUERY,
                 required_limits: Limits {
-                    max_compute_workgroup_size_x: workgroup_size_1d,
-                    max_compute_workgroup_size_y: workgroup_size_2d,
+                    max_compute_workgroup_size_x: WorkgroupSize::SIZE_1D,
+                    max_compute_workgroup_size_y: WorkgroupSize::SIZE_2D,
                     max_compute_workgroup_size_z: 1,
-                    max_compute_invocations_per_workgroup: max_invocations,
+                    max_compute_invocations_per_workgroup: WorkgroupSize::SIZE_2D
+                        * WorkgroupSize::SIZE_2D, // 256
                     max_storage_buffer_binding_size: max_storage,
                     ..Limits::default()
                 },
@@ -155,8 +185,7 @@ impl ComputeOrchestrator {
             .expect("Failed to create device and queue");
 
         let buffers = ComputeBuffers::new();
-        let shader_configs =
-            shaders::create_shader_configs(&device, workgroup_size_1d, workgroup_size_2d)?;
+        let shader_configs = shaders::create_shader_configs(&device)?;
         let texture_size = Extent3d {
             width: 4,
             height: 4,
@@ -176,28 +205,34 @@ impl ComputeOrchestrator {
             anisotropy_clamp: 1,
             border_color: None,
         });
+        let dispatch_workgroup_size_x_2d = 0;
+        let dispatch_workgroup_size_y_2d = 0;
+        let dispatch_workgroup_size_1d = 0;
 
         Ok(Self {
             instance,
             adapter,
             device,
             queue,
-            workgroup_size_1d,
-            workgroup_size_2d,
             buffers,
             shader_configs,
             texture_size,
             sampler,
-            dispatch_workgroup_size_2d: workgroup_size_2d,
-            dispatch_workgroup_size_1d: workgroup_size_1d,
+            dispatch_number_workgroups_x_2d: dispatch_workgroup_size_x_2d,
+            dispatch_number_workgroups_y_2d: dispatch_workgroup_size_y_2d,
+            dispatch_workgroup_size_1d,
         })
     }
+
+    #[allow(dead_code)]
     fn generate_shader_report(&self) -> String {
         generate_shader_report(&self.shader_configs)
     }
+
     fn get_sampler(&self) -> BindingResource<'_> {
         BindingResource::Sampler(&self.sampler)
     }
+
     fn get_view(&self, name: TextureName) -> BindingResource<'_> {
         let view = self
             .buffers
@@ -220,13 +255,13 @@ impl ComputeOrchestrator {
         &self,
         shader_name: &ShaderName,
         resources: &[BindingResource<'_>], // Pass actual resources (buffer bindings or texture views)
-        dispatch_workgroup_x: u32,
-        dispatch_workgroup_y: u32,
-        dispatch_workgroup_z: u32,
+        dispatch_number_workgroups_x: u32,
+        dispatch_number_workgroups_y: u32,
+        dispatch_number_workgroups_z: u32,
     ) -> Result<()> {
-        assert_ne!(dispatch_workgroup_x, 0);
-        assert_ne!(dispatch_workgroup_y, 0);
-        assert_ne!(dispatch_workgroup_z, 0);
+        assert_ne!(dispatch_number_workgroups_x, 0);
+        assert_ne!(dispatch_number_workgroups_y, 0);
+        assert_ne!(dispatch_number_workgroups_z, 0);
         let config = self
             .shader_configs
             .get(shader_name)
@@ -247,47 +282,9 @@ impl ComputeOrchestrator {
             compute_pass.set_pipeline(&config.pipeline);
             compute_pass.set_bind_group(0, &bind_group, &[]);
             compute_pass.dispatch_workgroups(
-                dispatch_workgroup_x,
-                dispatch_workgroup_y,
-                dispatch_workgroup_z,
-            );
-        }
-        self.queue.submit(Some(encoder.finish()));
-
-        Ok(())
-    }
-
-    pub async fn run_normals_shader(
-        &self,
-        shader_name: &ShaderName,
-        resources: &[BindingResource<'_>], // Pass actual resources (buffer bindings or texture views)
-        dispatch_workgroup_x: u32,
-        dispatch_workgroup_y: u32,
-        dispatch_workgroup_z: u32,
-    ) -> Result<()> {
-        let config = self
-            .shader_configs
-            .get(shader_name)
-            .ok_or_else(|| anyhow!("Shader '{}' not found", shader_name))?;
-
-        let bind_group = config.create_bind_group(&self.device, resources)?;
-
-        let mut encoder = self
-            .device
-            .create_command_encoder(&CommandEncoderDescriptor {
-                label: Some("Compute Encoder"),
-            });
-        {
-            let mut compute_pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some(&format!("{} Pass", shader_name)),
-                timestamp_writes: None,
-            });
-            compute_pass.set_pipeline(&config.pipeline);
-            compute_pass.set_bind_group(0, &bind_group, &[]);
-            compute_pass.dispatch_workgroups(
-                dispatch_workgroup_x,
-                dispatch_workgroup_y,
-                dispatch_workgroup_z,
+                dispatch_number_workgroups_x,
+                dispatch_number_workgroups_y,
+                dispatch_number_workgroups_z,
             );
         }
         self.queue.submit(Some(encoder.finish()));
@@ -309,7 +306,7 @@ impl ComputeOrchestrator {
     }
 
     pub async fn run_normals(
-        &mut self, // `&mut self` because we're adding textures
+        &mut self,
         sim_settings: &settings::SimSettings,
         dem: &dem::Dem,
     ) -> Result<()> {
@@ -319,8 +316,10 @@ impl ComputeOrchestrator {
             depth_or_array_layers: 1,
         };
 
-        self.dispatch_workgroup_size_2d =
-            sim_settings.grid_shape_x.div_ceil(self.workgroup_size_2d);
+        self.dispatch_number_workgroups_x_2d =
+            sim_settings.grid_shape_x.div_ceil(WorkgroupSize::SIZE_2D);
+        self.dispatch_number_workgroups_y_2d =
+            sim_settings.grid_shape_y.div_ceil(WorkgroupSize::SIZE_2D);
 
         self.buffers = create_buffers_and_texture_descriptions(&self.device, self.texture_size);
 
@@ -362,18 +361,25 @@ impl ComputeOrchestrator {
                 self.get_view(TextureName::Slope),
                 self.get_buffer_binding(BufferName::OutDebugNormals),
             ],
-            self.dispatch_workgroup_size_2d,
-            self.dispatch_workgroup_size_2d,
+            self.dispatch_number_workgroups_x_2d,
+            self.dispatch_number_workgroups_y_2d,
             1,
         )
         .await?;
         Ok(())
     }
+
     pub async fn run_load_release_areas(
         &mut self, // `&mut self` because we're adding textures
         data: &[u8],
+        sim_settings: &settings::SimSettings,
     ) -> Result<u32> {
         let texture_usage_input = TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST;
+
+        self.dispatch_number_workgroups_x_2d =
+            sim_settings.grid_shape_x.div_ceil(WorkgroupSize::SIZE_2D);
+        self.dispatch_number_workgroups_y_2d =
+            sim_settings.grid_shape_y.div_ceil(WorkgroupSize::SIZE_2D);
 
         self.buffers
             .add_texture_with_data(
@@ -392,11 +398,11 @@ impl ComputeOrchestrator {
             &[
                 self.get_view(TextureName::ReleaseAreasInput),
                 self.get_view(TextureName::ReleaseAreas),
-                self.get_buffer_binding(BufferName::OutDebugRelease),
                 self.get_buffer_binding(BufferName::NumberReleaseCells),
+                self.get_buffer_binding(BufferName::OutDebugRelease),
             ],
-            self.dispatch_workgroup_size_2d,
-            self.dispatch_workgroup_size_2d,
+            self.dispatch_number_workgroups_x_2d,
+            self.dispatch_number_workgroups_y_2d,
             1,
         )
         .await?;
@@ -407,8 +413,21 @@ impl ComputeOrchestrator {
             .expect("Failed to read number_release_cells buffer")[0];
         Ok(number_release_cells)
     }
-    pub async fn run_initialize_particles(&mut self) -> Result<()> {
+
+    pub async fn run_initialize_particles(
+        &mut self,
+        sim_settings: &settings::SimSettings,
+    ) -> Result<()> {
         debug!("Running texture processing shader...");
+        let number_release_cells: u32 = self
+            .read_buffer::<u32>(BufferName::NumberReleaseCells)
+            .await
+            .expect("Failed to read number_release_cells buffer")[0];
+        // TODO calculate this in initialize particles once Simulation object is set up
+        self.dispatch_workgroup_size_1d = (number_release_cells
+            * sim_settings.released_particles_per_cell)
+            .div_ceil(WorkgroupSize::SIZE_1D);
+
         self.buffers.add_buffer_with_data(
             &self.device,
             BufferName::ParticleIndex,
@@ -429,13 +448,14 @@ impl ComputeOrchestrator {
                 self.get_buffer_binding(BufferName::CellCountGrid),
                 self.get_buffer_binding(BufferName::MaxVelocityGrid),
             ],
-            self.workgroup_size_2d,
-            self.workgroup_size_2d,
+            self.dispatch_workgroup_size_1d,
+            1,
             1,
         )
         .await?;
         Ok(())
     }
+
     pub async fn run_compute_particles(&mut self) -> Result<()> {
         debug!("Running texture processing shader...");
         self.buffers.add_buffer_with_data(
@@ -458,8 +478,8 @@ impl ComputeOrchestrator {
                 self.get_buffer_binding(BufferName::CellCountGrid),
                 self.get_buffer_binding(BufferName::MaxVelocityGrid),
             ],
-            self.workgroup_size_2d,
-            self.workgroup_size_2d,
+            self.dispatch_workgroup_size_1d,
+            1,
             1,
         )
         .await?;
@@ -577,7 +597,7 @@ mod tests {
             .create_buffers_and_texture_descriptions(&sim_settings)
             .expect("Failed to create buffers and texture descriptions");
         let number_release_cells: u32 =
-            pollster::block_on(orchestrator.run_load_release_areas(&data))
+            pollster::block_on(orchestrator.run_load_release_areas(&data, &sim_settings))
                 .expect("Failed to run load_release_areas shader");
         let (release_thickness, _, _, _) =
             pollster::block_on(orchestrator.read_texture::<f32>(TextureName::ReleaseAreas))
@@ -601,7 +621,7 @@ mod tests {
             .expect("Failed to run normals shader");
         let (data, _, _) = read_png(&Path::new(RELEASE_TEXTURE_PATH)).expect("Failed to read PNG");
         let number_release_cells: u32 =
-            pollster::block_on(orchestrator.run_load_release_areas(&data))
+            pollster::block_on(orchestrator.run_load_release_areas(&data, &sim_settings))
                 .expect("Failed to run load_release_areas shader");
         assert_eq!(number_release_cells, 3245);
         let number_particles =
@@ -613,7 +633,7 @@ mod tests {
             BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
         );
         info!("Read number_release_cells: {:?}", number_release_cells);
-        pollster::block_on(orchestrator.run_initialize_particles())
+        pollster::block_on(orchestrator.run_initialize_particles(&sim_settings))
             .expect("Failed to run initialize_particles shader");
 
         // pollster::block_on(orchestrator.comp())
@@ -624,12 +644,11 @@ mod tests {
         //     .save_grid("slope_aspect.bin", slope_aspect.clone())
         //     .expect("Failed to save slope_aspect");
     }
-    
+
     #[test_log::test]
     fn test_shader_report_generation() {
         let orchestrator = pollster::block_on(ComputeOrchestrator::new())
             .expect("Failed to create ComputeOrchestrator");
         orchestrator.generate_shader_report();
-        
     }
 }

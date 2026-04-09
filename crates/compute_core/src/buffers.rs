@@ -43,16 +43,14 @@ impl BufferName {
             BufferName::TimestepData => "timestep_data",
         }
     }
-
-    pub fn to_string(&self) -> String {
-        self.to_str().to_string()
-    }
 }
+
 impl std::fmt::Display for BufferName {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.to_str())
     }
 }
+
 #[derive(Eq, Hash, PartialEq, Clone)]
 pub enum TextureName {
     Wind,
@@ -82,11 +80,8 @@ impl TextureName {
             TextureName::CellCount => "cell_count",
         }
     }
-
-    pub fn to_string(&self) -> String {
-        self.to_str().to_string()
-    }
 }
+
 impl std::fmt::Display for TextureName {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.to_str())
