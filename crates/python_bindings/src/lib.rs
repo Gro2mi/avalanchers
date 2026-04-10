@@ -103,6 +103,16 @@ impl PySimulation {
 
         Ok((rx, ry, rz, rw))
     }
+
+    pub fn get_dem_numpy<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        let dims = [self.inner.dem.height, self.inner.dem.width];
+        self.inner
+            .dem
+            .data1d
+            .to_pyarray(py)
+            .reshape(dims)
+            .map_err(to_val_err)
+    }
 }
 
 type PyTexture<'py> = (

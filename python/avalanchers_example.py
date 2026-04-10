@@ -6,7 +6,7 @@ sim = avalanchers.PySimulation.create_default("data/avaframe/avaMal.png")
 sim.run()
 normals_x = sim.get_normals_numpy()[0]
 
-z_data = normals_x
+z_data = sim.get_dem_numpy()
 rows, cols = z_data.shape # 1001, 401
 x = np.linspace(0, cols - 1, cols)
 y = np.linspace(0, rows - 1, rows)
