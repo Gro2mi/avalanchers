@@ -13,7 +13,7 @@ numpy = { workspace = true }
 ndarray = { workspace = true }
 pyo3-log = { workspace = true }
 tracing = { workspace = true }
-
+pollster = { workspace = true }
 
 compute_core = { workspace = true }
 data_processor = { workspace = true }

@@ -93,8 +93,18 @@ impl Simulation {
         simulation.dem_path = dem_path.clone();
         simulation.dem = dem::Dem::new(&dem_path);
         simulation.settings = settings;
+        simulation.settings.set_dem(&simulation.dem);
         simulation.state = SimulationState::Ready;
+        debug!(
+            "Created simulation with DEM path: {}, settings: {:?}",
+            simulation.dem_path, simulation.settings
+        );
         Ok(simulation)
+    }
+
+    pub async fn create_default(dem_path: String) -> Result<Self> {
+        let sim_settings = settings::SimSettings::default();
+        Self::create(dem_path, sim_settings).await
     }
 
     pub async fn run(&mut self) -> Result<()> {
@@ -147,6 +157,20 @@ impl Simulation {
             .await?;
         self.state = SimulationState::ParticlesInitialized;
         Ok(())
+    }
+
+    async fn get_texture_data<T: bytemuck::Pod + Send + Sync>(
+        &self,
+        name: TextureName,
+    ) -> Result<(Vec<T>, Vec<T>, Vec<T>, Vec<T>)> {
+        self.orchestrator.read_texture(name).await
+    }
+    pub async fn get_normals_texture(&self) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>)> {
+        assert!(
+            self.state >= SimulationState::NormalsComputed,
+            "Normals must be computed before reading normals texture"
+        );
+        self.get_texture_data(TextureName::Normals).await
     }
 }
 
@@ -255,7 +279,7 @@ impl ComputeOrchestrator {
 
         let max_storage = adapter.limits().max_storage_buffer_binding_size;
         let info = adapter.get_info();
-        info!("GPU Name     : {}", info.name);
+        info!("GPU Name    : {}", info.name);
         debug!("Driver      : {}", info.driver);
         debug!("Backend     : {:?}", info.backend);
         debug!("Device Type : {:?}", info.device_type);
@@ -371,9 +395,18 @@ impl ComputeOrchestrator {
         dispatch_number_workgroups_y: u32,
         dispatch_number_workgroups_z: u32,
     ) -> Result<()> {
-        assert_ne!(dispatch_number_workgroups_x, 0);
-        assert_ne!(dispatch_number_workgroups_y, 0);
-        assert_ne!(dispatch_number_workgroups_z, 0);
+        assert_ne!(
+            dispatch_number_workgroups_x, 0,
+            "dispatch_number_workgroups_x must be greater than 0, check your settings"
+        );
+        assert_ne!(
+            dispatch_number_workgroups_y, 0,
+            "dispatch_number_workgroups_y must be greater than 0, check your settings"
+        );
+        assert_ne!(
+            dispatch_number_workgroups_z, 0,
+            "dispatch_number_workgroups_z must be greater than 0, check your settings"
+        );
         let config = self
             .shader_configs
             .get(shader_name)
@@ -503,7 +536,6 @@ impl ComputeOrchestrator {
                 texture_usage_input,
             )
             .expect("Failed to add texture with data");
-        debug!("Loading release areas");
         self.run_shader(
             &ShaderName::LoadReleaseAreas,
             &[
