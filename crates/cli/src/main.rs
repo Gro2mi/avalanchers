@@ -8,7 +8,7 @@ use compute_core::{
 }; // Import from
 use std::path::PathBuf;
 use std::{env, time::Instant};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 #[derive(Parser, Debug)]
 #[command(name = "Avalanche Simulation")]
@@ -39,7 +39,12 @@ fn main() -> Result<()> {
             PathBuf::from("settings.json")
         }
         None => {
-            error!("Warning: No file path provided. Using settings.json instead.");
+            warn!(
+                "No file path provided. Using {}/settings.json instead.",
+                env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .display()
+            );
             PathBuf::from("settings.json")
         }
     };
@@ -58,8 +63,10 @@ fn main() -> Result<()> {
     // sim_settings.set_dem(&dem);
     info!("Loaded simSettings: {:?}", sim_settings);
 
-    let mut simulation = pollster::block_on(Simulation::new(settings.dem_path.clone()))?;
-    simulation.number_particles = 4;
+    let mut simulation: Simulation =
+        pollster::block_on(Simulation::create(settings.dem_path.clone(), sim_settings))?;
+
+    pollster::block_on(simulation.run())?;
 
     // SimSettings::new()
     //     .to_json(file_path)

@@ -62,20 +62,12 @@ jobs:
           ls /usr/share/vulkan/icd.d/
           vulkaninfo --summary
 
-      - name: Install wasm-pack
-        if: matrix.os == 'ubuntu-latest'
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
-
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
 
       - name: Install Dependencies (Linux)
         if: matrix.os == 'ubuntu-latest'
         run: sudo apt-get update -qq && sudo apt-get install -y -qq llvm-dev libclang-dev python3-dev
-
-      - name: Build WASM (Ubuntu Only)
-        if: matrix.os == 'ubuntu-latest'
-        run: wasm-pack build crates/wasm_bindings --target web --release --out-dir wasm_dist
 
       - name: Check & Test
         env:
@@ -133,6 +125,18 @@ jobs:
           path: coverage_report/
 
 
+
+      - name: Install wasm-pack
+        if: matrix.os == 'ubuntu-latest'
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+        # The core binder (This is the most active part of the org)
+        # cargo install wasm-bindgen-cli
+
+        # The optimization engine (Faster than the one built into wasm-pack)
+        # cargo install wasm-opt
+
+        # The metadata/component tool
+        # cargo install wasm-tools
       # --- ARTIFACT GENERATION ---
 
       - name: Build CLI Binary
@@ -155,6 +159,19 @@ jobs:
         with:
           command: build
           args: --release --out dist --find-interpreter
+
+          
+      - name: Build WASM (Ubuntu Only)
+        if: matrix.os == 'ubuntu-latest'
+        run: wasm-pack build crates/wasm_bindings --target web --release --out-dir wasm_dist
+            # 1. Compile to wasm
+            # cargo build --target wasm32-unknown-unknown --release
+
+            # 2. Generate JS glue (The wasm-bindgen step)
+            # wasm-bindgen ./target/wasm32-unknown-unknown/release/avalanchers.wasm --out-dir ./pkg --target web
+
+            # 3. Optimize (The wasm-opt step)
+            # wasm-opt -Oz ./pkg/avalanchers_bg.wasm -o ./pkg/avalanchers_bg.wasm
 
       # --- UPLOAD ---
       - name: Prepare Artifacts for Upload

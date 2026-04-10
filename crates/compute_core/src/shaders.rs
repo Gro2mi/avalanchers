@@ -1,16 +1,16 @@
 use std::fs;
 use std::num::NonZero;
 
+use crate::buffers::{BufferName, TextureName};
 use anyhow::Result;
 use regex::Regex;
+use tracing::debug;
 use wgpu::{
     BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindingType, BufferBindingType, ComputePipeline,
     ComputePipelineDescriptor, Device, PipelineLayoutDescriptor, ShaderModuleDescriptor,
     ShaderSource, ShaderStages, StorageTextureAccess, TextureFormat, TextureViewDimension,
 };
-
-use crate::buffers::{BufferName, TextureName};
 pub const SHADER_UTILS: &str = include_str!("shaders/utils.wgsl");
 
 #[derive(Eq, Hash, PartialEq, Clone)]
@@ -45,8 +45,14 @@ impl std::fmt::Display for ShaderName {
 }
 
 fn read_shader_source(name: &str) -> String {
-    let path = format!("src/shaders/{}.wgsl", name);
-    fs::read_to_string(&path).unwrap_or_else(|_| panic!("Failed to read shader file {}", &path))
+    // let path = format!("src/shaders/{}.wgsl", name);
+    let base_path = env!("CARGO_MANIFEST_DIR");
+    let path = std::path::PathBuf::from(base_path)
+        .join("src")
+        .join("shaders")
+        .join(format!("{}.wgsl", name));
+    debug!("Reading shader from path: {:?}", path);
+    fs::read_to_string(&path).unwrap_or_else(|_| panic!("Failed to read shader file {:?}", &path))
 }
 
 fn load_shader_source_string(name: &str) -> &'static str {

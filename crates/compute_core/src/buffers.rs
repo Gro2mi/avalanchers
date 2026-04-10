@@ -10,19 +10,25 @@ use wgpu::{
 
 #[derive(Eq, Hash, PartialEq, Clone)]
 pub enum BufferName {
-    OutDebugNormals,
-    OutDebugRelease,
+    /// Number of cells that release after computing/loading release areas
     NumberReleaseCells,
+    /// Number of particles to initialize after computing/loading release areas
     NumberReleaseParticles,
     SimInfo,
-    NumberParticles,
+    /// Index for initializing particles using atomicAdd in the shader
+    ParticleIndex,
+    // atomic grids
     CellCountGrid,
     VelocityGrid,
     MaxVelocityGrid,
+    // settings/initialization dependent buffers
     SimSettings,
     Particles,
-    ParticleIndex,
+    /// timestep data of the 0 index particle
     TimestepData,
+    // Debug buffers
+    OutDebugNormals,
+    OutDebugRelease,
 }
 
 impl BufferName {
@@ -33,13 +39,12 @@ impl BufferName {
             BufferName::NumberReleaseCells => "number_release_cells",
             BufferName::NumberReleaseParticles => "number_release_particles",
             BufferName::SimInfo => "sim_info",
-            BufferName::NumberParticles => "number_particles",
+            BufferName::SimSettings => "sim_settings",
             BufferName::CellCountGrid => "cell_count_grid",
             BufferName::VelocityGrid => "velocity_grid",
             BufferName::MaxVelocityGrid => "max_velocity_grid",
-            BufferName::SimSettings => "sim_settings",
-            BufferName::Particles => "particles",
             BufferName::ParticleIndex => "particle_index",
+            BufferName::Particles => "particles",
             BufferName::TimestepData => "timestep_data",
         }
     }
@@ -160,21 +165,26 @@ impl ComputeBuffers {
         name: BufferName,
         data: &[T],
         usage: BufferUsages,
-        fill: bool,
     ) {
-        let mut bytes = bytemuck::cast_slice(data).to_vec();
-        if fill {
-            let remainder = bytes.len() % 16;
-            if remainder != 0 {
-                let pad = 16 - remainder;
-                bytes.extend(std::iter::repeat_n(0u8, pad));
-            }
-        }
-        let buffer = device.create_buffer_init(&BufferInitDescriptor {
-            label: Some(&format!("{} Buffer", name)),
-            contents: &bytes,
-            usage,
-        });
+        let original_bytes = bytemuck::cast_slice(data);
+        let remainder = original_bytes.len() % 16;
+        let buffer = if remainder == 0 {
+            // No padding needed, upload directly from slice (No extra allocation!)
+            device.create_buffer_init(&BufferInitDescriptor {
+                label: Some(name.to_str()),
+                contents: original_bytes,
+                usage,
+            })
+        } else {
+            // Only allocate and pad if absolutely necessary
+            let mut padded_bytes = original_bytes.to_vec();
+            padded_bytes.resize(padded_bytes.len() + (16 - remainder), 0);
+            device.create_buffer_init(&BufferInitDescriptor {
+                label: Some(name.to_str()),
+                contents: &padded_bytes,
+                usage,
+            })
+        };
         self.buffers.insert(name, buffer);
     }
 
@@ -648,21 +658,9 @@ pub fn create_buffers_and_texture_descriptions(
     );
     compute_buffers.add_buffer(
         device,
-        BufferName::NumberReleaseCells,
-        4,
-        BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
-    );
-    compute_buffers.add_buffer(
-        device,
         BufferName::SimInfo,
         size_of::<SimInfo>(),
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
-    );
-    compute_buffers.add_buffer(
-        device,
-        BufferName::NumberParticles,
-        4,
-        BufferUsages::STORAGE | BufferUsages::COPY_SRC,
     );
     compute_buffers.add_buffer(
         device,
