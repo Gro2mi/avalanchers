@@ -393,6 +393,14 @@ mod tests {
     }
 
     #[test_log::test]
+    #[should_panic(expected = "range end index 4 out of range for slice of length 3")]
+    fn test_to_2d_width_not_multiple_of_length() {
+        let data = vec![1.0, 2.0, 3.0];
+        let result = to_2d(&data, 2, 3);
+        assert_eq!(result, vec![vec![1.0], vec![2.0], vec![3.0]]);
+    }
+
+    #[test_log::test]
     fn test_vector_arithmetic_add() {
         let mut v = vec![1.0, 2.0, 3.0];
         add(&mut v, 2.0);
@@ -467,5 +475,167 @@ mod tests {
         let data: Vec<Vec<i32>> = vec![];
         let result = data.to_1d();
         assert_eq!(result, Vec::<i32>::new());
+    }
+
+    #[test]
+    fn test_powers_of_two_zero() {
+        // The function explicitly handles 0
+        assert_eq!(highest_power_of_two(0), 0);
+    }
+
+    #[test]
+    fn test_powers_of_two() {
+        // If n is already a power of two, it should return itself
+        assert_eq!(highest_power_of_two(1), 1);
+        assert_eq!(highest_power_of_two(2), 2);
+        assert_eq!(highest_power_of_two(4), 4);
+        assert_eq!(highest_power_of_two(1024), 1024);
+    }
+
+    #[test]
+    fn test_non_powers_of_two() {
+        // Should return the largest power of two less than n
+        assert_eq!(highest_power_of_two(3), 2);
+        assert_eq!(highest_power_of_two(7), 4);
+        assert_eq!(highest_power_of_two(10), 8);
+        assert_eq!(highest_power_of_two(63), 32);
+        assert_eq!(highest_power_of_two(127), 64);
+    }
+
+    #[test]
+    fn test_powers_of_two_large_values() {
+        // Testing values near the upper limit of u32
+        assert_eq!(highest_power_of_two(u32::MAX), 2147483648); // 2^31
+        assert_eq!(highest_power_of_two(2147483648), 2147483648);
+        assert_eq!(highest_power_of_two(3000000000), 2147483648);
+    }
+
+    #[test]
+    fn test_random_rgba_data_length() {
+        let width = 10;
+        let height = 10;
+        let data = create_random_rgba_data(width, height);
+
+        // Every pixel is 4 bytes (RGBA)
+        assert_eq!(data.len(), width * height * 4);
+    }
+
+    #[test]
+    fn test_random_rgba_alpha_channel_is_opaque() {
+        let data = create_random_rgba_data(5, 5);
+
+        // Check every 4th byte (the Alpha channel)
+        // It should always be 255 based on your code
+        for i in (3..data.len()).step_by(4) {
+            assert_eq!(data[i], 255, "Alpha channel at index {} should be 255", i);
+        }
+    }
+
+    #[test]
+    fn test_random_rgba_empty_dimensions() {
+        let data = create_random_rgba_data(0, 100);
+        assert_eq!(data.len(), 0);
+    }
+
+    #[test]
+    fn test_random_rgba_randomness_stub() {
+        let data1 = create_random_rgba_data(1000, 1000);
+        let data2 = create_random_rgba_data(1000, 1000);
+
+        // It is mathematically improbable but possible to get the same random data twice.
+        assert_ne!(
+            data1, data2,
+            "Two random generations should not be identical"
+        );
+    }
+
+    #[test]
+    fn test_split_channels() {
+        let flat = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        let (r, g, b, a) = split_channels(&flat);
+        assert_eq!(r, vec![1, 5]);
+        assert_eq!(g, vec![2, 6]);
+        assert_eq!(b, vec![3, 7]);
+        assert_eq!(a, vec![4, 8]);
+    }
+
+    #[test]
+    #[should_panic(expected = "Input length must be a multiple of 4")]
+    fn test_split_channels_not_multiple_of_four() {
+        let flat = vec![1];
+        let (_, _, _, _) = split_channels(&flat);
+    }
+
+    #[test]
+    fn test_vec_min_max_nested() {
+        let data = vec![vec![10.5, 2.0, 35.7], vec![1.2, 50.0], vec![-5.5]];
+
+        // Testing MaxValue for [Vec<T>]
+        assert_eq!(data.max_value(), Some(50.0));
+
+        // Testing MinValue for [Vec<T>]
+        assert_eq!(data.min_value(), Some(-5.5));
+
+        // Testing empty case
+        let empty: Vec<Vec<f32>> = vec![vec![], vec![]];
+        assert_eq!(empty.max_value(), None);
+    }
+
+    #[test]
+    fn test_vec_min_value_slice() {
+        let data = [10, 5, 8, 3, 12];
+        assert_eq!(data.min_value(), Some(3));
+    }
+
+    #[test]
+    fn test_vec_mean_value_u32() {
+        // Test slice version
+        let flat_data: [u32; 3] = [10, 20, 31];
+        assert_eq!(flat_data.mean_value(), Some(20));
+
+        let flat_data: [u32; 2] = [7, 8];
+        assert_eq!(flat_data.mean_value(), Some(7));
+        let flat_data: [u32; 2] = [7, 9];
+        assert_eq!(flat_data.mean_value(), Some(8));
+
+        // // Test nested version
+        let nested_data: Vec<Vec<u32>> = vec![vec![10, 20], vec![30, 40, 50]];
+        // (10+20+30+40+50) / 5 = 30
+        assert_eq!(nested_data.mean_value(), Some(30));
+
+        let empty_nested: Vec<Vec<u32>> = vec![vec![]];
+        assert_eq!(empty_nested.mean_value(), None);
+    }
+
+    #[test]
+    fn test_vec_histogram_integer() {
+        let data = [1, 2, 2, 3, 3, 3, 4];
+        let hist = data.hist();
+
+        assert_eq!(hist.get(&1), Some(&1));
+        assert_eq!(hist.get(&2), Some(&2));
+        assert_eq!(hist.get(&3), Some(&3));
+        assert_eq!(hist.get(&5), None);
+    }
+
+    #[test]
+    fn test_vec_histogram_float_rounding() {
+        let data = [1.1, 1.4, 1.6, 2.9, 3.0];
+        // 1.1 -> 1, 1.4 -> 1, 1.6 -> 2, 2.9 -> 3, 3.0 -> 3
+        let hist = data.hist_float();
+
+        assert_eq!(hist.get(&1), Some(&2)); // 1.1 and 1.4
+        assert_eq!(hist.get(&2), Some(&1)); // 1.6
+        assert_eq!(hist.get(&3), Some(&2)); // 2.9 and 3.0
+    }
+
+    #[test]
+    fn test_vec_print_histogram_no_panic() {
+        let data = [1.1, 2.2, 2.2, 3.3, 3.3, 3.3];
+        // We just ensure it doesn't panic during string generation/printing
+        data.print_hist();
+
+        let empty: [f64; 0] = [];
+        empty.print_hist();
     }
 }

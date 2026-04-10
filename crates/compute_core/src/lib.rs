@@ -577,6 +577,16 @@ mod tests {
     use utils::{HistFloat, MaxValue, MinValue};
     const INCLINED_PLANE_PATH: &str = "../../data/avaframe/avaInclinedPlane.png";
     const RELEASE_TEXTURE_PATH: &str = "../../data/avaframe/avaInclinedPlanereleaseTexture.png";
+
+    #[test]
+    fn test_init_logging_idempotent() {
+        // Call it once
+        init_logging();
+
+        // Call it again - it should not panic or error because of .call_once()
+        init_logging();
+    }
+
     #[test_log::test]
     fn test_compute_orchestrator_creation() {
         let mut orchestrator = pollster::block_on(ComputeOrchestrator::new())
