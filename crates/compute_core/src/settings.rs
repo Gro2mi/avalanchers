@@ -44,7 +44,7 @@ impl SimSettings {
             max_steps: 3000,
             sim_model: 0,
             friction_model: FrictionModel::VoellmyMinShear.as_int(),
-            released_particles_per_cell: 1,
+            released_particles_per_cell: 8,
             grid_shape_x: 1,
             grid_shape_y: 1,
             world_size_x: 1.0,
@@ -272,7 +272,7 @@ mod tests {
             settings.friction_model,
             FrictionModel::VoellmyMinShear.as_int()
         );
-        assert_eq!(settings.released_particles_per_cell, 1);
+        assert_eq!(settings.released_particles_per_cell, 8);
         assert_eq!(settings.grid_shape_x, 1);
         assert_eq!(settings.grid_shape_y, 1);
         assert_eq!(settings.world_size_x, 1.0);

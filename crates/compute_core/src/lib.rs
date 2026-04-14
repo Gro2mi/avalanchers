@@ -17,7 +17,8 @@ pub mod settings;
 pub mod shaders;
 pub mod utils;
 use data_processor::*;
-use tracing::{debug, info, trace};
+#[allow(unused_imports)]
+use tracing::{debug, error, info, trace, warn};
 
 use std::sync::Once;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
@@ -27,8 +28,10 @@ static INIT: Once = Once::new();
 /// Initializes the global tracing subscriber.
 pub fn init_logging() {
     INIT.call_once(|| {
-        // Create the filter INSIDE the once block
-        let filter = EnvFilter::new("warn,compute_core=trace,data_processor=debug,cli=debug");
+        #[cfg(debug_assertions)]
+        let filter = EnvFilter::new("error,compute_core=trace,data_processor=debug,cli=debug");
+        #[cfg(not(debug_assertions))]
+        let filter = EnvFilter::new("error,compute_core=info,data_processor=info,cli=info");
 
         let _ = tracing_subscriber::registry()
             .with(fmt::layer().with_target(false))
@@ -113,6 +116,8 @@ impl Simulation {
             .load_release_areas(&self.dem_path.replace(".png", "releaseTexture.png"))
             .await?;
         self.initialize_particles().await?;
+        self.compute_particles().await?;
+        self.state = SimulationState::Finished;
         Ok(())
     }
 
@@ -159,18 +164,71 @@ impl Simulation {
         Ok(())
     }
 
+    async fn compute_particles(&mut self) -> Result<()> {
+        assert!(
+            self.state >= SimulationState::ParticlesInitialized,
+            "Particles must be initialized before running particle simulation"
+        );
+        self.orchestrator
+            .run_compute_particles(&self.settings, self.number_particles)
+            .await?;
+        self.state = SimulationState::Running;
+        Ok(())
+    }
+
     async fn get_texture_data<T: bytemuck::Pod + Send + Sync>(
         &self,
         name: TextureName,
     ) -> Result<(Vec<T>, Vec<T>, Vec<T>, Vec<T>)> {
         self.orchestrator.read_texture(name).await
     }
+
     pub async fn get_normals_texture(&self) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>)> {
         assert!(
             self.state >= SimulationState::NormalsComputed,
             "Normals must be computed before reading normals texture"
         );
         self.get_texture_data(TextureName::Normals).await
+    }
+
+    pub async fn get_release_areas_texture(
+        &self,
+    ) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>)> {
+        assert!(
+            self.state >= SimulationState::ReleaseAreasComputed,
+            "Release areas must be computed before reading release areas texture"
+        );
+        self.get_texture_data(TextureName::ReleaseAreas).await
+    }
+
+    pub async fn get_max_velocity(&self) -> Result<Vec<u32>> {
+        assert!(
+            self.state >= SimulationState::Finished,
+            "Simulation must be finished before reading max velocity"
+        );
+        self.orchestrator
+            .read_buffer(BufferName::MaxVelocityGrid)
+            .await
+    }
+
+    pub async fn get_cell_count(&self) -> Result<Vec<u32>> {
+        assert!(
+            self.state >= SimulationState::Finished,
+            "Simulation must be finished before reading cell count grid"
+        );
+        self.orchestrator
+            .read_buffer(BufferName::CellCountGrid)
+            .await
+    }
+
+    pub async fn get_compute_particles_debug(&self) -> Result<Vec<f32>> {
+        assert!(
+            self.state >= SimulationState::Finished,
+            "Simulation must be finished before reading cell count grid"
+        );
+        self.orchestrator
+            .read_buffer(BufferName::OutDebugNormals)
+            .await
     }
 }
 
@@ -258,6 +316,8 @@ pub struct ComputeOrchestrator {
     pub queue: Queue,
     pub buffers: ComputeBuffers,
     pub sampler: Sampler,
+    pub max_texture_size: u32,
+    pub max_storage_buffer_binding_size: u64,
     texture_size: Extent3d,
     shader_configs: HashMap<ShaderName, ComputeShaderConfig>,
     dispatch_number_workgroups_x_2d: u32,
@@ -277,22 +337,46 @@ impl ComputeOrchestrator {
             .await
             .expect("Failed to find an appropriate adapter");
 
-        let max_storage = adapter.limits().max_storage_buffer_binding_size;
         let info = adapter.get_info();
+        match info.device_type {
+            wgpu::DeviceType::DiscreteGpu => info!("Using discrete GPU: {}", info.name),
+            wgpu::DeviceType::IntegratedGpu => warn!(
+                "Using integrated GPU: {}. If performance is poor, consider using a discrete GPU",
+                info.name
+            ),
+            wgpu::DeviceType::VirtualGpu => {
+                warn!("Using virtual GPU: {}, performance may be poor", info.name)
+            }
+            wgpu::DeviceType::Cpu => warn!(
+                "Using CPU adapter: {}, performance will be very poor",
+                info.name
+            ),
+            wgpu::DeviceType::Other => warn!(
+                "Using unknown device type for adapter: {}, performance may be poor",
+                info.name
+            ),
+        }
         info!("GPU Name    : {}", info.name);
         debug!("Driver      : {}", info.driver);
         debug!("Backend     : {:?}", info.backend);
         debug!("Device Type : {:?}", info.device_type);
+        trace!("Adapter limits: {:?}", adapter.limits());
+
+        let max_texture_size = adapter.limits().max_texture_dimension_2d;
+        let max_storage_buffer_binding_size = adapter.limits().max_storage_buffer_binding_size;
         debug!(
             "Adapter limits: 
                                     - Max Compute Workgroup Size X: {:?}
                                     - Max Compute Invocations Per Workgroup: {:?} 
-                                    - Max Storage Buffer Binding Size: {:.2} GB",
+                                    - Max Storage Buffer Binding Size: {:.2} GB
+                                    - Max Buffer Size: {:.2} GB
+                                    - Max Texture Dimension 2D: {:?}",
             adapter.limits().max_compute_workgroup_size_x,
             adapter.limits().max_compute_invocations_per_workgroup,
-            max_storage as f64 / 1024.0 / 1024.0 / 1024.0
+            max_storage_buffer_binding_size as f64 / 1024.0 / 1024.0 / 1024.0,
+            adapter.limits().max_buffer_size as f64 / 1024.0 / 1024.0 / 1024.0,
+            max_texture_size
         );
-        trace!("Adapter: {:?}", adapter);
 
         // let workgroup_size_2d = utils::highest_power_of_two(
         //     (adapter.limits().max_compute_workgroup_size_x as f64).sqrt() as u32,
@@ -310,7 +394,7 @@ impl ComputeOrchestrator {
                     max_compute_workgroup_size_z: 1,
                     max_compute_invocations_per_workgroup: WorkgroupSize::SIZE_2D
                         * WorkgroupSize::SIZE_2D, // 256
-                    max_storage_buffer_binding_size: max_storage,
+                    max_storage_buffer_binding_size,
                     ..Limits::default()
                 },
                 experimental_features: wgpu::ExperimentalFeatures::default(),
@@ -322,11 +406,7 @@ impl ComputeOrchestrator {
 
         let buffers = ComputeBuffers::new();
         let shader_configs = shaders::create_shader_configs(&device)?;
-        let texture_size = Extent3d {
-            width: 4,
-            height: 4,
-            depth_or_array_layers: 1,
-        };
+        let texture_size = Extent3d::default();
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Linear Sampler"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -341,8 +421,8 @@ impl ComputeOrchestrator {
             anisotropy_clamp: 1,
             border_color: None,
         });
-        let dispatch_workgroup_size_x_2d = 0;
-        let dispatch_workgroup_size_y_2d = 0;
+        let dispatch_number_workgroups_x_2d = 0;
+        let dispatch_number_workgroups_y_2d = 0;
         let dispatch_number_workgroups_1d = 0;
 
         Ok(Self {
@@ -354,8 +434,10 @@ impl ComputeOrchestrator {
             shader_configs,
             texture_size,
             sampler,
-            dispatch_number_workgroups_x_2d: dispatch_workgroup_size_x_2d,
-            dispatch_number_workgroups_y_2d: dispatch_workgroup_size_y_2d,
+            max_texture_size,
+            max_storage_buffer_binding_size,
+            dispatch_number_workgroups_x_2d,
+            dispatch_number_workgroups_y_2d,
             dispatch_number_workgroups_1d,
         })
     }
@@ -386,7 +468,6 @@ impl ComputeOrchestrator {
             .as_entire_binding()
     }
 
-    // `run_shader` now takes `resources` directly for flexibility
     pub async fn run_shader(
         &self,
         shader_name: &ShaderName,
@@ -455,6 +536,14 @@ impl ComputeOrchestrator {
         sim_settings: &settings::SimSettings,
         dem: &dem::Dem,
     ) -> Result<()> {
+        assert!(
+            sim_settings.grid_shape_x <= self.max_texture_size
+                && sim_settings.grid_shape_y <= self.max_texture_size,
+            "Grid shape ({}, {}) exceeds max texture size of {}. Consider reducing the grid shape or using a GPU with larger max texture size.",
+            sim_settings.grid_shape_x,
+            sim_settings.grid_shape_y,
+            self.max_texture_size
+        );
         self.texture_size = Extent3d {
             width: sim_settings.grid_shape_x,
             height: sim_settings.grid_shape_y,
@@ -558,6 +647,19 @@ impl ComputeOrchestrator {
     }
 
     pub async fn run_initialize_particles(&mut self, number_release_particles: u32) -> Result<()> {
+        let particle_buffer_size = number_release_particles as usize * Particle::BYTE_SIZE;
+        assert!(
+            particle_buffer_size as u64 <= self.max_storage_buffer_binding_size,
+            "Particle buffer size {} bytes exceeds max storage buffer binding size of {} bytes. Consider reducing the number of particles or using a GPU with more memory.",
+            particle_buffer_size,
+            self.max_storage_buffer_binding_size
+        );
+        info!(
+            "Initializing particles with number_release_particles: {}, particle_buffer_size: {:.2} MB ({:.1} % of max storage buffer binding size)",
+            number_release_particles,
+            particle_buffer_size as f64 / 1024.0 / 1024.0,
+            (particle_buffer_size as f64 / self.max_storage_buffer_binding_size as f64) * 100.0
+        );
         self.dispatch_number_workgroups_1d =
             number_release_particles.div_ceil(WorkgroupSize::SIZE_1D);
         debug!(
@@ -572,8 +674,8 @@ impl ComputeOrchestrator {
         );
         self.add_buffer(
             BufferName::Particles,
-            number_release_particles as usize * Particle::BYTE_SIZE,
-            BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            particle_buffer_size,
+            BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
         );
         self.run_shader(
             &ShaderName::InitializeParticles,
@@ -584,44 +686,110 @@ impl ComputeOrchestrator {
                 self.get_view(TextureName::ReleaseAreas),
                 self.get_sampler(),
                 self.get_buffer_binding(BufferName::Particles),
-                self.get_buffer_binding(BufferName::ParticleIndex),
+                self.get_buffer_binding(BufferName::NumberReleaseParticles),
                 self.get_buffer_binding(BufferName::CellCountGrid),
                 self.get_buffer_binding(BufferName::MaxVelocityGrid),
             ],
-            self.dispatch_number_workgroups_1d,
-            1,
+            self.dispatch_number_workgroups_x_2d,
+            self.dispatch_number_workgroups_y_2d,
             1,
         )
         .await?;
         Ok(())
     }
 
-    pub async fn run_compute_particles(&mut self) -> Result<()> {
+    pub async fn run_compute_particles(
+        &mut self,
+        sim_settings: &settings::SimSettings,
+        number_release_particles: u32,
+    ) -> Result<()> {
         debug!("Start simulation");
-        self.buffers.add_buffer_with_data(
-            &self.device,
-            BufferName::ParticleIndex,
-            &[0u32],
+        self.add_buffer(
+            BufferName::TimestepData,
+            size_of::<TimestepData>() * sim_settings.max_steps as usize,
             BufferUsages::STORAGE | BufferUsages::COPY_DST,
         );
-        self.run_shader(
-            &ShaderName::ComputeParticles,
+        // Compute Particles Bind Group
+        let compute_particles_config = self
+            .shader_configs
+            .get(&ShaderName::ComputeParticles)
+            .expect("ComputeParticles shader config not found");
+
+        let compute_particles_bindgroup = compute_particles_config.create_bind_group(
+            &self.device,
             &[
                 self.get_buffer_binding(BufferName::SimSettings),
                 self.get_buffer_binding(BufferName::SimInfo),
                 self.get_view(TextureName::Dem),
                 self.get_view(TextureName::Normals),
-                self.get_buffer_binding(BufferName::Particles),
                 self.get_sampler(),
-                self.get_buffer_binding(BufferName::ParticleIndex),
+                self.get_buffer_binding(BufferName::Particles),
+                self.get_buffer_binding(BufferName::MaxVelocityGrid),
                 self.get_buffer_binding(BufferName::CellCountGrid),
+                self.get_buffer_binding(BufferName::VelocityGrid),
+                self.get_buffer_binding(BufferName::TimestepData),
+                self.get_buffer_binding(BufferName::OutDebugNormals),
+            ],
+        )?;
+
+        let reset_max_velocity_config = self
+            .shader_configs
+            .get(&ShaderName::ResetMaxVelocity)
+            .expect("ResetMaxVelocity shader config not found");
+
+        // Reset Max Velocity Bind Group
+        let reset_max_velocity_bind_group = reset_max_velocity_config.create_bind_group(
+            &self.device,
+            &[
+                self.get_buffer_binding(BufferName::SimSettings),
+                self.get_buffer_binding(BufferName::SimInfo),
                 self.get_buffer_binding(BufferName::MaxVelocityGrid),
             ],
-            self.dispatch_number_workgroups_1d,
-            1,
-            1,
-        )
-        .await?;
+        )?;
+        let sim_info: SimInfo = SimInfo {
+            timestep: 0,
+            number_particles: number_release_particles,
+            elevation_threshold: 0.0,
+            max_velocity: 0.0,
+        };
+
+        self.buffers.write_buffer(
+            &self.queue,
+            BufferName::SimInfo,
+            bytemuck::bytes_of(&sim_info),
+        )?;
+
+        // Create command encoder
+        let mut command_encoder =
+            self.device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("Compute Encoder"),
+                });
+
+        // Begin compute pass
+        {
+            let mut compute_pass =
+                command_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("Compute Pass"),
+                    timestamp_writes: None,
+                });
+
+            for _i in 0..sim_settings.max_steps {
+                // --- computeParticles ---
+                compute_pass.set_pipeline(&compute_particles_config.pipeline);
+                compute_pass.set_bind_group(0, &compute_particles_bindgroup, &[]);
+                compute_pass.dispatch_workgroups(self.dispatch_number_workgroups_1d, 1, 1);
+
+                // --- resetMaxVelocity ---
+                compute_pass.set_pipeline(&reset_max_velocity_config.pipeline);
+                compute_pass.set_bind_group(0, &reset_max_velocity_bind_group, &[]);
+                compute_pass.dispatch_workgroups(1, 1, 1);
+            }
+        } // compute_pass dropped here (equivalent to end())
+
+        // Submit commands
+        self.queue.submit(Some(command_encoder.finish()));
+
         Ok(())
     }
     #[allow(dead_code)]
@@ -675,9 +843,11 @@ mod tests {
     use crate::settings::Settings;
     use data_processor::read_png;
     use pollster;
-    use utils::{HistFloat, MaxValue, MinValue};
+    use utils::{Hist, HistFloat, MaxValue, MinValue};
     const INCLINED_PLANE_PATH: &str = "../../data/avaframe/avaInclinedPlane.png";
     const RELEASE_TEXTURE_PATH: &str = "../../data/avaframe/avaInclinedPlanereleaseTexture.png";
+    const GAR_PATH: &str = "../../data/avaframe/avaGar.png";
+    const GAR_RELEASE_TEXTURE_PATH: &str = "../../data/avaframe/avaGarreleaseTexture.png";
 
     #[test]
     fn test_init_logging_idempotent() {
@@ -739,7 +909,7 @@ mod tests {
             .expect("Failed to create ComputeOrchestrator");
         let (sim_settings, _dem) = Settings::create_from_path(INCLINED_PLANE_PATH);
         let (data, _, _) = read_png(&Path::new(RELEASE_TEXTURE_PATH)).expect("Failed to read PNG");
-        info!("Max: {:?}", data.max_value());
+        info!("Max: {:?}", data.max_value().unwrap());
 
         orchestrator
             .create_buffers_and_texture_descriptions(&sim_settings)
@@ -757,14 +927,129 @@ mod tests {
             release_thickness[1020..1040].to_vec(),
         );
         assert_eq!(number_release_cells, 3245);
+        assert_eq!(release_thickness.iter().filter(|&&x| x > 0.0).count(), 3245);
+        assert!(
+            release_thickness
+                .iter()
+                .all(|&x| x == 0.0 || (x - 1.0).abs() < 1e-6)
+        );
+        info!("Read number_release_cells: {:?}", number_release_cells);
+    }
+    #[test_log::test]
+    fn test_load_release_areas_gar() {
+        let mut orchestrator = pollster::block_on(ComputeOrchestrator::new())
+            .expect("Failed to create ComputeOrchestrator");
+        let (sim_settings, _dem) = Settings::create_from_path(GAR_PATH);
+        let (data, _, _) =
+            read_png(&Path::new(GAR_RELEASE_TEXTURE_PATH)).expect("Failed to read PNG");
+        info!("Max: {:?}", data.max_value().unwrap());
+
+        orchestrator
+            .create_buffers_and_texture_descriptions(&sim_settings)
+            .expect("Failed to create buffers and texture descriptions");
+        let number_release_cells: u32 =
+            pollster::block_on(orchestrator.run_load_release_areas(&data, &sim_settings))
+                .expect("Failed to run load_release_areas shader");
+        let (release_thickness, _, _, _) =
+            pollster::block_on(orchestrator.read_texture::<f32>(TextureName::ReleaseAreas))
+                .expect("Failed to get release_areas");
+        info!(
+            "Read release_texture: len: {} max: {:?} {:?}",
+            release_thickness.len(),
+            release_thickness.max_value(),
+            release_thickness[1020..1040].to_vec(),
+        );
+        assert_eq!(number_release_cells, 1628);
+        assert_eq!(release_thickness.iter().filter(|&&x| x > 0.0).count(), 1628);
+        assert!(
+            release_thickness
+                .iter()
+                .all(|&x| x == 0.0 || (x - 1.2).abs() < 1e-6)
+        );
         info!("Read number_release_cells: {:?}", number_release_cells);
     }
 
-    // #[test_log::test]
-    // fn test_compute() {
-    //     let mut simulation = pollster::block_on(Simulation::create(
+    #[test_log::test]
+    fn test_initialize_particles() {
+        let mut orchestrator = pollster::block_on(ComputeOrchestrator::new())
+            .expect("Failed to create ComputeOrchestrator");
+        let (mut sim_settings, dem) = Settings::create_from_path(INCLINED_PLANE_PATH);
+        sim_settings.released_particles_per_cell = 10;
+        info!("Sim settings: {:?}", sim_settings);
+        pollster::block_on(orchestrator.run_normals(&sim_settings, &dem))
+            .expect("Failed to run normals shader");
+        let (data, _, _) = read_png(&Path::new(RELEASE_TEXTURE_PATH)).expect("Failed to read PNG");
+        let number_release_cells: u32 =
+            pollster::block_on(orchestrator.run_load_release_areas(&data, &sim_settings))
+                .expect("Failed to run load_release_areas shader");
+        pollster::block_on(orchestrator.run_initialize_particles(
+            number_release_cells * sim_settings.released_particles_per_cell,
+        ))
+        .expect("Failed to run initialize_particles shader");
+        let number_release_particles =
+            pollster::block_on(orchestrator.read_buffer::<u32>(BufferName::NumberReleaseParticles))
+                .expect("Failed to read particle index buffer")[0];
+        info!("Number release particles: {}", number_release_particles);
+        let particles =
+            pollster::block_on(orchestrator.read_buffer::<Particle>(BufferName::Particles))
+                .expect("Failed to read particles buffer");
+        let particle = particles.first().expect("No particles found");
+        for p in particles.iter() {
+            assert!(p.position[0] > 100.0);
+            assert!(p.position[0] < 400.0);
+            assert!(p.position[1] < 1150.0);
+            assert!(p.position[1] > 850.0);
+            assert!(p.position[2] > 3000.0);
+            assert!(p.position[2] < 3350.0);
+        }
+        assert_eq!(particle.mass, 500.0);
+        info!(
+            "Read particles buffer: len: {}, first particle: {:?}",
+            particles.len(),
+            particles.last()
+        );
+        let cell_count_grid =
+            pollster::block_on(orchestrator.read_buffer::<u32>(BufferName::CellCountGrid))
+                .expect("Failed to read cell count grid");
 
-    // }
+        info!(
+            "Read cell count grid: len: {:?}, max value: {:?}",
+            cell_count_grid.hist(),
+            cell_count_grid.max_value().unwrap()
+        );
+        assert_eq!(particles.iter().filter(|&&x| x.mass > 0.0).count(), 32450);
+        assert!(cell_count_grid.max_value().unwrap() <= 12); // 10 particles per cell + some edge cases
+        assert!(cell_count_grid.hist().get(&0).unwrap() > &398150); // most cells dont have particles
+    }
+
+    #[test_log::test]
+    fn test_compute() {
+        let mut sim: Simulation =
+            pollster::block_on(Simulation::create_default(INCLINED_PLANE_PATH.to_string()))
+                .expect("Failed to create simulation");
+        pollster::block_on(sim.run()).expect("Failed to run simulation");
+        let debug_buffer: Vec<f32> = pollster::block_on(sim.orchestrator.buffers.read_buffer(
+            &sim.orchestrator.device,
+            &sim.orchestrator.queue,
+            BufferName::OutDebugNormals,
+        ))
+        .expect("Failed to read out_debug_normals_buffer");
+        info!("Read out_debug_normals_buffer: {:?}", debug_buffer);
+        let cell_count =
+            pollster::block_on(sim.get_cell_count()).expect("Failed to get cell count");
+        info!("Cell count max: {:?}", cell_count.max_value().unwrap());
+        let max_velocity =
+            pollster::block_on(sim.get_max_velocity()).expect("Failed to get max velocity");
+        info!("Max velocity: {:?}", max_velocity.max_value().unwrap());
+
+        let sim_info: Vec<SimInfo> = pollster::block_on(sim.orchestrator.buffers.read_buffer(
+            &sim.orchestrator.device,
+            &sim.orchestrator.queue,
+            BufferName::SimInfo,
+        ))
+        .expect("Failed to read sim info buffer");
+        info!("Read sim info: {:?}", sim_info);
+    }
 
     #[test_log::test]
     fn test_shader_report_generation() {

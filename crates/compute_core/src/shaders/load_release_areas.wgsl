@@ -16,7 +16,7 @@ fn load_release_areas(@builtin(global_invocation_id) id: vec3<u32>) {
     if (id.x >= gridSize.x || id.y >= gridSize.y) {
         return;
     }
-    let release_thickness = f32(textureLoad(release_areas_in, id.xy, 0).a) / 100;
+    let release_thickness = f32(textureLoad(release_areas_in, id.xy, 0).a) / 100.0;
     // this can be sped up with workgroups
     if (release_thickness > 0.01){
         textureStore(release_areas_out, id.xy, vec4f(release_thickness, 0.0, 0.0, 0.0));

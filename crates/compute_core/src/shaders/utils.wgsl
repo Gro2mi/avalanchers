@@ -100,17 +100,6 @@ fn compute_centroid(points: ptr<function, array<vec2<f32>, 256>>, count: u32) ->
     }
 
     return vec2<f32>(cx, cy) / (6.0 * area);
-//     @compute @workgroup_size(1)
-// fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-//     let count = arrayLength(&vertex_buffer);
-//     var local_points: array<vec2<f32>, 256>; // set a fixed maximum
-
-//     for (var i = 0u; i < count; i = i + 1u) {
-//         local_points[i] = vertex_buffer[i].pos;
-//     }
-
-//     let centroid = compute_centroid(&(local_points), count);
-//     centroid_out = centroid;
 }
 
 

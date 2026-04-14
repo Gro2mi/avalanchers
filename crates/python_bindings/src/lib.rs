@@ -1,4 +1,3 @@
-// use numpy::{PyArrayDyn, PyReadonlyArrayDyn, IntoPyArray};
 use compute_core::Simulation;
 use compute_core::settings::Settings;
 use numpy::PyArray2;
@@ -72,6 +71,10 @@ impl PySimulation {
         format!("{:?}", self.inner.get_state())
     }
 
+    pub fn get_cell_size(&self) -> f32 {
+        self.inner.dem.cell_size
+    }
+
     pub fn run(&mut self) -> PyResult<()> {
         self.inner
             .run()
@@ -85,7 +88,7 @@ impl PySimulation {
         self.inner.dem_path.clone()
     }
 
-    pub fn get_normals_numpy<'py>(&self, py: Python<'py>) -> PyResult<PyTexture<'py>> {
+    pub fn get_normals<'py>(&self, py: Python<'py>) -> PyResult<PyTexture<'py>> {
         // 1. Get the data from the core (async -> sync)
         let (nx, ny, nz, nw) = self
             .inner
@@ -93,22 +96,64 @@ impl PySimulation {
             .block_on()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
-        // 2. Convert each Vec<f32> into a NumPy array
-        // .to_pyarray(py) copies the data into memory managed by NumPy
-        let dims = [self.inner.dem.height, self.inner.dem.width];
-        let rx = nx.to_pyarray(py).reshape(dims).map_err(to_val_err)?;
-        let ry = ny.to_pyarray(py).reshape(dims).map_err(to_val_err)?;
-        let rz = nz.to_pyarray(py).reshape(dims).map_err(to_val_err)?;
-        let rw = nw.to_pyarray(py).reshape(dims).map_err(to_val_err)?;
-
-        Ok((rx, ry, rz, rw))
+        self.convert_rgba_texture(py, nx, ny, nz, nw)
     }
 
-    pub fn get_dem_numpy<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f32>>> {
+    pub fn get_release_areas<'py>(&self, py: Python<'py>) -> PyResult<PyTexture<'py>> {
+        let (r, g, b, a) = self
+            .inner
+            .get_release_areas_texture()
+            .block_on()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+
+        self.convert_rgba_texture(py, r, g, b, a)
+    }
+
+    /// Convert RGBA texture data from the core into NumPy arrays for Python.
+    pub fn convert_rgba_texture<'py>(
+        &self,
+        py: Python<'py>,
+        r: Vec<f32>,
+        g: Vec<f32>,
+        b: Vec<f32>,
+        a: Vec<f32>,
+    ) -> PyResult<PyTexture<'py>> {
+        let dims = [self.inner.dem.height, self.inner.dem.width];
+        let r_py = r.to_pyarray(py).reshape(dims).map_err(to_val_err)?;
+        let g_py = g.to_pyarray(py).reshape(dims).map_err(to_val_err)?;
+        let b_py = b.to_pyarray(py).reshape(dims).map_err(to_val_err)?;
+        let a_py = a.to_pyarray(py).reshape(dims).map_err(to_val_err)?;
+
+        Ok((r_py, g_py, b_py, a_py))
+    }
+
+    pub fn get_dem<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f32>>> {
         let dims = [self.inner.dem.height, self.inner.dem.width];
         self.inner
             .dem
             .data1d
+            .to_pyarray(py)
+            .reshape(dims)
+            .map_err(to_val_err)
+    }
+
+    pub fn get_max_velocity<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<u32>>> {
+        let dims = [self.inner.dem.height, self.inner.dem.width];
+        self.inner
+            .get_max_velocity()
+            .block_on()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?
+            .to_pyarray(py)
+            .reshape(dims)
+            .map_err(to_val_err)
+    }
+
+    pub fn get_cell_count<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<u32>>> {
+        let dims = [self.inner.dem.height, self.inner.dem.width];
+        self.inner
+            .get_cell_count()
+            .block_on()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?
             .to_pyarray(py)
             .reshape(dims)
             .map_err(to_val_err)

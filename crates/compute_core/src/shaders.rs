@@ -56,13 +56,43 @@ fn read_shader_source(name: &str) -> String {
 }
 
 fn load_shader_source_string(name: &str) -> &'static str {
-    let import_re = Regex::new(r#"//\s+import\s+([a-zA-Z0-9_./-]+)\.wgsl"#).unwrap();
     let shader_source = read_shader_source(name);
-    let processed = import_re.replace_all(&shader_source, |caps: &regex::Captures| {
-        let import_name = &caps[1];
-        load_shader_source_string(import_name)
-    });
-    Box::leak(processed.into_owned().into_boxed_str())
+
+    // Step 1: Strip out any existing BEGIN/END blocks to get a "clean" source
+    // This regex looks for any BEGIN...END block and deletes it.
+    let strip_re = Regex::new(
+        r#"(?m)\s*// BEGIN [a-zA-Z0-9_./-]+\.wgsl[\s\S]*?// END [a-zA-Z0-9_./-]+\.wgsl"#,
+    )
+    .unwrap();
+    let clean_source = strip_re.replace_all(&shader_source, "");
+
+    // Step 2: Find import lines and attach the (potentially nested) content
+    let import_re = Regex::new(r#"(?m)^//\s+import\s+([a-zA-Z0-9_./-]+)\.wgsl;?"#).unwrap();
+
+    let processed = import_re
+        .replace_all(&clean_source, |caps: &regex::Captures| {
+            let import_name = &caps[1];
+            let import_line = &caps[0];
+            let imported_content = load_shader_source_string(import_name);
+
+            format!(
+                "{}\n// BEGIN {}.wgsl\n{}\n// END {}.wgsl",
+                import_line, import_name, imported_content, import_name
+            )
+        })
+        .into_owned();
+
+    // Step 3: Write to disk and leak
+    if shader_source != processed {
+        let base_path = env!("CARGO_MANIFEST_DIR");
+        let path = std::path::PathBuf::from(base_path)
+            .join("src")
+            .join("shaders")
+            .join(format!("{}.wgsl", name));
+        fs::write(path, &processed).ok();
+    }
+
+    Box::leak(processed.into_boxed_str())
 }
 
 fn load_shader_source(name: ShaderName) -> &'static str {
@@ -535,7 +565,7 @@ pub fn create_shader_configs(
                 ),
                 // Binding 3:
                 (
-                    TextureName::ReleaseAreas.to_string(),
+                    TextureName::Normals.to_string(),
                     BindingType::Texture {
                         multisampled: false,
                         view_dimension: wgpu::TextureViewDimension::D2,

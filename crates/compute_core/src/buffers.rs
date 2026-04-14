@@ -658,6 +658,12 @@ pub fn create_buffers_and_texture_descriptions(
     );
     compute_buffers.add_buffer(
         device,
+        BufferName::NumberReleaseParticles,
+        4,
+        BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+    );
+    compute_buffers.add_buffer(
+        device,
         BufferName::SimInfo,
         size_of::<SimInfo>(),
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
