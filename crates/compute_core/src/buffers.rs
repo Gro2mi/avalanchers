@@ -388,73 +388,55 @@ impl ComputeBuffers {
     }
 
     /// Reads data from a texture, handling 256-byte row alignment.
-    /// `T` must be a POD type that can be cast from bytes.
-    pub async fn read_texture<T: bytemuck::Pod + Send + Sync>(
+    /// Reads a texture from the GPU and returns a flat Vec<T> of the raw data.
+    pub async fn read_texture_flat<T: bytemuck::Pod + Send + Sync>(
         &self,
         device: &Device,
         queue: &Queue,
         texture_name: TextureName,
-    ) -> Result<(Vec<T>, Vec<T>, Vec<T>, Vec<T>)> {
+    ) -> Result<Vec<T>> {
         let texture = self
             .get_texture(&texture_name)
-            .ok_or_else(|| anyhow!("Texture '{}' not found for reading", &texture_name))?;
+            .ok_or_else(|| anyhow!("Texture '{}' not found", &texture_name))?;
 
-        let texture_desc = texture.as_image_copy();
-        let bytes_per_pixel = texture_desc
-            .texture
-            .format()
+        let size = texture.size();
+        let format = texture.format();
+
+        // block_copy_size gives us bytes per pixel (e.g., 4 for R32Float, 16 for RGBA32Float)
+        let bytes_per_pixel = format
             .block_copy_size(None)
-            .expect("Unsupported texture format for copying");
-        let width = texture_desc.texture.size().width;
-        let height = texture_desc.texture.size().height;
-        let unpadded_bytes_per_row = width * bytes_per_pixel;
+            .ok_or_else(|| anyhow!("Unsupported texture format: {:?}", format))?;
+
+        let unpadded_bytes_per_row = size.width * bytes_per_pixel;
         let padded_bytes_per_row = align_up(unpadded_bytes_per_row, COPY_BYTES_PER_ROW_ALIGNMENT);
+        let total_padded_size = (padded_bytes_per_row * size.height) as u64;
 
-        let total_padded_size = (padded_bytes_per_row * height) as u64;
-
-        // Create a staging buffer to copy texture data into
         let staging_buffer = device.create_buffer(&BufferDescriptor {
-            label: Some(&format!(
-                "{} Staging Buffer (for reading texture)",
-                TextureName::StagingBuffer.to_str()
-            )),
+            label: Some("Texture Staging Buffer"),
             size: total_padded_size,
             usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
 
-        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
-            label: Some(&format!(
-                "{} Texture Read Encoder",
-                TextureName::StagingBuffer.to_str()
-            )),
-        });
-
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor { label: None });
         encoder.copy_texture_to_buffer(
-            TexelCopyTextureInfo {
-                texture,
-                mip_level: 0,
-                origin: Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
+            texture.as_image_copy(),
             TexelCopyBufferInfo {
                 buffer: &staging_buffer,
                 layout: TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(padded_bytes_per_row),
-                    rows_per_image: Some(texture_desc.texture.size().height),
+                    rows_per_image: Some(size.height),
                 },
             },
-            texture_desc.texture.size(),
+            size,
         );
         queue.submit(Some(encoder.finish()));
 
-        // Map and read the staging buffer
         let buffer_slice = staging_buffer.slice(..);
         let (sender, receiver) = futures_intrusive::channel::shared::oneshot_channel();
-
-        buffer_slice.map_async(MapMode::Read, move |result| {
-            sender.send(result).unwrap();
+        buffer_slice.map_async(MapMode::Read, move |res| {
+            sender.send(res).unwrap();
         });
 
         self.poll(device);
@@ -463,23 +445,42 @@ impl ComputeBuffers {
             .await
             .ok_or_else(|| anyhow!("Failed to receive map result"))??;
 
-        let padded_data_bytes = buffer_slice.get_mapped_range();
+        let padded_range = buffer_slice.get_mapped_range();
+        let mut unpadded_data = Vec::with_capacity((unpadded_bytes_per_row * size.height) as usize);
 
-        // Remove padding and convert to Vec<T>
-        let mut unpadded_data_bytes = Vec::with_capacity(
-            unpadded_bytes_per_row as usize * texture_desc.texture.size().height as usize,
-        );
-        for y in 0..texture_desc.texture.size().height as usize {
-            let src_start = y * padded_bytes_per_row as usize;
-            let src_end = src_start + unpadded_bytes_per_row as usize;
-            unpadded_data_bytes.extend_from_slice(&padded_data_bytes[src_start..src_end]);
+        for y in 0..size.height as usize {
+            let start = y * padded_bytes_per_row as usize;
+            let end = start + unpadded_bytes_per_row as usize;
+            unpadded_data.extend_from_slice(&padded_range[start..end]);
         }
 
-        drop(padded_data_bytes); // Unmap
+        drop(padded_range);
         staging_buffer.unmap();
-        Ok(split_channels::<T>(bytemuck::cast_slice::<u8, T>(
-            &unpadded_data_bytes,
-        )))
+
+        // Convert raw bytes to Vec<T>
+        Ok(bytemuck::cast_slice::<u8, T>(&unpadded_data).to_vec())
+    }
+
+    pub async fn read_texture_single_channel<T: bytemuck::Pod + Send + Sync>(
+        &self,
+        device: &Device,
+        queue: &Queue,
+        name: TextureName,
+    ) -> Result<Vec<T>> {
+        // Simply returns the flat vector
+        self.read_texture_flat::<T>(device, queue, name).await
+    }
+
+    pub async fn read_texture<T: bytemuck::Pod + Send + Sync>(
+        &self,
+        device: &Device,
+        queue: &Queue,
+        name: TextureName,
+    ) -> Result<(Vec<T>, Vec<T>, Vec<T>, Vec<T>)> {
+        let flat_data = self.read_texture_flat::<T>(device, queue, name).await?;
+
+        // Use your existing split_channels logic
+        Ok(split_channels::<T>(&flat_data))
     }
 
     /// Writes data to an existing texture, handling 256-byte row alignment.

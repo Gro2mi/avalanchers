@@ -67,6 +67,7 @@ pub struct Simulation {
     number_particles: u32,
     particles: Vec<Particle>,
     state: SimulationState,
+    gpu_cache: GpuCache,
 }
 
 impl Simulation {
@@ -85,6 +86,7 @@ impl Simulation {
             number_particles: 0,
             particles: Vec::new(),
             state: SimulationState::Uninitialized,
+            gpu_cache: GpuCache::default(),
         })
     }
     pub fn get_state(&self) -> SimulationState {
@@ -115,6 +117,7 @@ impl Simulation {
         let _ = self
             .load_release_areas(&self.dem_path.replace(".png", "releaseTexture.png"))
             .await?;
+        self.gpu_cache.reset_simulation_result();
         self.initialize_particles().await?;
         self.compute_particles().await?;
         self.state = SimulationState::Finished;
@@ -126,6 +129,7 @@ impl Simulation {
             self.state >= SimulationState::Ready,
             "DEM and settings must be loaded before running normals shader"
         );
+        self.gpu_cache.reset_all();
         self.orchestrator
             .run_normals(&self.settings, &self.dem)
             .await?;
@@ -179,46 +183,144 @@ impl Simulation {
     async fn get_texture_data<T: bytemuck::Pod + Send + Sync>(
         &self,
         name: TextureName,
-    ) -> Result<(Vec<T>, Vec<T>, Vec<T>, Vec<T>)> {
-        self.orchestrator.read_texture(name).await
+    ) -> Result<TextureRgba<T>> {
+        Ok(TextureRgba::from(
+            self.orchestrator
+                .read_texture(name)
+                .await
+                .expect("Failed to read texture"),
+        ))
     }
 
-    pub async fn get_normals_texture(&self) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>)> {
+    async fn get_texture_data_single_channel<T: bytemuck::Pod + Send + Sync>(
+        &self,
+        name: TextureName,
+    ) -> Result<Vec<T>> {
+        self.orchestrator.read_texture_single_channel(name).await
+    }
+
+    async fn get_slope_texture(&mut self) -> Result<&TextureRgba<f32>> {
         assert!(
             self.state >= SimulationState::NormalsComputed,
             "Normals must be computed before reading normals texture"
         );
-        self.get_texture_data(TextureName::Normals).await
+        if self.gpu_cache.slope.is_none() {
+            self.gpu_cache.slope = Some(self.get_texture_data(TextureName::Slope).await?);
+        }
+        Ok(self.gpu_cache.slope.as_ref().unwrap())
     }
 
-    pub async fn get_release_areas_texture(
-        &self,
-    ) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>)> {
+    pub async fn get_slope_angle(&mut self) -> Result<Vec<f32>> {
+        Ok(self.get_slope_texture().await?.r.clone())
+    }
+
+    pub async fn get_slope_aspect(&mut self) -> Result<Vec<f32>> {
+        Ok(self.get_slope_texture().await?.g.clone())
+    }
+
+    async fn get_normals_texture(&mut self) -> Result<&TextureRgba<f32>> {
+        assert!(
+            self.state >= SimulationState::NormalsComputed,
+            "Normals must be computed before reading normals texture"
+        );
+        if self.gpu_cache.normals.is_none() {
+            self.gpu_cache.normals = Some(self.get_texture_data(TextureName::Normals).await?);
+        }
+        Ok(self.gpu_cache.normals.as_ref().unwrap())
+    }
+
+    pub async fn get_normals_x(&mut self) -> Result<Vec<f32>> {
+        Ok(self.get_normals_texture().await?.r.clone())
+    }
+
+    pub async fn get_normals_y(&mut self) -> Result<Vec<f32>> {
+        Ok(self.get_normals_texture().await?.g.clone())
+    }
+
+    pub async fn get_normals_z(&mut self) -> Result<Vec<f32>> {
+        Ok(self.get_normals_texture().await?.b.clone())
+    }
+
+    pub async fn get_curvature(&mut self) -> Result<Vec<f32>> {
+        Ok(self.get_normals_texture().await?.a.clone())
+    }
+
+    pub async fn get_dem_texture(&self) -> Result<Vec<f32>> {
+        self.get_texture_data_single_channel(TextureName::Dem).await
+    }
+
+    async fn get_release_areas_texture(&mut self) -> Result<&TextureRgba<f32>> {
         assert!(
             self.state >= SimulationState::ReleaseAreasComputed,
             "Release areas must be computed before reading release areas texture"
         );
-        self.get_texture_data(TextureName::ReleaseAreas).await
+        if self.gpu_cache.release_areas.is_none() {
+            self.gpu_cache.release_areas =
+                Some(self.get_texture_data(TextureName::ReleaseAreas).await?);
+        }
+        Ok(self.gpu_cache.release_areas.as_ref().unwrap())
     }
 
-    pub async fn get_max_velocity(&self) -> Result<Vec<u32>> {
+    pub async fn get_release_areas(&mut self) -> Result<Vec<f32>> {
+        Ok(self.get_release_areas_texture().await?.r.clone())
+    }
+
+    pub async fn get_max_velocity(&mut self) -> Result<&Vec<f32>> {
         assert!(
             self.state >= SimulationState::Finished,
             "Simulation must be finished before reading max velocity"
         );
-        self.orchestrator
-            .read_buffer(BufferName::MaxVelocityGrid)
-            .await
+        if self.gpu_cache.max_velocity.is_none() {
+            let data: Vec<u32> = self
+                .orchestrator
+                .read_buffer(BufferName::VelocityGrid)
+                .await?;
+            self.gpu_cache.max_velocity = Some(data.into_iter().map(|x| x as f32).collect());
+        }
+        Ok(self.gpu_cache.max_velocity.as_ref().unwrap())
     }
 
-    pub async fn get_cell_count(&self) -> Result<Vec<u32>> {
+    pub async fn get_timestep_data(&mut self) -> Result<&TimestepData> {
+        assert!(
+            self.state >= SimulationState::Finished,
+            "Simulation must be finished before reading timestep data"
+        );
+        if self.gpu_cache.timestep_data.is_none() {
+            let data_aos = self
+                .orchestrator
+                .read_buffer(BufferName::TimestepData)
+                .await?;
+
+            self.gpu_cache.timestep_data = Some(TimestepData::from_aos(&data_aos));
+        }
+        Ok(self.gpu_cache.timestep_data.as_ref().unwrap())
+    }
+
+    pub async fn get_cell_count(&mut self) -> Result<&Vec<u32>> {
         assert!(
             self.state >= SimulationState::Finished,
             "Simulation must be finished before reading cell count grid"
         );
-        self.orchestrator
-            .read_buffer(BufferName::CellCountGrid)
-            .await
+        if self.gpu_cache.cell_count.is_none() {
+            self.gpu_cache.cell_count = Some(
+                self.orchestrator
+                    .read_buffer(BufferName::CellCountGrid)
+                    .await?,
+            );
+        }
+        Ok(self.gpu_cache.cell_count.as_ref().unwrap())
+    }
+
+    pub async fn get_particles(&mut self) -> Result<&Vec<Particle>> {
+        assert!(
+            self.state >= SimulationState::ParticlesInitialized,
+            "Simulation must be finished before reading cell count grid"
+        );
+        if self.gpu_cache.particles.is_none() {
+            self.gpu_cache.particles =
+                Some(self.orchestrator.read_buffer(BufferName::Particles).await?);
+        }
+        Ok(self.gpu_cache.particles.as_ref().unwrap())
     }
 
     pub async fn get_compute_particles_debug(&self) -> Result<Vec<f32>> {
@@ -232,16 +334,60 @@ impl Simulation {
     }
 }
 
+struct TextureRgba<T> {
+    pub r: Vec<T>,
+    pub g: Vec<T>,
+    pub b: Vec<T>,
+    pub a: Vec<T>,
+}
+impl<T> From<(Vec<T>, Vec<T>, Vec<T>, Vec<T>)> for TextureRgba<T> {
+    fn from(channels: (Vec<T>, Vec<T>, Vec<T>, Vec<T>)) -> Self {
+        Self {
+            r: channels.0,
+            g: channels.1,
+            b: channels.2,
+            a: channels.3,
+        }
+    }
+}
+
+#[derive(Default)]
+struct GpuCache {
+    pub particles: Option<Vec<Particle>>,
+    pub max_velocity: Option<Vec<f32>>,
+    pub cell_count: Option<Vec<u32>>,
+    pub normals: Option<TextureRgba<f32>>,
+    pub slope: Option<TextureRgba<f32>>,
+    pub release_areas: Option<TextureRgba<f32>>,
+    pub timestep_data: Option<TimestepData>,
+}
+
+impl GpuCache {
+    pub fn reset_simulation_result(&mut self) {
+        self.particles = None;
+        self.max_velocity = None;
+        self.cell_count = None;
+        self.timestep_data = None;
+    }
+
+    pub fn reset_all(&mut self) {
+        self.reset_simulation_result();
+        self.normals = None;
+        self.slope = None;
+        self.release_areas = None;
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Particle {
     pub position: [f32; 3],
     pub mass: f32,
     pub velocity: [f32; 3],
-    pub _pad0: f32,  // padding to align next field
-    pub c: [f32; 4], // 2x2 matrix: [xx, xy, yx, yy]
+    pub snow_thickness: f32, // padding to align next field
+    pub c: [f32; 4],         // 2x2 matrix: [xx, xy, yx, yy]
     pub stopped: u32,
-    pub _pad1: [u32; 3], // 3 * 4 bytes padding
+    pub _pad0: [u32; 3], // 3 * 4 bytes padding
 }
 
 impl Default for Particle {
@@ -258,10 +404,10 @@ impl Particle {
             position: [0.0; 3],
             mass: 0.0,
             velocity: [0.0; 3],
-            _pad0: 0.0,
+            snow_thickness: 0.0,
             c: [0.0; 4],
             stopped: 0,
-            _pad1: [0; 3],
+            _pad0: [0; 3],
         }
     }
 }
@@ -288,19 +434,75 @@ impl Default for SimInfo {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct TimestepData {
-    pub velocity: [f32; 3],                   // 12 bytes
-    pub dt: f32,                              // 4 bytes
+pub struct TimestepDataAoS {
+    pub velocity: [f32; 3], // 12 bytes
+    pub dt: f32,            // 4 bytes
+
     pub acceleration_tangential: [f32; 3],    // 12 bytes
     pub acceleration_friction_magnitude: f32, // 4 bytes
-    pub position: [f32; 3],                   // 12 bytes
-    pub elevation: f32,                       // 4 bytes
-    pub normal: [f32; 3],                     // 12 bytes
-    pub acceleration_normal: [f32; 3],        // 12 bytes
-    pub _pad0: f32,                           // 4 bytes (padding)
-    pub uv: [f32; 2],                         // 8 bytes
-    pub g_eff: f32,                           // 4 bytes
-    pub _pad1: f32,                           // 4 bytes (padding to 96 bytes)
+
+    pub position: [f32; 3], // 12 bytes
+    pub elevation: f32,     // 4 bytes
+
+    pub normal: [f32; 3], // 12 bytes
+    pub g_eff: f32,       // 4 bytes
+
+    pub acceleration_normal: [f32; 3], // 12 bytes
+    pub _pad0: f32,                    // 4 bytes (padding)
+
+    pub uv: [f32; 2],    // 4 bytes
+    pub _pad1: [f32; 2], // 12 bytes (padding to 96 bytes)
+}
+
+#[derive(Clone)]
+pub struct TimestepData {
+    pub velocity: Vec<[f32; 3]>,
+    pub dt: Vec<f32>,
+    pub acceleration_tangential: Vec<[f32; 3]>,
+    pub acceleration_friction_magnitude: Vec<f32>,
+    pub position: Vec<[f32; 3]>,
+    pub elevation: Vec<f32>,
+    pub normal: Vec<[f32; 3]>,
+    pub g_eff: Vec<f32>,
+    pub acceleration_normal: Vec<[f32; 3]>,
+    pub uv: Vec<[f32; 2]>,
+}
+
+impl TimestepData {
+    pub fn from_aos(aos_data: &[TimestepDataAoS]) -> Self {
+        let len = aos_data.len();
+
+        // Pre-allocate all vectors to the exact required size
+        let mut soa = Self {
+            velocity: Vec::with_capacity(len),
+            dt: Vec::with_capacity(len),
+            acceleration_tangential: Vec::with_capacity(len),
+            acceleration_friction_magnitude: Vec::with_capacity(len),
+            position: Vec::with_capacity(len),
+            elevation: Vec::with_capacity(len),
+            normal: Vec::with_capacity(len),
+            g_eff: Vec::with_capacity(len),
+            acceleration_normal: Vec::with_capacity(len),
+            uv: Vec::with_capacity(len),
+        };
+
+        for item in aos_data {
+            soa.velocity.push(item.velocity);
+            soa.dt.push(item.dt);
+            soa.acceleration_tangential
+                .push(item.acceleration_tangential);
+            soa.acceleration_friction_magnitude
+                .push(item.acceleration_friction_magnitude);
+            soa.position.push(item.position);
+            soa.elevation.push(item.elevation);
+            soa.normal.push(item.normal);
+            soa.g_eff.push(item.g_eff);
+            soa.acceleration_normal.push(item.acceleration_normal);
+            soa.uv.push(item.uv);
+        }
+
+        soa
+    }
 }
 
 pub struct WorkgroupSize {}
@@ -706,9 +908,22 @@ impl ComputeOrchestrator {
         debug!("Start simulation");
         self.add_buffer(
             BufferName::TimestepData,
-            size_of::<TimestepData>() * sim_settings.max_steps as usize,
-            BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            size_of::<TimestepDataAoS>() * sim_settings.max_steps as usize,
+            BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
         );
+
+        let sim_info: SimInfo = SimInfo {
+            timestep: 0,
+            number_particles: number_release_particles,
+            elevation_threshold: 0.0,
+            max_velocity: 0.0,
+        };
+
+        self.buffers.write_buffer(
+            &self.queue,
+            BufferName::SimInfo,
+            bytemuck::bytes_of(&sim_info),
+        )?;
         // Compute Particles Bind Group
         let compute_particles_config = self
             .shader_configs
@@ -746,18 +961,6 @@ impl ComputeOrchestrator {
                 self.get_buffer_binding(BufferName::MaxVelocityGrid),
             ],
         )?;
-        let sim_info: SimInfo = SimInfo {
-            timestep: 0,
-            number_particles: number_release_particles,
-            elevation_threshold: 0.0,
-            max_velocity: 0.0,
-        };
-
-        self.buffers.write_buffer(
-            &self.queue,
-            BufferName::SimInfo,
-            bytemuck::bytes_of(&sim_info),
-        )?;
 
         // Create command encoder
         let mut command_encoder =
@@ -792,13 +995,20 @@ impl ComputeOrchestrator {
 
         Ok(())
     }
-    #[allow(dead_code)]
     async fn read_texture<T: bytemuck::Pod + Send + Sync>(
         &self,
         name: TextureName,
     ) -> Result<(Vec<T>, Vec<T>, Vec<T>, Vec<T>)> {
         self.buffers
             .read_texture(&self.device, &self.queue, name)
+            .await
+    }
+    async fn read_texture_single_channel<T: bytemuck::Pod + Send + Sync>(
+        &self,
+        name: TextureName,
+    ) -> Result<Vec<T>> {
+        self.buffers
+            .read_texture_single_channel(&self.device, &self.queue, name)
             .await
     }
     async fn read_buffer<T: bytemuck::Pod + Send + Sync>(
@@ -837,12 +1047,12 @@ impl ComputeOrchestrator {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use super::*;
     use crate::settings::Settings;
     use data_processor::read_png;
     use pollster;
+    use std::collections::HashSet;
+    use std::path::Path;
     use utils::{Hist, HistFloat, MaxValue, MinValue};
     const INCLINED_PLANE_PATH: &str = "../../data/avaframe/avaInclinedPlane.png";
     const RELEASE_TEXTURE_PATH: &str = "../../data/avaframe/avaInclinedPlanereleaseTexture.png";
@@ -1003,6 +1213,26 @@ mod tests {
             assert!(p.position[2] < 3350.0);
         }
         assert_eq!(particle.mass, 500.0);
+        let unique_values = particles
+            .iter()
+            .map(|p| {
+                [
+                    p.position[0].to_bits(),
+                    p.position[0].to_bits(),
+                    p.position[0].to_bits(),
+                ]
+            })
+            .collect::<HashSet<_>>()
+            .len();
+        info!(
+            "Unique values: {}, {}%",
+            unique_values,
+            unique_values as f32 / particles.len() as f32 * 100.0
+        );
+        assert!(
+            unique_values as f32 / particles.len() as f32 > 0.98,
+            "Duplicate position found in vector"
+        );
         info!(
             "Read particles buffer: len: {}, first particle: {:?}",
             particles.len(),
@@ -1034,7 +1264,7 @@ mod tests {
             BufferName::OutDebugNormals,
         ))
         .expect("Failed to read out_debug_normals_buffer");
-        info!("Read out_debug_normals_buffer: {:?}", debug_buffer);
+        log_debug_buffer(&debug_buffer);
         let cell_count =
             pollster::block_on(sim.get_cell_count()).expect("Failed to get cell count");
         info!("Cell count max: {:?}", cell_count.max_value().unwrap());
@@ -1049,6 +1279,44 @@ mod tests {
         ))
         .expect("Failed to read sim info buffer");
         info!("Read sim info: {:?}", sim_info);
+
+        let particles = pollster::block_on(sim.orchestrator.buffers.read_buffer::<Particle>(
+            &sim.orchestrator.device,
+            &sim.orchestrator.queue,
+            BufferName::Particles,
+        ))
+        .expect("Failed to read particles buffer");
+        // for particle in particles.iter() {
+        //     if particle.velocity[0] != 0.0
+        //         || particle.velocity[1] != 0.0
+        //         || particle.velocity[2] != 0.0
+        //     {
+        //         info!(
+        //             "Particle position: {:?}, velocity: {:?}, mass: {}",
+        //             particle.position, particle.velocity, particle.mass
+        //         );
+        //     }
+        // }
+        let timestep_data =
+            pollster::block_on(sim.orchestrator.buffers.read_buffer::<TimestepDataAoS>(
+                &sim.orchestrator.device,
+                &sim.orchestrator.queue,
+                BufferName::TimestepData,
+            ))
+            .expect("Failed to read timestep data buffer");
+        info!("Read timestep data: len: {}", timestep_data.len());
+        for (i, data) in timestep_data.iter().step_by(3).take(40).enumerate() {
+            info!("Timestep {}: {:?}", i, data);
+        }
+    }
+
+    fn log_debug_buffer(buffer: &[f32]) {
+        info!("Debug buffer length: {}", buffer.len());
+        for (i, value) in buffer.iter().enumerate() {
+            if *value != 0.0 {
+                info!("{}: {}", i, value);
+            }
+        }
     }
 
     #[test_log::test]

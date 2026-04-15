@@ -1,47 +1,70 @@
-use compute_core::Simulation;
-use compute_core::settings::Settings;
-use numpy::PyArray2;
-use numpy::PyArrayMethods;
-use numpy::ToPyArray;
+use compute_core::{Simulation, TimestepData, settings::Settings};
+use numpy::{PyArray2, PyArrayMethods, ToPyArray};
 use pollster::FutureExt;
+use pyo3::exceptions::{PyIOError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyModuleMethods;
 
-#[pyclass]
-pub struct PySimulation {
-    // Wrap the core struct
-    inner: Simulation,
+// A helper trait to make error conversion less verbose
+trait IntoPyResult<T> {
+    fn map_runtime_err(self) -> PyResult<T>;
+}
+
+impl<T, E: std::fmt::Display> IntoPyResult<T> for Result<T, E> {
+    fn map_runtime_err(self) -> PyResult<T> {
+        self.map_err(|e| PyErr::new::<PyRuntimeError, _>(e.to_string()))
+    }
+}
+
+#[pyclass(name = "SimulationResults")]
+pub struct PyTimestepData {
+    // We store the inner core struct
+    inner: TimestepData,
+}
+
+#[pymethods]
+impl PyTimestepData {
+    #[getter]
+    fn get_velocity<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<f32>> {
+        let flattened = self.inner.velocity.as_flattened();
+
+        flattened
+            .to_pyarray(py)
+            .reshape([self.inner.velocity.len(), 3])
+            .map_err(|_| {
+                PyErr::new::<PyValueError, _>("Dimension mismatch during velocity conversion")
+            })
+            .expect("Failed to convert velocity data to numpy array")
+    }
 }
 
 #[pyclass]
-#[derive(Default)]
 pub struct PySettings {
-    inner: Settings,
+    pub inner: Settings,
 }
 
+#[allow(clippy::new_without_default)]
 #[pymethods]
 impl PySettings {
     #[new]
     pub fn new() -> Self {
-        PySettings {
-            inner: Settings::new(),
+        Self {
+            inner: Settings::default(),
         }
     }
 
     #[staticmethod]
     pub fn from_json(path: String) -> PyResult<Self> {
-        let settings = Settings::from_json(&path)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+        let settings =
+            Settings::from_json(&path).map_err(|e| PyErr::new::<PyIOError, _>(e.to_string()))?;
         Ok(PySettings { inner: settings })
     }
 
     pub fn to_json(&self, path: String) -> PyResult<()> {
         self.inner
             .to_json(&path)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))
+            .map_err(|e| PyErr::new::<PyIOError, _>(e.to_string()))
     }
 
-    // Expose dem_path so Python can tweak it manually if needed
     #[getter]
     pub fn get_dem_path(&self) -> String {
         self.inner.dem_path.clone()
@@ -53,10 +76,21 @@ impl PySettings {
     }
 }
 
+#[pyclass]
+pub struct PySimulation {
+    inner: Simulation,
+}
+
 #[pymethods]
 impl PySimulation {
-    // We use a static method for 'create' because Python '__init__' can't be async
-    #[allow(clippy::new_ret_no_self)]
+    // #[staticmethod]
+    // pub fn create(settings: &PySettings) -> PyResult<Self> {
+    //     let inner = Simulation::create(settings.inner.clone())
+    //         .block_on()
+    //         .map_runtime_err()?;
+    //     Ok(PySimulation { inner })
+    // }
+
     #[staticmethod]
     pub fn create_default(dem_path: String) -> PyResult<Self> {
         // block_on is used here to bridge async Rust to sync Python
@@ -67,50 +101,125 @@ impl PySimulation {
         Ok(PySimulation { inner })
     }
 
-    pub fn get_state(&self) -> String {
+    pub fn run(&mut self) -> PyResult<()> {
+        self.inner.run().block_on().map_runtime_err()
+    }
+
+    #[getter]
+    pub fn state(&self) -> String {
         format!("{:?}", self.inner.get_state())
     }
 
-    pub fn get_cell_size(&self) -> f32 {
+    #[getter]
+    pub fn cell_size(&self) -> f32 {
         self.inner.dem.cell_size
     }
 
-    pub fn run(&mut self) -> PyResult<()> {
-        self.inner
-            .run()
-            .block_on()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))
-    }
-
-    // Expose fields as properties
     #[getter]
-    pub fn dem_path(&self) -> String {
-        self.inner.dem_path.clone()
+    pub fn dem<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        let dims = [self.inner.dem.height, self.inner.dem.width];
+        self.inner
+            .dem
+            .data1d
+            .to_pyarray(py)
+            .reshape(dims)
+            .map_err(|_| {
+                PyErr::new::<PyValueError, _>("Dimension mismatch during texture conversion")
+            })
+    }
+    /// Generic helper to get a 2D array from a GPU-backed buffer
+    fn get_layer_u32<'py>(
+        &self,
+        py: Python<'py>,
+        data: Vec<u32>,
+    ) -> PyResult<Bound<'py, PyArray2<u32>>> {
+        let h = self.inner.dem.height;
+        let w = self.inner.dem.width;
+
+        data.to_pyarray(py).reshape([h, w]).map_err(|_| {
+            PyErr::new::<PyValueError, _>(format!(
+                "Data size {} does not match DEM dimensions {}x{}",
+                data.len(),
+                h,
+                w
+            ))
+        })
+    }
+    fn get_layer_f32<'py>(
+        &self,
+        py: Python<'py>,
+        data: Vec<f32>,
+    ) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        let h = self.inner.dem.height;
+        let w = self.inner.dem.width;
+
+        data.to_pyarray(py).reshape([h, w]).map_err(|_| {
+            PyErr::new::<PyValueError, _>(format!(
+                "Data size {} does not match DEM dimensions {}x{}",
+                data.len(),
+                h,
+                w
+            ))
+        })
     }
 
-    pub fn get_normals<'py>(&self, py: Python<'py>) -> PyResult<PyTexture<'py>> {
-        // 1. Get the data from the core (async -> sync)
-        let (nx, ny, nz, nw) = self
+    #[getter]
+    pub fn get_max_velocity<'py>(
+        &mut self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        let data = self
             .inner
-            .get_normals_texture()
+            .get_max_velocity()
             .block_on()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
-
-        self.convert_rgba_texture(py, nx, ny, nz, nw)
+            .map_runtime_err()?
+            .to_vec();
+        self.get_layer_f32(py, data)
     }
 
-    pub fn get_release_areas<'py>(&self, py: Python<'py>) -> PyResult<PyTexture<'py>> {
-        let (r, g, b, a) = self
+    #[getter]
+    pub fn get_cell_count<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<u32>>> {
+        let data = self
             .inner
-            .get_release_areas_texture()
+            .get_cell_count()
             .block_on()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
-
-        self.convert_rgba_texture(py, r, g, b, a)
+            .map_runtime_err()?
+            .to_vec();
+        self.get_layer_u32(py, data)
     }
 
-    /// Convert RGBA texture data from the core into NumPy arrays for Python.
-    pub fn convert_rgba_texture<'py>(
+    #[getter]
+    pub fn get_normals_x<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        let normals = self.inner.get_normals_x().block_on().map_runtime_err()?;
+        self.get_layer_f32(py, normals.to_vec())
+    }
+
+    #[getter]
+    pub fn get_release_areas<'py>(
+        &mut self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        let data = self
+            .inner
+            .get_release_areas()
+            .block_on()
+            .map_runtime_err()?;
+        self.get_layer_f32(py, data.to_vec())
+    }
+
+    #[getter]
+    pub fn get_timestep_data(&mut self) -> PyResult<PyTimestepData> {
+        let data = self
+            .inner
+            .get_timestep_data()
+            .block_on()
+            .map_runtime_err()?;
+        Ok(PyTimestepData {
+            inner: data.clone(),
+        })
+    }
+
+    fn convert_rgba_texture<'py>(
         &self,
         py: Python<'py>,
         r: Vec<f32>,
@@ -119,44 +228,14 @@ impl PySimulation {
         a: Vec<f32>,
     ) -> PyResult<PyTexture<'py>> {
         let dims = [self.inner.dem.height, self.inner.dem.width];
-        let r_py = r.to_pyarray(py).reshape(dims).map_err(to_val_err)?;
-        let g_py = g.to_pyarray(py).reshape(dims).map_err(to_val_err)?;
-        let b_py = b.to_pyarray(py).reshape(dims).map_err(to_val_err)?;
-        let a_py = a.to_pyarray(py).reshape(dims).map_err(to_val_err)?;
 
-        Ok((r_py, g_py, b_py, a_py))
-    }
+        let to_arr = |data: Vec<f32>| -> PyResult<Bound<'py, PyArray2<f32>>> {
+            data.to_pyarray(py).reshape(dims).map_err(|_| {
+                PyErr::new::<PyValueError, _>("Dimension mismatch during texture conversion")
+            })
+        };
 
-    pub fn get_dem<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f32>>> {
-        let dims = [self.inner.dem.height, self.inner.dem.width];
-        self.inner
-            .dem
-            .data1d
-            .to_pyarray(py)
-            .reshape(dims)
-            .map_err(to_val_err)
-    }
-
-    pub fn get_max_velocity<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<u32>>> {
-        let dims = [self.inner.dem.height, self.inner.dem.width];
-        self.inner
-            .get_max_velocity()
-            .block_on()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?
-            .to_pyarray(py)
-            .reshape(dims)
-            .map_err(to_val_err)
-    }
-
-    pub fn get_cell_count<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<u32>>> {
-        let dims = [self.inner.dem.height, self.inner.dem.width];
-        self.inner
-            .get_cell_count()
-            .block_on()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?
-            .to_pyarray(py)
-            .reshape(dims)
-            .map_err(to_val_err)
+        Ok((to_arr(r)?, to_arr(g)?, to_arr(b)?, to_arr(a)?))
     }
 }
 
@@ -167,16 +246,8 @@ type PyTexture<'py> = (
     Bound<'py, PyArray2<f32>>,
 );
 
-fn to_val_err(e: impl std::fmt::Display) -> PyErr {
-    PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-        "Dimension mismatch: Could not reshape data into 1001x401. Error: {}",
-        e
-    ))
-}
-
 #[pymodule]
 fn avalanchers(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    // 1. Initialize the bridge between Rust and Python logging
     pyo3_log::init();
     compute_core::init_logging();
 
