@@ -1052,8 +1052,10 @@ mod tests {
     use data_processor::read_png;
     use pollster;
     use std::collections::HashSet;
+    use std::mem;
     use std::path::Path;
     use utils::{Hist, HistFloat, MaxValue, MinValue};
+
     const INCLINED_PLANE_PATH: &str = "../../data/avaframe/avaInclinedPlane.png";
     const RELEASE_TEXTURE_PATH: &str = "../../data/avaframe/avaInclinedPlanereleaseTexture.png";
     const GAR_PATH: &str = "../../data/avaframe/avaGar.png";
@@ -1324,5 +1326,83 @@ mod tests {
         let orchestrator = pollster::block_on(ComputeOrchestrator::new())
             .expect("Failed to create ComputeOrchestrator");
         orchestrator.generate_shader_report();
+    }
+
+    #[test]
+    fn test_texture_rgba_from_tuple() {
+        // 1. Prepare sample data
+        let r = vec![1.0, 0.2, 0.3];
+        let g = vec![0.4, 0.5, 0.6];
+        let b = vec![0.7, 0.8, 0.9];
+        let a = vec![1.0, 1.0, 1.0];
+
+        // 2. Perform the conversion using .into()
+        // Note: We explicitly type it to ensure the compiler uses our From impl
+        let texture: TextureRgba<f32> = (r.clone(), g.clone(), b.clone(), a.clone()).into();
+
+        // 3. Assert the data moved correctly
+        assert_eq!(texture.r, r);
+        assert_eq!(texture.g, g);
+        assert_eq!(texture.b, b);
+        assert_eq!(texture.a, a);
+    }
+
+    #[test]
+    fn test_texture_rgba_generic_u8() {
+        // Testing with u8 to ensure the generic <T> works as expected
+        let r = vec![255, 0];
+        let g = vec![128, 64];
+        let b = vec![0, 255];
+        let a = vec![255, 255];
+
+        let texture = TextureRgba::from((r.clone(), g.clone(), b.clone(), a.clone()));
+
+        assert_eq!(texture.r[0], 255);
+        assert_eq!(texture.g[1], 64);
+    }
+
+    #[test]
+    fn test_particle_initialization() {
+        // Test both new() and Default
+        let p1 = Particle::new();
+        let p2 = Particle::default();
+
+        // Check a few key fields
+        assert_eq!(p1.position, [0.0; 3]);
+        assert_eq!(p1.velocity, [0.0; 3]);
+        assert_eq!(p1.stopped, 0);
+
+        // Ensure new() and default() are identical
+        assert_eq!(p1.position, p2.position);
+        assert_eq!(p1.c, p2.c);
+    }
+
+    #[test]
+    fn test_particle_memory_layout() {
+        // This is CRITICAL for WebGPU.
+        // We verify the size of the struct matches your constant.
+        assert_eq!(
+            mem::size_of::<Particle>(),
+            Particle::BYTE_SIZE,
+            "Particle struct size does not match BYTE_SIZE constant!"
+        );
+
+        // Verify that the size is exactly 64 bytes (16 * 4)
+        assert_eq!(mem::size_of::<Particle>(), 64);
+    }
+
+    #[test]
+    fn test_field_offsets() {
+        // Optional: Verifies that fields are where you think they are.
+        // WebGPU expects 'c' (the matrix) to start at byte 32 in this layout.
+        let p = Particle::new();
+        let base_ptr = &p as *const _ as usize;
+        let c_ptr = &p.c as *const _ as usize;
+
+        let offset_c = c_ptr - base_ptr;
+        assert_eq!(
+            offset_c, 32,
+            "Field 'c' is not at the expected 32-byte offset!"
+        );
     }
 }

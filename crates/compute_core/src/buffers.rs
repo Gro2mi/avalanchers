@@ -1,4 +1,6 @@
 use anyhow::{Result, anyhow};
+use bytemuck::Pod;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use wgpu::{
     Buffer, BufferDescriptor, BufferUsages, COPY_BYTES_PER_ROW_ALIGNMENT, CommandEncoderDescriptor,
@@ -166,26 +168,30 @@ impl ComputeBuffers {
         data: &[T],
         usage: BufferUsages,
     ) {
-        let original_bytes = bytemuck::cast_slice(data);
-        let remainder = original_bytes.len() % 16;
-        let buffer = if remainder == 0 {
-            // No padding needed, upload directly from slice (No extra allocation!)
-            device.create_buffer_init(&BufferInitDescriptor {
-                label: Some(name.to_str()),
-                contents: original_bytes,
-                usage,
-            })
-        } else {
-            // Only allocate and pad if absolutely necessary
-            let mut padded_bytes = original_bytes.to_vec();
-            padded_bytes.resize(padded_bytes.len() + (16 - remainder), 0);
-            device.create_buffer_init(&BufferInitDescriptor {
-                label: Some(name.to_str()),
-                contents: &padded_bytes,
-                usage,
-            })
-        };
+        let buffer = device.create_buffer_init(&BufferInitDescriptor {
+            label: Some(name.to_str()),
+            contents: &Self::prepare_buffer_contents(data),
+            usage,
+        });
         self.buffers.insert(name, buffer);
+    }
+
+    pub fn prepare_buffer_contents<T: Pod>(original_data: &[T]) -> Cow<'_, [u8]> {
+        // 1. Get the raw byte size of the input
+        let original_bytes = bytemuck::cast_slice(original_data);
+        let len = original_bytes.len();
+        let remainder = len % 16;
+
+        if remainder == 0 {
+            // Return a borrowed reference to the original data (Zero allocation)
+            Cow::Borrowed(original_bytes)
+        } else {
+            // Create an owned, padded version (Allocation only when needed)
+            let padding = 16 - remainder;
+            let mut padded_bytes = original_bytes.to_vec();
+            padded_bytes.extend(std::iter::repeat_n(0, padding));
+            Cow::Owned(padded_bytes)
+        }
     }
 
     pub fn get_buffer(&self, name: &BufferName) -> Option<&Buffer> {
@@ -586,13 +592,15 @@ pub fn create_buffers_and_texture_descriptions(
     device: &Device,
     texture_size: Extent3d,
 ) -> ComputeBuffers {
-    let mut compute_buffers = ComputeBuffers::new();
+    let mut compute_buffers = ComputeBuffers::default();
     let texture_usage_default = TextureUsages::TEXTURE_BINDING
         | TextureUsages::STORAGE_BINDING
         | TextureUsages::COPY_DST
         | TextureUsages::COPY_SRC;
 
     let texture_usage_input = TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST;
+    let texture_usage_output =
+        TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_SRC | TextureUsages::STORAGE_BINDING;
     let buffer_usage_output = BufferUsages::STORAGE | BufferUsages::COPY_SRC;
     let atomic_grid_size = (texture_size.width * texture_size.height * 4) as usize;
 
@@ -608,14 +616,14 @@ pub fn create_buffers_and_texture_descriptions(
         TextureName::Normals,
         texture_size,
         TextureFormat::Rgba32Float,
-        texture_usage_default,
+        texture_usage_output,
     );
     compute_buffers.add_texture(
         device,
         TextureName::Slope,
         texture_size,
         TextureFormat::Rgba32Float,
-        texture_usage_default,
+        texture_usage_output,
     );
     compute_buffers.add_texture(
         device,
@@ -629,7 +637,7 @@ pub fn create_buffers_and_texture_descriptions(
         TextureName::ReleaseAreas,
         texture_size,
         TextureFormat::Rgba32Float,
-        texture_usage_default,
+        texture_usage_output,
     );
     compute_buffers.add_texture(
         device,
@@ -689,4 +697,145 @@ pub fn create_buffers_and_texture_descriptions(
     );
 
     compute_buffers
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::borrow::Cow;
+
+    #[test]
+    fn buffer_name_to_str_covers_all_variants() {
+        let cases = [
+            (BufferName::OutDebugNormals, "out_debug_normals"),
+            (BufferName::OutDebugRelease, "out_debug_release"),
+            (BufferName::NumberReleaseCells, "number_release_cells"),
+            (
+                BufferName::NumberReleaseParticles,
+                "number_release_particles",
+            ),
+            (BufferName::SimInfo, "sim_info"),
+            (BufferName::SimSettings, "sim_settings"),
+            (BufferName::CellCountGrid, "cell_count_grid"),
+            (BufferName::VelocityGrid, "velocity_grid"),
+            (BufferName::MaxVelocityGrid, "max_velocity_grid"),
+            (BufferName::ParticleIndex, "particle_index"),
+            (BufferName::Particles, "particles"),
+            (BufferName::TimestepData, "timestep_data"),
+        ];
+
+        for (name, expected) in cases {
+            assert_eq!(name.to_str(), expected);
+            assert_eq!(name.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn texture_name_to_str_covers_all_variants() {
+        let cases = [
+            (TextureName::Wind, "wind"),
+            (TextureName::Normals, "normals"),
+            (TextureName::Slope, "slope"),
+            (TextureName::Roughness, "roughness"),
+            (TextureName::ReleaseAreas, "release_areas"),
+            (TextureName::Landcover, "landcover"),
+            (TextureName::StagingBuffer, "staging_buffer"),
+            (TextureName::Dem, "dem"),
+            (TextureName::ReleaseAreasInput, "release_areas_input"),
+            (TextureName::CellCount, "cell_count"),
+        ];
+
+        for (name, expected) in cases {
+            assert_eq!(name.to_str(), expected);
+            assert_eq!(name.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn align_up_behaves_as_expected() {
+        assert_eq!(align_up(0, 16), 0);
+        assert_eq!(align_up(1, 16), 16);
+        assert_eq!(align_up(15, 16), 16);
+        assert_eq!(align_up(16, 16), 16);
+        assert_eq!(align_up(17, 16), 32);
+        assert_eq!(align_up(255, 256), 256);
+        assert_eq!(align_up(256, 256), 256);
+        assert_eq!(align_up(257, 256), 512);
+    }
+
+    #[test]
+    fn prepare_buffer_contents_returns_borrowed_when_already_16_byte_aligned() {
+        let data = [1u32, 2, 3, 4]; // 16 bytes
+        let prepared = ComputeBuffers::prepare_buffer_contents(&data);
+
+        assert!(matches!(prepared, Cow::Borrowed(_)));
+        assert_eq!(prepared.len(), 16);
+        assert_eq!(&prepared[..], bytemuck::cast_slice::<u32, u8>(&data));
+    }
+
+    #[test]
+    fn prepare_buffer_contents_pads_when_not_16_byte_aligned() {
+        let data = [1u32, 2, 3]; // 12 bytes
+        let prepared = ComputeBuffers::prepare_buffer_contents(&data);
+
+        assert!(matches!(prepared, Cow::Owned(_)));
+        assert_eq!(prepared.len(), 16);
+        assert_eq!(&prepared[..12], bytemuck::cast_slice::<u32, u8>(&data));
+        assert_eq!(&prepared[12..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn prepare_buffer_contents_is_always_multiple_of_16_and_prefix_is_original() {
+        for len in 0usize..33 {
+            let data: Vec<u8> = (0..len as u8).collect();
+            let prepared = ComputeBuffers::prepare_buffer_contents(&data);
+
+            assert_eq!(prepared.len() % 16, 0);
+            assert_eq!(&prepared[..data.len()], data.as_slice());
+            for b in &prepared[data.len()..] {
+                assert_eq!(*b, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn texture_descriptor_is_constructed_correctly() {
+        let size = Extent3d {
+            width: 64,
+            height: 32,
+            depth_or_array_layers: 1,
+        };
+        let desc = texture_descriptor(
+            &TextureName::Normals,
+            size,
+            TextureFormat::Rgba32Float,
+            TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+        );
+
+        assert_eq!(desc.label, Some("normals"));
+        assert_eq!(desc.size.width, 64);
+        assert_eq!(desc.size.height, 32);
+        assert_eq!(desc.size.depth_or_array_layers, 1);
+        assert_eq!(desc.dimension, TextureDimension::D2);
+        assert_eq!(desc.format, TextureFormat::Rgba32Float);
+        assert!(desc.usage.contains(TextureUsages::TEXTURE_BINDING));
+        assert!(desc.usage.contains(TextureUsages::COPY_DST));
+        assert_eq!(desc.mip_level_count, 1);
+        assert_eq!(desc.sample_count, 1);
+        assert!(desc.view_formats.is_empty());
+    }
+
+    #[test]
+    fn compute_buffers_default_starts_empty() {
+        let buffers = ComputeBuffers::default();
+        assert!(buffers.get_buffer(&BufferName::SimInfo).is_none());
+        assert!(buffers.get_texture(&TextureName::Wind).is_none());
+        assert!(buffers.get_texture_view(&TextureName::Wind).is_none());
+    }
+
+    #[test]
+    fn debug_buffer_size_constant_is_expected() {
+        assert_eq!(DEBUG_BUFFER_SIZE, 100 * 4);
+        assert_eq!(DEBUG_BUFFER_SIZE, 400);
+    }
 }
