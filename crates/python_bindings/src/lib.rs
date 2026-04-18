@@ -219,6 +219,11 @@ impl PySimulation {
         })
     }
 
+    #[getter]
+    pub fn get_elevation_threshold(&self) -> f32 {
+        self.inner.get_sim_info().elevation_threshold
+    }
+
     fn convert_rgba_texture<'py>(
         &self,
         py: Python<'py>,
@@ -247,7 +252,7 @@ type PyTexture<'py> = (
 );
 
 #[pymodule]
-fn avalanchers(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _avalanchers(m: &Bound<'_, PyModule>) -> PyResult<()> {
     pyo3_log::init();
     compute_core::init_logging();
 

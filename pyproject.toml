@@ -14,4 +14,5 @@ dependencies = [
 [tool.maturin]
 # Point to the specific crate in your workspace
 manifest-path = "crates/python_bindings/Cargo.toml"
-module-name = "avalanchers"
+module-name = "avalanchers._avalanchers"
+python-source = "."

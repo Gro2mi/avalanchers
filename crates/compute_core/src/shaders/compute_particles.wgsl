@@ -159,7 +159,8 @@ fn compute_particles(
     if (particleId >= sim_info.number_particles) {
         return;
     }
-    if (particles[particleId].stopped > 0u) {
+    // do at least one step, otherwise simulation might stop too early
+    if (particles[particleId].stopped > 1u) {
         return;
     }
     let uv = position_to_uv(particles[particleId].position);

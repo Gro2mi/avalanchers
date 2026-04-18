@@ -64,6 +64,7 @@ pub struct Simulation {
     pub slope: Vec<f32>,
     pub cell_count: Vec<u32>,
     pub max_velocity: Vec<f32>,
+    sim_info: SimInfo,
     number_particles: u32,
     particles: Vec<Particle>,
     state: SimulationState,
@@ -87,10 +88,18 @@ impl Simulation {
             particles: Vec::new(),
             state: SimulationState::Uninitialized,
             gpu_cache: GpuCache::default(),
+            sim_info: SimInfo::default(),
         })
     }
     pub fn get_state(&self) -> SimulationState {
         self.state
+    }
+    pub fn get_sim_info(&self) -> SimInfo {
+        self.sim_info
+    }
+
+    pub fn elevation_threshold(&self) -> f32 {
+        self.sim_info.elevation_threshold
     }
 
     pub async fn create(dem_path: String, settings: settings::SimSettings) -> Result<Self> {
@@ -120,6 +129,14 @@ impl Simulation {
         self.gpu_cache.reset_simulation_result();
         self.initialize_particles().await?;
         self.compute_particles().await?;
+
+        self.sim_info = self
+            .orchestrator
+            .read_buffer::<SimInfo>(BufferName::SimInfo)
+            .await?
+            .first()
+            .cloned()
+            .unwrap_or_default();
         self.state = SimulationState::Finished;
         Ok(())
     }
@@ -580,12 +597,6 @@ impl ComputeOrchestrator {
             max_texture_size
         );
 
-        // let workgroup_size_2d = utils::highest_power_of_two(
-        //     (adapter.limits().max_compute_workgroup_size_x as f64).sqrt() as u32,
-        // );
-        // debug!("Workgroup size 2D: {}", workgroup_size_2d);
-        // let max_invocations = adapter.limits().max_compute_invocations_per_workgroup;
-        // let workgroup_size_1d = max_invocations;
         let (device, queue) = adapter
             .request_device(&DeviceDescriptor {
                 label: Some("Compute Device"),
@@ -623,9 +634,6 @@ impl ComputeOrchestrator {
             anisotropy_clamp: 1,
             border_color: None,
         });
-        let dispatch_number_workgroups_x_2d = 0;
-        let dispatch_number_workgroups_y_2d = 0;
-        let dispatch_number_workgroups_1d = 0;
 
         Ok(Self {
             instance,
@@ -638,9 +646,9 @@ impl ComputeOrchestrator {
             sampler,
             max_texture_size,
             max_storage_buffer_binding_size,
-            dispatch_number_workgroups_x_2d,
-            dispatch_number_workgroups_y_2d,
-            dispatch_number_workgroups_1d,
+            dispatch_number_workgroups_x_2d: 0,
+            dispatch_number_workgroups_y_2d: 0,
+            dispatch_number_workgroups_1d: 0,
         })
     }
 
@@ -992,7 +1000,6 @@ impl ComputeOrchestrator {
 
         // Submit commands
         self.queue.submit(Some(command_encoder.finish()));
-
         Ok(())
     }
     async fn read_texture<T: bytemuck::Pod + Send + Sync>(
