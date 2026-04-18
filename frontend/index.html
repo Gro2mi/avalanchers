@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Avalanche Sim - WebGPU</title>
+    <style>
+        body { margin: 0; background: #1a1a1a; color: white; font-family: sans-serif; }
+        canvas { width: 100vw; height: 100vh; display: block; }
+        #ui { position: absolute; top: 10px; left: 10px; pointer-events: none; }
+    </style>
+</head>
+<body>
+    <div id="ui">
+        <h1>Avalanche Simulation</h1>
+        <p>Status: <span id="status">Loading WASM...</span></p>
+    </div>
+    <canvas id="sim-canvas"></canvas>
+
+    <script type="module" src="js/main.js"></script>
+</body>
+</html>

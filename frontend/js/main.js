@@ -1,4 +1,4 @@
-import init, { greet } from "./pkg/avalanchers.js";
+import init, { WasmSimulation } from "./pkg/avalanchers.js";
 
 async function run() {
     // 1. This fetches 'avalanchers_bg.wasm', compiles it, 
@@ -11,7 +11,8 @@ async function run() {
     statusEl.textContent = "Engine Ready!";
     
     // 2. Now 'wasm' is defined, and you can call your functions.
-    greet("Avalanchers");
+    // greet("Avalanchers");
+    const sim = await WasmSimulation.create_default("path/to/dem");
 }
 
 run().catch(console.error);

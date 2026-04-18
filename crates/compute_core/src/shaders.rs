@@ -1,10 +1,7 @@
-use std::fs;
-use std::num::NonZero;
-
 use crate::buffers::{BufferName, TextureName};
 use anyhow::Result;
 use regex::Regex;
-use tracing::debug;
+use std::num::NonZero;
 use wgpu::{
     BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindingType, BufferBindingType, ComputePipeline,
@@ -13,29 +10,62 @@ use wgpu::{
 };
 pub const SHADER_UTILS: &str = include_str!("shaders/utils.wgsl");
 
-#[derive(Eq, Hash, PartialEq, Clone)]
-pub enum ShaderName {
-    ComputeNormals,
-    ResetMaxVelocity,
-    LoadReleaseAreas,
-    ComputeRoughness,
-    ComputeReleaseAreas,
-    InitializeParticles,
-    ComputeParticles,
-}
+macro_rules! define_shaders {
+    ($($variant:ident => $filename:expr),* $(,)?) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub enum ShaderName {
+            $($variant),*
+        }
 
-impl ShaderName {
-    pub fn to_str(&self) -> &'static str {
-        match self {
-            ShaderName::ComputeNormals => "compute_normals",
-            ShaderName::ResetMaxVelocity => "reset_max_velocity",
-            ShaderName::LoadReleaseAreas => "load_release_areas",
-            ShaderName::ComputeRoughness => "compute_roughness",
-            ShaderName::ComputeReleaseAreas => "compute_release_areas",
-            ShaderName::InitializeParticles => "initialize_particles",
-            ShaderName::ComputeParticles => "compute_particles",
+        impl std::str::FromStr for ShaderName {
+            type Err = String;
+
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
+                match s {
+                    $($filename => Ok(ShaderName::$variant),)*
+                    _ => Err(format!("'{}' is not a valid ShaderName", s)),
+                }
+            }
+        }
+
+        impl ShaderName {
+            // Added: Helper to go from string (like "compute_normals") to Enum
+            pub fn to_str(&self) -> &'static str {
+                match self {
+                    $(ShaderName::$variant => $filename,)*
+                }
+            }
+
+            pub fn read_source(&self) -> String {
+                #[cfg(any(target_arch = "wasm32", not(debug_assertions)))]
+                {
+                    match self {
+                        $(ShaderName::$variant => include_str!(concat!("shaders/", $filename, ".wgsl")).to_string()),*
+                    }
+                }
+
+                #[cfg(all(not(target_arch = "wasm32"), debug_assertions))]
+                {
+                    tracing::debug!("Loading shader source for {:?} from disk", self);
+                    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                        .join("src").join("shaders").join(format!("{}.wgsl", self.to_str()));
+                    std::fs::read_to_string(&path).expect("Shader file missing")
+                }
+            }
         }
     }
+}
+
+define_shaders! {
+    ComputeNormals => "compute_normals",
+    ResetMaxVelocity => "reset_max_velocity",
+    LoadReleaseAreas => "load_release_areas",
+    ComputeRoughness => "compute_roughness",
+    ComputeReleaseAreas => "compute_release_areas",
+    InitializeParticles => "initialize_particles",
+    ComputeParticles => "compute_particles",
+    Utils => "utils",
+    Random => "random",
 }
 
 impl std::fmt::Display for ShaderName {
@@ -44,35 +74,38 @@ impl std::fmt::Display for ShaderName {
     }
 }
 
-fn read_shader_source(name: &str) -> String {
-    // let path = format!("src/shaders/{}.wgsl", name);
-    let base_path = env!("CARGO_MANIFEST_DIR");
-    let path = std::path::PathBuf::from(base_path)
-        .join("src")
-        .join("shaders")
-        .join(format!("{}.wgsl", name));
-    debug!("Reading shader from path: {:?}", path);
-    fs::read_to_string(&path).unwrap_or_else(|_| panic!("Failed to read shader file {:?}", &path))
-}
+use std::sync::OnceLock;
 
-fn load_shader_source_string(name: &str) -> &'static str {
-    let shader_source = read_shader_source(name);
+// Using OnceLock for Regex is faster than Re-compiling every call
+static STRIP_RE: OnceLock<Regex> = OnceLock::new();
+static IMPORT_RE: OnceLock<Regex> = OnceLock::new();
 
-    // Step 1: Strip out any existing BEGIN/END blocks to get a "clean" source
-    // This regex looks for any BEGIN...END block and deletes it.
-    let strip_re = Regex::new(
-        r#"(?m)\s*// BEGIN [a-zA-Z0-9_./-]+\.wgsl[\s\S]*?// END [a-zA-Z0-9_./-]+\.wgsl"#,
-    )
-    .unwrap();
+fn load_shader_source_string(name_str: &str) -> &'static str {
+    // Get the enum variant from the string
+    let shader_enum: ShaderName = name_str
+        .parse()
+        .unwrap_or_else(|_| panic!("Unknown shader name: {}", name_str));
+
+    // Step 0: Get the raw source (from Disk or Binary)
+    let shader_source = shader_enum.read_source();
+
+    let strip_re = STRIP_RE.get_or_init(|| {
+        Regex::new(r#"(?m)\s*// BEGIN [a-zA-Z0-9_./-]+\.wgsl[\s\S]*?// END [a-zA-Z0-9_./-]+\.wgsl"#)
+            .unwrap()
+    });
+
+    let import_re = IMPORT_RE
+        .get_or_init(|| Regex::new(r#"(?m)^//\s+import\s+([a-zA-Z0-9_./-]+)\.wgsl;?"#).unwrap());
+
+    // Step 1: Strip
     let clean_source = strip_re.replace_all(&shader_source, "");
 
-    // Step 2: Find import lines and attach the (potentially nested) content
-    let import_re = Regex::new(r#"(?m)^//\s+import\s+([a-zA-Z0-9_./-]+)\.wgsl;?"#).unwrap();
-
+    // Step 2: Recursive Import
     let processed = import_re
         .replace_all(&clean_source, |caps: &regex::Captures| {
             let import_name = &caps[1];
             let import_line = &caps[0];
+
             let imported_content = load_shader_source_string(import_name);
 
             format!(
@@ -82,20 +115,22 @@ fn load_shader_source_string(name: &str) -> &'static str {
         })
         .into_owned();
 
-    // Step 3: Write to disk and leak
-    if shader_source != processed {
-        let base_path = env!("CARGO_MANIFEST_DIR");
-        let path = std::path::PathBuf::from(base_path)
-            .join("src")
-            .join("shaders")
-            .join(format!("{}.wgsl", name));
-        fs::write(path, &processed).ok();
+    #[cfg(all(not(target_arch = "wasm32"), debug_assertions))]
+    {
+        if shader_source != processed {
+            let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("src")
+                .join("shaders")
+                .join(format!("{}.wgsl", name_str));
+            std::fs::write(path, &processed).ok();
+        }
     }
 
     Box::leak(processed.into_boxed_str())
 }
 
-fn load_shader_source(name: ShaderName) -> &'static str {
+// The clean entry point
+pub fn load_shader_source(name: ShaderName) -> &'static str {
     load_shader_source_string(name.to_str())
 }
 
