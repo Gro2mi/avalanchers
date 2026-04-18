@@ -1,5 +1,5 @@
 use compute_core::{Simulation, TimestepData, settings::Settings};
-use numpy::{PyArray2, PyArrayMethods, ToPyArray};
+use numpy::{PyArray1, PyArray2, PyArrayMethods, ToPyArray};
 use pollster::FutureExt;
 use pyo3::exceptions::{PyIOError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -15,7 +15,7 @@ impl<T, E: std::fmt::Display> IntoPyResult<T> for Result<T, E> {
     }
 }
 
-#[pyclass(name = "SimulationResults")]
+#[pyclass]
 pub struct PyTimestepData {
     // We store the inner core struct
     inner: TimestepData,
@@ -25,16 +25,56 @@ pub struct PyTimestepData {
 impl PyTimestepData {
     #[getter]
     fn get_velocity<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<f32>> {
-        let flattened = self.inner.velocity.as_flattened();
-
-        flattened
-            .to_pyarray(py)
-            .reshape([self.inner.velocity.len(), 3])
-            .map_err(|_| {
-                PyErr::new::<PyValueError, _>("Dimension mismatch during velocity conversion")
-            })
-            .expect("Failed to convert velocity data to numpy array")
+        to_2d_numpy(py, &self.inner.velocity)
     }
+
+    #[getter]
+    fn get_position<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<f32>> {
+        to_2d_numpy(py, &self.inner.position)
+    }
+
+    #[getter]
+    fn get_acceleration_normal<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<f32>> {
+        to_2d_numpy(py, &self.inner.acceleration_normal)
+    }
+    #[getter]
+    fn get_acceleration_tangential<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<f32>> {
+        to_2d_numpy(py, &self.inner.acceleration_tangential)
+    }
+    #[getter]
+    fn get_normal<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<f32>> {
+        to_2d_numpy(py, &self.inner.normal)
+    }
+
+    #[getter]
+    fn get_dt<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f32>> {
+        self.inner.dt.to_pyarray(py)
+    }
+    #[getter]
+    fn get_acceleration_friction_magnitude<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> Bound<'py, PyArray1<f32>> {
+        self.inner.acceleration_friction_magnitude.to_pyarray(py)
+    }
+    #[getter]
+    fn get_elevation<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f32>> {
+        self.inner.elevation.to_pyarray(py)
+    }
+}
+
+pub fn to_2d_numpy<'py, const N: usize>(
+    py: Python<'py>,
+    data: &[[f32; N]],
+) -> Bound<'py, PyArray2<f32>> {
+    let flattened = data.as_flattened();
+    let rows = data.len();
+
+    flattened
+        .to_pyarray(py)
+        .reshape([rows, N])
+        .map_err(|_| PyErr::new::<PyValueError, _>("Dimension mismatch during data conversion"))
+        .expect("Failed to convert data to numpy array")
 }
 
 #[pyclass]
