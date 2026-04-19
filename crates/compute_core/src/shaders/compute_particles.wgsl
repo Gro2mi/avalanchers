@@ -232,12 +232,12 @@ fn compute_particles(
         sim_info.timestep = sim_info.timestep + 1u;
     }
 
-
-    atomicMax(&maxVelocity.value, u32(MAX_VELOCITY_FACTOR * length(particles[particleId].velocity)));
+    let converted_velocity = u32(MAX_VELOCITY_FACTOR * length(particles[particleId].velocity));
+    atomicMax(&maxVelocity.value, converted_velocity);
     
     let cell_index = uv_to_cell_index(new_uv);
     atomicAdd(&atomic_cell_count_buffer[cell_index], 1u);
-    atomicMax(&atomic_velocity_buffer[cell_index], u32(length(particles[particleId].velocity))); // ensure that the velocity is not zero, this is needed for the next step
+    atomicMax(&atomic_velocity_buffer[cell_index], converted_velocity); // ensure that the velocity is not zero, this is needed for the next step
 
     if(particleId == 0u){
     // atomicMax(&atomicBuffer.counter, step_count);

@@ -4,6 +4,7 @@ use crate::buffers::{
 use crate::shaders::{ComputeShaderConfig, ShaderName, generate_shader_report};
 use anyhow::{Ok, Result, anyhow};
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use wgpu::{
     Adapter, BindingResource, BufferUsages, CommandEncoderDescriptor, ComputePassDescriptor,
     Device, DeviceDescriptor, Extent3d, Features, Instance, InstanceDescriptor, Limits,
@@ -21,6 +22,8 @@ use tracing::{debug, error, info, trace, warn};
 
 use std::sync::Once;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+
+const MAX_VELOCITY_FACTOR: f32 = 1e7;
 
 static INIT: Once = Once::new();
 
@@ -93,6 +96,11 @@ impl Simulation {
     pub fn get_state(&self) -> SimulationState {
         self.state
     }
+
+    pub fn get_gpu_cache_read_count(&self) -> usize {
+        self.gpu_cache.read_count
+    }
+
     pub fn get_sim_info(&self) -> SimInfo {
         self.sim_info
     }
@@ -126,7 +134,6 @@ impl Simulation {
         let _ = self
             .load_release_areas(&self.dem_path.replace(".png", "releaseTexture.png"))
             .await?;
-        self.gpu_cache.reset_simulation_result();
         self.initialize_particles().await?;
         self.compute_particles().await?;
 
@@ -159,6 +166,8 @@ impl Simulation {
             self.state >= SimulationState::NormalsComputed,
             "Normals must be computed before loading release areas"
         );
+        self.gpu_cache.release_areas = None;
+        self.gpu_cache.reset_simulation_result();
         debug!("Loading release areas from path: {}", release_areas_path);
         let (data, _, _) =
             data_processor::read_png(release_areas_path).expect("Failed to read PNG");
@@ -177,6 +186,7 @@ impl Simulation {
             self.state >= SimulationState::ReleaseAreasComputed,
             "Release areas must be computed before initializing particles"
         );
+        self.gpu_cache.reset_simulation_result();
         // set parameters that depend on the number of particles
         self.orchestrator
             .run_initialize_particles(self.number_particles)
@@ -190,6 +200,7 @@ impl Simulation {
             self.state >= SimulationState::ParticlesInitialized,
             "Particles must be initialized before running particle simulation"
         );
+        self.gpu_cache.reset_simulation_result();
         self.orchestrator
             .run_compute_particles(&self.settings, self.number_particles)
             .await?;
@@ -222,6 +233,7 @@ impl Simulation {
             "Normals must be computed before reading normals texture"
         );
         if self.gpu_cache.slope.is_none() {
+            self.gpu_cache.read_count += 1;
             self.gpu_cache.slope = Some(self.get_texture_data(TextureName::Slope).await?);
         }
         Ok(self.gpu_cache.slope.as_ref().unwrap())
@@ -241,6 +253,7 @@ impl Simulation {
             "Normals must be computed before reading normals texture"
         );
         if self.gpu_cache.normals.is_none() {
+            self.gpu_cache.read_count += 1;
             self.gpu_cache.normals = Some(self.get_texture_data(TextureName::Normals).await?);
         }
         Ok(self.gpu_cache.normals.as_ref().unwrap())
@@ -272,6 +285,7 @@ impl Simulation {
             "Release areas must be computed before reading release areas texture"
         );
         if self.gpu_cache.release_areas.is_none() {
+            self.gpu_cache.read_count += 1;
             self.gpu_cache.release_areas =
                 Some(self.get_texture_data(TextureName::ReleaseAreas).await?);
         }
@@ -288,11 +302,16 @@ impl Simulation {
             "Simulation must be finished before reading max velocity"
         );
         if self.gpu_cache.max_velocity.is_none() {
+            self.gpu_cache.read_count += 1;
             let data: Vec<u32> = self
                 .orchestrator
                 .read_buffer(BufferName::VelocityGrid)
                 .await?;
-            self.gpu_cache.max_velocity = Some(data.into_iter().map(|x| x as f32).collect());
+            self.gpu_cache.max_velocity = Some(
+                data.into_iter()
+                    .map(|x| x as f32 / MAX_VELOCITY_FACTOR)
+                    .collect(),
+            );
         }
         Ok(self.gpu_cache.max_velocity.as_ref().unwrap())
     }
@@ -303,6 +322,7 @@ impl Simulation {
             "Simulation must be finished before reading timestep data"
         );
         if self.gpu_cache.timestep_data.is_none() {
+            self.gpu_cache.read_count += 1;
             let data_aos = self
                 .orchestrator
                 .read_buffer(BufferName::TimestepData)
@@ -319,6 +339,7 @@ impl Simulation {
             "Simulation must be finished before reading cell count grid"
         );
         if self.gpu_cache.cell_count.is_none() {
+            self.gpu_cache.read_count += 1;
             self.gpu_cache.cell_count = Some(
                 self.orchestrator
                     .read_buffer(BufferName::CellCountGrid)
@@ -334,6 +355,7 @@ impl Simulation {
             "Simulation must be finished before reading cell count grid"
         );
         if self.gpu_cache.particles.is_none() {
+            self.gpu_cache.read_count += 1;
             self.gpu_cache.particles =
                 Some(self.orchestrator.read_buffer(BufferName::Particles).await?);
         }
@@ -348,6 +370,18 @@ impl Simulation {
         self.orchestrator
             .read_buffer(BufferName::OutDebugNormals)
             .await
+    }
+
+    /// This function can be used to pre-load all results into the cache, so that subsequent calls to getters will be fast
+    pub async fn cache_results(&mut self) -> Result<()> {
+        self.get_slope_texture().await?;
+        self.get_normals_texture().await?;
+        self.get_release_areas_texture().await?;
+        self.get_max_velocity().await?;
+        self.get_cell_count().await?;
+        self.get_particles().await?;
+        self.get_timestep_data().await?;
+        Ok(())
     }
 }
 
@@ -377,6 +411,7 @@ struct GpuCache {
     pub slope: Option<TextureRgba<f32>>,
     pub release_areas: Option<TextureRgba<f32>>,
     pub timestep_data: Option<TimestepData>,
+    pub read_count: usize,
 }
 
 impl GpuCache {
@@ -396,7 +431,7 @@ impl GpuCache {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable, Default)]
 pub struct Particle {
     pub position: [f32; 3],
     pub mass: f32,
@@ -407,11 +442,55 @@ pub struct Particle {
     pub _pad0: [u32; 3], // 3 * 4 bytes padding
 }
 
-impl Default for Particle {
-    fn default() -> Self {
-        Self::new()
+impl Hash for Particle {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // Hash position bits
+        for val in &self.position {
+            val.to_bits().hash(state);
+        }
+        // Hash mass bits
+        self.mass.to_bits().hash(state);
+        // Hash velocity bits
+        for val in &self.velocity {
+            val.to_bits().hash(state);
+        }
+        // Hash thickness
+        self.snow_thickness.to_bits().hash(state);
+        // Hash matrix C
+        for val in &self.c {
+            val.to_bits().hash(state);
+        }
+        // These are already hashable (integers)
+        self.stopped.hash(state);
+        self._pad0.hash(state);
     }
 }
+
+// You MUST also implement PartialEq and Eq to match Hash logic
+impl PartialEq for Particle {
+    fn eq(&self, other: &Self) -> bool {
+        self.position
+            .iter()
+            .zip(other.position.iter())
+            .all(|(a, b)| a.to_bits() == b.to_bits())
+            && self.mass.to_bits() == other.mass.to_bits()
+            && self
+                .velocity
+                .iter()
+                .zip(other.velocity.iter())
+                .all(|(a, b)| a.to_bits() == b.to_bits())
+            && self.snow_thickness.to_bits() == other.snow_thickness.to_bits()
+            && self
+                .c
+                .iter()
+                .zip(other.c.iter())
+                .all(|(a, b)| a.to_bits() == b.to_bits())
+            && self.stopped == other.stopped
+            && self._pad0 == other._pad0
+    }
+}
+
+impl Eq for Particle {}
 
 impl Particle {
     pub const BYTE_SIZE: usize = 16 * 4;
@@ -916,7 +995,7 @@ impl ComputeOrchestrator {
         debug!("Start simulation");
         self.add_buffer(
             BufferName::TimestepData,
-            size_of::<TimestepDataAoS>() * sim_settings.max_steps as usize,
+            size_of::<TimestepDataAoS>() * sim_settings.max_steps as usize * 3,
             BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
         );
 
@@ -1060,7 +1139,6 @@ mod tests {
     use pollster;
     use std::collections::HashSet;
     use std::mem;
-    use std::path::Path;
     use utils::{Hist, HistFloat, MaxValue, MinValue};
 
     const INCLINED_PLANE_PATH: &str = "../../data/avaframe/avaInclinedPlane.png";
@@ -1288,33 +1366,49 @@ mod tests {
         .expect("Failed to read sim info buffer");
         info!("Read sim info: {:?}", sim_info);
 
-        let particles = pollster::block_on(sim.orchestrator.buffers.read_buffer::<Particle>(
-            &sim.orchestrator.device,
-            &sim.orchestrator.queue,
-            BufferName::Particles,
-        ))
-        .expect("Failed to read particles buffer");
-        // for particle in particles.iter() {
-        //     if particle.velocity[0] != 0.0
-        //         || particle.velocity[1] != 0.0
-        //         || particle.velocity[2] != 0.0
-        //     {
-        //         info!(
-        //             "Particle position: {:?}, velocity: {:?}, mass: {}",
-        //             particle.position, particle.velocity, particle.mass
-        //         );
-        //     }
-        // }
-        let timestep_data =
-            pollster::block_on(sim.orchestrator.buffers.read_buffer::<TimestepDataAoS>(
-                &sim.orchestrator.device,
-                &sim.orchestrator.queue,
-                BufferName::TimestepData,
-            ))
+        // particles dont stop, they fall off the DEM
+        let particles =
+            pollster::block_on(sim.get_particles()).expect("Failed to read particles buffer");
+        assert_eq!(particles.iter().filter(|&&x| x.stopped < 2000).count(), 0);
+
+        // max velocity should be above 39 m/s
+        let max_velocity =
+            pollster::block_on(sim.get_max_velocity()).expect("Failed to get max velocity");
+        assert!(max_velocity.max_value().unwrap() > 39.0);
+        info!(
+            "Max velocity after simulation: {:?}",
+            max_velocity.max_value().unwrap()
+        );
+
+        // timestep data has 3 particles interleaved, so length should be max_steps * 3
+        let expected_length = sim.settings.max_steps as usize * 3;
+        let timestep_data = pollster::block_on(sim.get_timestep_data())
             .expect("Failed to read timestep data buffer");
-        info!("Read timestep data: len: {}", timestep_data.len());
-        for (i, data) in timestep_data.iter().step_by(3).take(40).enumerate() {
-            info!("Timestep {}: {:?}", i, data);
+        assert_eq!(timestep_data.position.len(), expected_length);
+
+        // velocity X should be above 30.0 after step 500
+        for i in 500..2200 {
+            let vel_x = timestep_data.velocity[i * 3][0];
+            assert!(
+                vel_x > 30.0,
+                "Velocity X dropped below 30.0 (value: {}) at step {}",
+                vel_x,
+                i
+            );
+        }
+
+        // monotonically increasing position X
+        for i in 1..2200 {
+            let pos_prev = timestep_data.position[(i - 1) * 3][0];
+            let pos_curr = timestep_data.position[i * 3][0];
+
+            assert!(
+                pos_curr > pos_prev,
+                "Position X did not increase at step {}: {} -> {}",
+                i,
+                pos_prev,
+                pos_curr
+            );
         }
     }
 
@@ -1410,5 +1504,181 @@ mod tests {
             offset_c, 32,
             "Field 'c' is not at the expected 32-byte offset!"
         );
+    }
+
+    #[test_log::test]
+    fn test_gpu_cache_read_count() {
+        let mut sim: Simulation =
+            pollster::block_on(Simulation::create_default(INCLINED_PLANE_PATH.to_string()))
+                .expect("Failed to create simulation");
+        pollster::block_on(sim.run()).expect("Failed to run simulation");
+        let count_before = sim.get_gpu_cache_read_count();
+
+        // First call: Should trigger a "read" and populate the Option
+        pollster::block_on(sim.cache_results()).expect("Failed to get data on first call");
+        let first_ref =
+            pollster::block_on(sim.get_particles()).expect("Failed to get particles on first call");
+        let uncached_state = calculate_hash(&first_ref);
+        assert_eq!(
+            sim.get_gpu_cache_read_count(),
+            count_before + 7,
+            "Expected read_count to increase by 7 after first call, but it did not."
+        );
+
+        // Second call: Should return the cached value
+        pollster::block_on(sim.cache_results()).expect("Failed to get data on second call");
+        let second_ref = pollster::block_on(sim.get_particles())
+            .expect("Failed to get particles on second call");
+        let cached_state = calculate_hash(&second_ref);
+        assert_eq!(
+            sim.get_gpu_cache_read_count(),
+            count_before + 7,
+            "Expected read_count to NOT increase on second call, but it did."
+        );
+
+        // uncached and cached state should be the same
+        assert_eq!(
+            uncached_state, cached_state,
+            "Cache failed: Second call returned different hash"
+        );
+
+        sim.gpu_cache.reset_simulation_result();
+        assert!(
+            sim.gpu_cache.particles.is_none(),
+            "Reset failed: GPU cache particles Option was not cleared"
+        );
+
+        // Cache the 4 results again after reset, should trigger reads again
+        pollster::block_on(sim.cache_results()).expect("Failed to get data on third call");
+        assert_eq!(
+            sim.get_gpu_cache_read_count(),
+            count_before + 11,
+            "Expected read_count to increase by 1 after third call, but it did not"
+        );
+
+        sim.settings.friction_coefficient = 0.2;
+        pollster::block_on(sim.run()).expect("Failed to run simulation after changing settings");
+
+        pollster::block_on(sim.cache_results()).expect("Failed to get data on second call");
+        assert_eq!(
+            sim.get_gpu_cache_read_count(),
+            count_before + 18,
+            "Expected read_count to increase by 1 after third call, but it did not"
+        );
+
+        let third_ref =
+            pollster::block_on(sim.get_particles()).expect("Failed to get particles on third call");
+        let third_state = calculate_hash(&third_ref);
+        // hash changed after sim with different settings, confirming cache was reset
+        assert_ne!(
+            cached_state, third_state,
+            "Reset failed: Hash remained the same even after clearing cache"
+        );
+    }
+
+    #[test_log::test]
+    pub fn test_automatic_gpu_cache_reset() {
+        let mut sim: Simulation =
+            pollster::block_on(Simulation::create_default(INCLINED_PLANE_PATH.to_string()))
+                .expect("Failed to create simulation");
+        assert!(
+            sim.gpu_cache.particles.is_none()
+                && sim.gpu_cache.release_areas.is_none()
+                && sim.gpu_cache.normals.is_none()
+                && sim.gpu_cache.slope.is_none()
+                && sim.gpu_cache.cell_count.is_none()
+                && sim.gpu_cache.max_velocity.is_none()
+                && sim.gpu_cache.timestep_data.is_none(),
+            "GPU cache should start empty"
+        );
+        pollster::block_on(sim.run()).expect("Failed to run simulation");
+
+        assert!(
+            sim.gpu_cache.particles.is_none()
+                && sim.gpu_cache.release_areas.is_none()
+                && sim.gpu_cache.normals.is_none()
+                && sim.gpu_cache.slope.is_none()
+                && sim.gpu_cache.cell_count.is_none()
+                && sim.gpu_cache.max_velocity.is_none()
+                && sim.gpu_cache.timestep_data.is_none(),
+            "GPU cache should stay empty after simulation run (no caching yet)"
+        );
+        pollster::block_on(sim.cache_results()).expect("Failed to cache results");
+        assert!(
+            sim.gpu_cache.particles.is_some()
+                && sim.gpu_cache.release_areas.is_some()
+                && sim.gpu_cache.normals.is_some()
+                && sim.gpu_cache.slope.is_some()
+                && sim.gpu_cache.cell_count.is_some()
+                && sim.gpu_cache.max_velocity.is_some()
+                && sim.gpu_cache.timestep_data.is_some(),
+            "GPU cache should be fully populated after caching results"
+        );
+
+        pollster::block_on(sim.compute_normals()).expect("Failed to run normals shader");
+        assert!(
+            sim.gpu_cache.particles.is_none()
+                && sim.gpu_cache.release_areas.is_none()
+                && sim.gpu_cache.normals.is_none()
+                && sim.gpu_cache.slope.is_none()
+                && sim.gpu_cache.cell_count.is_none()
+                && sim.gpu_cache.max_velocity.is_none()
+                && sim.gpu_cache.timestep_data.is_none(),
+            "GPU cache should be empty after loading new DEM and running normals shader"
+        );
+
+        pollster::block_on(sim.run()).expect("Failed to run simulation");
+        pollster::block_on(sim.cache_results()).expect("Failed to cache results");
+        pollster::block_on(sim.load_release_areas(RELEASE_TEXTURE_PATH))
+            .expect("Failed to run release shader");
+
+        assert!(
+            sim.gpu_cache.particles.is_none()
+                && sim.gpu_cache.release_areas.is_none()
+                && sim.gpu_cache.normals.is_some()
+                && sim.gpu_cache.slope.is_some()
+                && sim.gpu_cache.cell_count.is_none()
+                && sim.gpu_cache.max_velocity.is_none()
+                && sim.gpu_cache.timestep_data.is_none(),
+            "GPU cache should be empty"
+        );
+
+        pollster::block_on(sim.run()).expect("Failed to run simulation");
+        pollster::block_on(sim.cache_results()).expect("Failed to cache results");
+        pollster::block_on(sim.initialize_particles())
+            .expect("Failed to run initialize particles shader");
+
+        assert!(
+            sim.gpu_cache.particles.is_none()
+                && sim.gpu_cache.release_areas.is_some()
+                && sim.gpu_cache.normals.is_some()
+                && sim.gpu_cache.slope.is_some()
+                && sim.gpu_cache.cell_count.is_none()
+                && sim.gpu_cache.max_velocity.is_none()
+                && sim.gpu_cache.timestep_data.is_none(),
+            "GPU cache should be empty except for normals and slope"
+        );
+
+        pollster::block_on(sim.run()).expect("Failed to run simulation");
+        pollster::block_on(sim.cache_results()).expect("Failed to cache results");
+        pollster::block_on(sim.compute_particles())
+            .expect("Failed to run compute particles shader");
+
+        assert!(
+            sim.gpu_cache.particles.is_none()
+                && sim.gpu_cache.release_areas.is_some()
+                && sim.gpu_cache.normals.is_some()
+                && sim.gpu_cache.slope.is_some()
+                && sim.gpu_cache.cell_count.is_none()
+                && sim.gpu_cache.max_velocity.is_none()
+                && sim.gpu_cache.timestep_data.is_none(),
+            "GPU cache should be empty except for release areas, normals, and slope"
+        );
+    }
+
+    pub fn calculate_hash<T: Hash>(t: &T) -> u64 {
+        let mut s = std::hash::DefaultHasher::new();
+        t.hash(&mut s);
+        s.finish()
     }
 }
