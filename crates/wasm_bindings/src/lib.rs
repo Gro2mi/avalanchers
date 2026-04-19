@@ -5,7 +5,8 @@ use wasm_bindgen::prelude::*;
 #[wasm_bindgen(start)]
 pub fn main() {
     std::panic::set_hook(Box::new(console_error_panic_hook::hook));
-    // compute_core::init_logging();
+    tracing_wasm::set_as_global_default();
+    compute_core::init_logging();
 }
 
 // Helper for error conversion to JS strings
