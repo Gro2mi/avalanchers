@@ -45,7 +45,7 @@ zoomLevelSlider.addEventListener('change', () => {
 });
 zoomLevelSlider.addEventListener('input', () => {
     zoomLevelValue.textContent = zoomLevelSlider.value + ' Resolution: ' + pixelWidthMeters(zoomLevelSlider.value, 47.2).toFixed(2) + ' m';
-  });
+});
 
 demDropdown.addEventListener('change', async (event) => {
     predefinedReleasePoints = true;
@@ -92,7 +92,19 @@ function setSettingsDisabled(flag) {
     }
 }
 
-// Disable all
+const exportResultsCheckbox = document.getElementById('exportResults');
+exportResultsCheckbox.addEventListener('change', async (event) => {
+    if (!event.target.checked) return; // Only act on 'checked' state
+    try {
+        if (!directoryHandle) {
+            await setExportDirectory();
+        }
+        await exportResults();
+    } catch (error) {
+        alert("Failed to export results:", error);
+    }
+});
+
 
 // Enable all
 const simSettingsDiv = document.getElementById('simSettingsDiv')
@@ -120,6 +132,9 @@ async function runAndPlot() {
         plotTimer();
         plotVariable.value = 'cellCount';
         plotVariable.dispatchEvent(new Event('change'));
+        if (exportResultsCheckbox.checked) {
+            await exportResults();
+        }
     } catch (error) {
         console.error('Error during simulation:', error);
     }
@@ -165,6 +180,78 @@ function getSettings() {
         releasedParticlesPerCell = parseInt(releasedParticlesPerCellSlider.value),
     )
 }
+
+async function saveFilePersistent() {
+    try {
+        // Create a Blob containing the data you want to save
+        const textToSave = "Hello, world! This is my data.";
+        const blob = new Blob([textToSave], { type: 'text/plain' });
+
+        // Options for the save file picker
+        const options = {
+            suggestedName: 'my-data.txt',
+            types: [
+                {
+                    description: 'Text Files',
+                    accept: {
+                        'text/plain': ['.txt'],
+                    },
+                },
+            ],
+        };
+
+        // Show the save file picker and get a FileSystemFileHandle
+        // This is where the user interacts and potentially grants persistent permission
+        const fileHandle = await window.showSaveFilePicker(options);
+
+        // Create a writable stream to write data to the file
+        const writableStream = await fileHandle.createWritable();
+
+        // Write the blob to the file
+        await writableStream.write(blob);
+
+        // Close the stream
+        await writableStream.close();
+
+        console.log('File saved successfully!');
+
+    } catch (error) {
+        if (error.name === 'AbortError') {
+            console.log('User cancelled the save operation.');
+        } else {
+            console.error('Error saving file:', error);
+        }
+    }
+}
+
+async function savePngFile(pngBlob) {
+    let fileHandle = await getStoredHandle(); // Your own function to retrieve stored handle
+
+    if (!fileHandle) {
+        fileHandle = await window.showSaveFilePicker({
+            suggestedName: 'image.png',
+            types: [{
+                description: 'PNG Image',
+                accept: { 'image/png': ['.png'] }
+            }]
+        });
+        await storeHandle(fileHandle); // Your own function to persist the handle
+    }
+
+    // Check or request permission
+    const permission = await fileHandle.queryPermission({ mode: 'readwrite' }) ||
+        await fileHandle.requestPermission({ mode: 'readwrite' });
+
+    if (permission !== 'granted') {
+        throw new Error('Permission to write file denied.');
+    }
+
+    const writable = await fileHandle.createWritable();
+    await writable.write(pngBlob);
+    await writable.close();
+}
+
+// document.getElementById('exportResults').addEventListener('click', savePNG);
 
 async function fetchInputs() {
     await getSettings();

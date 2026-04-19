@@ -174,7 +174,7 @@ function plotTrajectory(xminBounds, yminBounds, mapFactor) {
         z: simData.elevation.map((val) => (val + 5)),
         marker: {
             size: 3,
-            color: simData.velocityMagnitude,
+            color: simData.g_eff,
             colorscale: 'Bluered',
             cmin: Math.min(...simData.velocityMagnitude),
             cmax: Math.max(...simData.velocityMagnitude),
