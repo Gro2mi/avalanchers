@@ -8,11 +8,28 @@ version = "0.1.0"
 requires-python = ">=3.10"
 dependencies = [
     "numpy>=2.0",
-    "matplotlib>=3.5"
+]
+
+[project.optional-dependencies]
+viz = [
+    "matplotlib>=3.5",
+    "pyvista>=0.43",
+    "vtk"
+]
+jupyter = [
+    "avalanchers[viz]",
+    "jupyterlab",
+    "ipywidgets",
+    "trame",
+    "trame-vtk",
+    "trame-vuetify",
+    "trame-jupyter-extension",
 ]
 
 [tool.maturin]
-# Point to the specific crate in your workspace
 manifest-path = "crates/python_bindings/Cargo.toml"
 module-name = "avalanchers._avalanchers"
-python-source = "."
+python-source = "python"
+
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]

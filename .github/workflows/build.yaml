@@ -30,6 +30,7 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.x'
+          cache: 'pip'
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -112,6 +113,16 @@ jobs:
             --fail-under 70 \
             -p compute_core -p data_processor
 
+        
+      - name: Build and Install Python Package
+        run: pip install .
+
+      - name: Install pytest dependencies
+        run: pip install pytest
+
+      - name: Build and Test
+        run: pytest
+
       - name: Upload to codecov.io
         uses: codecov/codecov-action@v1.0.2
         with:
@@ -124,21 +135,6 @@ jobs:
         with:
           name: code-coverage-report
           path: coverage_report/
-
-
-
-      - name: Install wasm-pack
-        if: matrix.os == 'ubuntu-latest'
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
-        # The core binder (This is the most active part of the org)
-        # cargo install wasm-bindgen-cli
-
-        # The optimization engine (Faster than the one built into wasm-pack)
-        # cargo install wasm-opt
-
-        # The metadata/component tool
-        # cargo install wasm-tools
-      # --- ARTIFACT GENERATION ---
 
       - name: Build CLI Binary
         run: cargo build -p cli --release
@@ -161,18 +157,14 @@ jobs:
           command: build
           args: --release --out dist --find-interpreter
 
-          
+      - name: Install wasm-pack
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo install wasm-pack
+
       - name: Build WASM (Ubuntu Only)
         if: matrix.os == 'ubuntu-latest'
         run: wasm-pack build crates/wasm_bindings --target web --release --out-dir wasm_dist
-            # 1. Compile to wasm
-            # cargo build --target wasm32-unknown-unknown --release
-
-            # 2. Generate JS glue (The wasm-bindgen step)
-            # wasm-bindgen ./target/wasm32-unknown-unknown/release/avalanchers.wasm --out-dir ./pkg --target web
-
-            # 3. Optimize (The wasm-opt step)
-            # wasm-opt -Oz ./pkg/avalanchers_bg.wasm -o ./pkg/avalanchers_bg.wasm
+        
 
       # --- UPLOAD ---
       - name: Prepare Artifacts for Upload

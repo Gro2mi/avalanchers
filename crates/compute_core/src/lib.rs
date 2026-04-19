@@ -4,7 +4,6 @@ use crate::buffers::{
 use crate::shaders::{ComputeShaderConfig, ShaderName, generate_shader_report};
 use anyhow::{Ok, Result, anyhow};
 use std::collections::HashMap;
-use std::path::PathBuf;
 use wgpu::{
     Adapter, BindingResource, BufferUsages, CommandEncoderDescriptor, ComputePassDescriptor,
     Device, DeviceDescriptor, Extent3d, Features, Instance, InstanceDescriptor, Limits,
@@ -102,23 +101,24 @@ impl Simulation {
         self.sim_info.elevation_threshold
     }
 
-    pub async fn create(dem_path: String, settings: settings::SimSettings) -> Result<Self> {
+    pub async fn create(settings: settings::Settings) -> Result<Self> {
         let mut simulation = Simulation::new().await?;
-        simulation.dem_path = dem_path.clone();
-        simulation.dem = dem::Dem::new(&dem_path);
-        simulation.settings = settings;
-        simulation.settings.set_dem(&simulation.dem);
+        (simulation.settings, simulation.dem) = settings.create();
+        simulation.dem_path = settings.dem_path.clone();
         simulation.state = SimulationState::Ready;
-        debug!(
-            "Created simulation with DEM path: {}, settings: {:?}",
+        info!(
+            "Created simulation with DEM path: {}\nSettings: {:#?}",
             simulation.dem_path, simulation.settings
         );
         Ok(simulation)
     }
 
     pub async fn create_default(dem_path: String) -> Result<Self> {
-        let sim_settings = settings::SimSettings::default();
-        Self::create(dem_path, sim_settings).await
+        let settings = settings::Settings {
+            dem_path: dem_path.clone(),
+            ..settings::Settings::default()
+        };
+        Self::create(settings).await
     }
 
     pub async fn run(&mut self) -> Result<()> {
@@ -154,14 +154,14 @@ impl Simulation {
         Ok(())
     }
 
-    async fn load_release_areas(&mut self, release_areas_path: &String) -> Result<u32> {
+    async fn load_release_areas(&mut self, release_areas_path: &str) -> Result<u32> {
         assert!(
             self.state >= SimulationState::NormalsComputed,
             "Normals must be computed before loading release areas"
         );
         debug!("Loading release areas from path: {}", release_areas_path);
-        let (data, _, _) = data_processor::read_png(&PathBuf::from(release_areas_path))
-            .expect("Failed to read PNG");
+        let (data, _, _) =
+            data_processor::read_png(release_areas_path).expect("Failed to read PNG");
         let number_release_cells = self
             .orchestrator
             .run_load_release_areas(&data, &self.settings)
@@ -1127,7 +1127,7 @@ mod tests {
         let mut orchestrator = pollster::block_on(ComputeOrchestrator::new())
             .expect("Failed to create ComputeOrchestrator");
         let (sim_settings, _dem) = Settings::create_from_path(INCLINED_PLANE_PATH);
-        let (data, _, _) = read_png(&Path::new(RELEASE_TEXTURE_PATH)).expect("Failed to read PNG");
+        let (data, _, _) = read_png(RELEASE_TEXTURE_PATH).expect("Failed to read PNG");
         info!("Max: {:?}", data.max_value().unwrap());
 
         orchestrator
@@ -1159,8 +1159,7 @@ mod tests {
         let mut orchestrator = pollster::block_on(ComputeOrchestrator::new())
             .expect("Failed to create ComputeOrchestrator");
         let (sim_settings, _dem) = Settings::create_from_path(GAR_PATH);
-        let (data, _, _) =
-            read_png(&Path::new(GAR_RELEASE_TEXTURE_PATH)).expect("Failed to read PNG");
+        let (data, _, _) = read_png(GAR_RELEASE_TEXTURE_PATH).expect("Failed to read PNG");
         info!("Max: {:?}", data.max_value().unwrap());
 
         orchestrator
@@ -1197,7 +1196,7 @@ mod tests {
         info!("Sim settings: {:?}", sim_settings);
         pollster::block_on(orchestrator.run_normals(&sim_settings, &dem))
             .expect("Failed to run normals shader");
-        let (data, _, _) = read_png(&Path::new(RELEASE_TEXTURE_PATH)).expect("Failed to read PNG");
+        let (data, _, _) = read_png(RELEASE_TEXTURE_PATH).expect("Failed to read PNG");
         let number_release_cells: u32 =
             pollster::block_on(orchestrator.run_load_release_areas(&data, &sim_settings))
                 .expect("Failed to run load_release_areas shader");

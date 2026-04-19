@@ -161,7 +161,7 @@ impl FrictionModel {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Default)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
 pub struct Settings {
     pub dem_path: String,
     pub release_areas: Option<String>,
@@ -182,37 +182,26 @@ pub struct Settings {
 }
 
 impl Settings {
-    pub fn new() -> Self {
-        Settings {
-            dem_path: String::new(),
-            release_areas: None,
-            max_steps: None,
-            sim_model: None,
-            friction_model: None,
-            released_particles_per_cell: None,
-            density: None,
-            slab_thickness: None,
-            friction_coefficient: None,
-            drag_coefficient: None,
-            cfl: None,
-            min_slope_angle: None,
-            max_slope_angle: None,
-            min_elevation: None,
-            velocity_threshold: None,
-            roughness_threshold: None,
-        }
-    }
-
-    pub fn from_json(path: &str) -> io::Result<Self> {
-        let data = fs::read_to_string(path)?;
-        let settings: Settings = serde_json::from_str(&data)
+    pub fn loads(json_str: &str) -> io::Result<Self> {
+        let settings: Settings = serde_json::from_str(json_str)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         Ok(settings)
     }
 
-    pub fn to_json(&self, path: &str) -> io::Result<()> {
+    pub fn dumps(&self) -> io::Result<String> {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        Ok(json)
+    }
+
+    pub fn from_json(path: &str) -> io::Result<Self> {
+        let data = fs::read_to_string(path)?;
+        let settings = Self::loads(&data)?;
+        Ok(settings)
+    }
+
+    pub fn to_json(&self, path: &str) -> io::Result<()> {
+        let json = self.dumps()?;
         let mut file = fs::File::create(path)?;
         file.write_all(json.as_bytes())?;
         Ok(())
@@ -224,19 +213,19 @@ impl Settings {
         settings.create()
     }
     pub fn create_from_path(file_path: &str) -> (SimSettings, Dem) {
-        let mut settings = Settings::new();
-        settings.dem_path = file_path.to_string();
+        let settings = Settings {
+            dem_path: file_path.to_string(),
+            ..Default::default()
+        };
         settings.create()
     }
     pub fn create(&self) -> (SimSettings, Dem) {
-        let dem_path = std::path::PathBuf::from(&self.dem_path);
-        if !dem_path.exists() {
-            eprintln!("DEM file does not exist: {}", self.dem_path);
-            std::process::exit(1);
-        }
-        let dem = Dem::load_png_as_float32(dem_path);
+        let dem = Dem::load_png_as_float32(&self.dem_path);
         let sim_settings = SimSettings::from_settings(self, &dem);
         (sim_settings, dem)
+    }
+    pub fn get_sim_settings(&self) -> SimSettings {
+        SimSettings::from_settings(self, &Dem::default())
     }
 }
 
@@ -388,8 +377,8 @@ mod tests {
     #[test_log::test]
     fn test_settings_to_json_and_from_json() {
         let settings = Settings {
-            dem_path: "dem.png".to_string(),
-            release_areas: Some("release_areas.png".to_string()),
+            dem_path: String::from("dem.png"),
+            release_areas: Some(String::from("release_areas.png")),
             max_steps: Some(100),
             sim_model: Some(1),
             friction_model: Some(2),
@@ -410,8 +399,11 @@ mod tests {
         settings.to_json(path).unwrap();
 
         let loaded = Settings::from_json(path).unwrap();
-        assert_eq!(loaded.dem_path, "dem.png");
-        assert_eq!(loaded.release_areas, Some("release_areas.png".to_string()));
+        assert_eq!(loaded.dem_path, String::from("dem.png"));
+        assert_eq!(
+            loaded.release_areas,
+            Some(String::from("release_areas.png"))
+        );
         assert_eq!(loaded.max_steps, Some(100));
         assert_eq!(loaded.sim_model, Some(1));
         assert_eq!(loaded.friction_model, Some(2));
@@ -431,7 +423,7 @@ mod tests {
     #[test_log::test]
     fn test_settings_display() {
         let settings = Settings {
-            dem_path: "foo.tif".to_string(),
+            dem_path: String::from("foo.tif"),
             ..Default::default()
         };
         let display = format!("{}", settings);

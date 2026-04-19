@@ -432,8 +432,8 @@ pub fn write_png(
     Ok(())
 }
 
-pub fn read_png(path: &Path) -> Result<(Vec<u8>, usize, usize), Box<dyn std::error::Error>> {
-    let img = ImageReader::open(path.with_extension("png"))?.decode()?;
+pub fn read_png(path: &str) -> Result<(Vec<u8>, usize, usize), Box<dyn std::error::Error>> {
+    let img = ImageReader::open(PathBuf::from(path).with_extension("png"))?.decode()?;
     let rgba = img.to_rgba8();
     let (width, height) = img.dimensions();
     Ok((rgba.into_raw().to_vec(), width as usize, height as usize))
@@ -715,11 +715,11 @@ mod tests {
         // XZ :   1.9335498s    2158308 bytes   243.1962ms
         let tmp_dir = env::temp_dir();
         let file_path = tmp_dir.join("test_write_file");
-        let png_path = PathBuf::from("../../data/avaframe/avaArzlerUni.png");
+        let png_path = "../../data/avaframe/avaArzlerUni.png";
         print!("Start PNG: ");
-        print_file_size(&png_path);
+        print_file_size(Path::new(png_path));
         println!();
-        let (data, width, height) = read_png(&png_path).expect("Failed to load PNG");
+        let (data, width, height) = read_png(png_path).expect("Failed to load PNG");
         println!("Format  WriteTime   FileSize           ReadTime");
 
         let mut start = Instant::now();
@@ -765,7 +765,9 @@ mod tests {
         print_file_size(&file_path.with_extension("png"));
 
         start = Instant::now();
-        let decompressed_png = read_png(&file_path.with_extension("png")).unwrap().0;
+        let decompressed_png = read_png(file_path.with_extension("png").to_str().unwrap())
+            .unwrap()
+            .0;
         duration = start.elapsed();
         println!(" {:>12?}", duration);
         assert_eq!(decompressed_png, data);

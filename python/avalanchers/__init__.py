@@ -1,14 +1,6 @@
-import pyvista as pv
 import numpy as np
 
-import matplotlib.pyplot as plt
-from mpl_toolkits.axes_grid1 import make_axes_locatable
-
 from ._avalanchers import *
-
-# Define native Python logic
-def python_helper():
-    print("This is pure Python!")
 
 def create_mesh(sim):
     dem = sim.dem
@@ -22,6 +14,13 @@ def create_mesh(sim):
 
 
 def plot3d(sim, parameter, threshold_value=1):
+    try:
+        import pyvista as pv
+    except ImportError:
+        raise ImportError(
+            "The 'pyvista' package is required for 3d visualization. "
+            "Install it using: pip install 'avalanchers[viz]'"
+        )
     data = getattr(sim, parameter).astype(np.float32)
     x, y, dem, dem_mask = create_mesh(sim)
 
@@ -69,6 +68,14 @@ def plot_dem(sim, ax, dark=True):
     return xx, yy, dem, dem_mask
 
 def plot2d(sim, parameter, title="Avalanche Simulation", threshold_value=1, step=10, max_velocity=100, dark=True): 
+    try:
+        import matplotlib.pyplot as plt
+        from mpl_toolkits.axes_grid1 import make_axes_locatable
+    except ImportError:
+        raise ImportError(
+            "The 'matplotlib' package is required for 2d plots. "
+            "Install it using: pip install 'avalanchers[viz]'"
+        )
     data = getattr(sim, parameter).astype(np.float32)
     fig, ax = plt.subplots(figsize=(10, 8))
     ax.set_aspect('equal')
@@ -100,6 +107,13 @@ def is_jupyter():
         return False
     
 async def setup_jupyter_3d():
+    try:
+        import pyvista as pv
+    except ImportError:
+        raise ImportError(
+            "The 'pyvista' package is required for this feature. "
+            "Install it using: pip install 'avalanchers[viz]'"
+        )
     if is_jupyter():
         try:
             from pyvista.trame.jupyter import launch_server

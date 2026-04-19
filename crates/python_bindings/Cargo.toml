@@ -9,11 +9,12 @@ crate-type = ["cdylib"]
 
 [dependencies]
 pyo3 = { workspace = true }
+pythonize = { workspace = true }
 numpy = { workspace = true }
 ndarray = { workspace = true }
 pyo3-log = { workspace = true }
 tracing = { workspace = true }
 pollster = { workspace = true }
-
+serde_json = { workspace = true }
 compute_core = { workspace = true }
 data_processor = { workspace = true }

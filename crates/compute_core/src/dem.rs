@@ -47,15 +47,13 @@ impl Default for Dem {
 }
 
 impl Dem {
-    pub fn new(path: &String) -> Self {
+    pub fn new(path: &str) -> Self {
         match Path::new(path).extension().and_then(|s| s.to_str()) {
             Some(ext) if ext.eq_ignore_ascii_case("asc") => {
                 panic!("ASC format not supported yet");
                 // return Self::load_asc(path);
             }
-            Some(ext) if ext.eq_ignore_ascii_case("png") => {
-                Self::load_png_as_float32(PathBuf::from(path))
-            }
+            Some(ext) if ext.eq_ignore_ascii_case("png") => Self::load_png_as_float32(path),
             _ => {
                 panic!("Unsupported DEM format: {:?}", Path::new(path).extension());
             }
@@ -113,11 +111,10 @@ impl Dem {
     //     dem
     // }
 
-    pub fn load_png_as_float32(path: PathBuf) -> Self {
-        let (rgba, width, height) =
-            data_processor::read_png(path.as_path()).expect("Failed to load PNG");
-        let bounds: Bounds = Dem::load_bounds(&path).expect("Failed to load bounds");
-        debug!("Loaded PNG {:?}: {} x {}", path.as_os_str(), width, height);
+    pub fn load_png_as_float32(path: &str) -> Self {
+        let (rgba, width, height) = data_processor::read_png(path).expect("Failed to load PNG");
+        let bounds: Bounds = Dem::load_bounds(path).expect("Failed to load bounds");
+        debug!("Loaded PNG {}: {} x {}", path, width, height);
         let mut dem = Dem {
             width,
             height,
@@ -162,8 +159,8 @@ impl Dem {
         }
     }
 
-    fn load_bounds(path: &Path) -> Result<Bounds, String> {
-        let mut aabb_path = path.to_path_buf();
+    fn load_bounds(path: &str) -> Result<Bounds, String> {
+        let mut aabb_path = PathBuf::from(path);
         aabb_path.set_extension("aabb");
         let file =
             File::open(&aabb_path).map_err(|e| format!("Failed to open bounds file: {}", e))?;
@@ -227,7 +224,7 @@ mod tests {
 
     #[test_log::test]
     fn test_load_png_as_float32() {
-        let path = PathBuf::from("../../data/avaframe/avaParabola.png");
+        let path = "../../data/avaframe/avaParabola.png";
         let dem = Dem::load_png_as_float32(path);
         assert_eq!(dem.width, 1001);
         assert_eq!(dem.height, 401);
@@ -258,8 +255,8 @@ mod tests {
     }
     #[test_log::test]
     fn test_load_bounds() {
-        let path = PathBuf::from("../../data/avaframe/avaInclinedPlane.png");
-        let bounds = Dem::load_bounds(&path).expect("Failed to load bounds");
+        let path = "../../data/avaframe/avaInclinedPlane.png";
+        let bounds = Dem::load_bounds(path).expect("Failed to load bounds");
         assert_eq!(bounds.xmin, 1000.0);
         assert_eq!(bounds.xmax, 6000.0);
         assert_eq!(bounds.ymin, -5000.0);
@@ -299,8 +296,8 @@ mod tests {
 
     #[test_log::test]
     fn test_fetch_bounds_returns_default() {
-        let path = PathBuf::from("dummy/path");
-        let result = std::panic::catch_unwind(|| Dem::load_bounds(&path).unwrap());
+        let path = "dummy/path";
+        let result = std::panic::catch_unwind(|| Dem::load_bounds(path).unwrap());
         assert!(
             result.is_err(),
             "Expected panic when loading bounds from a non-existent file"

@@ -72,6 +72,12 @@ impl WasmSettings {
     }
 }
 
+impl Default for WasmSettings {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[wasm_bindgen]
 pub struct WasmSimulation {
     inner: Simulation,

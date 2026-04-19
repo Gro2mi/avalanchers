@@ -1,11 +1,7 @@
 // compute_cli/src/main.rs
 use anyhow::Result;
 use clap::Parser;
-use compute_core::{
-    Simulation,
-    dem::Dem,
-    settings::{Settings, SimSettings},
-}; // Import from
+use compute_core::{Simulation, settings::Settings}; // Import from
 use std::path::PathBuf;
 use std::{env, time::Instant};
 use tracing::{debug, error, info, warn};
@@ -52,19 +48,7 @@ fn main() -> Result<()> {
     let settings = Settings::from_json(&file_path.to_string_lossy())
         .expect("Failed to load settings from JSON file");
 
-    info!("Loaded settings: {:?}", settings);
-    let dem_path = std::path::PathBuf::from(&settings.dem_path);
-    if !dem_path.exists() {
-        error!("DEM file does not exist: {}", settings.dem_path);
-        std::process::exit(1);
-    }
-    let dem = Dem::load_png_as_float32(dem_path);
-    let sim_settings = SimSettings::from_settings(&settings, &dem);
-    // sim_settings.set_dem(&dem);
-    info!("Loaded simSettings: {:?}", sim_settings);
-
-    let mut simulation: Simulation =
-        pollster::block_on(Simulation::create(settings.dem_path.clone(), sim_settings))?;
+    let mut simulation: Simulation = pollster::block_on(Simulation::create(settings))?;
 
     pollster::block_on(simulation.run())?;
 

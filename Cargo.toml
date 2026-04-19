@@ -35,6 +35,7 @@ half = "2.6"
 
 # python
 pyo3 = { version = "0.28", features = ["auto-initialize", "abi3-py37"] }
+pythonize = "0.28"
 numpy = "0.28" 
 ndarray = "0.17"
 pyo3-log = "0.13"

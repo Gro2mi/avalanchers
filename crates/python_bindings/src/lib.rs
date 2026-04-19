@@ -3,6 +3,7 @@ use numpy::{PyArray1, PyArray2, PyArrayMethods, ToPyArray};
 use pollster::FutureExt;
 use pyo3::exceptions::{PyIOError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
+use pythonize::depythonize;
 
 // A helper trait to make error conversion less verbose
 trait IntoPyResult<T> {
@@ -123,13 +124,21 @@ pub struct PySimulation {
 
 #[pymethods]
 impl PySimulation {
-    // #[staticmethod]
-    // pub fn create(settings: &PySettings) -> PyResult<Self> {
-    //     let inner = Simulation::create(settings.inner.clone())
-    //         .block_on()
-    //         .map_runtime_err()?;
-    //     Ok(PySimulation { inner })
-    // }
+    #[staticmethod]
+    pub fn create(dict: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let json_value: serde_json::Value = depythonize(dict)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyTypeError, _>(e.to_string()))?;
+
+        // 2. Turn that Value into a JSON String
+        let json_str = serde_json::to_string(&json_value)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        let settings = Settings::loads(&json_str)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        let inner = Simulation::create(settings.clone())
+            .block_on()
+            .map_runtime_err()?;
+        Ok(PySimulation { inner })
+    }
 
     #[staticmethod]
     pub fn create_default(dem_path: String) -> PyResult<Self> {
