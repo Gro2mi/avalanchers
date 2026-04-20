@@ -3,6 +3,7 @@ use crate::buffers::{
 };
 use crate::shaders::{ComputeShaderConfig, ShaderName, generate_shader_report};
 use anyhow::{Ok, Result, anyhow};
+use futures::join;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use wgpu::{
@@ -110,8 +111,11 @@ impl Simulation {
     }
 
     pub async fn create(settings: settings::Settings) -> Result<Self> {
-        let mut simulation = Simulation::new().await?;
-        (simulation.settings, simulation.dem) = settings.create();
+        let sim_future = Simulation::new();
+        let settings_future = settings.create();
+        let (sim_result, settings_result) = join!(sim_future, settings_future);
+        let mut simulation = sim_result?;
+        (simulation.settings, simulation.dem) = settings_result;
         simulation.dem_path = settings.dem_path.clone();
         simulation.state = SimulationState::Ready;
         info!(
@@ -169,8 +173,9 @@ impl Simulation {
         self.gpu_cache.release_areas = None;
         self.gpu_cache.reset_simulation_result();
         debug!("Loading release areas from path: {}", release_areas_path);
-        let (data, _, _) =
-            data_processor::read_png(release_areas_path).expect("Failed to read PNG");
+        let (data, _, _) = data_processor::read_png(release_areas_path)
+            .await
+            .expect("Failed to read PNG");
         let number_release_cells = self
             .orchestrator
             .run_load_release_areas(&data, &self.settings)
@@ -1136,15 +1141,16 @@ mod tests {
     use super::*;
     use crate::settings::Settings;
     use data_processor::read_png;
-    use pollster;
+    use pollster::block_on;
     use std::collections::HashSet;
     use std::mem;
     use utils::{Hist, HistFloat, MaxValue, MinValue};
 
-    const INCLINED_PLANE_PATH: &str = "../../data/avaframe/avaInclinedPlane.png";
-    const RELEASE_TEXTURE_PATH: &str = "../../data/avaframe/avaInclinedPlanereleaseTexture.png";
-    const GAR_PATH: &str = "../../data/avaframe/avaGar.png";
-    const GAR_RELEASE_TEXTURE_PATH: &str = "../../data/avaframe/avaGarreleaseTexture.png";
+    const INCLINED_PLANE_PATH: &str = "../../frontend/data/avaframe/avaInclinedPlane.png";
+    const RELEASE_TEXTURE_PATH: &str =
+        "../../frontend/data/avaframe/avaInclinedPlanereleaseTexture.png";
+    const GAR_PATH: &str = "../../frontend/data/avaframe/avaGar.png";
+    const GAR_RELEASE_TEXTURE_PATH: &str = "../../frontend/data/avaframe/avaGarreleaseTexture.png";
 
     #[test]
     fn test_init_logging_idempotent() {
@@ -1157,17 +1163,17 @@ mod tests {
 
     #[test_log::test]
     fn test_compute_orchestrator_creation() {
-        let mut orchestrator = pollster::block_on(ComputeOrchestrator::new())
-            .expect("Failed to create ComputeOrchestrator");
-        let (sim_settings, dem) = Settings::create_from_path(INCLINED_PLANE_PATH);
-        pollster::block_on(orchestrator.run_normals(&sim_settings, &dem))
+        let mut orchestrator =
+            block_on(ComputeOrchestrator::new()).expect("Failed to create ComputeOrchestrator");
+        let (sim_settings, dem) = block_on(Settings::create_from_path(INCLINED_PLANE_PATH));
+        block_on(orchestrator.run_normals(&sim_settings, &dem))
             .expect("Failed to run normals shader");
 
         let (slope_angle, slope_aspect, _, _) =
-            pollster::block_on(orchestrator.read_texture::<f32>(TextureName::Slope)) // get_texture::<f32>("slope"))
+            block_on(orchestrator.read_texture::<f32>(TextureName::Slope)) // get_texture::<f32>("slope"))
                 .expect("Failed to get slope texture");
         let (normal_x, normal_y, normal_z, profile_curvature) =
-            pollster::block_on(orchestrator.read_texture::<f32>(TextureName::Normals))
+            block_on(orchestrator.read_texture::<f32>(TextureName::Normals))
                 .expect("Failed to get normals texture");
         orchestrator
             .save_grid("slope_aspect.bin", slope_aspect.clone())
@@ -1179,7 +1185,7 @@ mod tests {
             .save_grid("profile_curvature.bin", profile_curvature.clone())
             .expect("Failed to save profile_curvature");
         // println!("{}", slope_texture[5].to_f32());
-        let debug_buffer: Vec<f32> = pollster::block_on(orchestrator.buffers.read_buffer(
+        let debug_buffer: Vec<f32> = block_on(orchestrator.buffers.read_buffer(
             &orchestrator.device,
             &orchestrator.queue,
             BufferName::OutDebugNormals,
@@ -1202,20 +1208,20 @@ mod tests {
     }
     #[test_log::test]
     fn test_load_release_areas() {
-        let mut orchestrator = pollster::block_on(ComputeOrchestrator::new())
-            .expect("Failed to create ComputeOrchestrator");
-        let (sim_settings, _dem) = Settings::create_from_path(INCLINED_PLANE_PATH);
-        let (data, _, _) = read_png(RELEASE_TEXTURE_PATH).expect("Failed to read PNG");
+        let mut orchestrator =
+            block_on(ComputeOrchestrator::new()).expect("Failed to create ComputeOrchestrator");
+        let (sim_settings, _dem) = block_on(Settings::create_from_path(INCLINED_PLANE_PATH));
+        let (data, _, _) = block_on(read_png(RELEASE_TEXTURE_PATH)).expect("Failed to read PNG");
         info!("Max: {:?}", data.max_value().unwrap());
 
         orchestrator
             .create_buffers_and_texture_descriptions(&sim_settings)
             .expect("Failed to create buffers and texture descriptions");
         let number_release_cells: u32 =
-            pollster::block_on(orchestrator.run_load_release_areas(&data, &sim_settings))
+            block_on(orchestrator.run_load_release_areas(&data, &sim_settings))
                 .expect("Failed to run load_release_areas shader");
         let (release_thickness, _, _, _) =
-            pollster::block_on(orchestrator.read_texture::<f32>(TextureName::ReleaseAreas))
+            block_on(orchestrator.read_texture::<f32>(TextureName::ReleaseAreas))
                 .expect("Failed to get release_areas");
         info!(
             "Read release_texture: len: {} max: {:?} {:?}",
@@ -1234,20 +1240,21 @@ mod tests {
     }
     #[test_log::test]
     fn test_load_release_areas_gar() {
-        let mut orchestrator = pollster::block_on(ComputeOrchestrator::new())
-            .expect("Failed to create ComputeOrchestrator");
-        let (sim_settings, _dem) = Settings::create_from_path(GAR_PATH);
-        let (data, _, _) = read_png(GAR_RELEASE_TEXTURE_PATH).expect("Failed to read PNG");
+        let mut orchestrator =
+            block_on(ComputeOrchestrator::new()).expect("Failed to create ComputeOrchestrator");
+        let (sim_settings, _dem) = block_on(Settings::create_from_path(GAR_PATH));
+        let (data, _, _) =
+            block_on(read_png(GAR_RELEASE_TEXTURE_PATH)).expect("Failed to read PNG");
         info!("Max: {:?}", data.max_value().unwrap());
 
         orchestrator
             .create_buffers_and_texture_descriptions(&sim_settings)
             .expect("Failed to create buffers and texture descriptions");
         let number_release_cells: u32 =
-            pollster::block_on(orchestrator.run_load_release_areas(&data, &sim_settings))
+            block_on(orchestrator.run_load_release_areas(&data, &sim_settings))
                 .expect("Failed to run load_release_areas shader");
         let (release_thickness, _, _, _) =
-            pollster::block_on(orchestrator.read_texture::<f32>(TextureName::ReleaseAreas))
+            block_on(orchestrator.read_texture::<f32>(TextureName::ReleaseAreas))
                 .expect("Failed to get release_areas");
         info!(
             "Read release_texture: len: {} max: {:?} {:?}",
@@ -1267,28 +1274,27 @@ mod tests {
 
     #[test_log::test]
     fn test_initialize_particles() {
-        let mut orchestrator = pollster::block_on(ComputeOrchestrator::new())
-            .expect("Failed to create ComputeOrchestrator");
-        let (mut sim_settings, dem) = Settings::create_from_path(INCLINED_PLANE_PATH);
+        let mut orchestrator =
+            block_on(ComputeOrchestrator::new()).expect("Failed to create ComputeOrchestrator");
+        let (mut sim_settings, dem) = block_on(Settings::create_from_path(INCLINED_PLANE_PATH));
         sim_settings.released_particles_per_cell = 10;
         info!("Sim settings: {:?}", sim_settings);
-        pollster::block_on(orchestrator.run_normals(&sim_settings, &dem))
+        block_on(orchestrator.run_normals(&sim_settings, &dem))
             .expect("Failed to run normals shader");
-        let (data, _, _) = read_png(RELEASE_TEXTURE_PATH).expect("Failed to read PNG");
+        let (data, _, _) = block_on(read_png(RELEASE_TEXTURE_PATH)).expect("Failed to read PNG");
         let number_release_cells: u32 =
-            pollster::block_on(orchestrator.run_load_release_areas(&data, &sim_settings))
+            block_on(orchestrator.run_load_release_areas(&data, &sim_settings))
                 .expect("Failed to run load_release_areas shader");
-        pollster::block_on(orchestrator.run_initialize_particles(
+        block_on(orchestrator.run_initialize_particles(
             number_release_cells * sim_settings.released_particles_per_cell,
         ))
         .expect("Failed to run initialize_particles shader");
         let number_release_particles =
-            pollster::block_on(orchestrator.read_buffer::<u32>(BufferName::NumberReleaseParticles))
+            block_on(orchestrator.read_buffer::<u32>(BufferName::NumberReleaseParticles))
                 .expect("Failed to read particle index buffer")[0];
         info!("Number release particles: {}", number_release_particles);
-        let particles =
-            pollster::block_on(orchestrator.read_buffer::<Particle>(BufferName::Particles))
-                .expect("Failed to read particles buffer");
+        let particles = block_on(orchestrator.read_buffer::<Particle>(BufferName::Particles))
+            .expect("Failed to read particles buffer");
         let particle = particles.first().expect("No particles found");
         for p in particles.iter() {
             assert!(p.position[0] > 100.0);
@@ -1324,9 +1330,8 @@ mod tests {
             particles.len(),
             particles.last()
         );
-        let cell_count_grid =
-            pollster::block_on(orchestrator.read_buffer::<u32>(BufferName::CellCountGrid))
-                .expect("Failed to read cell count grid");
+        let cell_count_grid = block_on(orchestrator.read_buffer::<u32>(BufferName::CellCountGrid))
+            .expect("Failed to read cell count grid");
 
         info!(
             "Read cell count grid: len: {:?}, max value: {:?}",
@@ -1341,24 +1346,22 @@ mod tests {
     #[test_log::test]
     fn test_compute() {
         let mut sim: Simulation =
-            pollster::block_on(Simulation::create_default(INCLINED_PLANE_PATH.to_string()))
+            block_on(Simulation::create_default(INCLINED_PLANE_PATH.to_string()))
                 .expect("Failed to create simulation");
-        pollster::block_on(sim.run()).expect("Failed to run simulation");
-        let debug_buffer: Vec<f32> = pollster::block_on(sim.orchestrator.buffers.read_buffer(
+        block_on(sim.run()).expect("Failed to run simulation");
+        let debug_buffer: Vec<f32> = block_on(sim.orchestrator.buffers.read_buffer(
             &sim.orchestrator.device,
             &sim.orchestrator.queue,
             BufferName::OutDebugNormals,
         ))
         .expect("Failed to read out_debug_normals_buffer");
         log_debug_buffer(&debug_buffer);
-        let cell_count =
-            pollster::block_on(sim.get_cell_count()).expect("Failed to get cell count");
+        let cell_count = block_on(sim.get_cell_count()).expect("Failed to get cell count");
         info!("Cell count max: {:?}", cell_count.max_value().unwrap());
-        let max_velocity =
-            pollster::block_on(sim.get_max_velocity()).expect("Failed to get max velocity");
+        let max_velocity = block_on(sim.get_max_velocity()).expect("Failed to get max velocity");
         info!("Max velocity: {:?}", max_velocity.max_value().unwrap());
 
-        let sim_info: Vec<SimInfo> = pollster::block_on(sim.orchestrator.buffers.read_buffer(
+        let sim_info: Vec<SimInfo> = block_on(sim.orchestrator.buffers.read_buffer(
             &sim.orchestrator.device,
             &sim.orchestrator.queue,
             BufferName::SimInfo,
@@ -1367,13 +1370,11 @@ mod tests {
         info!("Read sim info: {:?}", sim_info);
 
         // particles dont stop, they fall off the DEM
-        let particles =
-            pollster::block_on(sim.get_particles()).expect("Failed to read particles buffer");
+        let particles = block_on(sim.get_particles()).expect("Failed to read particles buffer");
         assert_eq!(particles.iter().filter(|&&x| x.stopped < 2000).count(), 0);
 
         // max velocity should be above 39 m/s
-        let max_velocity =
-            pollster::block_on(sim.get_max_velocity()).expect("Failed to get max velocity");
+        let max_velocity = block_on(sim.get_max_velocity()).expect("Failed to get max velocity");
         assert!(max_velocity.max_value().unwrap() > 39.0);
         info!(
             "Max velocity after simulation: {:?}",
@@ -1382,8 +1383,8 @@ mod tests {
 
         // timestep data has 3 particles interleaved, so length should be max_steps * 3
         let expected_length = sim.settings.max_steps as usize * 3;
-        let timestep_data = pollster::block_on(sim.get_timestep_data())
-            .expect("Failed to read timestep data buffer");
+        let timestep_data =
+            block_on(sim.get_timestep_data()).expect("Failed to read timestep data buffer");
         assert_eq!(timestep_data.position.len(), expected_length);
 
         // velocity X should be above 30.0 after step 500
@@ -1423,8 +1424,8 @@ mod tests {
 
     #[test_log::test]
     fn test_shader_report_generation() {
-        let orchestrator = pollster::block_on(ComputeOrchestrator::new())
-            .expect("Failed to create ComputeOrchestrator");
+        let orchestrator =
+            block_on(ComputeOrchestrator::new()).expect("Failed to create ComputeOrchestrator");
         orchestrator.generate_shader_report();
     }
 
@@ -1509,15 +1510,15 @@ mod tests {
     #[test_log::test]
     fn test_gpu_cache_read_count() {
         let mut sim: Simulation =
-            pollster::block_on(Simulation::create_default(INCLINED_PLANE_PATH.to_string()))
+            block_on(Simulation::create_default(INCLINED_PLANE_PATH.to_string()))
                 .expect("Failed to create simulation");
-        pollster::block_on(sim.run()).expect("Failed to run simulation");
+        block_on(sim.run()).expect("Failed to run simulation");
         let count_before = sim.get_gpu_cache_read_count();
 
         // First call: Should trigger a "read" and populate the Option
-        pollster::block_on(sim.cache_results()).expect("Failed to get data on first call");
+        block_on(sim.cache_results()).expect("Failed to get data on first call");
         let first_ref =
-            pollster::block_on(sim.get_particles()).expect("Failed to get particles on first call");
+            block_on(sim.get_particles()).expect("Failed to get particles on first call");
         let uncached_state = calculate_hash(&first_ref);
         assert_eq!(
             sim.get_gpu_cache_read_count(),
@@ -1526,9 +1527,9 @@ mod tests {
         );
 
         // Second call: Should return the cached value
-        pollster::block_on(sim.cache_results()).expect("Failed to get data on second call");
-        let second_ref = pollster::block_on(sim.get_particles())
-            .expect("Failed to get particles on second call");
+        block_on(sim.cache_results()).expect("Failed to get data on second call");
+        let second_ref =
+            block_on(sim.get_particles()).expect("Failed to get particles on second call");
         let cached_state = calculate_hash(&second_ref);
         assert_eq!(
             sim.get_gpu_cache_read_count(),
@@ -1549,7 +1550,7 @@ mod tests {
         );
 
         // Cache the 4 results again after reset, should trigger reads again
-        pollster::block_on(sim.cache_results()).expect("Failed to get data on third call");
+        block_on(sim.cache_results()).expect("Failed to get data on third call");
         assert_eq!(
             sim.get_gpu_cache_read_count(),
             count_before + 11,
@@ -1557,9 +1558,9 @@ mod tests {
         );
 
         sim.settings.friction_coefficient = 0.2;
-        pollster::block_on(sim.run()).expect("Failed to run simulation after changing settings");
+        block_on(sim.run()).expect("Failed to run simulation after changing settings");
 
-        pollster::block_on(sim.cache_results()).expect("Failed to get data on second call");
+        block_on(sim.cache_results()).expect("Failed to get data on second call");
         assert_eq!(
             sim.get_gpu_cache_read_count(),
             count_before + 18,
@@ -1567,7 +1568,7 @@ mod tests {
         );
 
         let third_ref =
-            pollster::block_on(sim.get_particles()).expect("Failed to get particles on third call");
+            block_on(sim.get_particles()).expect("Failed to get particles on third call");
         let third_state = calculate_hash(&third_ref);
         // hash changed after sim with different settings, confirming cache was reset
         assert_ne!(
@@ -1579,7 +1580,7 @@ mod tests {
     #[test_log::test]
     pub fn test_automatic_gpu_cache_reset() {
         let mut sim: Simulation =
-            pollster::block_on(Simulation::create_default(INCLINED_PLANE_PATH.to_string()))
+            block_on(Simulation::create_default(INCLINED_PLANE_PATH.to_string()))
                 .expect("Failed to create simulation");
         assert!(
             sim.gpu_cache.particles.is_none()
@@ -1591,7 +1592,7 @@ mod tests {
                 && sim.gpu_cache.timestep_data.is_none(),
             "GPU cache should start empty"
         );
-        pollster::block_on(sim.run()).expect("Failed to run simulation");
+        block_on(sim.run()).expect("Failed to run simulation");
 
         assert!(
             sim.gpu_cache.particles.is_none()
@@ -1603,7 +1604,7 @@ mod tests {
                 && sim.gpu_cache.timestep_data.is_none(),
             "GPU cache should stay empty after simulation run (no caching yet)"
         );
-        pollster::block_on(sim.cache_results()).expect("Failed to cache results");
+        block_on(sim.cache_results()).expect("Failed to cache results");
         assert!(
             sim.gpu_cache.particles.is_some()
                 && sim.gpu_cache.release_areas.is_some()
@@ -1615,7 +1616,7 @@ mod tests {
             "GPU cache should be fully populated after caching results"
         );
 
-        pollster::block_on(sim.compute_normals()).expect("Failed to run normals shader");
+        block_on(sim.compute_normals()).expect("Failed to run normals shader");
         assert!(
             sim.gpu_cache.particles.is_none()
                 && sim.gpu_cache.release_areas.is_none()
@@ -1627,9 +1628,9 @@ mod tests {
             "GPU cache should be empty after loading new DEM and running normals shader"
         );
 
-        pollster::block_on(sim.run()).expect("Failed to run simulation");
-        pollster::block_on(sim.cache_results()).expect("Failed to cache results");
-        pollster::block_on(sim.load_release_areas(RELEASE_TEXTURE_PATH))
+        block_on(sim.run()).expect("Failed to run simulation");
+        block_on(sim.cache_results()).expect("Failed to cache results");
+        block_on(sim.load_release_areas(RELEASE_TEXTURE_PATH))
             .expect("Failed to run release shader");
 
         assert!(
@@ -1643,10 +1644,9 @@ mod tests {
             "GPU cache should be empty"
         );
 
-        pollster::block_on(sim.run()).expect("Failed to run simulation");
-        pollster::block_on(sim.cache_results()).expect("Failed to cache results");
-        pollster::block_on(sim.initialize_particles())
-            .expect("Failed to run initialize particles shader");
+        block_on(sim.run()).expect("Failed to run simulation");
+        block_on(sim.cache_results()).expect("Failed to cache results");
+        block_on(sim.initialize_particles()).expect("Failed to run initialize particles shader");
 
         assert!(
             sim.gpu_cache.particles.is_none()
@@ -1659,10 +1659,9 @@ mod tests {
             "GPU cache should be empty except for normals and slope"
         );
 
-        pollster::block_on(sim.run()).expect("Failed to run simulation");
-        pollster::block_on(sim.cache_results()).expect("Failed to cache results");
-        pollster::block_on(sim.compute_particles())
-            .expect("Failed to run compute particles shader");
+        block_on(sim.run()).expect("Failed to run simulation");
+        block_on(sim.cache_results()).expect("Failed to cache results");
+        block_on(sim.compute_particles()).expect("Failed to run compute particles shader");
 
         assert!(
             sim.gpu_cache.particles.is_none()

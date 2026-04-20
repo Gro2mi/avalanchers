@@ -207,20 +207,20 @@ impl Settings {
         Ok(())
     }
 
-    pub fn create_from_json(file_path: &str) -> (SimSettings, Dem) {
+    pub async fn create_from_json(file_path: &str) -> (SimSettings, Dem) {
         let settings =
             Settings::from_json(file_path).expect("Failed to load settings from JSON file");
-        settings.create()
+        settings.create().await
     }
-    pub fn create_from_path(file_path: &str) -> (SimSettings, Dem) {
+    pub async fn create_from_path(file_path: &str) -> (SimSettings, Dem) {
         let settings = Settings {
             dem_path: file_path.to_string(),
             ..Default::default()
         };
-        settings.create()
+        settings.create().await
     }
-    pub fn create(&self) -> (SimSettings, Dem) {
-        let dem = Dem::load_png_as_float32(&self.dem_path);
+    pub async fn create(&self) -> (SimSettings, Dem) {
+        let dem = Dem::load_png_as_float32(&self.dem_path).await;
         let sim_settings = SimSettings::from_settings(self, &dem);
         (sim_settings, dem)
     }

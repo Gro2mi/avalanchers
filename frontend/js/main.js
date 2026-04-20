@@ -1,5 +1,6 @@
 import init, { WasmSimulation } from "./pkg/avalanchers.js";
 
+window.sim = null;
 async function run() {
     // 1. This fetches 'avalanchers_bg.wasm', compiles it, 
     // and populates the internal 'wasm' object.
@@ -12,7 +13,8 @@ async function run() {
     
     // 2. Now 'wasm' is defined, and you can call your functions.
     // greet("Avalanchers");
-    const sim = await WasmSimulation.create_default("path/to/dem");
+    window.sim = await WasmSimulation.create_default("avaMal");
+    window.sim.run();
 }
 
 run().catch(console.error);

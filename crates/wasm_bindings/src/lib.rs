@@ -1,17 +1,30 @@
 use compute_core::{Simulation, TimestepData, settings::Settings};
 use js_sys::Float32Array;
+use std::sync::OnceLock;
+use tracing::info;
 use wasm_bindgen::prelude::*;
+use web_sys::window;
+static BASE_URL: OnceLock<String> = OnceLock::new();
 
 #[wasm_bindgen(start)]
 pub fn main() {
     std::panic::set_hook(Box::new(console_error_panic_hook::hook));
     tracing_wasm::set_as_global_default();
     compute_core::init_logging();
+    let window = window().expect("no global window");
+    let location = window.location();
+    let origin = location.origin().unwrap_or_default() + "/";
+    info!("Base URI: {}", origin);
+    BASE_URL.set(origin).ok();
 }
 
 // Helper for error conversion to JS strings
 fn to_js_err<E: std::fmt::Display>(e: E) -> JsValue {
     JsValue::from_str(&e.to_string())
+}
+
+pub fn base_url() -> &'static str {
+    BASE_URL.get().map(|s| s.as_str()).unwrap_or("./")
 }
 
 #[wasm_bindgen]
@@ -89,9 +102,9 @@ impl WasmSimulation {
     /// In WASM, we use wasm-bindgen-futures to handle async properly
     /// instead of pollster::block_on (which can freeze the browser thread).
     pub async fn create_default(dem_path: String) -> Result<WasmSimulation, JsValue> {
-        let inner = Simulation::create_default(dem_path)
-            .await
-            .map_err(to_js_err)?;
+        let path = base_url().to_owned() + "data/avaframe/" + &dem_path + ".png";
+        info!("Creating simulation with DEM path: {}", path);
+        let inner = Simulation::create_default(path).await.map_err(to_js_err)?;
         Ok(WasmSimulation { inner })
     }
 

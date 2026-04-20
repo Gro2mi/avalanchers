@@ -17,6 +17,7 @@ futures-intrusive = { workspace = true }
 tracing = { workspace = true}
 tracing-subscriber = { workspace = true }
 test-log = { workspace = true }
+futures = { workspace = true }
 
 
 

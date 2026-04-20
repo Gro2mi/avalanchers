@@ -14,10 +14,18 @@ image = { workspace = true}
 tracing = { workspace = true}
 zstd = { workspace = true }
 lz4_flex = { workspace = true }
+reqwest = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 xz2 = "0.1"
 
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-sys = { workspace = true }
+
 [dev-dependencies]
 criterion = "0.7"
 test-log = { workspace = true}
+wiremock = { workspace = true }
+tokio = { workspace = true }
+tempfile = { workspace = true }
+pollster = { workspace = true }

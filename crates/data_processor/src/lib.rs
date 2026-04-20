@@ -1,11 +1,11 @@
 use std::fs::File;
+use std::io::Cursor;
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use bincode::{Decode, Encode, config};
 #[cfg(not(target_arch = "wasm32"))]
 use std::io::BufReader;
-use std::io::Cursor;
 use std::io::Read;
 
 use lz4_flex::{compress_prepend_size, decompress_size_prepended};
@@ -14,6 +14,9 @@ use xz2::{read::XzDecoder, write::XzEncoder};
 use zstd::stream::{decode_all, encode_all};
 
 use image::{GenericImageView, ImageReader};
+
+#[allow(unused_imports)]
+use tracing::{info, trace};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
 pub enum DataType {
@@ -432,11 +435,39 @@ pub fn write_png(
     Ok(())
 }
 
-pub fn read_png(path: &str) -> Result<(Vec<u8>, usize, usize), Box<dyn std::error::Error>> {
-    let img = ImageReader::open(PathBuf::from(path).with_extension("png"))?.decode()?;
-    let rgba = img.to_rgba8();
+pub async fn read_file(path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    trace!("Reading file: {}", path);
+    if path.starts_with("http") {
+        fetch_from_url(path).await
+    } else {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Ok(std::fs::read(PathBuf::from(path))?)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            // In WASM, treat local paths as relative HTTP fetches
+            let window = web_sys::window().ok_or("no global window")?;
+            let location = window.location();
+            let origin = location.origin().map_err(|_| "could not get origin")?;
+
+            let url = format!("{}/{}", origin, path);
+            fetch_from_url(&url).await
+        }
+    }
+}
+
+pub async fn read_png(path: &str) -> Result<(Vec<u8>, usize, usize), Box<dyn std::error::Error>> {
+    let bytes = read_file(PathBuf::from(path).with_extension("png").to_str().unwrap()).await?;
+    // Decode from memory bytes
+    let img = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()?
+        .decode()?;
+
     let (width, height) = img.dimensions();
-    Ok((rgba.into_raw().to_vec(), width as usize, height as usize))
+    let rgba = img.to_rgba8();
+
+    Ok((rgba.into_raw(), width as usize, height as usize))
 }
 
 pub fn rgba_bytes_to_f32(data: &[u8]) -> Vec<f32> {
@@ -449,13 +480,100 @@ pub fn f32_to_rgba_bytes(data: &[f32]) -> Vec<u8> {
     data.iter().flat_map(|f| f.to_le_bytes()).collect()
 }
 
+pub async fn fetch_from_url(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    trace!("Fetching from URL: {}", url);
+    let response = reqwest::get(url).await?;
+    let bytes = response.bytes().await?;
+    Ok(bytes.to_vec())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use half::f16;
+    use pollster::block_on;
     use std::env;
     use std::fs;
+    use std::fs::File;
+    use std::io::Write;
     use std::time::Instant;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn test_fetch_from_url_valid() {
+        let url =
+            "https://www.google.com/images/branding/googlelogo/1x/googlelogo_color_272x92dp.png";
+        let result = fetch_from_url(url).await;
+
+        assert!(result.is_ok(), "Should successfully fetch the PNG");
+        let bytes = result.unwrap();
+        assert!(!bytes.is_empty(), "Fetched bytes should not be empty");
+        // Verify PNG magic numbers: [0x89, 0x50, 0x4E, 0x47]
+        assert_eq!(&bytes[0..4], &[0x89, 0x50, 0x4E, 0x47]);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_from_url_invalid() {
+        let url = "https://this.url.does.not.exist.internal";
+        let result = fetch_from_url(url).await;
+        assert!(result.is_err(), "Should return error for non-existent URL");
+    }
+
+    // Helper to create a valid minimal PNG for testing
+    fn create_test_png() -> Vec<u8> {
+        let mut img = image::RgbaImage::new(2, 2);
+        img.put_pixel(0, 0, image::Rgba([255, 0, 0, 255])); // Red pixel
+
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        bytes.into_inner()
+    }
+
+    #[tokio::test]
+    async fn test_read_png_from_file() {
+        // Arrange: Create a temporary .png file
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let file_path = tmp_dir.path().join("test_image.png");
+        let png_data = create_test_png();
+
+        let mut file = File::create(&file_path).unwrap();
+        file.write_all(&png_data).unwrap();
+
+        // Act: Call read_png (passing path without extension as per your logic)
+        let path_str = file_path.with_extension("").to_str().unwrap().to_string();
+        let result = block_on(read_png(&path_str));
+
+        // Assert
+        assert!(result.is_ok());
+        let (data, width, height) = result.unwrap();
+        assert_eq!(width, 2);
+        assert_eq!(height, 2);
+        assert_eq!(data.len(), 2 * 2 * 4); // 4 bytes per pixel (RGBA)
+    }
+
+    #[tokio::test]
+    async fn test_read_png_from_http() {
+        // Arrange: Start a mock server
+        let mock_server = MockServer::start().await;
+        let png_data = create_test_png();
+
+        Mock::given(method("GET"))
+            .and(path("/assets/map.png"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(png_data, "image/png"))
+            .mount(&mock_server)
+            .await;
+
+        // Act
+        let url = format!("{}/assets/map.png", &mock_server.uri());
+        let result = read_png(&url).await;
+
+        // Assert
+        assert!(result.is_ok());
+        let (_, width, height) = result.unwrap();
+        assert_eq!(width, 2);
+        assert_eq!(height, 2);
+    }
 
     #[test_log::test]
     fn data_type_ranges() {
@@ -693,9 +811,9 @@ mod tests {
         assert_eq!(f32_bytes, bytes)
     }
 
-    #[test_log::test]
+    #[tokio::test]
     // #[ignore]
-    fn test_write_and_read_file_size_bin() {
+    async fn test_write_and_read_file_size_bin() {
         // For avaMal.png
         // Start PNG:      744017 bytes
         // Format  WriteTime   FileSize         ReadTime
@@ -715,11 +833,11 @@ mod tests {
         // XZ :   1.9335498s    2158308 bytes   243.1962ms
         let tmp_dir = env::temp_dir();
         let file_path = tmp_dir.join("test_write_file");
-        let png_path = "../../data/avaframe/avaArzlerUni.png";
+        let png_path = "../../frontend/data/avaframe/avaArzlerUni.png";
         print!("Start PNG: ");
         print_file_size(Path::new(png_path));
         println!();
-        let (data, width, height) = read_png(png_path).expect("Failed to load PNG");
+        let (data, width, height) = read_png(png_path).await.expect("Failed to load PNG");
         println!("Format  WriteTime   FileSize           ReadTime");
 
         let mut start = Instant::now();
@@ -766,6 +884,7 @@ mod tests {
 
         start = Instant::now();
         let decompressed_png = read_png(file_path.with_extension("png").to_str().unwrap())
+            .await
             .unwrap()
             .0;
         duration = start.elapsed();
