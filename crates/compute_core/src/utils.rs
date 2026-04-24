@@ -1,6 +1,10 @@
 use rand::RngExt;
 use std::cmp::Ordering;
 
+use std::fmt::Write;
+use std::time::Duration;
+use web_time::Instant;
+
 pub struct Point {
     pub x: f32,
     pub y: f32,
@@ -297,6 +301,66 @@ pub fn split_channels<T: Copy>(flat: &[T]) -> (Vec<T>, Vec<T>, Vec<T>, Vec<T>) {
     }
 
     (r, g, b, a)
+}
+
+#[derive(Debug)]
+pub struct Checkpoint {
+    pub name: String,
+    pub time_since_start: Duration,
+    pub delta: Duration,
+}
+
+pub struct Timer {
+    label: String,
+    start: Instant,
+    last: Instant,
+    checkpoints: Vec<Checkpoint>,
+}
+
+impl Timer {
+    pub fn new(label: &str) -> Self {
+        let now = Instant::now();
+        Self {
+            label: label.to_string(),
+            start: now,
+            last: now,
+            checkpoints: Vec::new(),
+        }
+    }
+
+    pub fn checkpoint(&mut self, name: &str) {
+        let now = Instant::now();
+        let delta = now.duration_since(self.last);
+        let time_since_start = now.duration_since(self.start);
+
+        self.checkpoints.push(Checkpoint {
+            name: name.to_string(),
+            time_since_start,
+            delta,
+        });
+
+        self.last = now;
+    }
+
+    pub fn get_checkpoints(&self) -> &Vec<Checkpoint> {
+        &self.checkpoints
+    }
+
+    pub fn get_summary(&self) -> String {
+        let mut output = format!("Timer \"{}\" Summary:\n", self.label);
+
+        for cp in &self.checkpoints {
+            // write! appends to the string and returns a Result;
+            // we .ok() or .unwrap() because writing to a String won't fail.
+            let _ = writeln!(
+                output,
+                "  {}: +{:.2?} (total {:.2?})",
+                cp.name, cp.delta, cp.time_since_start
+            );
+        }
+
+        output
+    }
 }
 
 #[cfg(test)]

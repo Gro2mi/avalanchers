@@ -11,6 +11,8 @@ use std::io::Read;
 use lz4_flex::{compress_prepend_size, decompress_size_prepended};
 #[cfg(not(target_arch = "wasm32"))]
 use xz2::{read::XzDecoder, write::XzEncoder};
+
+#[cfg(not(target_arch = "wasm32"))]
 use zstd::stream::{decode_all, encode_all};
 
 use image::{GenericImageView, ImageReader};
@@ -373,17 +375,36 @@ pub fn read_lz4(path: &Path) -> io::Result<Vec<u8>> {
     })
 }
 
+#[allow(unused_variables)]
 pub fn write_zstd(path: &Path, buffer: &Vec<u8>) {
-    let file = File::create(path.with_extension("zst")).expect("Failed to create file");
-    let compressed_data = encode_all(Cursor::new(buffer), 22).expect("Failed to compress data");
-    let mut writer = BufWriter::with_capacity(16 * 1024 * 1024, file); // 16 MB buffer
-    writer
-        .write_all(&compressed_data)
-        .expect("Failed to write data");
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let file = File::create(path.with_extension("zst")).expect("Failed to create file");
+        let compressed_data = encode_all(Cursor::new(buffer), 22).expect("Failed to compress data");
+        let mut writer = BufWriter::with_capacity(16 * 1024 * 1024, file); // 16 MB buffer
+        writer
+            .write_all(&compressed_data)
+            .expect("Failed to write data");
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        panic!("Zstd compression is not supported on this platform");
+    }
 }
 
+#[allow(unused_variables)]
 pub fn read_zstd_bin(path: &Path) -> io::Result<Vec<u8>> {
-    read_bin(&path.with_extension("zst")).and_then(|buffer| decode_all(Cursor::new(&buffer[..])))
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        read_bin(&path.with_extension("zst"))
+            .and_then(|buffer| decode_all(Cursor::new(&buffer[..])))
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        panic!("Zstd compression is not supported on this platform");
+    }
 }
 
 #[allow(unused_variables)]

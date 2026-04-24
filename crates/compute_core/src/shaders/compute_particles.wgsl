@@ -225,7 +225,7 @@ fn compute_particles(
         current.acceleration_normal = acceleration_normal;
         current.elevation = elevation;
         current.uv = new_uv;
-        current.g_eff = curvature_acceleration;
+        current.g_eff = g_eff;
         update_output_data(0u, sim_info.timestep, current);
         
     // out_debug[2] = f32(particles[particleId].position.x);

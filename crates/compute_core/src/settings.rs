@@ -220,7 +220,9 @@ impl Settings {
         settings.create().await
     }
     pub async fn create(&self) -> (SimSettings, Dem) {
-        let dem = Dem::load_png_as_float32(&self.dem_path).await;
+        let dem = Dem::new(&self.dem_path)
+            .await
+            .expect("Failed to load DEM from path");
         let sim_settings = SimSettings::from_settings(self, &dem);
         (sim_settings, dem)
     }

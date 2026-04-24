@@ -12,12 +12,13 @@ bincode = { workspace = true}
 half = { workspace = true}
 image = { workspace = true}
 tracing = { workspace = true}
-zstd = { workspace = true }
 lz4_flex = { workspace = true }
 reqwest = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 xz2 = "0.1"
+[target.'cfg(not(all(target_os = "unknown", target_arch = "wasm32")))'.dependencies]
+zstd = "0.13"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-sys = { workspace = true }

@@ -24,6 +24,7 @@ pub struct Dem {
     pub y: Vec<f32>,
     pub cell_size: f32,
     pub map_factor: f32,
+    pub minimum_elevation: f32,
 }
 
 impl Default for Dem {
@@ -43,6 +44,7 @@ impl Default for Dem {
             y: Vec::new(),
             cell_size: 1.0,
             map_factor: 1.0,
+            minimum_elevation: 1.0,
         }
     }
 }
@@ -54,18 +56,37 @@ impl Dem {
             .and_then(|s| s.to_str())
             .unwrap_or("");
 
-        match ext.to_lowercase().as_str() {
-            "asc" => {
-                // Use a proper error return instead of just a log
-                Err("ASC format not supported yet".into())
-            }
+        // 1. Assign the result of the match to 'data'
+        let mut data = match ext.to_lowercase().as_str() {
+            "asc" => return Err("ASC format not supported yet".into()),
             "png" => {
-                // Await the loader and return the result
-                let data = Self::load_png_as_float32(path).await;
-                Ok(data)
+                // Ensure this function returns Result<Self, ...>
+                Self::load_png_as_float32(path).await?
             }
-            _ => Err(format!("Unsupported DEM format: {}", ext).into()),
-        }
+            _ => return Err(format!("Unsupported DEM format: {}", ext).into()),
+        };
+
+        data.minimum_elevation = data
+            .data1d
+            .iter()
+            .filter(|&&v| v > 0.1)
+            .min_by(|a: &&f32, b: &&f32| a.total_cmp(b))
+            .copied() // Convert Option<&f32> to Option<f32>
+            .unwrap_or(0.0); // Provide a default if no value matches the filter
+
+        data.data1d = data
+            .data1d
+            .into_iter()
+            .map(|v| {
+                if v >= data.minimum_elevation {
+                    v
+                } else {
+                    f32::NAN
+                }
+            })
+            .collect();
+
+        Ok(data)
     }
 
     // pub fn load_asc(path: PathBuf) -> Self {
@@ -119,7 +140,7 @@ impl Dem {
     //     dem
     // }
 
-    pub async fn load_png_as_float32(path: &str) -> Self {
+    async fn load_png_as_float32(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let (rgba, width, height) = data_processor::read_png(path)
             .await
             .expect("Failed to load PNG");
@@ -135,9 +156,10 @@ impl Dem {
             cell_size: (bounds.xmax - bounds.xmin) / (width - 1) as f32,
             bounds,
             map_factor: 1.0,
+            minimum_elevation: f32::INFINITY,
         };
         dem.data = to_2d(&dem.data1d, width, height);
-        dem
+        Ok(dem)
     }
 
     pub fn get_index(&self, pt: &Point) -> (f32, f32) {
@@ -237,7 +259,8 @@ mod tests {
     #[test_log::test]
     fn test_load_png_as_float32() {
         let path = "../../frontend/data/avaframe/avaParabola.png";
-        let dem: Dem = block_on(Dem::load_png_as_float32(path));
+        let dem: Dem =
+            block_on(Dem::load_png_as_float32(path)).expect("Failed to load PNG as float32");
         assert_eq!(dem.width, 1001);
         assert_eq!(dem.height, 401);
         assert_eq!(dem.bounds.xmin, 1000.0);
@@ -296,6 +319,7 @@ mod tests {
             y: vec![0.0, 1.0, 2.0],
             cell_size: 1.0,
             map_factor: 1.0,
+            minimum_elevation: 1.0,
         };
         let pt = Point {
             x: 1.0,

@@ -1,5 +1,5 @@
 use compute_core::{Simulation, TimestepData, settings::Settings};
-use js_sys::Float32Array;
+use js_sys::{Float32Array, Uint32Array};
 use std::sync::OnceLock;
 use tracing::info;
 use wasm_bindgen::prelude::*;
@@ -41,18 +41,57 @@ impl WasmTimestepData {
     }
 
     #[wasm_bindgen(getter)]
-    pub fn velocity(&self) -> Float32Array {
-        self.flatten_to_js(&self.inner.velocity)
-    }
-
-    #[wasm_bindgen(getter)]
     pub fn position(&self) -> Float32Array {
         self.flatten_to_js(&self.inner.position)
     }
-
-    #[wasm_bindgen(getter)]
+    #[wasm_bindgen(getter, js_name = dt)]
     pub fn dt(&self) -> Float32Array {
         unsafe { Float32Array::view(&self.inner.dt) }
+    }
+
+    #[wasm_bindgen(getter, js_name = accelerationFrictionMagnitude)]
+    pub fn acceleration_friction_magnitude(&self) -> Float32Array {
+        unsafe { Float32Array::view(&self.inner.acceleration_friction_magnitude) }
+    }
+
+    #[wasm_bindgen(getter, js_name = elevation)]
+    pub fn elevation(&self) -> Float32Array {
+        unsafe { Float32Array::view(&self.inner.elevation) }
+    }
+
+    #[wasm_bindgen(getter, js_name = gEff)]
+    pub fn g_eff(&self) -> Float32Array {
+        unsafe { Float32Array::view(&self.inner.g_eff) }
+    }
+
+    #[wasm_bindgen(getter, js_name = velocityMagnitude)]
+    pub fn velocity_magnitude(&self) -> Float32Array {
+        unsafe { Float32Array::view(&self.inner.velocity_magnitude) }
+    }
+
+    #[wasm_bindgen(getter, js_name = accelerationTangentialMagnitude)]
+    pub fn acceleration_tangential_magnitude(&self) -> Float32Array {
+        unsafe { Float32Array::view(&self.inner.acceleration_tangential_magnitude) }
+    }
+
+    #[wasm_bindgen(getter, js_name = time)]
+    pub fn time(&self) -> Float32Array {
+        unsafe { Float32Array::view(&self.inner.time) }
+    }
+
+    #[wasm_bindgen(getter, js_name = stepDistance)]
+    pub fn step_distance(&self) -> Float32Array {
+        unsafe { Float32Array::view(&self.inner.step_distance) }
+    }
+
+    #[wasm_bindgen(getter, js_name = travelDistance)]
+    pub fn travel_distance(&self) -> Float32Array {
+        unsafe { Float32Array::view(&self.inner.travel_distance) }
+    }
+
+    #[wasm_bindgen(getter, js_name = cfl)]
+    pub fn cfl(&self) -> Float32Array {
+        unsafe { Float32Array::view(&self.inner.cfl) }
     }
 }
 
@@ -117,8 +156,6 @@ impl WasmSimulation {
         self.inner.dem.cell_size
     }
 
-    /// Returns the DEM data as a flat array.
-    /// JS will need to know the width/height to treat it as 2D.
     #[wasm_bindgen(getter)]
     pub fn dem(&self) -> Float32Array {
         unsafe { Float32Array::view(&self.inner.dem.data1d) }
@@ -134,14 +171,74 @@ impl WasmSimulation {
         self.inner.dem.height as u32
     }
 
-    pub async fn get_max_velocity(&mut self) -> Result<Float32Array, JsValue> {
-        let data = self.inner.get_max_velocity().await.map_err(to_js_err)?;
-        // Note: Creating a view of a temporary Vec is unsafe, so we copy here
-        Ok(Float32Array::from(data.as_slice()))
+    #[wasm_bindgen(getter)]
+    pub fn x(&self) -> Float32Array {
+        unsafe { Float32Array::view(&self.inner.dem.x) }
     }
 
+    #[wasm_bindgen(getter)]
+    pub fn y(&self) -> Float32Array {
+        unsafe { Float32Array::view(&self.inner.dem.y) }
+    }
+
+    #[wasm_bindgen(getter, js_name = demTrajectoryInfo)]
+    pub fn dem_trajectory_info(&self) -> Float32Array {
+        let vals = [
+            self.inner.dem.bounds.xmin,
+            self.inner.dem.bounds.ymin,
+            self.inner.dem.map_factor,
+        ];
+        Float32Array::from(&vals[..])
+    }
+
+    pub async fn fetch_max_velocity(&mut self) -> Result<(), JsValue> {
+        self.inner.fetch_max_velocity().await.map_err(to_js_err)?;
+        Ok(())
+    }
+
+    pub async fn fetch_cell_count(&mut self) -> Result<(), JsValue> {
+        self.inner.fetch_cell_count().await.map_err(to_js_err)?;
+        Ok(())
+    }
+
+    pub async fn fetch_results(&mut self) -> Result<(), JsValue> {
+        self.inner.fetch_results().await.map_err(to_js_err)?;
+        Ok(())
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn max_velocity(&self) -> Float32Array {
+        unsafe { Float32Array::view(self.inner.gpu_cache.max_velocity.as_ref().unwrap()) }
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn cell_count(&self) -> Uint32Array {
+        unsafe { Uint32Array::view(self.inner.gpu_cache.cell_count.as_ref().unwrap()) }
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn slope_aspect(&self) -> Float32Array {
+        unsafe { Float32Array::view(&self.inner.gpu_cache.slope.as_ref().unwrap().g) }
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn slope_angle(&self) -> Float32Array {
+        unsafe { Float32Array::view(&self.inner.gpu_cache.slope.as_ref().unwrap().r) }
+    }
+
+    // #[wasm_bindgen(getter)]
+    // pub fn roughness(&self) -> Float32Array {
+    //     unsafe { Float32Array::view(&self.inner.gpu_cache.roughness.as_ref().unwrap()) }
+    // }
+
+    #[wasm_bindgen(getter)]
+    pub fn release_areas(&self) -> Float32Array {
+        unsafe { Float32Array::view(&self.inner.gpu_cache.release_areas.as_ref().unwrap().r) }
+    }
+
+    #[wasm_bindgen]
     pub async fn get_timestep_data(&mut self) -> Result<WasmTimestepData, JsValue> {
-        let data = self.inner.get_timestep_data().await.map_err(to_js_err)?;
+        let data = self.inner.fetch_timestep_data().await.map_err(to_js_err)?;
         Ok(WasmTimestepData {
             inner: data.clone(),
         })

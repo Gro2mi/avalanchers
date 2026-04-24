@@ -26,9 +26,10 @@ bytemuck = { version = "1.25", features = ["derive"] }
 tempfile = "3"
 futures = "0.3"
 futures-intrusive = "0.5"
+web-time = "1.1"
 
 data_processor = { path = "crates/data_processor" }
-zstd = "0.13"
+
 lz4_flex = "0.11"
 bincode = "2.0"
 image = "0.25" 

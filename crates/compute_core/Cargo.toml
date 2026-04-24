@@ -18,7 +18,7 @@ tracing = { workspace = true}
 tracing-subscriber = { workspace = true }
 test-log = { workspace = true }
 futures = { workspace = true }
-
+web-time = { workspace = true }
 
 
 [dev-dependencies]

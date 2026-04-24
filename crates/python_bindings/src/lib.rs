@@ -219,7 +219,7 @@ impl PySimulation {
     ) -> PyResult<Bound<'py, PyArray2<f32>>> {
         let data = self
             .inner
-            .get_max_velocity()
+            .fetch_max_velocity()
             .block_on()
             .map_runtime_err()?
             .to_vec();
@@ -230,7 +230,7 @@ impl PySimulation {
     pub fn get_cell_count<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<u32>>> {
         let data = self
             .inner
-            .get_cell_count()
+            .fetch_cell_count()
             .block_on()
             .map_runtime_err()?
             .to_vec();
@@ -260,7 +260,7 @@ impl PySimulation {
     pub fn get_timestep_data(&mut self) -> PyResult<PyTimestepData> {
         let data = self
             .inner
-            .get_timestep_data()
+            .fetch_timestep_data()
             .block_on()
             .map_runtime_err()?;
         Ok(PyTimestepData {
