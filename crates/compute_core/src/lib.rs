@@ -4,7 +4,6 @@ use crate::buffers::{
 use crate::shaders::{ComputeShaderConfig, ShaderName, generate_shader_report};
 use crate::utils::Timer;
 use anyhow::{Ok, Result, anyhow};
-use futures::join;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use wgpu::{
@@ -114,30 +113,32 @@ impl Simulation {
         self.sim_info.elevation_threshold
     }
 
-    pub async fn create(settings: settings::Settings) -> Result<Self> {
+    pub async fn create(&mut self, settings: settings::Settings) -> Result<()> {
         let mut timer = Timer::new("Total Simulation Creation Time");
-        let sim_future = Simulation::new();
-        let settings_future = settings.create();
-        let (sim_result, settings_result) = join!(sim_future, settings_future);
-        let mut simulation = sim_result?;
-        (simulation.settings, simulation.dem) = settings_result;
-        simulation.dem_path = settings.dem_path.clone();
-        simulation.state = SimulationState::Ready;
+        let (settings_result, dem_result) = settings.create().await;
+        self.settings = settings_result;
+        self.dem = dem_result;
+        self.dem_path = settings.dem_path.clone();
+        self.gpu_cache.reset_all();
+        self.state = SimulationState::Ready;
         info!(
-            "Created simulation with DEM path: {}\nSettings: {:#?}",
-            simulation.dem_path, simulation.settings
+            "Updated simulation with DEM path: {}\nSettings: {:#?}",
+            self.dem_path, self.settings
         );
-        timer.checkpoint("Simulation created");
+        timer.checkpoint("Simulation updated/created");
         debug!("{}", timer.get_summary());
-        Ok(simulation)
+
+        Ok(())
     }
 
-    pub async fn create_default(dem_path: String) -> Result<Self> {
+    pub async fn create_default(&mut self, dem_path: String) -> Result<()> {
         let settings = settings::Settings {
             dem_path: dem_path.clone(),
             ..settings::Settings::default()
         };
-        Self::create(settings).await
+        self.create(settings).await?;
+        Ok(())
+    }
     }
 
     pub async fn run(&mut self) -> Result<()> {
@@ -343,7 +344,7 @@ impl Simulation {
     pub async fn fetch_timestep_data(&mut self) -> Result<&TimestepData> {
         assert!(
             self.state >= SimulationState::Finished,
-            "Simulation must be finished before reading timestep data"
+            "Simulation must run and be finished before reading timestep data"
         );
         if self.gpu_cache.timestep_data.is_none() {
             self.gpu_cache.read_count += 1;
@@ -1441,9 +1442,9 @@ mod tests {
 
     #[test_log::test]
     fn test_compute() {
-        let mut sim: Simulation =
-            block_on(Simulation::create_default(INCLINED_PLANE_PATH.to_string()))
-                .expect("Failed to create simulation");
+        let mut sim: Simulation = block_on(Simulation::new()).expect("Failed to create Simulation");
+        block_on(sim.create_default(INCLINED_PLANE_PATH.to_string()))
+            .expect("Failed to create simulation");
         block_on(sim.run()).expect("Failed to run simulation");
         let debug_buffer: Vec<f32> = block_on(sim.orchestrator.buffers.read_buffer(
             &sim.orchestrator.device,
@@ -1610,9 +1611,9 @@ mod tests {
 
     #[test_log::test]
     fn test_gpu_cache_read_count() {
-        let mut sim: Simulation =
-            block_on(Simulation::create_default(INCLINED_PLANE_PATH.to_string()))
-                .expect("Failed to create simulation");
+        let mut sim: Simulation = block_on(Simulation::new()).expect("Failed to create Simulation");
+        block_on(sim.create_default(INCLINED_PLANE_PATH.to_string()))
+            .expect("Failed to create simulation");
         block_on(sim.run()).expect("Failed to run simulation");
         let count_before = sim.get_gpu_cache_read_count();
 
@@ -1680,9 +1681,9 @@ mod tests {
 
     #[test_log::test]
     pub fn test_automatic_gpu_cache_reset() {
-        let mut sim: Simulation =
-            block_on(Simulation::create_default(INCLINED_PLANE_PATH.to_string()))
-                .expect("Failed to create simulation");
+        let mut sim: Simulation = block_on(Simulation::new()).expect("Failed to create Simulation");
+        block_on(sim.create_default(INCLINED_PLANE_PATH.to_string()))
+            .expect("Failed to create simulation");
         assert!(
             sim.gpu_cache.particles.is_none()
                 && sim.gpu_cache.release_areas.is_none()

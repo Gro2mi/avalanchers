@@ -125,7 +125,12 @@ pub struct PySimulation {
 #[pymethods]
 impl PySimulation {
     #[staticmethod]
-    pub fn create(dict: &Bound<'_, PyAny>) -> PyResult<Self> {
+    pub fn new() -> PyResult<Self> {
+        let inner = Simulation::new().block_on().map_runtime_err()?;
+        Ok(PySimulation { inner })
+    }
+
+    pub fn create(&mut self, dict: &Bound<'_, PyAny>) -> PyResult<()> {
         let json_value: serde_json::Value = depythonize(dict)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyTypeError, _>(e.to_string()))?;
 
@@ -134,20 +139,21 @@ impl PySimulation {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
         let settings = Settings::loads(&json_str)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
-        let inner = Simulation::create(settings.clone())
+        self.inner
+            .create(settings.clone())
             .block_on()
             .map_runtime_err()?;
-        Ok(PySimulation { inner })
+        Ok(())
     }
 
-    #[staticmethod]
-    pub fn create_default(dem_path: String) -> PyResult<Self> {
+    pub fn create_default(&mut self, dem_path: String) -> PyResult<()> {
         // block_on is used here to bridge async Rust to sync Python
-        let inner = Simulation::create_default(dem_path)
+        self.inner
+            .create_default(dem_path)
             .block_on()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
 
-        Ok(PySimulation { inner })
+        Ok(())
     }
 
     pub fn run(&mut self) -> PyResult<()> {

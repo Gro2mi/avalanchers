@@ -1,5 +1,12 @@
 import init, { WasmSimulation } from "./pkg/avalanchers.js";
 
+
+var release_points;
+var release_point;
+var simSettings;
+var gpx;
+var tiles = [];
+
 const wasm = await init();
 const demDropdown = document.getElementById('demDropdown');
 const frictionModelDropdown = document.getElementById('frictionModelDropdown');
@@ -53,6 +60,8 @@ demDropdown.addEventListener('change', async (event) => {
     const selectedFile = event.target.value;
     localStorage.setItem('demDropdown', selectedFile);
     simSettings = getSettings();
+    await sim.create(simSettings);
+    plotDem(sim);
     if (!isMobileDevice) {
         runAndPlot();
     }
@@ -122,6 +131,7 @@ async function runAndPlot() {
     console.log('Run simulation');
     setSettingsDisabled(true);
     try {
+        await sim.create(getSettings());
         simTimer = new Timer('AvalancheSimulation');
         await sim.run();
         simTimer.checkpoint('simulation');
@@ -169,16 +179,16 @@ window.addEventListener('DOMContentLoaded', () => {
 
 function getSettings() {
     const simSettings = {
-        casename: demDropdown.value,
-        maxSteps: parseInt(stepSlider.value),
-        simModel: 0,
-        frictionModel: frictionModelDropdown.selectedIndex,
+        dem_path: "data/avaframe/" + demDropdown.value + ".png",
+        max_steps: parseInt(stepSlider.value),
+        sim_model: 0,
+        friction_model: frictionModelDropdown.selectedIndex,
         density: 200,
-        slabThickness: 1,
-        frictionCoefficient: parseFloat(frictionCoefficientSlider.value),
-        dragCoefficient: parseInt(dragCoefficientSlider.value),
+        slab_thickness: 1,
+        friction_coefficient: parseFloat(frictionCoefficientSlider.value),
+        drag_coefficient: parseInt(dragCoefficientSlider.value),
         cfl: parseFloat(cflSlider.value),
-        releasedParticlesPerCell: parseInt(releasedParticlesPerCellSlider.value),
+        released_particles_per_cell: parseInt(releasedParticlesPerCellSlider.value),
     };
     return simSettings;
 }
@@ -255,9 +265,6 @@ async function savePngFile(pngBlob) {
 
 // document.getElementById('exportResults').addEventListener('click', savePNG);
 
-var release_points;
-var release_point;
-// fetchAabb(demDropdown.value);
 async function main() {
     const adapter = await navigator.gpu?.requestAdapter({
         powerPreference: 'high-performance',
@@ -275,7 +282,6 @@ async function main() {
     }
 
     changeFrictionModel();
-    // await getSettings();
     const settings = getSettings();
     // const gpxString = await fetch('gpx/NockspitzeNDirectTop.gpx').then(response => response.text());
     // gpx = parseGPX(gpxString);
@@ -285,17 +291,14 @@ async function main() {
     // plotGpx(gpx); // Initial plot
     // await computeNormalsFromDemTexture(settings, dem);
     
-    window.sim = await WasmSimulation.create_default("avaMal");
-    console.log("Is plotDem defined?", typeof plotDem);
+    // sim = await WasmSimulation.create_default("avaMal");
+    await sim.create(settings);
     plotDem(sim);
     if (!isMobileDevice) {
         runAndPlot();
     }
 }
 
-
-var gpx;
-var tiles = [];
 document.getElementById("gpxfile").addEventListener("change", async (e) => {
     predefinedReleasePoints = false;
     const file = e.target.files[0];
@@ -333,6 +336,7 @@ async function loadEngine() {
     
     statusEl.textContent = "Loading Engine...";
     window.wasm = await init();
+    sim = await WasmSimulation.new();
     
     statusEl.textContent = "Engine Ready!";
 }

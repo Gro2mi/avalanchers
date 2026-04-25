@@ -48,7 +48,8 @@ fn main() -> Result<()> {
     let settings = Settings::from_json(&file_path.to_string_lossy())
         .expect("Failed to load settings from JSON file");
 
-    let mut simulation: Simulation = pollster::block_on(Simulation::create(settings))?;
+    let mut simulation: Simulation = pollster::block_on(Simulation::new())?;
+    pollster::block_on(simulation.create(settings))?;
 
     pollster::block_on(simulation.run())?;
 

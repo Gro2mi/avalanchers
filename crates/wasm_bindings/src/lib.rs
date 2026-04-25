@@ -1,5 +1,6 @@
 use compute_core::{Simulation, TimestepData, settings::Settings};
 use js_sys::{Float32Array, Uint32Array};
+use serde_wasm_bindgen::from_value;
 use std::sync::OnceLock;
 use tracing::info;
 use wasm_bindgen::prelude::*;
@@ -138,13 +139,25 @@ pub struct WasmSimulation {
 
 #[wasm_bindgen]
 impl WasmSimulation {
-    /// In WASM, we use wasm-bindgen-futures to handle async properly
-    /// instead of pollster::block_on (which can freeze the browser thread).
-    pub async fn create_default(dem_path: String) -> Result<WasmSimulation, JsValue> {
+    pub async fn new() -> Result<WasmSimulation, JsValue> {
+        let inner = Simulation::new().await.map_err(to_js_err)?;
+        Ok(WasmSimulation { inner })
+    }
+    pub async fn create_default(&mut self, dem_path: String) -> Result<(), JsValue> {
         let path = base_url().to_owned() + "data/avaframe/" + &dem_path + ".png";
         info!("Creating simulation with DEM path: {}", path);
-        let inner = Simulation::create_default(path).await.map_err(to_js_err)?;
-        Ok(WasmSimulation { inner })
+        self.inner.create_default(path).await.map_err(to_js_err)?;
+        Ok(())
+    }
+
+    #[wasm_bindgen]
+    pub async fn create(&mut self, val: JsValue) -> Result<(), JsValue> {
+        let settings: Settings = from_value(val).map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        // 2. Run the async creation
+        // Browser environment REQUIRES .await here. block_on() will panic.
+        self.inner.create(settings).await.map_err(to_js_err)?;
+        Ok(())
     }
 
     pub async fn run(&mut self) -> Result<(), JsValue> {
