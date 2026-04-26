@@ -88,8 +88,11 @@ wasm-pack build crates/wasm_bindings --target web --out-dir ../../frontend/js/pk
 
 Before pushing use:
 
+Install `pip install ruff`
+
 ```
 cargo fmt
 cargo clippy -- -D warnings
 cargo test --verbose
+ruff check ./python
 ```

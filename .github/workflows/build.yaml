@@ -118,7 +118,10 @@ jobs:
         run: pip install .
 
       - name: Install pytest dependencies
-        run: pip install pytest
+        run: pip install pytest ruff
+
+      - name: Python Linting
+        run: ruff check ./python
 
       - name: Build and Test
         run: pytest

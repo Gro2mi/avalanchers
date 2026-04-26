@@ -1,8 +1,9 @@
 use crate::buffers::{
     BufferName, ComputeBuffers, TextureName, create_buffers_and_texture_descriptions,
 };
+use crate::dem::{Bounds, Dem};
 use crate::shaders::{ComputeShaderConfig, ShaderName, generate_shader_report};
-use crate::utils::Timer;
+use crate::utils::{Timer, linspace, to_2d};
 use anyhow::{Ok, Result, anyhow};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -51,6 +52,7 @@ pub fn init_logging() {
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub enum SimulationState {
     Uninitialized,
+    DemMissing,
     Ready,
     NormalsComputed,
     ReleaseAreasComputed,
@@ -65,7 +67,7 @@ pub struct Simulation {
     pub settings: settings::SimSettings,
     pub info: SimInfo,
     pub dem_path: String,
-    pub dem: dem::Dem,
+    pub dem: Dem,
     pub normals: Vec<f32>,
     pub slope: Vec<f32>,
     pub cell_count: Vec<u32>,
@@ -85,7 +87,7 @@ impl Simulation {
             settings: settings::SimSettings::default(),
             info: SimInfo::default(),
             dem_path: String::new(),
-            dem: dem::Dem::default(),
+            dem: Dem::default(),
             normals: Vec::new(),
             slope: Vec::new(),
             cell_count: Vec::new(),
@@ -118,13 +120,17 @@ impl Simulation {
         let (settings_result, dem_result) = settings.create().await;
         self.settings = settings_result;
         self.dem = dem_result;
-        self.dem_path = settings.dem_path.clone();
+        self.dem_path = settings.dem_path.unwrap_or_default().clone();
         self.gpu_cache.reset_all();
-        self.state = SimulationState::Ready;
-        info!(
-            "Updated simulation with DEM path: {}\nSettings: {:#?}",
-            self.dem_path, self.settings
-        );
+        if self.dem.data1d.is_empty() {
+            self.state = SimulationState::DemMissing;
+        } else {
+            self.state = SimulationState::Ready;
+            info!(
+                "Updated simulation with DEM path: {}\nSettings: {:#?}",
+                self.dem_path, self.settings
+            );
+        }
         timer.checkpoint("Simulation updated/created");
         debug!("{}", timer.get_summary());
 
@@ -133,12 +139,87 @@ impl Simulation {
 
     pub async fn create_default(&mut self, dem_path: String) -> Result<()> {
         let settings = settings::Settings {
-            dem_path: dem_path.clone(),
+            dem_path: Some(dem_path.clone()),
             ..settings::Settings::default()
         };
         self.create(settings).await?;
         Ok(())
     }
+
+    pub fn set_dem_default(
+        &mut self,
+        dem_data: &[f32],
+        width: usize,
+        height: usize,
+        cell_size: f32,
+    ) -> Result<()> {
+        self.set_dem(
+            dem_data,
+            width,
+            height,
+            cell_size,
+            0.0,
+            width as f32 * cell_size,
+            0.0,
+            height as f32 * cell_size,
+            1.0,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_dem(
+        &mut self,
+        dem_data: &[f32],
+        width: usize,
+        height: usize,
+        cell_size: f32,
+        bounds_xmin: f32,
+        bounds_xmax: f32,
+        bounds_ymin: f32,
+        bounds_ymax: f32,
+        map_factor: f32,
+    ) -> Result<()> {
+        info!(
+            "{:#?}",
+            [bounds_xmin, bounds_xmax, bounds_ymin, bounds_ymax]
+        );
+        self.dem = Dem {
+            data: to_2d(dem_data, width, height),
+            minimum_elevation: Dem::calculate_minimum_elevation(dem_data),
+            data1d: dem_data.to_vec(),
+            width,
+            height,
+            cell_size,
+            map_factor,
+            bounds: Bounds {
+                xmin: bounds_xmin,
+                xmax: bounds_xmax,
+                ymin: bounds_ymin,
+                ymax: bounds_ymax,
+            },
+            x: linspace(bounds_xmin, bounds_xmax, width),
+            y: linspace(bounds_ymin, bounds_ymax, height),
+        };
+
+        assert!(
+            self.dem.bounds.xmin < self.dem.bounds.xmax,
+            "xmin ({}) must be less than or equal to xmax ({})",
+            self.dem.bounds.xmin,
+            self.dem.bounds.xmax
+        );
+        assert!(
+            self.dem.bounds.ymin < self.dem.bounds.ymax,
+            "ymin ({}) must be less than or equal to ymax ({})",
+            self.dem.bounds.ymin,
+            self.dem.bounds.ymax
+        );
+        self.settings.set_dem(&self.dem);
+
+        self.state = SimulationState::Ready;
+        info!(
+            "Updated simulation with DEM path: {}\nSettings: {:#?}",
+            self.dem_path, self.settings
+        );
+        Ok(())
     }
 
     pub async fn run(&mut self) -> Result<()> {
@@ -915,7 +996,7 @@ impl ComputeOrchestrator {
     pub async fn run_normals(
         &mut self,
         sim_settings: &settings::SimSettings,
-        dem: &dem::Dem,
+        dem: &Dem,
     ) -> Result<()> {
         assert!(
             sim_settings.grid_shape_x <= self.max_texture_size
@@ -1610,6 +1691,15 @@ mod tests {
     }
 
     #[test_log::test]
+    fn test_sim_create_without_path() {
+        let settings = Settings::default();
+        let mut sim: Simulation =
+            block_on(Simulation::new()).expect("Failed to create Simulation without path");
+        block_on(sim.create(settings)).expect("Failed to create simulation with default settings");
+        assert_eq!(sim.state, SimulationState::DemMissing);
+    }
+
+    #[test_log::test]
     fn test_gpu_cache_read_count() {
         let mut sim: Simulation = block_on(Simulation::new()).expect("Failed to create Simulation");
         block_on(sim.create_default(INCLINED_PLANE_PATH.to_string()))
@@ -1781,5 +1871,153 @@ mod tests {
         let mut s = std::hash::DefaultHasher::new();
         t.hash(&mut s);
         s.finish()
+    }
+
+    #[test_log::test]
+    fn test_set_dem_initialization() {
+        // 1. Setup mock data
+        // A 2x3 grid (width=2, height=3)
+        let dem_data = vec![
+            10.0, 11.0, // Row 0
+            20.0, 21.0, // Row 1
+            30.0, 31.0, // Row 2
+        ];
+
+        // Ensure you have a way to create a 'blank' Simulation
+        // If Simulation::new() is too heavy (GPU init), use a mock or Default
+        let mut sim: Simulation = block_on(Simulation::new()).expect("Failed to create Simulation");
+        block_on(sim.create(Settings::default()))
+            .expect("Failed to create simulation with default settings");
+        // 2. Execute
+        let result = sim.set_dem(
+            &dem_data, 2,    // width
+            3,    // height
+            3.0,  // cell_size
+            0.0,  // xmin
+            2.0,  // xmax
+            10.0, // ymin
+            13.0, // ymax
+            4.0,  // map_factor
+        );
+
+        // 3. Assertions
+        assert!(result.is_ok(), "set_dem should return Ok");
+        assert_eq!(
+            sim.state,
+            SimulationState::Ready,
+            "State should be Ready after setting DEM"
+        );
+
+        // Verify metadata
+        assert_eq!(sim.dem.width, 2);
+        assert_eq!(sim.dem.height, 3);
+        assert_eq!(sim.dem.cell_size, 3.0);
+
+        // Verify 1D data integrity (cloned correctly)
+        assert_eq!(sim.dem.data1d, dem_data);
+
+        // Verify 2D data transformation
+        // Checking row 1, col 0 (which should be the 3rd element in 1D: 20.0)
+        assert_eq!(sim.dem.data[1][0], 20.0);
+
+        // Verify minimum elevation logic
+        assert_eq!(sim.dem.minimum_elevation, 10.0);
+
+        // Verify Bounds struct assignment
+        assert_eq!(sim.dem.bounds.xmin, 0.0);
+        assert_eq!(sim.dem.bounds.ymax, 13.0);
+
+        // Verify coordinate generation (linspace)
+        // x: 0.0 to 2.0 with width 2 -> [0.0, 2.0]
+        assert_eq!(sim.dem.x.len(), 2);
+        assert_eq!(sim.dem.x[0], 0.0);
+        assert_eq!(sim.dem.x[1], 2.0);
+
+        // y: 10.0 to 13.0 with height 3 -> [10.0, 11.5, 13.0]
+        assert_eq!(sim.dem.y.len(), 3);
+        assert_eq!(sim.dem.y[0], 10.0);
+        assert_eq!(sim.dem.y[2], 13.0);
+        assert_eq!(sim.dem.bounds.xmin, 0.0);
+        assert_eq!(sim.dem.bounds.ymin, 10.0);
+        assert_eq!(sim.dem.bounds.xmax, 2.0);
+        assert_eq!(sim.dem.bounds.ymax, 13.0);
+        assert_eq!(sim.dem.map_factor, 4.0);
+        assert_eq!(sim.dem.minimum_elevation, 10.0);
+
+        assert_eq!(sim.settings.cell_size, 3.0);
+        assert_eq!(sim.settings.grid_shape_x, 2);
+        assert_eq!(sim.settings.grid_shape_y, 3);
+
+        assert_eq!(sim.settings.world_size_x, 3.0 * 2 as f32);
+        assert_eq!(sim.settings.world_size_y, 3.0 * 3 as f32);
+        assert_eq!(sim.settings.release_min_elevation, 1500.0);
+
+        block_on(sim.compute_normals()).expect("Failed to compute normals after setting DEM");
+    }
+
+    #[test_log::test]
+    fn test_set_dem_initialization_invalid() {
+        // 1. Setup mock data
+        // A 2x3 grid (width=2, height=3)
+        let dem_data = vec![
+            10.0, 11.0, // Row 0
+            20.0, 21.0, // Row 1
+            30.0, 31.0, // Row 2
+        ];
+
+        // Ensure you have a way to create a 'blank' Simulation
+        // If Simulation::new() is too heavy (GPU init), use a mock or Default
+        let mut sim = block_on(Simulation::new()).expect("Failed to create Simulation");
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            sim.set_dem(
+                &dem_data, 2,    // width
+                2,    // height
+                3.0,  // cell_size
+                0.0,  // xmin
+                2.0,  // xmax
+                10.0, // ymin
+                13.0, // ymax
+                1.0,  // map_factor
+            )
+            .unwrap();
+        }));
+        assert!(
+            result.is_err(),
+            "set_dem should panic with invalid input for shape"
+        );
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            sim.set_dem(
+                &dem_data, 2,    // width
+                3,    // height
+                3.0,  // cell_size
+                5.0,  // xmin
+                2.0,  // xmax
+                10.0, // ymin
+                13.0, // ymax
+                1.0,  // map_factor
+            )
+            .unwrap();
+        }));
+        assert!(
+            result.is_err(),
+            "set_dem should panic with invalid input for bounds"
+        );
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            sim.set_dem(
+                &dem_data, 2,    // width
+                3,    // height
+                3.0,  // cell_size
+                0.0,  // xmin
+                2.0,  // xmax
+                10.0, // ymin
+                3.0,  // ymax
+                1.0,  // map_factor
+            )
+            .unwrap();
+        }));
+        assert!(
+            result.is_err(),
+            "set_dem should panic with invalid input for bounds"
+        );
     }
 }

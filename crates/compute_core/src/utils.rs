@@ -73,6 +73,15 @@ pub fn linspace(start: f32, end: f32, num: usize) -> Vec<f32> {
 }
 
 pub fn to_2d<T: Clone>(data: &[T], width: usize, height: usize) -> Vec<Vec<T>> {
+    assert_eq!(
+        data.len(),
+        width * height,
+        "Data length ({}) must match dimensions {}x{} (total {})",
+        data.len(),
+        width,
+        height,
+        width * height
+    );
     (0..height)
         .map(|row| {
             let start = row * width;
@@ -457,7 +466,9 @@ mod tests {
     }
 
     #[test_log::test]
-    #[should_panic(expected = "range end index 4 out of range for slice of length 3")]
+    #[should_panic(
+        expected = "assertion `left == right` failed: Data length (3) must match dimensions 2x3 (total 6)\n  left: 3\n right: 6"
+    )]
     fn test_to_2d_width_not_multiple_of_length() {
         let data = vec![1.0, 2.0, 3.0];
         let result = to_2d(&data, 2, 3);

@@ -1,6 +1,7 @@
 import numpy as np
+import importlib.util
 
-from ._avalanchers import *
+from ._avalanchers import * # noqa: F403
 
 def create_mesh(sim):
     dem = sim.dem
@@ -107,9 +108,7 @@ def is_jupyter():
         return False
     
 async def setup_jupyter_3d():
-    try:
-        import pyvista as pv
-    except ImportError:
+    if importlib.util.find_spec("pyvista") is None:
         raise ImportError(
             "The 'pyvista' package is required for this feature. "
             "Install it using: pip install 'avalanchers[viz]'"

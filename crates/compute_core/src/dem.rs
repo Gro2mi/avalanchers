@@ -66,13 +66,7 @@ impl Dem {
             _ => return Err(format!("Unsupported DEM format: {}", ext).into()),
         };
 
-        data.minimum_elevation = data
-            .data1d
-            .iter()
-            .filter(|&&v| v > 0.1)
-            .min_by(|a: &&f32, b: &&f32| a.total_cmp(b))
-            .copied() // Convert Option<&f32> to Option<f32>
-            .unwrap_or(0.0); // Provide a default if no value matches the filter
+        data.minimum_elevation = Self::calculate_minimum_elevation(&data.data1d);
 
         data.data1d = data
             .data1d
@@ -85,8 +79,29 @@ impl Dem {
                 }
             })
             .collect();
+        assert!(
+            data.bounds.xmin < data.bounds.xmax,
+            "xmin ({}) must be less than or equal to xmax ({})",
+            data.bounds.xmin,
+            data.bounds.xmax
+        );
+        assert!(
+            data.bounds.ymin < data.bounds.ymax,
+            "ymin ({}) must be less than or equal to ymax ({})",
+            data.bounds.ymin,
+            data.bounds.ymax
+        );
 
         Ok(data)
+    }
+
+    pub fn calculate_minimum_elevation(data1d: &[f32]) -> f32 {
+        data1d
+            .iter()
+            .filter(|&&v| v > 0.1)
+            .min_by(|a: &&f32, b: &&f32| a.total_cmp(b))
+            .copied() // Convert Option<&f32> to Option<f32>
+            .unwrap_or(0.0) // Provide a default if no value matches the filter
     }
 
     // pub fn load_asc(path: PathBuf) -> Self {

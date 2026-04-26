@@ -6,6 +6,9 @@ var release_point;
 var simSettings;
 var gpx;
 var tiles = [];
+window.dem = new Dem();
+window.sim = null;
+window.wasm = null;
 
 const wasm = await init();
 const demDropdown = document.getElementById('demDropdown');
@@ -283,17 +286,20 @@ async function main() {
 
     changeFrictionModel();
     const settings = getSettings();
-    // const gpxString = await fetch('gpx/NockspitzeNDirectTop.gpx').then(response => response.text());
-    // gpx = parseGPX(gpxString);
-    // await dem.loadTiles(gpx, zoom = zoomLevelSlider.value)
-    // console.log("dem width:", dem.bounds.width, "height:", dem.bounds.height);
-    // plotDem(dem); // Initial plot
-    // plotGpx(gpx); // Initial plot
-    // await computeNormalsFromDemTexture(settings, dem);
-    
-    // sim = await WasmSimulation.create_default("avaMal");
     await sim.create(settings);
+
+    // const gpxString = await fetch('data/gpx/Nockspitze.gpx').then(response => response.text());
+    // gpx = parseGPX(gpxString);
+    // await dem.loadTiles(gpx, zoomLevelSlider.value)
+    // await sim.set_dem(dem.data1d,
+    //     dem.width,
+    //     dem.height, 
+    //     dem.cellSize, 
+    //     dem.bounds.xmin, dem.bounds.xmax, dem.bounds.ymin, dem.bounds.ymax,
+    //     dem.mapFactor);    
+
     plotDem(sim);
+    // plotGpx(gpx, dem);
     if (!isMobileDevice) {
         runAndPlot();
     }
@@ -304,16 +310,22 @@ document.getElementById("gpxfile").addEventListener("change", async (e) => {
     const file = e.target.files[0];
     if (!file) return;
 
-    gpxString = await file.text();
+    const gpxString = await file.text();
     tiles = [];
     gpx = parseGPX(gpxString);
-    await dem.loadTiles(gpx, zoom = zoomLevelSlider.value)
-    simSettings.setDem(dem);
-
-    plotDem(dem);
-    plotGpx(gpx);
+    await dem.loadTiles(gpx, zoomLevelSlider.value)
+    // simSettings.setDem(dem);
+    await sim.set_dem(dem.data1d,
+        dem.width,
+        dem.height, 
+        dem.cell_size, 
+        dem.bounds.xmin, dem.bounds.xmax, dem.bounds.ymin, dem.bounds.ymax, 
+        dem.mapFactor);
+    resetPlots();
+    plotDem(sim);
+    plotGpx(gpx, dem);
     if (!isMobileDevice) {
-        runAndPlot();
+        // runAndPlot();
     }
 });
 
@@ -326,17 +338,14 @@ if (urlParams.get("debug") === "vscode") {
 }
 var isMobileDevice = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 
-
-window.sim = null;
-window.wasm = null;
 await loadEngine().catch(console.error);
 main();
 async function loadEngine() {
     const statusEl = document.getElementById("status");
-    
+
     statusEl.textContent = "Loading Engine...";
     window.wasm = await init();
     sim = await WasmSimulation.new();
-    
+
     statusEl.textContent = "Engine Ready!";
 }

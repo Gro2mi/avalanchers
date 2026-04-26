@@ -27,7 +27,7 @@ pub struct SimSettings {
     pub cell_size: f32,
     pub min_slope_angle: f32,
     pub max_slope_angle: f32,
-    pub min_elevation: f32,
+    pub release_min_elevation: f32,
     pub velocity_threshold: f32,
     pub roughness_threshold: f32,
 }
@@ -57,7 +57,7 @@ impl SimSettings {
             cell_size: 1.0,
             min_slope_angle: 35.0,
             max_slope_angle: 45.0,
-            min_elevation: 1500.0,
+            release_min_elevation: 1500.0,
             velocity_threshold: 1e-6,
             roughness_threshold: 0.01,
         }
@@ -111,7 +111,7 @@ impl SimSettings {
             settings.max_slope_angle = val;
         }
         if let Some(val) = patch.min_elevation {
-            settings.min_elevation = val;
+            settings.release_min_elevation = val;
         }
         if let Some(val) = patch.velocity_threshold {
             settings.velocity_threshold = val;
@@ -163,7 +163,7 @@ impl FrictionModel {
 
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
 pub struct Settings {
-    pub dem_path: String,
+    pub dem_path: Option<String>,
     pub release_areas: Option<String>,
     pub max_steps: Option<u32>,
     pub sim_model: Option<u32>,
@@ -214,15 +214,18 @@ impl Settings {
     }
     pub async fn create_from_path(file_path: &str) -> (SimSettings, Dem) {
         let settings = Settings {
-            dem_path: file_path.to_string(),
+            dem_path: Some(file_path.to_string()),
             ..Default::default()
         };
         settings.create().await
     }
     pub async fn create(&self) -> (SimSettings, Dem) {
-        let dem = Dem::new(&self.dem_path)
-            .await
-            .expect("Failed to load DEM from path");
+        let dem = match &self.dem_path {
+            Some(path) => Dem::new(path.as_ref())
+                .await
+                .expect("Failed to load DEM from path"),
+            None => Dem::default(),
+        };
         let sim_settings = SimSettings::from_settings(self, &dem);
         (sim_settings, dem)
     }
@@ -276,7 +279,7 @@ mod tests {
         assert_eq!(settings.cell_size, 1.0);
         assert_eq!(settings.min_slope_angle, 35.0);
         assert_eq!(settings.max_slope_angle, 45.0);
-        assert_eq!(settings.min_elevation, 1500.0);
+        assert_eq!(settings.release_min_elevation, 1500.0);
         assert_eq!(settings.velocity_threshold, 1e-6);
         assert_eq!(settings.roughness_threshold, 0.01);
     }
@@ -318,7 +321,7 @@ mod tests {
             min_elevation: Some(100.0),
             velocity_threshold: Some(0.001),
             roughness_threshold: Some(0.002),
-            dem_path: String::from("dem.png"),
+            dem_path: Some(String::from("dem.png")),
             release_areas: Some(String::from("release_area.png")),
         };
         let dem = create_test_dem();
@@ -334,7 +337,7 @@ mod tests {
         assert_eq!(settings.cfl, 0.9);
         assert_eq!(settings.min_slope_angle, 10.0);
         assert_eq!(settings.max_slope_angle, 20.0);
-        assert_eq!(settings.min_elevation, 100.0);
+        assert_eq!(settings.release_min_elevation, 100.0);
         assert_eq!(settings.velocity_threshold, 0.001);
         assert_eq!(settings.roughness_threshold, 0.002);
         assert_eq!(settings.grid_shape_x, dem.width as u32);
@@ -379,7 +382,7 @@ mod tests {
     #[test_log::test]
     fn test_settings_to_json_and_from_json() {
         let settings = Settings {
-            dem_path: String::from("dem.png"),
+            dem_path: Some(String::from("dem.png")),
             release_areas: Some(String::from("release_areas.png")),
             max_steps: Some(100),
             sim_model: Some(1),
@@ -401,7 +404,7 @@ mod tests {
         settings.to_json(path).unwrap();
 
         let loaded = Settings::from_json(path).unwrap();
-        assert_eq!(loaded.dem_path, String::from("dem.png"));
+        assert_eq!(loaded.dem_path, Some(String::from("dem.png")));
         assert_eq!(
             loaded.release_areas,
             Some(String::from("release_areas.png"))
@@ -425,7 +428,7 @@ mod tests {
     #[test_log::test]
     fn test_settings_display() {
         let settings = Settings {
-            dem_path: String::from("foo.tif"),
+            dem_path: Some(String::from("foo.tif")),
             ..Default::default()
         };
         let display = format!("{}", settings);

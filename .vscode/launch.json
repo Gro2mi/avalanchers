@@ -20,7 +20,7 @@
             "type": "chrome",
             "name": "AvaSimSecure",
             "request": "launch",
-            "url": "https://192.168.1.150/index.html?debug=vscode"
+            "url": "https://192.168.1.100/index.html?debug=vscode"
         }
     ]
 }

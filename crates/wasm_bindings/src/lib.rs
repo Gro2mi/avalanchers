@@ -117,12 +117,12 @@ impl WasmSettings {
 
     #[wasm_bindgen(getter)]
     pub fn dem_path(&self) -> String {
-        self.inner.dem_path.clone()
+        self.inner.dem_path.clone().unwrap_or_else(|| "".into())
     }
 
     #[wasm_bindgen(setter)]
     pub fn set_dem_path(&mut self, path: String) {
-        self.inner.dem_path = path;
+        self.inner.dem_path = Some(path);
     }
 }
 
@@ -157,6 +157,50 @@ impl WasmSimulation {
         // 2. Run the async creation
         // Browser environment REQUIRES .await here. block_on() will panic.
         self.inner.create(settings).await.map_err(to_js_err)?;
+        Ok(())
+    }
+
+    #[wasm_bindgen]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn set_dem(
+        &mut self,
+        dem_data: &[f32],
+        width: u32,
+        height: u32,
+        cell_size: f32,
+        bounds_xmin: f32,
+        bounds_xmax: f32,
+        bounds_ymin: f32,
+        bounds_ymax: f32,
+        map_factor: f32,
+    ) -> Result<(), JsValue> {
+        self.inner
+            .set_dem(
+                dem_data,
+                width as usize,
+                height as usize,
+                cell_size,
+                bounds_xmin,
+                bounds_xmax,
+                bounds_ymin,
+                bounds_ymax,
+                map_factor,
+            )
+            .map_err(to_js_err)?;
+        Ok(())
+    }
+
+    #[wasm_bindgen]
+    pub async fn set_dem_default(
+        &mut self,
+        dem_data: &[f32],
+        width: u32,
+        height: u32,
+        cell_size: f32,
+    ) -> Result<(), JsValue> {
+        self.inner
+            .set_dem_default(dem_data, width as usize, height as usize, cell_size)
+            .map_err(to_js_err)?;
         Ok(())
     }
 

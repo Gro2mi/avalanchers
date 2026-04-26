@@ -9,6 +9,13 @@ const resetLighting = {
     roughness: 0.5,
     fresnel: 0.2,
 }
+
+function resetPlots() {
+    Plotly.purge('outputPlot');
+    Plotly.purge('demPlot');
+    Plotly.purge('histogramPlot');
+}
+
 function plotDem(sim) {
     // DEM  coordinates have to be copied. Otherwise detached ArrayBuffer issues arise when restyling
     try {
@@ -17,9 +24,17 @@ function plotDem(sim) {
             y: new Float32Array(sim.y),
             z: to2D(new Float32Array(sim.dem), sim.width, sim.height),
             type: 'surface',
-            colorscale: 'Earth',
-            cmin: 0,
-            cmax: 3000,
+            colorscale: [[0, '#a5a5a5'], [1, '#a5a5a5']],
+            showscale: false,
+
+            lighting: {
+                ambient: 0.6,   // Base brightness
+                diffuse: 0.5,   // Defines the shape/shadows
+                specular: 0.05, // Very low "shininess"
+                roughness: 0.9
+            },
+            // cmin: 0,
+            // cmax: 3000,
             contours: {
                 z: {
                     show: true,
@@ -105,6 +120,7 @@ async function updatePlots(sim, selectedVariable) {
 
     var plotOptions = {
         surfacecolor: [to2D(sim[selectedVariable], sim.width, sim.height)],
+        showscale: true,
         colorscale: ['Portland'],
         cmin: [null],
         cmax: [null],
@@ -124,7 +140,7 @@ async function updatePlots(sim, selectedVariable) {
     Plotly.react(histogramPlot, [traceHist], layoutHist);
 }
 
-function plotGpx(gpx) {
+function plotGpx(gpx, dem) {
     const webMercatorCoords = gpx.map(pt => latLonToWebMercator(pt.lat, pt.lon)).map(pt => dem.interpolateElevation(pt));
 
     dem.interpolateElevation(webMercatorCoords[0])
@@ -257,7 +273,7 @@ async function plotTimestepData(sim) {
         name: 'Position Z Error',
         visible: 'legendonly',
     };
-    
+
     const diffElevation = new Float32Array(n);
     for (let i = 1; i < n; i++) {
         diffElevation[i] = timestepData.elevation[i] - timestepData.elevation[i - 1];

@@ -1,5 +1,5 @@
 use compute_core::{Simulation, TimestepData, settings::Settings};
-use numpy::{PyArray1, PyArray2, PyArrayMethods, ToPyArray};
+use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray2, ToPyArray};
 use pollster::FutureExt;
 use pyo3::exceptions::{PyIOError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -108,12 +108,12 @@ impl PySettings {
 
     #[getter]
     pub fn get_dem_path(&self) -> String {
-        self.inner.dem_path.clone()
+        self.inner.dem_path.clone().unwrap_or_else(|| "".into())
     }
 
     #[setter]
     pub fn set_dem_path(&mut self, path: String) {
-        self.inner.dem_path = path;
+        self.inner.dem_path = Some(path);
     }
 }
 
@@ -152,6 +152,60 @@ impl PySimulation {
             .create_default(dem_path)
             .block_on()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
+
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_dem(
+        &mut self,
+        dem_data: PyReadonlyArray2<f32>, // Accepts (height, width) array
+        cell_size: f32,
+        bounds_xmin: f32,
+        bounds_xmax: f32,
+        bounds_ymin: f32,
+        bounds_ymax: f32,
+        map_factor: f32,
+    ) -> PyResult<()> {
+        // NumPy shape is usually (height, width)
+        let view = dem_data.as_array();
+        let height = view.shape()[0];
+        let width = view.shape()[1];
+
+        // Ensure the data is contiguous in memory so we can treat it as a slice
+        let slice = dem_data.as_slice()?;
+
+        self.inner
+            .set_dem(
+                slice,
+                width,
+                height,
+                cell_size,
+                bounds_xmin,
+                bounds_xmax,
+                bounds_ymin,
+                bounds_ymax,
+                map_factor,
+            )
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+
+        Ok(())
+    }
+
+    pub fn set_dem_default(
+        &mut self,
+        dem_data: PyReadonlyArray2<f32>,
+        cell_size: f32,
+    ) -> PyResult<()> {
+        let view = dem_data.as_array();
+        let height = view.shape()[0];
+        let width = view.shape()[1];
+
+        let slice = dem_data.as_slice()?;
+
+        self.inner
+            .set_dem_default(slice, width, height, cell_size)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         Ok(())
     }
