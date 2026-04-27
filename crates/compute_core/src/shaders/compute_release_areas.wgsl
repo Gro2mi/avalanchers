@@ -115,8 +115,8 @@ fn compute_centroid(points: ptr<function, array<vec2<f32>, 256>>, count: u32) ->
 // @group(0) @binding(4) var landcoverTexture: texture_2d<u32>;
 
 @group(0) @binding(4) var release_areas_texture: texture_storage_2d<rgba32float, write>;
-@group(0) @binding(5) var<storage, read_write> out_debug: array<f32>;
-@group(0) @binding(6) var<storage, read_write> atomic_release_cell_counter: AtomicValue;
+@group(0) @binding(5) var<storage, read_write> debug: array<f32>;
+@group(0) @binding(6) var<storage, read_write> number_release_cells: AtomicValue;
 
 
 const confers_trees = vec4u(34, 139, 34, 255);
@@ -165,8 +165,8 @@ fn compute_release_areas(@builtin(global_invocation_id) id: vec3<u32>) {
     } else {
         // release cell
         textureStore(release_areas_texture, tex_pos, vec4f(1, gpx_mask, predictor, 0f));
-        atomicAdd(&atomic_release_cell_counter.value, 1u);
-    out_debug[0] = f32(sim_settings.slab_thickness);
+        atomicAdd(&number_release_cells.value, 1u);
+        debug[0] = f32(sim_settings.slab_thickness);
     }
     // needs to stay here, otherwise texture is not used
 }

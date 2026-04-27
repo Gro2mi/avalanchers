@@ -492,80 +492,39 @@ impl ComputeBuffers {
     /// Writes data to an existing texture, handling 256-byte row alignment.
     pub fn write_texture<T: bytemuck::Pod + Send + Sync>(
         &self,
-        device: &Device,
         queue: &Queue,
         texture_name: TextureName,
         data: &[T],
     ) -> Result<()> {
         let texture = self
             .get_texture(&texture_name)
-            .ok_or_else(|| anyhow!("Texture '{}' not found for writing", texture_name))?;
+            .ok_or_else(|| anyhow!("Texture '{}' not found", texture_name))?;
 
-        let texture_desc = texture.as_image_copy();
-        let bytes_per_pixel = texture_desc
-            .texture
-            .format()
+        let size = texture.size();
+        let format = texture.format();
+
+        // Calculate how many bytes one row of pixels actually takes in memory
+        let bytes_per_pixel = format
             .block_copy_size(None)
-            .expect("Unsupported texture format for copying");
-        let unpadded_bytes_per_row = texture_desc.texture.size().width * bytes_per_pixel;
-        let padded_bytes_per_row = align_up(unpadded_bytes_per_row, COPY_BYTES_PER_ROW_ALIGNMENT);
+            .expect("Unsupported texture format");
+        let bytes_per_row = size.width * bytes_per_pixel;
 
-        let total_padded_size = padded_bytes_per_row * texture_desc.texture.size().height;
-
-        // Create a staging buffer for the data
-        let staging_buffer = device.create_buffer_init(&BufferInitDescriptor {
-            label: Some(&format!(
-                "{} Staging Buffer (for reading texture)",
-                texture_name
-            )),
-            contents: &vec![0; total_padded_size as usize], // Initialize with zeros
-            usage: BufferUsages::COPY_SRC,
-        });
-
-        // Copy user data into the staging buffer, adding padding
-        let mut padded_data_bytes = vec![0u8; total_padded_size as usize];
-        let data_bytes = bytemuck::cast_slice(data);
-
-        for y in 0..texture_desc.texture.size().height as usize {
-            let src_start = y * unpadded_bytes_per_row as usize;
-            let src_end = src_start + unpadded_bytes_per_row as usize;
-            let dest_start = y * padded_bytes_per_row as usize;
-            let dest_end = dest_start + unpadded_bytes_per_row as usize;
-
-            if src_end > data_bytes.len() {
-                return Err(anyhow!(
-                    "Provided data is too small for texture dimensions."
-                ));
-            }
-            padded_data_bytes[dest_start..dest_end]
-                .copy_from_slice(&data_bytes[src_start..src_end]);
-        }
-
-        queue.write_buffer(&staging_buffer, 0, &padded_data_bytes);
-
-        // Copy from staging buffer to texture
-        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
-            label: Some(&format!("{} Texture Data Write Encoder", texture_name)),
-        });
-
-        encoder.copy_buffer_to_texture(
-            TexelCopyBufferInfo {
-                buffer: &staging_buffer,
-                layout: TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded_bytes_per_row),
-                    rows_per_image: Some(texture_desc.texture.size().height),
-                },
-            },
-            TexelCopyTextureInfo {
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
                 texture,
                 mip_level: 0,
-                origin: Origin3d::ZERO,
+                origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            texture_desc.texture.size(),
+            bytemuck::cast_slice(data),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bytes_per_row),
+                rows_per_image: Some(size.height),
+            },
+            size,
         );
-        queue.submit(Some(encoder.finish()));
+
         Ok(())
     }
 }
@@ -637,7 +596,7 @@ pub fn create_buffers_and_texture_descriptions(
         TextureName::ReleaseAreas,
         texture_size,
         TextureFormat::Rgba32Float,
-        texture_usage_output,
+        texture_usage_default,
     );
     compute_buffers.add_texture(
         device,

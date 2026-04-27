@@ -5,6 +5,7 @@ var release_points;
 var release_point;
 var simSettings;
 var gpx;
+var isExample = true;
 var tiles = [];
 window.dem = new Dem();
 window.sim = null;
@@ -64,6 +65,7 @@ demDropdown.addEventListener('change', async (event) => {
     localStorage.setItem('demDropdown', selectedFile);
     simSettings = getSettings();
     await sim.create(simSettings);
+    isExample = true;
     plotDem(sim);
     if (!isMobileDevice) {
         runAndPlot();
@@ -121,7 +123,6 @@ const simSettingsDiv = document.getElementById('simSettingsDiv')
 const runButton = document.getElementById('runSimulation')
 const prepareButton = document.getElementById('prepareSimulation')
 runButton.addEventListener('click', async () => {
-    getSettings();
     await runAndPlot();
 });
 prepareButton.addEventListener('click', async () => {
@@ -134,7 +135,21 @@ async function runAndPlot() {
     console.log('Run simulation');
     setSettingsDisabled(true);
     try {
-        await sim.create(getSettings());
+        simSettings = getSettings();
+        if (!isExample) {
+            delete simSettings.dem_path;
+            delete simSettings.release_areas_path;
+            await sim.create(simSettings);
+            await sim.set_dem(dem.data1d,
+                dem.width,
+                dem.height, 
+                dem.cellSize, 
+                dem.bounds.xmin, dem.bounds.xmax, dem.bounds.ymin, dem.bounds.ymax,
+                dem.mapFactor); 
+        }
+        else {
+            await sim.create(simSettings);
+        }
         simTimer = new Timer('AvalancheSimulation');
         await sim.run();
         simTimer.checkpoint('simulation');
@@ -183,6 +198,7 @@ window.addEventListener('DOMContentLoaded', () => {
 function getSettings() {
     const simSettings = {
         dem_path: "data/avaframe/" + demDropdown.value + ".png",
+        release_areas_path: "data/avaframe/" + demDropdown.value + "releaseTexture.png",
         max_steps: parseInt(stepSlider.value),
         sim_model: 0,
         friction_model: frictionModelDropdown.selectedIndex,
@@ -306,6 +322,7 @@ async function main() {
 }
 
 document.getElementById("gpxfile").addEventListener("change", async (e) => {
+    isExample = false;
     predefinedReleasePoints = false;
     const file = e.target.files[0];
     if (!file) return;
@@ -325,7 +342,7 @@ document.getElementById("gpxfile").addEventListener("change", async (e) => {
     plotDem(sim);
     plotGpx(gpx, dem);
     if (!isMobileDevice) {
-        // runAndPlot();
+        runAndPlot();
     }
 });
 

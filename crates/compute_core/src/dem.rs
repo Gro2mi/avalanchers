@@ -56,13 +56,9 @@ impl Dem {
             .and_then(|s| s.to_str())
             .unwrap_or("");
 
-        // 1. Assign the result of the match to 'data'
         let mut data = match ext.to_lowercase().as_str() {
             "asc" => return Err("ASC format not supported yet".into()),
-            "png" => {
-                // Ensure this function returns Result<Self, ...>
-                Self::load_png_as_float32(path).await?
-            }
+            "png" => Self::load_png_as_float32(path).await?,
             _ => return Err(format!("Unsupported DEM format: {}", ext).into()),
         };
 

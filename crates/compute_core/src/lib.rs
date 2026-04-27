@@ -70,8 +70,11 @@ pub struct Simulation {
     pub dem: Dem,
     pub normals: Vec<f32>,
     pub slope: Vec<f32>,
+    pub roughness: Vec<f32>,
     pub cell_count: Vec<u32>,
     pub max_velocity: Vec<f32>,
+    release_areas_path: Option<String>,
+    release_areas_array: Option<Vec<f32>>,
     sim_info: SimInfo,
     number_particles: u32,
     particles: Vec<Particle>,
@@ -90,6 +93,7 @@ impl Simulation {
             dem: Dem::default(),
             normals: Vec::new(),
             slope: Vec::new(),
+            roughness: Vec::new(),
             cell_count: Vec::new(),
             max_velocity: Vec::new(),
             number_particles: 0,
@@ -97,6 +101,8 @@ impl Simulation {
             state: SimulationState::Uninitialized,
             gpu_cache: GpuCache::default(),
             sim_info: SimInfo::default(),
+            release_areas_path: None,
+            release_areas_array: None,
         })
     }
     pub fn get_state(&self) -> SimulationState {
@@ -121,6 +127,7 @@ impl Simulation {
         self.settings = settings_result;
         self.dem = dem_result;
         self.dem_path = settings.dem_path.unwrap_or_default().clone();
+        self.release_areas_path = settings.release_areas_path.clone();
         self.gpu_cache.reset_all();
         if self.dem.data1d.is_empty() {
             self.state = SimulationState::DemMissing;
@@ -137,9 +144,34 @@ impl Simulation {
         Ok(())
     }
 
-    pub async fn create_default(&mut self, dem_path: String) -> Result<()> {
+    pub async fn create_default(&mut self, dem_path: &str) -> Result<()> {
         let settings = settings::Settings {
-            dem_path: Some(dem_path.clone()),
+            dem_path: Some(dem_path.to_string()),
+            ..settings::Settings::default()
+        };
+        self.create(settings).await?;
+        Ok(())
+    }
+
+    pub async fn create_default_with_release_areas(
+        &mut self,
+        dem_path: &str,
+        release_areas_path: &str,
+    ) -> Result<()> {
+        let settings = settings::Settings {
+            dem_path: Some(dem_path.to_string()),
+            release_areas_path: Some(release_areas_path.to_string()),
+            ..settings::Settings::default()
+        };
+        self.create(settings).await?;
+        Ok(())
+    }
+
+    pub async fn create_example(&mut self, dem_path: &str) -> Result<()> {
+        let release_areas_path = dem_path.to_string().replace(".png", "releaseTexture.png");
+        let settings = settings::Settings {
+            dem_path: Some(dem_path.to_string()),
+            release_areas_path: Some(release_areas_path.to_string()),
             ..settings::Settings::default()
         };
         self.create(settings).await?;
@@ -178,10 +210,6 @@ impl Simulation {
         bounds_ymax: f32,
         map_factor: f32,
     ) -> Result<()> {
-        info!(
-            "{:#?}",
-            [bounds_xmin, bounds_xmax, bounds_ymin, bounds_ymax]
-        );
         self.dem = Dem {
             data: to_2d(dem_data, width, height),
             minimum_elevation: Dem::calculate_minimum_elevation(dem_data),
@@ -222,19 +250,34 @@ impl Simulation {
         Ok(())
     }
 
+    pub fn set_release_areas(&mut self, release_areas: &[f32]) -> Result<()> {
+        self.release_areas_array = Some(release_areas.to_vec());
+        self.release_areas_path = None;
+        Ok(())
+    }
+
+    pub async fn prepare(&mut self) -> Result<()> {
+        self.compute_normals().await?;
+        let _ = self.get_release_areas().await?;
+        self.initialize_particles().await?;
+        Ok(())
+    }
+
     pub async fn run(&mut self) -> Result<()> {
         let mut timer = Timer::new("Total Simulation Run Time");
         self.compute_normals().await?;
         timer.checkpoint("Normals computed");
-        let _ = self
-            .load_release_areas(&self.dem_path.replace(".png", "releaseTexture.png"))
-            .await?;
+        let _ = self.get_release_areas().await?;
         timer.checkpoint("Release areas loaded");
-        self.initialize_particles().await?;
-        timer.checkpoint("Particles initialized");
-        self.compute_particles().await?;
+        if self.number_particles == 0 {
+            warn!("No particles to simulate! Check if release areas are correctly defined.");
+        } else {
+            self.initialize_particles().await?;
+            timer.checkpoint("Particles initialized");
+            self.compute_particles().await?;
 
-        self.sim_info = self.fetch_sim_info().await?;
+            self.sim_info = self.fetch_sim_info().await?;
+        }
         self.state = SimulationState::Finished;
 
         timer.checkpoint("Simulation finished");
@@ -266,21 +309,56 @@ impl Simulation {
         Ok(())
     }
 
-    async fn load_release_areas(&mut self, release_areas_path: &str) -> Result<u32> {
+    async fn get_release_areas(&mut self) -> Result<u32> {
         assert!(
             self.state >= SimulationState::NormalsComputed,
             "Normals must be computed before loading release areas"
         );
         self.gpu_cache.release_areas = None;
         self.gpu_cache.reset_simulation_result();
-        debug!("Loading release areas from path: {}", release_areas_path);
-        let (data, _, _) = data_processor::read_png(release_areas_path)
-            .await
-            .expect("Failed to read PNG");
-        let number_release_cells = self
-            .orchestrator
-            .run_load_release_areas(&data, &self.settings)
-            .await?;
+        let number_release_cells = match &self.release_areas_path {
+            Some(path) => {
+                info!("Loading release areas from path: {}", path);
+                let (data, _, _) = data_processor::read_png(path)
+                    .await
+                    .expect("Failed to read PNG at release areas path");
+                self.orchestrator
+                    .run_load_release_areas(&data, &self.settings)
+                    .await?
+            }
+            None => {
+                match &self.release_areas_array {
+                    Some(array) => {
+                        info!("Loading release areas from provided array");
+
+                        let mut interleaved_data: Vec<f32> = Vec::with_capacity(array.len() * 4);
+                        let mut counter: u32 = 0;
+                        for r in array.iter() {
+                            if *r > 0.1 {
+                                counter += 1;
+                            }
+                            interleaved_data.push(*r); // R
+                            interleaved_data.push(0.0); // G
+                            interleaved_data.push(0.0); // B
+                            interleaved_data.push(0.0); // A
+                        }
+                        self.orchestrator
+                            .write_texture::<f32>(TextureName::ReleaseAreas, &interleaved_data)
+                            .expect("Failed to write release areas texture");
+                        counter
+                    }
+                    None => {
+                        info!("Computing release areas from DEM");
+                        self.orchestrator
+                            .run_compute_roughness(&self.settings)
+                            .await?;
+                        self.orchestrator
+                            .run_compute_release_areas(&self.settings)
+                            .await?
+                    }
+                }
+            }
+        };
         self.number_particles = number_release_cells * self.settings.released_particles_per_cell;
         self.state = SimulationState::ReleaseAreasComputed;
         info!("Number of release cells: {}", number_release_cells);
@@ -292,10 +370,14 @@ impl Simulation {
             self.state >= SimulationState::ReleaseAreasComputed,
             "Release areas must be computed before initializing particles"
         );
+        assert_ne!(
+            self.number_particles, 0,
+            "Number of particles must be greater than 0 to initialize particles"
+        );
         self.gpu_cache.reset_simulation_result();
         // set parameters that depend on the number of particles
         self.orchestrator
-            .run_initialize_particles(self.number_particles)
+            .run_initialize_particles(&self.settings, self.number_particles)
             .await?;
         self.state = SimulationState::ParticlesInitialized;
         Ok(())
@@ -331,6 +413,22 @@ impl Simulation {
         name: TextureName,
     ) -> Result<Vec<T>> {
         self.orchestrator.read_texture_single_channel(name).await
+    }
+
+    async fn fetch_roughness_texture(&mut self) -> Result<&TextureRgba<f32>> {
+        assert!(
+            self.state >= SimulationState::ReleaseAreasComputed,
+            "Release areas must be computed before reading roughness texture"
+        );
+        if self.gpu_cache.roughness.is_none() {
+            self.gpu_cache.read_count += 1;
+            self.gpu_cache.roughness = Some(self.get_texture_data(TextureName::Roughness).await?);
+        }
+        Ok(self.gpu_cache.roughness.as_ref().unwrap())
+    }
+
+    pub async fn get_roughness_aspect(&mut self) -> Result<Vec<f32>> {
+        Ok(self.fetch_roughness_texture().await?.r.clone())
     }
 
     async fn fetch_slope_texture(&mut self) -> Result<&TextureRgba<f32>> {
@@ -398,7 +496,7 @@ impl Simulation {
         Ok(self.gpu_cache.release_areas.as_ref().unwrap())
     }
 
-    pub async fn get_release_areas(&mut self) -> Result<Vec<f32>> {
+    pub async fn fetch_release_areas(&mut self) -> Result<Vec<f32>> {
         Ok(self.fetch_release_areas_texture().await?.r.clone())
     }
 
@@ -488,6 +586,7 @@ impl Simulation {
         self.fetch_cell_count().await?;
         self.fetch_particles().await?;
         self.fetch_timestep_data().await?;
+        self.fetch_roughness_texture().await?;
         self.fetch_slope_texture().await?;
         self.fetch_normals_texture().await?;
         self.fetch_release_areas_texture().await?;
@@ -524,6 +623,7 @@ pub struct GpuCache {
     pub cell_count: Option<Vec<u32>>,
     pub normals: Option<TextureRgba<f32>>,
     pub slope: Option<TextureRgba<f32>>,
+    pub roughness: Option<TextureRgba<f32>>,
     pub release_areas: Option<TextureRgba<f32>>,
     pub timestep_data: Option<TimestepData>,
     pub read_count: usize,
@@ -541,6 +641,7 @@ impl GpuCache {
         self.reset_simulation_result();
         self.normals = None;
         self.slope = None;
+        self.roughness = None;
         self.release_areas = None;
     }
 }
@@ -1064,6 +1165,65 @@ impl ComputeOrchestrator {
         Ok(())
     }
 
+    pub async fn run_compute_roughness(
+        &mut self,
+        sim_settings: &settings::SimSettings,
+    ) -> Result<()> {
+        self.buffers.write_buffer(
+            &self.queue,
+            BufferName::SimSettings,
+            sim_settings.as_bytes(),
+        )?;
+        self.run_shader(
+            &ShaderName::ComputeRoughness,
+            &[
+                self.get_buffer_binding(BufferName::SimSettings),
+                self.get_view(TextureName::Normals),
+                self.get_view(TextureName::Landcover),
+                self.get_view(TextureName::Roughness),
+            ],
+            self.dispatch_number_workgroups_x_2d,
+            self.dispatch_number_workgroups_y_2d,
+            1,
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn run_compute_release_areas(
+        &mut self,
+        sim_settings: &settings::SimSettings,
+    ) -> Result<u32> {
+        self.buffers.write_buffer(
+            &self.queue,
+            BufferName::SimSettings,
+            sim_settings.as_bytes(),
+        )?;
+        self.run_shader(
+            &ShaderName::ComputeReleaseAreas,
+            &[
+                self.get_buffer_binding(BufferName::SimSettings),
+                self.get_view(TextureName::Dem),
+                self.get_view(TextureName::Slope),
+                self.get_view(TextureName::Roughness),
+                self.get_view(TextureName::ReleaseAreas),
+                self.get_buffer_binding(BufferName::OutDebugRelease),
+                self.get_buffer_binding(BufferName::NumberReleaseCells),
+            ],
+            self.dispatch_number_workgroups_x_2d,
+            self.dispatch_number_workgroups_y_2d,
+            1,
+        )
+        .await?;
+
+        let number_release_cells: u32 = self
+            .read_buffer::<u32>(BufferName::NumberReleaseCells)
+            .await
+            .expect("Failed to read number_release_cells buffer")[0];
+
+        Ok(number_release_cells)
+    }
+
     pub async fn run_load_release_areas(
         &mut self, // `&mut self` because we're adding textures
         data: &[u8],
@@ -1108,7 +1268,11 @@ impl ComputeOrchestrator {
         Ok(number_release_cells)
     }
 
-    pub async fn run_initialize_particles(&mut self, number_release_particles: u32) -> Result<()> {
+    pub async fn run_initialize_particles(
+        &mut self,
+        sim_settings: &settings::SimSettings,
+        number_release_particles: u32,
+    ) -> Result<()> {
         let particle_buffer_size = number_release_particles as usize * Particle::BYTE_SIZE;
         assert!(
             particle_buffer_size as u64 <= self.max_storage_buffer_binding_size,
@@ -1126,6 +1290,11 @@ impl ComputeOrchestrator {
             (self.max_texture_size * self.max_texture_size) as f32
                 / (self.max_storage_buffer_binding_size as usize / Particle::BYTE_SIZE) as f32
         );
+        self.buffers.write_buffer(
+            &self.queue,
+            BufferName::SimSettings,
+            sim_settings.as_bytes(),
+        )?;
         info!(
             "Initializing particles with number_release_particles: {}, particle_buffer_size: {:.2} MB ({:.1} % of max storage buffer binding size)",
             number_release_particles,
@@ -1188,11 +1357,16 @@ impl ComputeOrchestrator {
             elevation_threshold: 0.0,
             max_velocity: 0.0,
         };
-
         self.buffers.write_buffer(
             &self.queue,
             BufferName::SimInfo,
             bytemuck::bytes_of(&sim_info),
+        )?;
+
+        self.buffers.write_buffer(
+            &self.queue,
+            BufferName::SimSettings,
+            sim_settings.as_bytes(),
         )?;
         // Compute Particles Bind Group
         let compute_particles_config = self
@@ -1271,6 +1445,13 @@ impl ComputeOrchestrator {
         self.buffers
             .read_texture(&self.device, &self.queue, name)
             .await
+    }
+    fn write_texture<T: bytemuck::Pod + Send + Sync>(
+        &mut self,
+        name: TextureName,
+        data: &[T],
+    ) -> Result<()> {
+        self.buffers.write_texture::<T>(&self.queue, name, data)
     }
     async fn read_texture_single_channel<T: bytemuck::Pod + Send + Sync>(
         &self,
@@ -1386,7 +1567,7 @@ mod tests {
     }
     #[test_log::test]
     fn test_load_release_areas() {
-        let mut orchestrator =
+        let mut orchestrator: ComputeOrchestrator =
             block_on(ComputeOrchestrator::new()).expect("Failed to create ComputeOrchestrator");
         let (sim_settings, _dem) = block_on(Settings::create_from_path(INCLINED_PLANE_PATH));
         let (data, _, _) = block_on(read_png(RELEASE_TEXTURE_PATH)).expect("Failed to read PNG");
@@ -1464,6 +1645,7 @@ mod tests {
             block_on(orchestrator.run_load_release_areas(&data, &sim_settings))
                 .expect("Failed to run load_release_areas shader");
         block_on(orchestrator.run_initialize_particles(
+            &sim_settings,
             number_release_cells * sim_settings.released_particles_per_cell,
         ))
         .expect("Failed to run initialize_particles shader");
@@ -1524,8 +1706,7 @@ mod tests {
     #[test_log::test]
     fn test_compute() {
         let mut sim: Simulation = block_on(Simulation::new()).expect("Failed to create Simulation");
-        block_on(sim.create_default(INCLINED_PLANE_PATH.to_string()))
-            .expect("Failed to create simulation");
+        block_on(sim.create_example(INCLINED_PLANE_PATH)).expect("Failed to create simulation");
         block_on(sim.run()).expect("Failed to run simulation");
         let debug_buffer: Vec<f32> = block_on(sim.orchestrator.buffers.read_buffer(
             &sim.orchestrator.device,
@@ -1701,9 +1882,10 @@ mod tests {
 
     #[test_log::test]
     fn test_gpu_cache_read_count() {
+        let number_cache_elements = 8;
+        let number_sim_results_elements = 4;
         let mut sim: Simulation = block_on(Simulation::new()).expect("Failed to create Simulation");
-        block_on(sim.create_default(INCLINED_PLANE_PATH.to_string()))
-            .expect("Failed to create simulation");
+        block_on(sim.create_example(INCLINED_PLANE_PATH)).expect("Failed to create simulation");
         block_on(sim.run()).expect("Failed to run simulation");
         let count_before = sim.get_gpu_cache_read_count();
 
@@ -1714,8 +1896,9 @@ mod tests {
         let uncached_state = calculate_hash(&first_ref);
         assert_eq!(
             sim.get_gpu_cache_read_count(),
-            count_before + 7,
-            "Expected read_count to increase by 7 after first call, but it did not."
+            count_before + number_cache_elements,
+            "Expected read_count to increase by {} after first call, but it did not.",
+            number_cache_elements
         );
 
         // Second call: Should return the cached value
@@ -1725,7 +1908,7 @@ mod tests {
         let cached_state = calculate_hash(&second_ref);
         assert_eq!(
             sim.get_gpu_cache_read_count(),
-            count_before + 7,
+            count_before + number_cache_elements,
             "Expected read_count to NOT increase on second call, but it did."
         );
 
@@ -1745,8 +1928,9 @@ mod tests {
         block_on(sim.fetch_results()).expect("Failed to get data on third call");
         assert_eq!(
             sim.get_gpu_cache_read_count(),
-            count_before + 11,
-            "Expected read_count to increase by 1 after third call, but it did not"
+            count_before + number_cache_elements + number_sim_results_elements,
+            "Expected read_count to increase by {} after third call, but it did not",
+            number_cache_elements + number_sim_results_elements
         );
 
         sim.settings.friction_coefficient = 0.2;
@@ -1755,8 +1939,9 @@ mod tests {
         block_on(sim.fetch_results()).expect("Failed to get data on second call");
         assert_eq!(
             sim.get_gpu_cache_read_count(),
-            count_before + 18,
-            "Expected read_count to increase by 1 after third call, but it did not"
+            count_before + 2 * number_cache_elements + number_sim_results_elements,
+            "Expected read_count to increase by {} after third call, but it did not",
+            number_cache_elements + number_sim_results_elements
         );
 
         let third_ref =
@@ -1772,8 +1957,7 @@ mod tests {
     #[test_log::test]
     pub fn test_automatic_gpu_cache_reset() {
         let mut sim: Simulation = block_on(Simulation::new()).expect("Failed to create Simulation");
-        block_on(sim.create_default(INCLINED_PLANE_PATH.to_string()))
-            .expect("Failed to create simulation");
+        block_on(sim.create_example(INCLINED_PLANE_PATH)).expect("Failed to create simulation");
         assert!(
             sim.gpu_cache.particles.is_none()
                 && sim.gpu_cache.release_areas.is_none()
@@ -1822,8 +2006,7 @@ mod tests {
 
         block_on(sim.run()).expect("Failed to run simulation");
         block_on(sim.fetch_results()).expect("Failed to cache results");
-        block_on(sim.load_release_areas(RELEASE_TEXTURE_PATH))
-            .expect("Failed to run release shader");
+        block_on(sim.get_release_areas()).expect("Failed to run release shader");
 
         assert!(
             sim.gpu_cache.particles.is_none()
@@ -2019,5 +2202,12 @@ mod tests {
             result.is_err(),
             "set_dem should panic with invalid input for bounds"
         );
+    }
+
+    #[test_log::test]
+    fn test_compute_release_areas() {
+        let mut sim: Simulation = block_on(Simulation::new()).expect("Failed to create Simulation");
+        block_on(sim.create_default(GAR_PATH)).expect("Failed to create simulation");
+        block_on(sim.prepare()).expect("Failed to prepare simulation");
     }
 }

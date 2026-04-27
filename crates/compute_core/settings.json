@@ -1,3 +1,4 @@
 {
-  "dem_path": "../avaframe/avaParabola.png"
+  "dem_path": "../avaframe/avaParabola.png",
+  "release_areas_path": "../avaframe/avaParabolareleaseTexture.png"
 }

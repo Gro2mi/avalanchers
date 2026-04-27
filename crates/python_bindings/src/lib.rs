@@ -146,10 +146,10 @@ impl PySimulation {
         Ok(())
     }
 
-    pub fn create_default(&mut self, dem_path: String) -> PyResult<()> {
+    pub fn create_example(&mut self, dem_path: String) -> PyResult<()> {
         // block_on is used here to bridge async Rust to sync Python
         self.inner
-            .create_default(dem_path)
+            .create_example(&dem_path)
             .block_on()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("{}", e)))?;
 
@@ -205,6 +205,14 @@ impl PySimulation {
 
         self.inner
             .set_dem_default(slice, width, height, cell_size)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+
+        Ok(())
+    }
+
+    pub fn set_release_areas(&mut self, release_areas: PyReadonlyArray2<f32>) -> PyResult<()> {
+        self.inner
+            .set_release_areas(release_areas.as_array().as_slice().expect("Failed to convert release areas to slice. In case you manipulated the numpy array, try passing it with .copy() to ensure it's contiguous in memory."))
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         Ok(())
@@ -310,7 +318,7 @@ impl PySimulation {
     ) -> PyResult<Bound<'py, PyArray2<f32>>> {
         let data = self
             .inner
-            .get_release_areas()
+            .fetch_release_areas()
             .block_on()
             .map_runtime_err()?;
         self.get_layer_f32(py, data.to_vec())

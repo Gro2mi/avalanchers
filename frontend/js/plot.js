@@ -96,7 +96,7 @@ async function updatePlots(sim, selectedVariable) {
 
     if (selectedVariable === 'elevation') {
         Plotly.restyle(demPlot, {
-            surfacecolor: [to2D(new Float32Array(sim.dem), sim.width, sim.height)],
+            surfacecolor: [to2D(new Float32Array(sim.dem), new Float32Array(sim.width), new Float32Array(sim.height))],
             colorscale: 'Earth',
             cmin: [0],
             cmax: [4000],
@@ -109,7 +109,7 @@ async function updatePlots(sim, selectedVariable) {
     }
     var traceHist = {
         type: 'histogram',
-        x: sim[selectedVariable],
+        x: new Float32Array(sim[selectedVariable]),
         autobinx: true, // or set fixed bin settings
     };
 
@@ -119,7 +119,7 @@ async function updatePlots(sim, selectedVariable) {
     };
 
     var plotOptions = {
-        surfacecolor: [to2D(sim[selectedVariable], sim.width, sim.height)],
+        surfacecolor: [to2D(new Float32Array(sim[selectedVariable]), sim.width, sim.height)],
         showscale: true,
         colorscale: ['Portland'],
         cmin: [null],
@@ -128,7 +128,7 @@ async function updatePlots(sim, selectedVariable) {
             title: selectedVariable,
         },
     };
-    traceHist.x = sim[selectedVariable].filter((val, index) => (sim.dem[index] > 0));
+    traceHist.x = new Float32Array(sim[selectedVariable]).filter((val, index) => (sim.dem[index] > 0));
     if (selectedVariable === 'cell_count') {
         const cellCountLog = new Float32Array(sim.cell_count).map(val => Math.log10(val));
         plotOptions.surfacecolor = [to2D(cellCountLog, sim.width, sim.height)];

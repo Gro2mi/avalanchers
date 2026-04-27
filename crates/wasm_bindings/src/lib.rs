@@ -143,10 +143,10 @@ impl WasmSimulation {
         let inner = Simulation::new().await.map_err(to_js_err)?;
         Ok(WasmSimulation { inner })
     }
-    pub async fn create_default(&mut self, dem_path: String) -> Result<(), JsValue> {
+    pub async fn create_example(&mut self, dem_path: String) -> Result<(), JsValue> {
         let path = base_url().to_owned() + "data/avaframe/" + &dem_path + ".png";
         info!("Creating simulation with DEM path: {}", path);
-        self.inner.create_default(path).await.map_err(to_js_err)?;
+        self.inner.create_example(&path).await.map_err(to_js_err)?;
         Ok(())
     }
 
@@ -283,10 +283,10 @@ impl WasmSimulation {
         unsafe { Float32Array::view(&self.inner.gpu_cache.slope.as_ref().unwrap().r) }
     }
 
-    // #[wasm_bindgen(getter)]
-    // pub fn roughness(&self) -> Float32Array {
-    //     unsafe { Float32Array::view(&self.inner.gpu_cache.roughness.as_ref().unwrap()) }
-    // }
+    #[wasm_bindgen(getter)]
+    pub fn roughness(&self) -> Float32Array {
+        unsafe { Float32Array::view(&self.inner.gpu_cache.roughness.as_ref().unwrap().r) }
+    }
 
     #[wasm_bindgen(getter)]
     pub fn release_areas(&self) -> Float32Array {

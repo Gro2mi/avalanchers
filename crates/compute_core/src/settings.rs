@@ -164,7 +164,7 @@ impl FrictionModel {
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
 pub struct Settings {
     pub dem_path: Option<String>,
-    pub release_areas: Option<String>,
+    pub release_areas_path: Option<String>,
     pub max_steps: Option<u32>,
     pub sim_model: Option<u32>,
     pub friction_model: Option<u32>,
@@ -322,7 +322,7 @@ mod tests {
             velocity_threshold: Some(0.001),
             roughness_threshold: Some(0.002),
             dem_path: Some(String::from("dem.png")),
-            release_areas: Some(String::from("release_area.png")),
+            release_areas_path: Some(String::from("release_area.png")),
         };
         let dem = create_test_dem();
         let settings = SimSettings::from_settings(&patch, &dem);
@@ -383,7 +383,7 @@ mod tests {
     fn test_settings_to_json_and_from_json() {
         let settings = Settings {
             dem_path: Some(String::from("dem.png")),
-            release_areas: Some(String::from("release_areas.png")),
+            release_areas_path: Some(String::from("release_areas.png")),
             max_steps: Some(100),
             sim_model: Some(1),
             friction_model: Some(2),
@@ -406,7 +406,7 @@ mod tests {
         let loaded = Settings::from_json(path).unwrap();
         assert_eq!(loaded.dem_path, Some(String::from("dem.png")));
         assert_eq!(
-            loaded.release_areas,
+            loaded.release_areas_path,
             Some(String::from("release_areas.png"))
         );
         assert_eq!(loaded.max_steps, Some(100));
