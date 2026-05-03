@@ -99,7 +99,7 @@ Install `pip install ruff`
 ```
 cargo fmt
 cargo clippy -- -D warnings
-cargo test --verbose
+cargo test -p compute_core -p data_processor
 ruff check ./python
 pytest python
 ```

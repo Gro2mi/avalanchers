@@ -46,3 +46,4 @@ def test_np_array_as_release_areas_roundtrip():
     # release areas only get updated on run, so we need to run again to see the changes
     sim.run()
     np.testing.assert_array_equal(release_areas_2d, sim.release_areas)
+    

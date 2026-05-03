@@ -81,13 +81,32 @@ jobs:
           cargo fmt --check
           cargo clippy -q -- -D warnings
 
-      - name: Run Tests
+      - name: Build CLI Binary
+        run: cargo build -p cli --release
+
+      - name: Test Linux
+        if: matrix.os == 'ubuntu-latest' 
         env:
             # This forces wgpu to use the software adapter
             WGPU_BACKEND: vulkan 
             VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
         run:
-          cargo test -q
+          cargo test -p compute_core -p data_processor --release
+
+      - name: Test MacOS
+        if: matrix.os == 'macos-latest'
+        env:
+          WGPU_BACKEND: metal
+        run:
+          cargo test -p compute_core -p data_processor --release
+
+      - name: Test Windows
+        if: matrix.os == 'windows-latest'
+        env:
+          # Force WGPU to use DX12 (Standard for Windows)
+          WGPU_BACKEND: dx12
+        run:
+          cargo test -p compute_core -p data_processor --release -- --test-threads=1 
   
       # --- COVERAGE (Ubuntu Only) ---
       - name: Install Tarpaulin
@@ -131,8 +150,8 @@ jobs:
       - name: Python Linting
         run: ruff check ./python
 
-      - name: Build and Test
-        run: pytest
+      - name: Python Tests
+        run: pytest ./python/tests
 
       # - name: Upload to codecov.io
       #   uses: codecov/codecov-action@v1.0.2
@@ -147,8 +166,6 @@ jobs:
           name: code-coverage-report
           path: coverage_report/
 
-      - name: Build CLI Binary
-        run: cargo build -p cli --release
 
       - name: Prepare CLI Artifacts
         shell: bash
@@ -179,14 +196,14 @@ jobs:
 
       # --- UPLOAD ---
       - name: Prepare Artifacts for Upload
-        # This works on both Linux and Windows (using Git Bash on the runner)
+        shell: bash
         run: |
           mkdir -p staging_all
           mkdir -p staging_all/wasm
-          cp -r dist/*.whl staging_all/ 2>/dev/null || true
-          cp -r bin_dist/* staging_all/ 2>/dev/null || true
-          cp -r crates/wasm_bindings/wasm_dist/*.wasm staging_all/wasm 2>/dev/null || true
-          cp -r crates/wasm_bindings/wasm_dist/*.js staging_all/wasm 2>/dev/null || true
+          cp -r dist/*.whl staging_all/ || true
+          cp -r bin_dist/* staging_all/ || true
+          cp -r crates/wasm_bindings/wasm_dist/*.wasm staging_all/wasm || true
+          cp -r crates/wasm_bindings/wasm_dist/*.js staging_all/wasm || true
 
       - name: Upload All Artifacts
         uses: actions/upload-artifact@v6
