@@ -19,7 +19,7 @@ jobs:
       - name: Copy files with excludes
         run: |
           mkdir -p deploy_dir
-          rsync -av --exclude='.git/' --exclude='.github/' --exclude='dem/*.json'  --exclude='data/' . deploy_dir/
+          rsync -av --exclude='*.pem' --exclude='.*py' --exclude='*.rp' --exclude='*.gpx'  --exclude='data/' frontend/ deploy_dir/
 
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v4
