@@ -281,7 +281,7 @@ impl Simulation {
         self.state = SimulationState::Finished;
 
         timer.checkpoint("Simulation finished");
-        debug!("{}", timer.get_summary());
+        info!("{}", timer.get_summary());
         Ok(())
     }
 
@@ -303,7 +303,7 @@ impl Simulation {
         );
         self.gpu_cache.reset_all();
         self.orchestrator
-            .run_normals(&self.settings, &self.dem)
+            .run_analyze_terrain(&self.settings, &self.dem)
             .await?;
         self.state = SimulationState::NormalsComputed;
         Ok(())
@@ -361,7 +361,12 @@ impl Simulation {
         };
         self.number_particles = number_release_cells * self.settings.released_particles_per_cell;
         self.state = SimulationState::ReleaseAreasComputed;
-        info!("Number of release cells: {}", number_release_cells);
+        info!(
+            "Number of release cells: {} of {} ({:.1}%)",
+            number_release_cells,
+            self.dem.width * self.dem.height,
+            (number_release_cells as f64 / (self.dem.width * self.dem.height) as f64 * 100.0)
+        );
         Ok(number_release_cells)
     }
 
@@ -393,6 +398,10 @@ impl Simulation {
             .run_compute_particles(&self.settings, self.number_particles)
             .await?;
         self.state = SimulationState::Running;
+        info!(
+            "Allocated GPU Memory: {:.1} MB",
+            self.orchestrator.buffers.get_total_allocated_memory_mb()
+        );
         Ok(())
     }
 
@@ -1094,7 +1103,7 @@ impl ComputeOrchestrator {
         Ok(())
     }
 
-    pub async fn run_normals(
+    pub async fn run_analyze_terrain(
         &mut self,
         sim_settings: &settings::SimSettings,
         dem: &Dem,
@@ -1140,7 +1149,6 @@ impl ComputeOrchestrator {
                 texture_usage_input,
             )
             .expect("Failed to add texture with data");
-        debug!("Running compute_normals shader...");
         let _ = self.buffers.write_buffer(
             &self.queue,
             BufferName::SimSettings,
@@ -1148,13 +1156,14 @@ impl ComputeOrchestrator {
         );
 
         self.run_shader(
-            &ShaderName::ComputeNormals,
+            &ShaderName::AnalyzeTerrain,
             &[
                 self.get_buffer_binding(BufferName::SimSettings),
                 self.get_view(TextureName::Dem),
                 self.get_view(TextureName::Wind),
                 self.get_view(TextureName::Normals),
                 self.get_view(TextureName::Slope),
+                self.get_view(TextureName::Curvature),
                 self.get_buffer_binding(BufferName::OutDebugNormals),
             ],
             self.dispatch_number_workgroups_x_2d,
@@ -1387,6 +1396,7 @@ impl ComputeOrchestrator {
                 self.get_buffer_binding(BufferName::CellCountGrid),
                 self.get_buffer_binding(BufferName::VelocityGrid),
                 self.get_buffer_binding(BufferName::TimestepData),
+                self.get_view(TextureName::Curvature),
                 self.get_buffer_binding(BufferName::OutDebugNormals),
             ],
         )?;
@@ -1525,7 +1535,7 @@ mod tests {
         let mut orchestrator =
             block_on(ComputeOrchestrator::new()).expect("Failed to create ComputeOrchestrator");
         let (sim_settings, dem) = block_on(Settings::create_from_path(INCLINED_PLANE_PATH));
-        block_on(orchestrator.run_normals(&sim_settings, &dem))
+        block_on(orchestrator.run_analyze_terrain(&sim_settings, &dem))
             .expect("Failed to run normals shader");
 
         let (slope_angle, slope_aspect, _, _) =
@@ -1638,7 +1648,7 @@ mod tests {
         let (mut sim_settings, dem) = block_on(Settings::create_from_path(INCLINED_PLANE_PATH));
         sim_settings.released_particles_per_cell = 10;
         info!("Sim settings: {:?}", sim_settings);
-        block_on(orchestrator.run_normals(&sim_settings, &dem))
+        block_on(orchestrator.run_analyze_terrain(&sim_settings, &dem))
             .expect("Failed to run normals shader");
         let (data, _, _) = block_on(read_png(RELEASE_TEXTURE_PATH)).expect("Failed to read PNG");
         let number_release_cells: u32 =

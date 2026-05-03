@@ -1,10 +1,14 @@
+import time
 import avalanchers
+
+start = time.time()
+
 
 example_case = "avaMal"
 
 settings = {
-    "dem_path": "frontend/data/avaframe/avaMal.png",
-    "release_areas_path": "frontend/data/avaframe/avaMalreleaseTexture.png",
+    "dem_path": f"frontend/data/avaframe/{example_case}.png",
+    "release_areas_path": f"frontend/data/avaframe/{example_case}releaseTexture.png",
 }
 sim = avalanchers.PySimulation.new()
 sim.create(settings)
@@ -13,5 +17,10 @@ sim.create(settings)
 # sim.create_example("frontend/data/avaframe/avaMal.png")
 
 sim.run()
-avalanchers.plot3d(sim, "max_velocity")
+
+end = time.time()
+
+print(f"Execution time without plotting: {end - start:.2f} seconds")
+
+avalanchers.plot3d(sim, "cell_count")
 avalanchers.plot2d(sim, "max_velocity")

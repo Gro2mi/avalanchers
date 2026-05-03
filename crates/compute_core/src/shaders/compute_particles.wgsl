@@ -143,7 +143,9 @@ struct TimestepData {
 @group(0) @binding(7) var<storage, read_write> atomic_cell_count_buffer: array<atomic<u32>>; // trajectory texture
 @group(0) @binding(8) var<storage, read_write> atomic_velocity_buffer: array<atomic<u32>>; // trajectory texture
 @group(0) @binding(9) var<storage, read_write> out_timestep_data: array<TimestepDataArray>; // trajectory data, fixed size 3
-@group(0) @binding(10) var<storage, read_write> out_debug: array<f32>;
+
+@group(0) @binding(10) var curvature_texture: texture_2d<f32>;
+@group(0) @binding(11) var<storage, read_write> out_debug: array<f32>;
 // @group(0) @binding(11) var<storage, read_write> atomicBuffer: AtomicData;
 
 
@@ -166,13 +168,17 @@ fn compute_particles(
     let uv = position_to_uv(particles[particleId].position);
     
     let normal = get_normal(uv);
+    let u = particles[particleId].velocity;
     particles[particleId].velocity = particles[particleId].velocity - dot(particles[particleId].velocity, normal) * normal; 
     
     // let curvature_acceleration = get_curvature(uv) * length(particles[particleId].velocity) * length(particles[particleId].velocity);
     const acceleration_gravity = vec3f(0.0, 0.0, -g);
-    let acceleration_normal = g * normal.z * normal;
-
+    var acceleration_normal = g * normal.z * normal;
     let acceleration_tangential = acceleration_gravity + acceleration_normal;
+    // uKu, K curvature matrix
+    let curvature = get_curvature(uv);
+    let centrifugal_acceleration = (u.x * u.x * curvature.x) + (2.0 * u.x * u.y * curvature.y) + (u.y * u.y * curvature.z);
+    acceleration_normal = acceleration_normal + centrifugal_acceleration;
     var dt = sim_settings.cfl * sim_settings.cell_size / (sim_info.max_velocity + sim_settings.velocity_threshold);
     particles[particleId].velocity = particles[particleId].velocity + acceleration_tangential * dt; 
     var acceleration_normal_friction_magnitude = acceleration_by_normal_friction(acceleration_normal, particles[particleId]);
@@ -318,7 +324,6 @@ fn acceleration_by_drag_friction(acceleration_normal: vec3f, particle: Particle)
     // standard 0.155, samos: standard 0.155, small 0.22, medium 0.17
     let friction_coefficient = sim_settings.friction_coefficient;
     let drag_coefficient = sim_settings.drag_coefficient; // only used for voellmy, standard 4000.
-    let normal_stress = length(acceleration_normal * mass_per_area);
     const min_shear_stress = 70f;
     var shear_stress = 0.0f;
     //actually: friction model: 0 coulomb, 1 voellmy, 2 voellmy minshear, 3 samosAt
@@ -338,6 +343,7 @@ fn acceleration_by_drag_friction(acceleration_normal: vec3f, particle: Particle)
         let kappa = 0.43;
         let r = 0.05;
         let b = 4.13;
+        let normal_stress = length(acceleration_normal * mass_per_area);
         let rs = density * velocity_magnitude * velocity_magnitude / (normal_stress + 0.001);
         var div = particle.snow_thickness / r;
         if div < 1.0 {
@@ -357,15 +363,12 @@ fn get_elevation(uv: vec2f) -> f32 {
     return textureSampleLevel(dem_texture, tex_sampler, uv, 0).x;
 }
 
-fn get_normal_and_curvature(uv: vec2f) -> vec4f {
-    return textureSampleLevel(normals_texture, tex_sampler, uv, 0); // convert from [0, 1] to [-1, 1
+fn get_normal(uv: vec2f) -> vec3f {
+    return textureSampleLevel(normals_texture, tex_sampler, uv, 0).xyz;
 }
 
-fn get_normal(uv: vec2f) -> vec3f {
-    return get_normal_and_curvature(uv).xyz;
-}
-fn get_curvature(uv: vec2f) -> f32 {
-    return get_normal_and_curvature(uv).w;
+fn get_curvature(uv: vec2f) -> vec3f {
+    return textureSampleLevel(curvature_texture, tex_sampler, uv, 0).xyz;
 }
 
 fn acceleration_by_friction(acceleration_normal: vec3f, particle: Particle) -> f32 {

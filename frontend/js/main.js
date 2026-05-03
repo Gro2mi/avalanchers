@@ -48,7 +48,7 @@ const zoomLevelValue = document.getElementById('zoomLevelValue');
 zoomLevelValue.textContent = zoomLevelSlider.value + ' Resolution: ' + pixelWidthMeters(zoomLevelSlider.value, 47.2).toFixed(2) + ' m';
 zoomLevelSlider.addEventListener('change', () => {
     zoomLevelValue.textContent = zoomLevelSlider.value + ' Resolution: ' + pixelWidthMeters(zoomLevelSlider.value, 47.2).toFixed(2) + ' m';
-    dem.loadTiles(gpx, zoom = zoomLevelSlider.value).then(() => {
+    dem.loadTiles(gpx, zoomLevelSlider.value).then(() => {
         plotDem(dem);
         plotGpx(gpx)
         simSettings.setDem(dem);

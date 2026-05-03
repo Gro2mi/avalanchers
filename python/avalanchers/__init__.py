@@ -63,6 +63,7 @@ def plot_dem(sim, ax, dark=True):
     cmap_contours = "Greys_r" if dark else "Greys"
     color_lines = "white" if dark else "black"
     levels_dem = np.arange(0, 4000, 200)
+    ax.set_aspect('equal')
     ax.contourf(xx, yy, dem, levels=levels_dem, cmap=cmap_contours)
     CS = ax.contour(xx, yy, dem, levels=levels_dem, linewidths=.5, colors=color_lines)
     ax.clabel(CS, fontsize=10)
@@ -70,19 +71,27 @@ def plot_dem(sim, ax, dark=True):
 
 def plot2d(sim, parameter, title="Avalanche Simulation", threshold_value=1, step=10, max_velocity=100, dark=True): 
     try:
-        import matplotlib.pyplot as plt
-        from mpl_toolkits.axes_grid1 import make_axes_locatable
+        import matplotlib.pyplot as _plt
+        from mpl_toolkits.axes_grid1 import make_axes_locatable as _make_axes_locatable
+        # from matplotlib.colors
+        plt = _plt
+        make_axes_locatable = _make_axes_locatable
+        ListedColormap = importlib.import_module("matplotlib.colors").ListedColormap
     except ImportError:
         raise ImportError(
             "The 'matplotlib' package is required for 2d plots. "
             "Install it using: pip install 'avalanchers[viz]'"
         )
+
+def plot2d(sim, parameter, title="Avalanche Simulation", threshold_value=1, step=10, max_velocity=100, dark=True, particle_threshold=0): 
+    import_plt()
     data = getattr(sim, parameter).astype(np.float32)
     fig, ax = plt.subplots(figsize=(10, 8))
     ax.set_aspect('equal')
     x, y, dem, dem_mask = plot_dem(sim, ax, dark=False)
     data[dem_mask] = np.nan
     data[data < threshold_value] = np.nan
+    data[sim.cell_count < particle_threshold * sim.released_particles_per_cell] = np.nan
     # surf = ax.contourf(xx, yy, flow_velocity, cmap='viridis', levels=get_levels(flow_velocity, step), vmin=0.01)
     surf = ax.contourf(x, y, data, cmap='magma')#, levels=get_levels(np.array(max_velocity - 1), step), vmin=0.00001)
     ax.contour(x, y, sim.release_areas.astype(np.float32), colors='cyan', linewidths=1, alpha=0.3)
@@ -97,6 +106,59 @@ def plot2d(sim, parameter, title="Avalanche Simulation", threshold_value=1, step
 
     ax.set(title=title)
     plt.show()
+    return fig, ax
+
+def plot_comparison_binary(sim, parameter, reference_array, threshold_value=1, title="Avalanche Simulation Comparison"):
+    import_plt()
+    data = getattr(sim, parameter).astype(np.float32)
+    fig, ax = plt.subplots(figsize=(10, 8))
+    x, y, dem, dem_mask = plot_dem(sim, ax, dark=False)
+    data[dem_mask] = np.nan
+    data[data < threshold_value] = np.nan
+    data[sim.cell_count < PARTICLE_COUNT_FACTOR * sim.released_particles_per_cell] = np.nan
+    only_reference = ~(data > 0) & (reference_array > 0)
+    only_sim = (data > 0) & ~(reference_array > 0)
+    both = (data > 0) & (reference_array > 0)
+    comparison = np.zeros_like(data, dtype=int)
+    comparison[only_reference] = 1
+    comparison[both] = 2
+    comparison[only_sim] = 3
+    cmap = ListedColormap(['yellow', 'red', 'blue'])
+    cont = ax.contourf(
+        x,
+        y,
+        comparison,
+        cmap=cmap,
+        levels=[0.5, 1.5, 2.5, 3.5],
+        alpha=0.7,
+        antialiased=False,
+    )
+    cbar = fig.colorbar(cont, ax=ax, ticks=[0, 1, 2, 3], shrink=0.8, aspect=10)
+    cbar.ax.set_yticklabels(["No avalanche", "reference only", "both", "sim only"])
+    ax.set_title(title)
+    return fig, ax
+
+def plot_comparison(sim, parameter, reference_array, threshold_value=1, title="Avalanche Simulation Comparison"):
+    import_plt()
+    data = getattr(sim, parameter).astype(np.float32)
+    fig, ax = plt.subplots(figsize=(10, 8))
+    x, y, dem, dem_mask = plot_dem(sim, ax, dark=False)
+    data[dem_mask] = np.nan
+    # data[data < threshold_value] = np.nan
+    # data[sim.cell_count < PARTICLE_COUNT_FACTOR * sim.released_particles_per_cell] = np.nan
+    diff = reference_array - data
+    diff[diff == 0] = np.nan
+    # diff[(data == 0) | (reference_array == 0)] = np.nan
+    max_abs = np.nanmax(np.abs(diff))
+    if not np.isfinite(max_abs) or max_abs == 0:
+        max_abs = 1.0
+    levels = np.linspace(-max_abs, max_abs, 21)
+    cont = ax.contourf(x, y, diff, cmap='bwr', levels=levels)
+    fig.colorbar(cont, ax=ax,  shrink=0.8, aspect=10)
+    ax.set_title(f"Difference in {parameter.replace('_', ' ').title()} (reference - sim), red ref faster, blue sim faster")
+
+    # cbar.ax.set_yticklabels(["No avalanche", "webigeo and dfa", "webigeo only", "dfa only"])
+    ax.set_title(title)
     return fig, ax
 
 def is_jupyter():

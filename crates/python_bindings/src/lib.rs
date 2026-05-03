@@ -233,6 +233,11 @@ impl PySimulation {
     }
 
     #[getter]
+    pub fn released_particles_per_cell(&self) -> u32 {
+        self.inner.settings.released_particles_per_cell
+    }
+
+    #[getter]
     pub fn dem<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f32>>> {
         let dims = [self.inner.dem.height, self.inner.dem.width];
         self.inner

@@ -70,6 +70,7 @@ pub enum TextureName {
     Dem,
     ReleaseAreasInput,
     CellCount,
+    Curvature,
 }
 
 impl TextureName {
@@ -85,6 +86,7 @@ impl TextureName {
             TextureName::Dem => "dem",
             TextureName::ReleaseAreasInput => "release_areas_input",
             TextureName::CellCount => "cell_count",
+            TextureName::Curvature => "curvature",
         }
     }
 }
@@ -114,6 +116,7 @@ pub struct ComputeBuffers {
     buffers: HashMap<BufferName, Buffer>,
     textures: HashMap<TextureName, Texture>,
     texture_views: HashMap<TextureName, TextureView>, // Store views as they are used in bind groups
+    total_allocated_buffer_bytes: usize, // Track total allocated buffer size for debugging/monitoring
 }
 
 impl Default for ComputeBuffers {
@@ -128,7 +131,12 @@ impl ComputeBuffers {
             buffers: HashMap::new(),
             textures: HashMap::new(),
             texture_views: HashMap::new(),
+            total_allocated_buffer_bytes: 0,
         }
+    }
+
+    pub fn get_total_allocated_memory_mb(&self) -> f64 {
+        self.total_allocated_buffer_bytes as f64 / (1024.0 * 1024.0)
     }
 
     fn poll(&self, device: &Device) {
@@ -159,6 +167,7 @@ impl ComputeBuffers {
             mapped_at_creation: false,
         });
         self.buffers.insert(name, buffer);
+        self.total_allocated_buffer_bytes += size_bytes;
     }
 
     pub fn add_buffer_with_data<T: bytemuck::Pod + Send + Sync>(
@@ -174,6 +183,7 @@ impl ComputeBuffers {
             usage,
         });
         self.buffers.insert(name, buffer);
+        self.total_allocated_buffer_bytes += std::mem::size_of_val(data);
     }
 
     pub fn prepare_buffer_contents<T: Pod>(original_data: &[T]) -> Cow<'_, [u8]> {
@@ -296,6 +306,10 @@ impl ComputeBuffers {
 
         self.textures.insert(label.clone(), texture);
         self.texture_views.insert(label, view);
+        self.total_allocated_buffer_bytes +=
+            (texture_size.width * texture_size.height * texture_size.depth_or_array_layers)
+                as usize
+                * format.block_copy_size(None).unwrap_or(4) as usize; // Approximate size for tracking
     }
 
     /// Adds a new texture with initial data, handling 256-byte row alignment.
@@ -382,6 +396,10 @@ impl ComputeBuffers {
 
         self.textures.insert(label.clone(), texture);
         self.texture_views.insert(label, view);
+        self.total_allocated_buffer_bytes +=
+            (texture_size.width * texture_size.height * texture_size.depth_or_array_layers)
+                as usize
+                * format.block_copy_size(None).unwrap_or(4) as usize; // Approximate size for tracking
         Ok(())
     }
 
@@ -586,6 +604,13 @@ pub fn create_buffers_and_texture_descriptions(
     );
     compute_buffers.add_texture(
         device,
+        TextureName::Curvature,
+        texture_size,
+        TextureFormat::Rgba32Float,
+        texture_usage_output,
+    );
+    compute_buffers.add_texture(
+        device,
         TextureName::Roughness,
         texture_size,
         TextureFormat::Rgba32Float,
@@ -695,6 +720,7 @@ mod tests {
             (TextureName::Wind, "wind"),
             (TextureName::Normals, "normals"),
             (TextureName::Slope, "slope"),
+            (TextureName::Curvature, "curvature"),
             (TextureName::Roughness, "roughness"),
             (TextureName::ReleaseAreas, "release_areas"),
             (TextureName::Landcover, "landcover"),

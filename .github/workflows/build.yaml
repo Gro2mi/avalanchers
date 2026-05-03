@@ -71,7 +71,8 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends llvm-dev libclang-dev python3-dev
 
-      - name: Check & Test
+      - name: Lint
+        if: matrix.os == 'ubuntu-latest' 
         env:
             # This forces wgpu to use the software adapter
             WGPU_BACKEND: vulkan 
@@ -79,6 +80,13 @@ jobs:
         run: |
           cargo fmt --check
           cargo clippy -q -- -D warnings
+
+      - name: Run Tests
+        env:
+            # This forces wgpu to use the software adapter
+            WGPU_BACKEND: vulkan 
+            VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
+        run:
           cargo test -q
   
       # --- COVERAGE (Ubuntu Only) ---
@@ -126,10 +134,10 @@ jobs:
       - name: Build and Test
         run: pytest
 
-      - name: Upload to codecov.io
-        uses: codecov/codecov-action@v1.0.2
-        with:
-          token: ${{secrets.CODECOV_TOKEN}}
+      # - name: Upload to codecov.io
+      #   uses: codecov/codecov-action@v1.0.2
+      #   with:
+      #     token: ${{secrets.CODECOV_TOKEN}}
 
       - name: Upload Coverage Results
         if: matrix.os == 'ubuntu-latest' 

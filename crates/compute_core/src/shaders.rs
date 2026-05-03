@@ -57,7 +57,7 @@ macro_rules! define_shaders {
 }
 
 define_shaders! {
-    ComputeNormals => "compute_normals",
+    AnalyzeTerrain => "analyze_terrain",
     ResetMaxVelocity => "reset_max_velocity",
     LoadReleaseAreas => "load_release_areas",
     ComputeRoughness => "compute_roughness",
@@ -243,11 +243,11 @@ pub fn create_shader_configs(
 ) -> Result<std::collections::HashMap<ShaderName, ComputeShaderConfig>> {
     let mut shader_configs = std::collections::HashMap::new();
     shader_configs.insert(
-        ShaderName::ComputeNormals,
+        ShaderName::AnalyzeTerrain,
         ComputeShaderConfig::new(
             device,
-            ShaderName::ComputeNormals,
-            load_shader_source(ShaderName::ComputeNormals),
+            ShaderName::AnalyzeTerrain,
+            load_shader_source(ShaderName::AnalyzeTerrain),
             &[
                 // Binding 0: Uniform buffer (sim_settings_buffer)
                 (
@@ -279,7 +279,6 @@ pub fn create_shader_configs(
                 // Binding 3:
                 (
                     TextureName::Normals.to_string(),
-                    // Binding 3: Texture (normals_texture)
                     BindingType::StorageTexture {
                         access: StorageTextureAccess::WriteOnly,
                         format: TextureFormat::Rgba32Float,
@@ -296,6 +295,15 @@ pub fn create_shader_configs(
                     },
                 ),
                 // Binding 5:
+                (
+                    TextureName::Curvature.to_string(),
+                    BindingType::StorageTexture {
+                        access: StorageTextureAccess::WriteOnly,
+                        format: TextureFormat::Rgba32Float,
+                        view_dimension: TextureViewDimension::D2,
+                    },
+                ),
+                // Binding 6:
                 (
                     BufferName::OutDebugNormals.to_string(),
                     BindingType::Buffer {
@@ -658,6 +666,15 @@ pub fn create_shader_configs(
                     },
                 ),
                 // Binding 10:
+                (
+                    TextureName::Curvature.to_string(),
+                    BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                ),
+                // Binding 11:
                 (
                     BufferName::OutDebugNormals.to_string(),
                     BindingType::Buffer {

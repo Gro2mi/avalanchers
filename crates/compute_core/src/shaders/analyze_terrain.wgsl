@@ -111,14 +111,15 @@ fn compute_centroid(points: ptr<function, array<vec2<f32>, 256>>, count: u32) ->
 @group(0) @binding(1) var dem_texture: texture_2d<f32>;
 @group(0) @binding(2) var wind_shelter_texture: texture_2d<f32>;
 
-@group(0) @binding(3) var normals_texture: texture_storage_2d<rgba32float, write>; // ASSERT: same dimensions as heights_texture
-@group(0) @binding(4) var slope_texture: texture_storage_2d<rgba32float, write>; // ASSERT: same dimensions as heights_texture
-@group(0) @binding(5) var<storage, read_write> debug: array<f32>;
+@group(0) @binding(3) var normals_texture: texture_storage_2d<rgba32float, write>;
+@group(0) @binding(4) var slope_texture: texture_storage_2d<rgba32float, write>;
+@group(0) @binding(5) var curvature_texture: texture_storage_2d<rgba32float, write>;
+@group(0) @binding(6) var<storage, read_write> debug: array<f32>;
 
 
 @compute @workgroup_size(16, 16, 1)
-fn compute_normals(@builtin(global_invocation_id) cell: vec3<u32>) {
-    // exit if thread cell is outscelle image dimensions (i.e. thread is not supposed to be doing any work)
+fn analyze_terrain(@builtin(global_invocation_id) cell: vec3<u32>) {
+    // exit if thread cell is out of the image dimensions (i.e. thread is not supposed to be doing any work)
     if (cell.x >= sim_settings.grid_shape.x || cell.y >= sim_settings.grid_shape.y) {
         return;
     }
@@ -160,6 +161,7 @@ fn compute_normals(@builtin(global_invocation_id) cell: vec3<u32>) {
     // );
     // textureStore(normalsTexture, coord, normal_f16);
     textureStore(normals_texture, coord, vec4f(normal, profile_curvature));
+    textureStore(curvature_texture, coord, vec4f(dxx, dxy, dyy, 0.0));
 
     let slope_angle = acos(normal.z) * RAD_TO_DEG;
     let slope_aspect = (atan2(normal.x, normal.y) * RAD_TO_DEG + 360.0) % 360.0;
