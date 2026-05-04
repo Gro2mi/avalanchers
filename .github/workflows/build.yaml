@@ -172,7 +172,7 @@ jobs:
         run: |
           mkdir -p bin_dist
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            cp target/release/*.exe bin_dist/avalanchers-cli-${{ matrix.os }}.exe || true
+            mv target/release/*.exe bin_dist/avalanchers-cli-${{ matrix.os }}.exe || true
           else
             # Find the binary (assuming it's named after your project) 
             # and rename it to include the OS for clarity in the release

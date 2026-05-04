@@ -2,7 +2,7 @@ use compute_core::{Simulation, TimestepData, settings::Settings};
 use js_sys::{Float32Array, Uint32Array};
 use serde_wasm_bindgen::from_value;
 use std::sync::OnceLock;
-use tracing::info;
+use tracing::{info, trace};
 use wasm_bindgen::prelude::*;
 use web_sys::window;
 static BASE_URL: OnceLock<String> = OnceLock::new();
@@ -15,8 +15,9 @@ pub fn main() {
     let window = window().expect("no global window");
     let location = window.location();
     let origin = location.origin().unwrap_or_default() + "/";
-    info!("Base URI: {}", origin);
-    BASE_URL.set(origin).ok();
+    trace!("Base URI: {}", origin);
+    trace!("Full URI: {}", location.href().unwrap_or_default());
+    BASE_URL.set(location.href().unwrap_or_default()).ok();
 }
 
 // Helper for error conversion to JS strings
