@@ -17,7 +17,7 @@ function latLonToTile(lat, lon, zoom) {
     return { x: xTile, y: yTile };
 }
 
-dbPromise = null;
+var dbPromise = null;
 
 function getTileDB() {
     if (!dbPromise) {
@@ -49,7 +49,7 @@ async function fetchAndCacheTile(url) {
 
     // Download and store if not present
 
-    console.log(`Download tile: ${url}`);
+    // console.log(`Download tile: ${url}`);
     const resp = await fetch(url);
     if (!resp.ok) throw new Error(`Failed to fetch ${url}`);
     const blob = await resp.blob();
@@ -66,7 +66,7 @@ async function fetchAndCacheTile(url) {
         };
 
         tx2.oncomplete = () => {
-            console.log(`Transaction complete: ${url}`);
+            // console.log(`Transaction complete: ${url}`);
             resolve();
         };
         tx2.onerror = () => {
@@ -74,7 +74,7 @@ async function fetchAndCacheTile(url) {
             reject(tx2.error);
         };
     });
-    console.log(`Cached tile: ${url}`);
+    // console.log(`Cached tile: ${url}`);
     return blob;
 }
 
@@ -93,7 +93,7 @@ function tileToWebMercatorBounds(x, y, zoom, tileSize = 256) {
     const maxY = 20037508.342789244 - y * tileWidthMeters;
 
     return {
-        topLeft:     { x: minX, y: maxY },
+        topLeft: { x: minX, y: maxY },
         bottomRight: { x: minX + tileWidthMeters, y: maxY - tileWidthMeters }
     };
 }
@@ -113,29 +113,38 @@ async function fetchAndCacheTiles(bbox, zoom) {
     const [minLat, minLon, maxLat, maxLon] = bbox;
     const topLeft = latLonToTile(maxLat, minLon, zoom);
     const bottomRight = latLonToTile(minLat, maxLon, zoom);
-    // const bottomRight = { x: topLeft.x + 1, y: topLeft.y + 1 }; // Adjusted to fetch a 3x3 grid of tiles
+
     const nTilesX = bottomRight.x - topLeft.x + 1;
     const nTilesY = bottomRight.y - topLeft.y + 1;
-    const nTiles = nTilesX * nTilesY;
-    console.log(`Fetching tiles from zoom ${zoom} for bbox:`, bbox);
-    console.log(`Number of tiles to fetch:`, nTiles);
-    tiles = [];
+
+    console.log(`Fetching ${nTilesX * nTilesY} tiles simultaneously...`);
+
+    // 1. Create an array to store the promises
+    const fetchPromises = [];
+
     for (let x = topLeft.x; x <= bottomRight.x; x++) {
-        // TODO figure this out in a nice way
-        for (let y = nTilesY; y > 0 ; --y) {
-            const url = `https://alpinemaps.cg.tuwien.ac.at/tiles/alpine_png/${zoom}/${x}/${tmsToXyzY(bottomRight.y, zoom) + y - 1}.png`;
-            // console.log(`Fetching tile: ${url}`);
-            try {
-                const tile = await fetchAndCacheTile(url);
-                tiles.push(tile);
-            } catch (e) {
-                console.error('Failed to fetch', url, e);
-            }
+        for (let y = 0; y < nTilesY; y++) {
+            const yCoord = tmsToXyzY(bottomRight.y, zoom) + y;
+            const url = `https://alpinemaps.cg.tuwien.ac.at/tiles/alpine_png/${zoom}/${x}/${yCoord}.png`;
+            fetchPromises.push(
+                fetchAndCacheTile(url).catch(e => {
+                    console.error('Failed to fetch', url, e);
+                    return null; // Return null so Promise.all doesn't fail entirely
+                })
+            );
         }
     }
+
+    // 3. Wait for all requests to finish in parallel
+    const results = await Promise.all(fetchPromises);
+
+    // 4. Filter out any failed (null) tiles if necessary
+    const tiles = results.filter(t => t !== null);
+
     const topLeftWebMerc = tileToWebMercatorBounds(topLeft.x, topLeft.y, zoom).topLeft;
     const bottomRightWebMerc = tileToWebMercatorBounds(bottomRight.x, bottomRight.y, zoom).bottomRight;
-    const bounds = new RegionBounds(topLeftWebMerc.x, bottomRightWebMerc.y, bottomRightWebMerc.x, topLeftWebMerc.y)
+    const bounds = new RegionBounds(topLeftWebMerc.x, bottomRightWebMerc.y, bottomRightWebMerc.x, topLeftWebMerc.y);
+
     return { tiles, nTilesX, nTilesY, bounds };
 }
 
@@ -163,7 +172,7 @@ function haversineDistance(lat1, lon1, lat2, lon2) {
     const lambda = toRad(lon2 - lon1);
 
     const a = Math.sin(phi / 2) ** 2 +
-              Math.cos(theta1) * Math.cos(theta2) * Math.sin(lambda / 2) ** 2;
+        Math.cos(theta1) * Math.cos(theta2) * Math.sin(lambda / 2) ** 2;
 
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 
@@ -196,15 +205,6 @@ async function getGPXBoundingBoxWithMargin(gpx, marginMeters = 500) {
         maxLon: maxLon + lonMargin
     };
 }
-
-async function fetchGPXAndCacheTiles(gpxText, zoom = 14) {
-    const bbox = await getGPXBoundingBoxWithMargin(gpxText);
-    const db = await openTileDB();
-    const { tiles, nTilesX, nTilesY } = await fetchAndCacheTiles(db, [bbox.minLat, bbox.minLon, bbox.maxLat, bbox.maxLon], zoom);
-    const stitchedCanvas = stitchTilesCropped(tiles, 64, nTilesX, nTilesY);
-    document.body.appendChild(stitchedCanvas);
-}
-
 async function stitchTilesCropped(tiles, cropSize = 64, tilesX, tilesY) {
     const width = cropSize * tilesX;
     const height = cropSize * tilesY;
@@ -213,15 +213,22 @@ async function stitchTilesCropped(tiles, cropSize = 64, tilesX, tilesY) {
     canvas.height = height;
     const ctx = canvas.getContext('2d');
 
-    for (let x = 0; x < tilesX; x++) {
-        for (let y = 0; y < tilesY; y++) {
+    for (let y = 0; y < tilesY; y++) {
+        for (let x = 0; x < tilesX; x++) {
             const idx = x * tilesY + y;
+
             const tile = tiles[idx];
             if (tile) {
-                const bitmap = await createImageBitmap(tile);
+                const bitmap = await createImageBitmap(tile, {
+                    imageOrientation: 'flipY'
+                });
+
+                const drawY = y * cropSize;
+                const drawX = x * cropSize;
+
                 ctx.drawImage(bitmap,
                     0, 0, cropSize, cropSize,
-                    x * cropSize, y * cropSize,
+                    drawX, drawY,
                     cropSize, cropSize
                 );
             }
@@ -233,17 +240,12 @@ async function stitchTilesCropped(tiles, cropSize = 64, tilesX, tilesY) {
     const data1d = new Float32Array(width * height);
     const scalingFactor = 8191.875 / 65535.0;
 
-    for (let y = 0; y < height; y++) {
-    const flippedY = height - 1 - y;
-    for (let x = 0; x < width; x++) {
-        const idx = (y * width + x) * 4;
-        const r = pixels[idx];
-        const g = pixels[idx + 1];
-
-        const combined = (r << 8) | g;
-        data1d[flippedY * width + x] = combined * scalingFactor;
+    // Standard row-major read
+    for (let i = 0; i < width * height; i++) {
+        const pxIdx = i * 4;
+        const combined = (pixels[pxIdx] << 8) | pixels[pxIdx + 1];
+        data1d[i] = combined * scalingFactor;
     }
-}
 
     return { data1d, width, height };
 }

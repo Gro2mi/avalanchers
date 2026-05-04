@@ -1,5 +1,17 @@
-var dem = new Dem();
+import init, { WasmSimulation } from "./pkg/avalanchers.js";
 
+
+var release_points;
+var release_point;
+var simSettings;
+var gpx;
+var isExample = true;
+var tiles = [];
+window.dem = new Dem();
+window.sim = null;
+window.wasm = null;
+
+const wasm = await init();
 const demDropdown = document.getElementById('demDropdown');
 const frictionModelDropdown = document.getElementById('frictionModelDropdown');
 
@@ -25,10 +37,10 @@ const dragCoefficientValue = document.getElementById('dragCoefficientValue');
 dragCoefficientSlider.addEventListener('input', () => {
     dragCoefficientValue.textContent = dragCoefficientSlider.value;
 });
-const numberTrajectoriesSlider = document.getElementById('numberTrajectoriesSlider');
-const numberTrajectoriesValue = document.getElementById('numberTrajectoriesValue');
-numberTrajectoriesSlider.addEventListener('input', () => {
-    numberTrajectoriesValue.textContent = numberTrajectoriesSlider.value;
+const releasedParticlesPerCellSlider = document.getElementById('releasedParticlesPerCellSlider');
+const releasedParticlesPerCellValue = document.getElementById('releasedParticlesPerCellValue');
+releasedParticlesPerCellSlider.addEventListener('input', () => {
+    releasedParticlesPerCellValue.textContent = releasedParticlesPerCellSlider.value;
 });
 
 const zoomLevelSlider = document.getElementById('zoomLevelSlider');
@@ -36,20 +48,25 @@ const zoomLevelValue = document.getElementById('zoomLevelValue');
 zoomLevelValue.textContent = zoomLevelSlider.value + ' Resolution: ' + pixelWidthMeters(zoomLevelSlider.value, 47.2).toFixed(2) + ' m';
 zoomLevelSlider.addEventListener('change', () => {
     zoomLevelValue.textContent = zoomLevelSlider.value + ' Resolution: ' + pixelWidthMeters(zoomLevelSlider.value, 47.2).toFixed(2) + ' m';
-    dem.loadTiles(gpx, zoom = zoomLevelSlider.value).then(() => {
+    dem.loadTiles(gpx, zoomLevelSlider.value).then(() => {
         plotDem(dem);
         plotGpx(gpx)
+        simSettings.setDem(dem);
     });
 
+});
+zoomLevelSlider.addEventListener('input', () => {
+    zoomLevelValue.textContent = zoomLevelSlider.value + ' Resolution: ' + pixelWidthMeters(zoomLevelSlider.value, 47.2).toFixed(2) + ' m';
 });
 
 demDropdown.addEventListener('change', async (event) => {
     predefinedReleasePoints = true;
     const selectedFile = event.target.value;
     localStorage.setItem('demDropdown', selectedFile);
-    await dem.loadPNGAsFloat32(selectedFile);
-    plotDem(dem);
-    await fetchInputs();
+    simSettings = getSettings();
+    await sim.create(simSettings);
+    isExample = true;
+    plotDem(sim);
     if (!isMobileDevice) {
         runAndPlot();
     }
@@ -87,7 +104,19 @@ function setSettingsDisabled(flag) {
     }
 }
 
-// Disable all
+// const exportResultsCheckbox = document.getElementById('exportResults');
+// exportResultsCheckbox.addEventListener('change', async (event) => {
+//     if (!event.target.checked) return; // Only act on 'checked' state
+//     try {
+//         if (!directoryHandle) {
+//             await setExportDirectory();
+//         }
+//         await exportResults();
+//     } catch (error) {
+//         alert("Failed to export results:", error);
+//     }
+// });
+
 
 // Enable all
 const simSettingsDiv = document.getElementById('simSettingsDiv')
@@ -106,24 +135,45 @@ async function runAndPlot() {
     console.log('Run simulation');
     setSettingsDisabled(true);
     try {
-        await run(simSettings, dem, release_point, predefinedReleasePoints);
-        plotOutput();
-        plotPosition();
-        plotHistogram();
-        simTimer.checkpoint('plotting');
-        plotTimer();
-        plotVariable.value = 'cellCount';
+        simSettings = getSettings();
+        if (!isExample) {
+            delete simSettings.dem_path;
+            delete simSettings.release_areas_path;
+            await sim.create(simSettings);
+            await sim.set_dem(dem.data1d,
+                dem.width,
+                dem.height, 
+                dem.cellSize, 
+                dem.bounds.xmin, dem.bounds.xmax, dem.bounds.ymin, dem.bounds.ymax,
+                dem.mapFactor); 
+        }
+        else {
+            await sim.create(simSettings);
+        }
+        simTimer = new Timer('AvalancheSimulation');
+        await sim.run();
+        simTimer.checkpoint('simulation');
+        await sim.get_timestep_data();
+        await sim.fetch_cell_count();
+        simTimer.checkpoint('fetching data');
+        plotTimestepData(sim);
+        plotTrajectory(sim);
+        plotVariable.value = 'cell_count';
         plotVariable.dispatchEvent(new Event('change'));
+        plotTimer();
+        // if (exportResultsCheckbox.checked) {
+        //     await exportResults();
+        // }
     } catch (error) {
         console.error('Error during simulation:', error);
     }
     setSettingsDisabled(false);
 }
 
-plotVariable = document.getElementById('plotVariable');
+const plotVariable = document.getElementById('plotVariable');
 plotVariable.addEventListener('change', async (event) => {
     const selectedVariable = event.target.value;
-    updatePlots(selectedVariable)
+    updatePlots(sim, selectedVariable)
 });
 
 document.addEventListener('keydown', async function (event) {
@@ -145,31 +195,95 @@ window.addEventListener('DOMContentLoaded', () => {
     }
 });
 
-async function getSettings() {
-    await simSettings.set(
-        casename = demDropdown.value,
-        maxSteps = parseInt(stepSlider.value),
-        simModel = 0,
-        frictionModel = frictionModelDropdown.selectedIndex,
-        density = 200,
-        slabThickness = 1,
-        frictionCoefficient = frictionCoefficientSlider.value,
-        dragCoefficient = dragCoefficientSlider.value,
-        cfl = parseFloat(cflSlider.value),
-        numberTrajectories = parseInt(numberTrajectoriesSlider.value),
-    )
+function getSettings() {
+    const simSettings = {
+        dem_path: "data/avaframe/" + demDropdown.value + ".png",
+        release_areas_path: "data/avaframe/" + demDropdown.value + "releaseTexture.png",
+        max_steps: parseInt(stepSlider.value),
+        sim_model: 0,
+        friction_model: frictionModelDropdown.selectedIndex,
+        density: 200,
+        slab_thickness: 1,
+        friction_coefficient: parseFloat(frictionCoefficientSlider.value),
+        drag_coefficient: parseInt(dragCoefficientSlider.value),
+        cfl: parseFloat(cflSlider.value),
+        released_particles_per_cell: parseInt(releasedParticlesPerCellSlider.value),
+    };
+    return simSettings;
 }
 
-async function fetchInputs() {
-    await getSettings();
-    release_points = await loadReleasePoints(simSettings.casename);
-    release_point = release_points.centroids[0]
-    return true;
+async function saveFilePersistent() {
+    try {
+        // Create a Blob containing the data you want to save
+        const textToSave = "Hello, world! This is my data.";
+        const blob = new Blob([textToSave], { type: 'text/plain' });
+
+        // Options for the save file picker
+        const options = {
+            suggestedName: 'my-data.txt',
+            types: [
+                {
+                    description: 'Text Files',
+                    accept: {
+                        'text/plain': ['.txt'],
+                    },
+                },
+            ],
+        };
+
+        // Show the save file picker and get a FileSystemFileHandle
+        // This is where the user interacts and potentially grants persistent permission
+        const fileHandle = await window.showSaveFilePicker(options);
+
+        // Create a writable stream to write data to the file
+        const writableStream = await fileHandle.createWritable();
+
+        // Write the blob to the file
+        await writableStream.write(blob);
+
+        // Close the stream
+        await writableStream.close();
+
+        console.log('File saved successfully!');
+
+    } catch (error) {
+        if (error.name === 'AbortError') {
+            console.log('User cancelled the save operation.');
+        } else {
+            console.error('Error saving file:', error);
+        }
+    }
 }
-var simSettings = new SimSettings();
-var release_points;
-var release_point;
-// fetchAabb(demDropdown.value);
+
+async function savePngFile(pngBlob) {
+    let fileHandle = await getStoredHandle(); // Your own function to retrieve stored handle
+
+    if (!fileHandle) {
+        fileHandle = await window.showSaveFilePicker({
+            suggestedName: 'image.png',
+            types: [{
+                description: 'PNG Image',
+                accept: { 'image/png': ['.png'] }
+            }]
+        });
+        await storeHandle(fileHandle); // Your own function to persist the handle
+    }
+
+    // Check or request permission
+    const permission = await fileHandle.queryPermission({ mode: 'readwrite' }) ||
+        await fileHandle.requestPermission({ mode: 'readwrite' });
+
+    if (permission !== 'granted') {
+        throw new Error('Permission to write file denied.');
+    }
+
+    const writable = await fileHandle.createWritable();
+    await writable.write(pngBlob);
+    await writable.close();
+}
+
+// document.getElementById('exportResults').addEventListener('click', savePNG);
+
 async function main() {
     const adapter = await navigator.gpu?.requestAdapter({
         powerPreference: 'high-performance',
@@ -184,71 +298,71 @@ async function main() {
         alert("Your device has to support float32-filterable textures and timestamp-query to run this simulation.");
         runButton.disabled = true;
         runButton.textContent = "WebGPU features not supported";
-    } else {
-        console.log("Adapter limits:", adapter.limits);
-        console.log("Adapter features:", [...adapter.features]);
-        const maxInvocations = adapter.limits.maxComputeInvocationsPerWorkgroup;
-        const workgroupSizeXY = Math.floor(Math.sqrt(maxInvocations));
-        console.log("Release point:", release_point);
-        device = await adapter.requestDevice({
-            requiredFeatures: ["float32-filterable", 'timestamp-query'],
-            requiredLimits: {
-                maxComputeWorkgroupSizeX: workgroupSizeXY,
-                maxComputeWorkgroupSizeY: workgroupSizeXY,
-                maxComputeWorkgroupSizeZ: 1,
-                maxComputeInvocationsPerWorkgroup: maxInvocations
-            }
-        });
-        device.lost.then(err => {
-            console.error('WebGPU device lost:', err);
-            alert('WebGPU device lost.', err);
-        });
     }
 
     changeFrictionModel();
-    // await getSettings();
-    await fetchInputs();
+    const settings = getSettings();
+    await sim.create(settings);
 
-    await dem.loadPNGAsFloat32(simSettings.casename);
-    // const gpxString = await fetch('gpx/NockspitzeNDirectTop.gpx').then(response => response.text());
+    // const gpxString = await fetch('data/gpx/Nockspitze.gpx').then(response => response.text());
     // gpx = parseGPX(gpxString);
-    // await dem.loadTiles(gpx, zoom = zoomLevelSlider.value)
-    console.log("dem width:", dem.bounds.width, "height:", dem.bounds.height);
-    plotDem(dem); // Initial plot
-    // plotGpx(gpx); // Initial plot
-    // await computeNormalsFromDemTexture(settings, dem);
+    // await dem.loadTiles(gpx, zoomLevelSlider.value)
+    // await sim.set_dem(dem.data1d,
+    //     dem.width,
+    //     dem.height, 
+    //     dem.cellSize, 
+    //     dem.bounds.xmin, dem.bounds.xmax, dem.bounds.ymin, dem.bounds.ymax,
+    //     dem.mapFactor);    
+
+    plotDem(sim);
+    // plotGpx(gpx, dem);
     if (!isMobileDevice) {
         runAndPlot();
     }
 }
 
-
-var gpx;
-var tiles = [];
 document.getElementById("gpxfile").addEventListener("change", async (e) => {
+    isExample = false;
     predefinedReleasePoints = false;
     const file = e.target.files[0];
     if (!file) return;
 
-    gpxString = await file.text();
+    const gpxString = await file.text();
     tiles = [];
     gpx = parseGPX(gpxString);
-    await dem.loadTiles(gpx, zoom = zoomLevelSlider.value)
-
-    plotDem(dem);
-    plotGpx(gpx);
+    await dem.loadTiles(gpx, zoomLevelSlider.value)
+    // simSettings.setDem(dem);
+    await sim.set_dem(dem.data1d,
+        dem.width,
+        dem.height, 
+        dem.cell_size, 
+        dem.bounds.xmin, dem.bounds.xmax, dem.bounds.ymin, dem.bounds.ymax, 
+        dem.mapFactor);
+    resetPlots();
+    plotDem(sim);
+    plotGpx(gpx, dem);
     if (!isMobileDevice) {
         runAndPlot();
     }
 });
 
-debug = false;
+var debug = false;
 let predefinedReleasePoints = true;
 const urlParams = new URLSearchParams(window.location.search);
 if (urlParams.get("debug") === "vscode") {
     debug = true;
     console.log("Running in VS Code debug session");
 }
-isMobileDevice = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+var isMobileDevice = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 
+await loadEngine().catch(console.error);
 main();
+async function loadEngine() {
+    const statusEl = document.getElementById("status");
+
+    statusEl.textContent = "Loading Engine...";
+    window.wasm = await init();
+    sim = await WasmSimulation.new();
+
+    statusEl.textContent = "Engine Ready!";
+}

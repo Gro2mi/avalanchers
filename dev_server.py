@@ -4,6 +4,7 @@ import socket
 import os 
 import subprocess
 
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.connect(("8.8.8.8", 80))
 ip = s.getsockname()[0]
@@ -43,6 +44,6 @@ context.load_cert_chain(certfile=certfile, keyfile=keyfile)
 httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
 
 # Start the server
-print("Open in Chrome: https://" + ip + "/index.html?debug=vscode")
+print("Open https://" + ip + "/index.html?debug=vscode")
 
 httpd.serve_forever()

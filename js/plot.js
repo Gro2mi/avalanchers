@@ -1,7 +1,7 @@
 const outputPlot = document.getElementById('outputPlot');
 const demPlot = document.getElementById('demPlot');
 const histogramPlot = document.getElementById('histogramPlot');
-    
+
 const resetLighting = {
     ambient: 0.8,
     diffuse: 0.8,
@@ -10,23 +10,31 @@ const resetLighting = {
     fresnel: 0.2,
 }
 
-async function plotDem(dem) {
+function resetPlots() {
+    Plotly.purge('outputPlot');
+    Plotly.purge('demPlot');
+    Plotly.purge('histogramPlot');
+}
+
+function plotDem(sim) {
+    // DEM  coordinates have to be copied. Otherwise detached ArrayBuffer issues arise when restyling
     try {
         const surfaceDem = {
-            x: dem.x,
-            y: dem.y,
-            z: dem.z,
+            x: new Float32Array(sim.x),
+            y: new Float32Array(sim.y),
+            z: to2D(new Float32Array(sim.dem), sim.width, sim.height),
             type: 'surface',
-            colorscale: 'Earth',
-            cmin: 0,
-            cmax: 3000,
-            // lighting: {
-            //     ambient: 0.1,      // less ambient = darker shadows
-            //     diffuse: 0.4,      // more diffuse = softer shadows
-            //     specular: 1.0,     // strong highlights
-            //     roughness: 0.7,    // lower = shinier
-            //     fresnel: 0.0       // optional for reflectivity
-            // },
+            colorscale: [[0, '#a5a5a5'], [1, '#a5a5a5']],
+            showscale: false,
+
+            lighting: {
+                ambient: 0.6,   // Base brightness
+                diffuse: 0.5,   // Defines the shape/shadows
+                specular: 0.05, // Very low "shininess"
+                roughness: 0.9
+            },
+            // cmin: 0,
+            // cmax: 3000,
             contours: {
                 z: {
                     show: true,
@@ -43,20 +51,20 @@ async function plotDem(dem) {
         const layout = {
             template: plotly_dark,
             scene: {
-                aspectmode: 'data', 
+                aspectmode: 'data',
             }
         };
         Plotly.newPlot('demPlot', data, layout);
-        demPlot.on('plotly_click', function(eventData) {
-                const point = eventData.points[0];
-                const i = point.pointNumber[0]; // column index (x)
-                const j = point.pointNumber[1]; // row index (y)
-                const x = point.x;
-                const y = point.y;
-                const z = point.z;
+        demPlot.on('plotly_click', function (eventData) {
+            const point = eventData.points[0];
+            const i = point.pointNumber[0]; // column index (x)
+            const j = point.pointNumber[1]; // row index (y)
+            const x = point.x;
+            const y = point.y;
+            const z = point.z;
 
-                console.log(`Clicked surface point at i=${i}, j=${j}, x=${x}, y=${y}, z=${z}`);
-            });
+            console.log(`Clicked surface point at i=${i}, j=${j}, x=${x}, y=${y}, z=${z}`);
+        });
     } catch (error) {
         console.error('Error loading or plotting data:', error);
     }
@@ -68,13 +76,30 @@ const cyclicAspectColorscale = [
     [0.75, 'yellow'],   // 270° West
     [1.0, 'blue']      // 360° North again to close the loop
 ];
-function updatePlots(selectedVariable) {
+
+function createRandomMatrix2D(width, height) {
+    const matrix = new Array(height);
+    for (let i = 0; i < height; i++) {
+        const row = new Array(width);
+        for (let j = 0; j < width; j++) {
+            row[j] = Math.random();
+        }
+        matrix[i] = row;
+    }
+    return matrix;
+}
+
+async function updatePlots(sim, selectedVariable) {
+    // await sim.fetch_max_velocity();
+    await sim.fetch_cell_count();
+    sim.fetch_results();
+
     if (selectedVariable === 'elevation') {
-        Plotly.update(demPlot, {
-            surfacecolor: [dem.data],
+        Plotly.restyle(demPlot, {
+            surfacecolor: [to2D(new Float32Array(sim.dem), new Float32Array(sim.width), new Float32Array(sim.height))],
             colorscale: 'Earth',
             cmin: [0],
-            cmax: [3000],
+            cmax: [4000],
             colorbar: {
                 title: 'Elevation (m)'
             },
@@ -84,7 +109,7 @@ function updatePlots(selectedVariable) {
     }
     var traceHist = {
         type: 'histogram',
-        x: simData[selectedVariable].flat(),
+        x: new Float32Array(sim[selectedVariable]),
         autobinx: true, // or set fixed bin settings
     };
 
@@ -92,68 +117,44 @@ function updatePlots(selectedVariable) {
         title: `Histogram of ${selectedVariable}`,
         template: plotly_dark,
     };
-        Plotly.update(demPlot, {
-            surfacecolor: [simData[selectedVariable]],  // new data
-            cmin: [null],                               // reset min
-            cmax: [null],                               // reset max
-            colorscale: ['Portland'],
-            colorbar: {
-                title: plotVariable.options[plotVariable.selectedIndex].text
-            },
-            lighting: resetLighting,
 
-        });
-    if (selectedVariable === 'slopeAspect') {
-        Plotly.update(demPlot, {
-            surfacecolor: [simData[selectedVariable]],
-            // colorscale: cyclicAspectColorscale,
-            cmin: [null],
-            cmax: [null],
-            colorbar: {
-                title: 'Aspect (°)'
-            },
-            lighting: [resetLighting],
-        }, [0]);
-
-        traceHist.x = simData[selectedVariable].flat().filter((val, index) => (Math.abs(val) < 1) && (dem.data1d[index] > 0));
-    } else if (selectedVariable === 'cellCount') {
-        const transformedSurfaceColor = simData[selectedVariable].map(row =>
-            row.map(val => Math.log10(val))
-        );
-        Plotly.update(demPlot, {
-            surfacecolor: [transformedSurfaceColor],
-            colorscale: ['Portland'],
-            cmin: [null],                               // reset min
-            cmax: [null],                               // reset max
-            colorbar: {
-                title: plotVariable.options[plotVariable.selectedIndex].text
-            },
-            lighting: [resetLighting],
-        }, {
-            'scene.colorbar.title.text': 'Log10(Cell Count)',
-            'scene.colorbar.title.font.color': 'red'
-        }[0]);
-
-        traceHist.x = simData[selectedVariable].flat().filter(val => val > 0).map(val => Math.log10(val));
-    } else if (selectedVariable === 'velocityField') {
-        traceHist.x = simData[selectedVariable].flat().filter(val => val > 0)
+    var plotOptions = {
+        surfacecolor: [to2D(new Float32Array(sim[selectedVariable]), sim.width, sim.height)],
+        showscale: true,
+        colorscale: ['Portland'],
+        cmin: [null],
+        cmax: [null],
+        colorbar: {
+            title: selectedVariable,
+        },
+    };
+    traceHist.x = new Float32Array(sim[selectedVariable]).filter((val, index) => (sim.dem[index] > 0));
+    if (selectedVariable === 'cell_count') {
+        const cellCountLog = new Float32Array(sim.cell_count).map(val => Math.log10(val));
+        plotOptions.surfacecolor = [to2D(cellCountLog, sim.width, sim.height)];
+        traceHist.x = cellCountLog.filter(val => val > 0);
+    } else if (selectedVariable === 'max_velocity') {
+        traceHist.x = traceHist.x.filter(val => val > 1e-5)
     }
-
+    Plotly.restyle(demPlot, plotOptions, [0]);
     Plotly.react(histogramPlot, [traceHist], layoutHist);
 }
 
-function plotGpx(gpx) {
+function plotGpx(gpx, dem) {
     const webMercatorCoords = gpx.map(pt => latLonToWebMercator(pt.lat, pt.lon)).map(pt => dem.interpolateElevation(pt));
 
     dem.interpolateElevation(webMercatorCoords[0])
     const lineTrace = {
         type: 'scatter3d',
-        mode: 'line+markers',
+        mode: 'lines+markers',
         x: webMercatorCoords.map(pt => pt.x),
         y: webMercatorCoords.map(pt => pt.y),
-        z: webMercatorCoords.map(pt => pt.z || 3000),
+        z: webMercatorCoords.map(pt => pt.z + 1 || 3000),
         marker: {
-            size: 3,
+            size: 2,
+        },
+        line: {
+            width: 4,
         },
         name: 'Route'
     };
@@ -161,20 +162,22 @@ function plotGpx(gpx) {
     Plotly.addTraces(demPlot, [lineTrace]);
 }
 
-function plotPosition() {
+async function plotTrajectory(sim) {
+    timestepData = await sim.get_timestep_data();
+    const [xminBounds, yminBounds, mapFactor] = sim.demTrajectoryInfo;
     const lineTrace = {
         type: 'scatter3d',
         mode: 'line+markers',
-        x: simData.position.x,
-        y: simData.position.y,
+        x: timestepData.position.filter((_, i) => i % 3 === 0).map(val => val * mapFactor + xminBounds),
+        y: timestepData.position.filter((_, i) => i % 3 === 1).map(val => val * mapFactor + yminBounds),
         // Offset elevation by 5 units to visually separate the trajectory from the DEM surface
-        z: simData.elevation.map((val) => (val + 5)),
+        z: timestepData.elevation.map((val) => (val + 5)),
         marker: {
             size: 3,
-            color: simData.velocityMagnitude,
+            color: timestepData.velocityMagnitude,
             colorscale: 'Bluered',
-            cmin: Math.min(...simData.velocityMagnitude),
-            cmax: Math.max(...simData.velocityMagnitude),
+            cmin: Math.min(...timestepData.velocityMagnitude),
+            cmax: Math.max(...timestepData.velocityMagnitude),
         },
         name: 'Trajectory'
     };
@@ -194,14 +197,15 @@ function plotPosition() {
     Plotly.addTraces(demPlot, [lineTrace]);
 }
 
-function plotOutput() {
-    let n = simData.timestep.length;
-    let x = simData.time;
+async function plotTimestepData(sim) {
+    const timestepData = await sim.get_timestep_data();
+    let x = new Float32Array(timestepData.time);
+    let n = timestepData.time.length;
     const friction = {
         type: 'scatter',
         mode: 'lines',
-        x: x,
-        y: simData.accelerationFrictionMagnitude,
+        x: x.slice(1, n),
+        y: new Float32Array(timestepData.accelerationFrictionMagnitude).slice(1, n),
         name: 'Friction Acceleration',
         visible: 'legendonly',
     };
@@ -209,7 +213,7 @@ function plotOutput() {
         type: 'scatter',
         mode: 'lines',
         x: x,
-        y: simData.accelerationTangentialMagnitude,
+        y: new Float32Array(timestepData.accelerationTangentialMagnitude),
         name: 'Tangential Acceleration',
         visible: 'legendonly',
     };
@@ -217,7 +221,7 @@ function plotOutput() {
         type: 'scatter',
         mode: 'lines',
         x: x,
-        y: simData.timestep,
+        y: new Float32Array(timestepData.timestep),
         name: 'Timestep',
         visible: 'legendonly',
     };
@@ -226,7 +230,7 @@ function plotOutput() {
         mode: 'lines',
         // first element is zero due to velocity being zero at the start
         x: x.slice(1, n - 2),
-        y: simData.cfl.slice(1, n - 2),
+        y: new Float32Array(timestepData.cfl.slice(1, n - 2)),
         name: 'CFL',
         visible: 'legendonly',
     };
@@ -234,7 +238,7 @@ function plotOutput() {
         type: 'scatter',
         mode: 'lines',
         x: x,
-        y: simData.velocityMagnitude,
+        y: new Float32Array(timestepData.velocityMagnitude),
         name: 'Velocity Magnitude',
         visible: 'legendonly',
     };
@@ -243,7 +247,7 @@ function plotOutput() {
         type: 'scatter',
         mode: 'lines',
         x: x,
-        y: simData.position.z,
+        y: new Float32Array(timestepData.position.z),
         name: 'Position Z',
         visible: 'legendonly',
     };
@@ -251,72 +255,94 @@ function plotOutput() {
     const traceElevation = {
         type: 'scatter',
         mode: 'lines',
-        x: x,
+        x: x.slice(0, n - 3),
         // last elevation point is outside the domain
-        y: simData.elevation.slice(0, n - 1),
+        y: new Float32Array(timestepData.elevation),
         name: 'Elevation',
         visible: 'legendonly',
     };
+    const positionZError = new Float32Array(n);
+    for (let i = 1; i < n; i++) {
+        positionZError[i] = timestepData.elevation[i] - timestepData.position[i * 3 + 2];
+    }
     const tracePositionZError = {
         type: 'scatter',
         mode: 'lines',
         x: x,
-        y: subtractArr(simData.elevation, simData.position.z).slice(0, n - 1),
+        y: positionZError,
         name: 'Position Z Error',
         visible: 'legendonly',
     };
+
+    const diffElevation = new Float32Array(n);
+    for (let i = 1; i < n; i++) {
+        diffElevation[i] = timestepData.elevation[i] - timestepData.elevation[i - 1];
+    }
     const traceDiffElevation = {
         type: 'scatter',
         mode: 'lines',
-        x: x.slice(0, n - 2),
-        y: diff(simData.elevation).slice(0, n - 1),
+        x: x,
+        y: diffElevation,
 
         name: 'Diff Elevation',
         visible: 'legendonly',
     };
+    const diffZ = new Float32Array(n);
+    for (let i = 1; i < n; i++) {
+        diffZ[i] = timestepData.position[i * 3 + 2] - timestepData.position[(i - 1) * 3 + 2];
+    }
     const traceDiffZ = {
         type: 'scatter',
         mode: 'lines',
-        x: x.slice(0, n - 2),
-        y: diff(simData.position.z).slice(0, n - 1),
+        x: x,
+        y: diffZ,
 
         name: 'Diff Position Z',
         visible: 'legendonly',
     };
-    const traceNormalX = {
-        type: 'scatter',
-        mode: 'lines',
-        x: x,
-        y: simData.normal.x,
+    // // const traceNormalX = {
+    // //     type: 'scatter',
+    // //     mode: 'lines',
+    // //     x: x,
+    // //     y: timestepData.normal.x,
 
-        name: 'Normal X',
-        visible: 'legendonly',
-    };
-    const traceNormalY = {
-        type: 'scatter',
-        mode: 'lines',
-        x: x,
-        y: simData.normal.y,
+    // //     name: 'Normal X',
+    // //     visible: 'legendonly',
+    // // };
+    // // const traceNormalY = {
+    // //     type: 'scatter',
+    // //     mode: 'lines',
+    // //     x: x,
+    // //     y: timestepData.normal.y,
 
-        name: 'Normal Y',
-        visible: 'legendonly',
-    };
-    const traceNormalZ = {
-        type: 'scatter',
-        mode: 'lines',
-        x: x,
-        y: simData.normal.z,
+    // //     name: 'Normal Y',
+    // //     visible: 'legendonly',
+    // // };
+    // // const traceNormalZ = {
+    // //     type: 'scatter',
+    // //     mode: 'lines',
+    // //     x: x,
+    // //     y: timestepData.normal.z,
 
-        name: 'Normal Z',
-        visible: 'legendonly',
-    };
+    // //     name: 'Normal Z',
+    // //     visible: 'legendonly',
+    // // };
     const traceStepDistance = {
         type: 'scatter',
         mode: 'lines',
         x: x,
-        y: simData.stepDistance,
+        y: new Float32Array(timestepData.stepDistance),
 
         name: 'Step Distance',
+        visible: 'legendonly',
+    };
+    const traceGEff = {
+        type: 'scatter',
+        mode: 'lines',
+        x: x.slice(1, n),
+        y: new Float32Array(timestepData.gEff).slice(1, n),
+
+        name: 'g_eff',
         // visible: 'legendonly',
     };
     let layout = {
@@ -325,17 +351,17 @@ function plotOutput() {
             buttons: [
                 {
                     method: 'restyle',
-                    args: ['x', [simData.travelDistance]],
+                    args: ['x', [new Float32Array(timestepData.travelDistance)]],
                     label: 'Travel Distance [m]'
                 },
                 {
                     method: 'restyle',
-                    args: ['x', [simData.time]],
+                    args: ['x', [new Float32Array(timestepData.time)]],
                     label: 'Time [s]'
                 },
                 {
                     method: 'restyle',
-                    args: ['x', [Array.from({ length: n }, (_, i) => i)]],
+                    args: ['x', [new Float32Array(Array.from({ length: n }, (_, i) => i))]],
                     label: 'Timestep [#]'
                 }
             ],
@@ -359,10 +385,11 @@ function plotOutput() {
         tracePositionZError,
         traceDiffElevation,
         traceDiffZ,
-        traceNormalX,
-        traceNormalY,
-        traceNormalZ,
+        // // traceNormalX,
+        // // traceNormalY,
+        // // traceNormalZ,
         traceStepDistance,
+        traceGEff,
     ]
 
     Plotly.newPlot('outputPlot', traces, layout).then(() => {
