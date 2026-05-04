@@ -2,33 +2,43 @@ name: Deploy to GitHub Pages
 
 permissions:
   contents: write
-  
+
 on:
-  push:
-    branches:
-      - main 
+  workflow_run:
+    workflows: ["Build"]
+    types:
+      - completed
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-
+    # Only run if the Build workflow actually succeeded
+    if: >
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main'
+      
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
       - name: Download Build Artifacts
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v4
         with:
           name: artifacts-ubuntu-latest
           path: ./downloaded_assets
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Copy files with excludes and merge artifacts
         run: |
           mkdir -p deploy_dir
-          rsync -av --exclude='*.pem' --exclude='.*py' --exclude='*.rp' --exclude='*.gpx'  --exclude='data/' frontend/ deploy_dir/
+          # Sync frontend source
+          rsync -av --exclude='*.pem' --exclude='.*py' --exclude='*.rp' --exclude='*.gpx' --exclude='data/' frontend/ deploy_dir/
 
-          # 2. Move the .wasm and .js from the build job into the deployment folder
-          # Assuming they are inside 'staging_all/' in the artifact:
+          # Ensure the target directory exists before copying
+          mkdir -p deploy_dir/frontend/js/pkg/
+
+          # Move the .wasm and .js from the build job into the deployment folder
           find ./downloaded_assets -name "*.wasm" -exec cp {} deploy_dir/frontend/js/pkg/ \;
           find ./downloaded_assets -name "*.js" -exec cp {} deploy_dir/frontend/js/pkg/ \;
 

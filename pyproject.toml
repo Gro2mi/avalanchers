@@ -5,7 +5,12 @@ build-backend = "maturin"
 [project]
 name = "avalanchers"
 version = "0.1.0"
+
+description = "Avalanche simulation with Rust and WebGPU"
+readme = { file = "README.md", content-type = "text/markdown" }
+
 requires-python = ">=3.10"
+
 dependencies = [
     "numpy>=2.0",
 ]

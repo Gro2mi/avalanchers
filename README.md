@@ -1,16 +1,36 @@
-# Avalanche Simulation with WebGPU
+# Avalanche Simulation with Rust and WebGPU
 
-[Try it yourself!](https://gro2mi.github.io/avalanchers/ "Avalanche Simulation") By now most browsers support WebGPU ([check here](https://github.com/gpuweb/gpuweb/wiki/Implementation-Status)). It was tested on Windows, Linux and Android but support on Mobile might be lacking.
-You can either test one of the AvaFrame examples by selecting it in the dropdown or you can upload an Austrian GPX file.
 
-This project was started to improve the development process for avalanche simulations with webGPU based on [weBIGeo](https://github.com/weBIGeo/webigeo/tree/main). It offers the possibility to easily plot results in the browser. Now the core is rewritten in Rust and provides Python ans WASM bindings.
+[Try it yourself!](https://gro2mi.github.io/avalanchers/ "Avalanche Simulation")
 
-Test examples are from [AvaFrame
-](https://docs.avaframe.org/en/latest/testing.html#tests-for-model-validation)
+Most modern browsers now support WebGPU ([check the current status](https://github.com/gpuweb/gpuweb/wiki/Implementation-Status)). The application has been tested on Windows, Linux, and Android, though support on mobile devices may still be limited.
 
-Tiles are provided by the [AlpineMaps project](https://github.com/AlpineMapsOrg) and based on basemap.at data.
+You can explore one of the predefined AvaFrame examples using the dropdown menu, or upload your own Austrian GPX file to run a custom simulation.
 
-## Known Issues
+This project was initiated to streamline the development of avalanche simulations using WebGPU, building on concepts from [weBIGeo](https://github.com/weBIGeo/webigeo/tree/main). It provides an easy way to visualize results directly in the browser.
+
+The core has since been rewritten in Rust, with Python and WebAssembly (WASM) bindings available. The underlying model is a block-based approach without particle interactions, enabling fast initial estimates of runout distance and flow routing.
+
+## Get started with Python
+
+`pip install avalanchers[viz]` once pypi upload works. For now use the released wheel.
+
+```
+import avalanchers
+
+sim = avalanchers.PySimulation.new()
+sim.create_example("frontend/data/avaframe/avaMal.png")
+sim.run()
+
+# needs the viz option
+avalanchers.plot2d(sim, "max_velocity")
+avalanchers.plot3d(sim, "max_velocity")
+```
+
+Test examples are from [AvaFrame](https://docs.avaframe.org/en/latest/testing.html#tests-for-model-validation) under [EUPL-1.2 license
+](https://github.com/OpenNHM/AvaFrame#EUPL-1.2-1-ov-file)
+
+## Known Issues with Chrome
 
 * Chromium on Windows currently ignores the `high-performance` option in `powerPreference` WebGPU flag if you have multiple GPUs [[Issue](https://crbug.com/369219127)]. Options are:
   1. Run slow on integrated GPU
