@@ -197,8 +197,8 @@ window.addEventListener('DOMContentLoaded', () => {
 
 function getSettings() {
     const simSettings = {
-        dem_path: "data/avaframe/" + demDropdown.value + ".png",
-        release_areas_path: "data/avaframe/" + demDropdown.value + "releaseTexture.png",
+        dem_path: window.location + "data/avaframe/" + demDropdown.value + ".png",
+        release_areas_path: window.location + "data/avaframe/" + demDropdown.value + "releaseTexture.png",
         max_steps: parseInt(stepSlider.value),
         sim_model: 0,
         friction_model: frictionModelDropdown.selectedIndex,
