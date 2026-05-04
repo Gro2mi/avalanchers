@@ -44,6 +44,6 @@ context.load_cert_chain(certfile=certfile, keyfile=keyfile)
 httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
 
 # Start the server
-print("Open in Chrome: https://" + ip + "/index.html?debug=vscode")
+print("Open https://" + ip + "/index.html?debug=vscode")
 
 httpd.serve_forever()

@@ -1,6 +1,6 @@
 # Avalanche Simulation with WebGPU
 
-[Try it yourself!](https://gro2mi.github.io/AvalancheSim-WebGPU/ "Avalanche Simulation") By now most browsers support WebGPU ([check here](https://github.com/gpuweb/gpuweb/wiki/Implementation-Status)). It was tested on Windows, Linux and Android but support on Mobile might be lacking.
+[Try it yourself!](https://gro2mi.github.io/avalanchers/ "Avalanche Simulation") By now most browsers support WebGPU ([check here](https://github.com/gpuweb/gpuweb/wiki/Implementation-Status)). It was tested on Windows, Linux and Android but support on Mobile might be lacking.
 You can either test one of the AvaFrame examples by selecting it in the dropdown or you can upload an Austrian GPX file.
 
 This project was started to improve the development process for avalanche simulations with webGPU based on [weBIGeo](https://github.com/weBIGeo/webigeo/tree/main). It offers the possibility to easily plot results in the browser. Now the core is rewritten in Rust and provides Python ans WASM bindings.

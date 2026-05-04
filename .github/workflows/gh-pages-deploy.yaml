@@ -16,10 +16,21 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Copy files with excludes
+      - name: Download Build Artifacts
+        uses: actions/download-artifact@v5
+        with:
+          name: artifacts-ubuntu-latest
+          path: ./downloaded_assets
+
+      - name: Copy files with excludes and merge artifacts
         run: |
           mkdir -p deploy_dir
           rsync -av --exclude='*.pem' --exclude='.*py' --exclude='*.rp' --exclude='*.gpx'  --exclude='data/' frontend/ deploy_dir/
+
+          # 2. Move the .wasm and .js from the build job into the deployment folder
+          # Assuming they are inside 'staging_all/' in the artifact:
+          find ./downloaded_assets -name "*.wasm" -exec cp {} deploy_dir/frontend/js/pkg/ \;
+          find ./downloaded_assets -name "*.js" -exec cp {} deploy_dir/frontend/js/pkg/ \;
 
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v4
