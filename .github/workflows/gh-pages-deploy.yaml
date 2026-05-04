@@ -33,14 +33,14 @@ jobs:
         run: |
           mkdir -p deploy_dir
           # Sync frontend source
-          rsync -av --exclude='*.pem' --exclude='.*py' --exclude='*.rp' --exclude='*.gpx' --exclude='data/' frontend/ deploy_dir/
+          rsync -av --exclude='*.pem' --exclude='.*py' --exclude='*.rp' --exclude='*.gpx' frontend/ deploy_dir/
 
           # Ensure the target directory exists before copying
-          mkdir -p deploy_dir/frontend/js/pkg/
+          mkdir -p deploy_dir/js/pkg/
 
           # Move the .wasm and .js from the build job into the deployment folder
-          find ./downloaded_assets -name "*.wasm" -exec cp {} deploy_dir/frontend/js/pkg/ \;
-          find ./downloaded_assets -name "*.js" -exec cp {} deploy_dir/frontend/js/pkg/ \;
+          find ./downloaded_assets -name "*.wasm" -exec cp {} deploy_dir/js/pkg/ \;
+          find ./downloaded_assets -name "*.js" -exec cp {} deploy_dir/js/pkg/ \;
 
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v4
