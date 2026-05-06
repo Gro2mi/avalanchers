@@ -64,6 +64,8 @@ define_shaders! {
     ComputeReleaseAreas => "compute_release_areas",
     InitializeParticles => "initialize_particles",
     ComputeParticles => "compute_particles",
+    P2G => "p2g",
+    GridPhysics => "grid_physics",
     Utils => "utils",
     Random => "random",
 }
@@ -168,6 +170,16 @@ impl ComputeShaderConfig {
         shader_src: &'static str,
         bindings: &[(String, BindingType)],
     ) -> Result<Self> {
+        Self::new_with_constants(device, name, shader_src, bindings, &[])
+    }
+
+    pub fn new_with_constants(
+        device: &Device,
+        name: ShaderName,
+        shader_src: &'static str,
+        bindings: &[(String, BindingType)],
+        constants: &[(&str, f64)],
+    ) -> Result<Self> {
         let mut binding_names = Vec::new();
         let mut binding_types = Vec::new();
         let mut binding_group_layout_entries = Vec::new();
@@ -204,7 +216,10 @@ impl ComputeShaderConfig {
             layout: Some(&pipeline_layout),
             module: &shader_module,
             entry_point: Some(name.to_str()),
-            compilation_options: Default::default(),
+            compilation_options: wgpu::PipelineCompilationOptions {
+                constants,
+                zero_initialize_workgroup_memory: true,
+            },
             cache: None,
         });
 
@@ -240,6 +255,7 @@ impl ComputeShaderConfig {
 
 pub fn create_shader_configs(
     device: &Device,
+    max_compute_invocations_per_workgroup: u32,
 ) -> Result<std::collections::HashMap<ShaderName, ComputeShaderConfig>> {
     let mut shader_configs = std::collections::HashMap::new();
     shader_configs.insert(
@@ -574,7 +590,7 @@ pub fn create_shader_configs(
     );
     shader_configs.insert(
         ShaderName::ComputeParticles,
-        ComputeShaderConfig::new(
+        ComputeShaderConfig::new_with_constants(
             device,
             ShaderName::ComputeParticles,
             load_shader_source(ShaderName::ComputeParticles),
@@ -683,7 +699,26 @@ pub fn create_shader_configs(
                         min_binding_size: None,
                     },
                 ),
+                // Binding 12:
+                (
+                    BufferName::ThicknessGrid.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                // Binding 13:
+                (
+                    BufferName::GridForces.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
             ],
+            &[("WG_SIZE_1D", max_compute_invocations_per_workgroup as f64)],
         )?,
     );
     shader_configs.insert(
@@ -714,6 +749,108 @@ pub fn create_shader_configs(
                 // Binding 2:
                 (
                     BufferName::MaxVelocityGrid.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                // Binding 2:
+                (
+                    BufferName::ThicknessGrid.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+            ],
+        )?,
+    );
+    shader_configs.insert(
+        ShaderName::P2G,
+        ComputeShaderConfig::new_with_constants(
+            device,
+            ShaderName::P2G,
+            load_shader_source(ShaderName::P2G),
+            &[
+                // Binding 0:
+                (
+                    BufferName::SimSettings.to_string(),
+                    BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                // Binding 1:
+                (
+                    BufferName::Particles.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                // Binding 2:
+                (
+                    BufferName::ThicknessGrid.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                // Binding 3:
+                (
+                    BufferName::SimInfo.to_string(),
+                    BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+            ],
+            &[("WG_SIZE_1D", max_compute_invocations_per_workgroup as f64)],
+        )?,
+    );
+    shader_configs.insert(
+        ShaderName::GridPhysics,
+        ComputeShaderConfig::new(
+            device,
+            ShaderName::GridPhysics,
+            load_shader_source(ShaderName::GridPhysics),
+            &[
+                // Binding 0:
+                (
+                    BufferName::SimSettings.to_string(),
+                    BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                // Binding 1:
+                (
+                    BufferName::ThicknessGrid.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                // Binding 2:
+                (
+                    TextureName::Slope.to_string(),
+                    BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                ),
+                // Binding 3:
+                (
+                    BufferName::GridForces.to_string(),
                     BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: false },
                         has_dynamic_offset: false,

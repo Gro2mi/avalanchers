@@ -1,16 +1,47 @@
-@group(0) @binding(1) var<storage, read_write> sim_info: SimInfo;
-@group(0) @binding(2) var<storage, read_write> max_velocity: AtomicValue;
-@group(0) @binding(3) var<storage, read_write> grid_h_atomic: array<atomic<u32>>;
+@group(0) @binding(1) var<storage, read> particles: array<Particle>;
+@group(0) @binding(2) var<storage, read_write> grid_h_atomic: array<atomic<u32>>;
+@group(0) @binding(3) var<storage, read_write> sim_info: SimInfo;
+// @group(0) @binding(2) var<storage, read_write> grid_mom_atomic: array<atomic<i32>>; // Combined u, v
 
-@compute @workgroup_size(WG_SIZE_2D, WG_SIZE_2D, 1)
-fn reset_max_velocity(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    if global_id.x < sim_settings.grid_shape.x && global_id.y < sim_settings.grid_shape.y {
-        if global_id.x == 0u && global_id.y == 0u {
-            sim_info.max_velocity = (f32(atomicLoad(&max_velocity.value)) / f32(MAX_VELOCITY_FACTOR)); // Load the current max velocity
-            // TODO load max h for cfl calculation, add sqrt(g*h)
-            atomicStore(&max_velocity.value, u32(0)); // Reset max velocity to 0 for the new timestep
+override WG_SIZE_1D: u32 = 1u;
+@compute @workgroup_size(WG_SIZE_1D, 1, 1)
+fn p2g(@builtin(global_invocation_id) id: vec3u) {
+
+    if id.x >= sim_info.number_particles {
+        return;
+    }
+    let p = particles[id.x];
+    let h = p.mass / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size);
+
+    let grid_pos = p.position.xy / sim_settings.cell_size;
+
+    let base_node = get_base_node(grid_pos);
+
+    for (var i: i32 = 0; i < 3; i++) {
+        for (var j: i32 = 0; j < 3; j++) {
+
+            let node_coords = base_node + vec2i(i, j);
+
+            if node_coords.x < 0 ||
+                node_coords.y < 0 ||
+                node_coords.x >= i32(sim_settings.grid_shape.x) ||
+                node_coords.y >= i32(sim_settings.grid_shape.y) {
+                continue;
+            }
+
+            let weight = calculate_weight(grid_pos, node_coords);
+
+            let idx = u32(node_coords.y) * sim_settings.grid_shape.x +
+                u32(node_coords.x);
+
+            atomicAdd(
+                &grid_h_atomic[idx],
+                // TODO multiply with normal_z to account for bigger cell area due to slope
+                u32(h * weight * H_FACTOR)
+            );
+            // atomicAdd(&grid_mom_atomic[idx * 2], i32(h * p.vel.x * weight * SCALE_FACTOR));
+            // atomicAdd(&grid_mom_atomic[idx * 2 + 1], i32(h * p.vel.y * weight * SCALE_FACTOR));
         }
-        atomicStore(&grid_h_atomic[xy_to_idx(global_id.x, global_id.y)], 0u); // Reset grid heights for the new timestep
     }
 }
 

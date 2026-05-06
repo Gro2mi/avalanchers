@@ -1,3 +1,13 @@
+const WG_SIZE_2D: u32 = 16u;
+
+const g: f32 = 9.81;
+const PI: f32 = 3.14159265358979323846;
+const RAD_TO_DEG: f32 = 180.0 / PI;
+const MAX_VELOCITY_FACTOR: f32 = 1e7; // u32 limit is 430 m/s
+const H_FACTOR: f32 = 1e6; // u32 limit is 4.3km thickness
+const INV_MAX_VELOCITY_FACTOR: f32 = 1 / MAX_VELOCITY_FACTOR; // u32 limit is 430 m/s
+const INV_H_FACTOR: f32 = 1 / H_FACTOR; // u32 limit is 4.3km thickness
+
 struct Particle {
     position: vec3f,
     mass: f32,
@@ -8,10 +18,10 @@ struct Particle {
 };
 
 struct SimInfo {
-  timestep: u32,
-  number_particles: u32,
-  elevation_threshold: f32,
-  max_velocity: f32,
+    timestep: u32,
+    number_particles: u32,
+    elevation_threshold: f32,
+    max_velocity: f32,
 };
 
 struct SimSettings {
@@ -20,7 +30,6 @@ struct SimSettings {
     friction_model: u32,
     released_particles_per_cell: u32,
     grid_shape: vec2u,
-
     world_size: vec2f,
     snow_density: f32,
     slab_thickness: f32,
@@ -38,11 +47,6 @@ struct SimSettings {
 struct AtomicValue {
     value: atomic<u32>,
 };
-
-const g: f32 = 9.81;
-const PI: f32 = 3.14159265358979323846;
-const RAD_TO_DEG: f32 = 180.0 / PI;
-const MAX_VELOCITY_FACTOR: f32 = 1e7;
 
 @group(0) @binding(0) var<uniform> sim_settings: SimSettings;
 
@@ -65,7 +69,6 @@ fn position_to_cell_index(position: vec3f) -> u32 {
     return uv_to_cell_index(uv);
 }
 
-
 fn uv_to_cell(uv: vec2f) -> vec2u {
     return vec2u(clamp(uv * vec2f(sim_settings.grid_shape), vec2f(0.0), vec2f(sim_settings.grid_shape - 1u)));
 }
@@ -75,6 +78,29 @@ fn uv_to_cell_index(uv: vec2f) -> u32 {
     // return cell.x * sim_settings.grid_shape.y + cell.y;
     return (cell.y % sim_settings.grid_shape.y * sim_settings.grid_shape.x +
               (cell.x % sim_settings.grid_shape.x));
+}
+
+fn xy_to_idx(x: u32, y: u32) -> u32 {
+    return y * sim_settings.grid_shape.x + x;
+}
+
+fn quadratic_weight(d: f32) -> f32 {
+    let abs_d = abs(d);
+    if abs_d < 0.5 {
+        return 0.75 - abs_d * abs_d;
+    } else if abs_d < 1.5 {
+        return 0.5 * pow(1.5 - abs_d, 2.0);
+    }
+    return 0.0;
+}
+
+fn calculate_weight(particle_position: vec2f, node_position: vec2i) -> f32 {
+    let dist = particle_position - vec2f(node_position);
+    return quadratic_weight(dist.x) * quadratic_weight(dist.y);
+}
+
+fn get_base_node(grid_pos: vec2f) -> vec2i {
+    return vec2i(floor(grid_pos - vec2f(0.5)));
 }
 
 fn compute_centroid(points: ptr<function, array<vec2<f32>, 256>>, count: u32) -> vec2<f32> {
@@ -95,11 +121,9 @@ fn compute_centroid(points: ptr<function, array<vec2<f32>, 256>>, count: u32) ->
 
     area = area * 0.5;
 
-    if (abs(area) < 1e-6) {
+    if abs(area) < 1e-6 {
         return vec2<f32>(0.0, 0.0);
     }
 
     return vec2<f32>(cx, cy) / (6.0 * area);
 }
-
-

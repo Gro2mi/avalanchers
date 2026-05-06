@@ -38,8 +38,8 @@ avalanchers.plot3d(sim, "max_velocity")
 
 ### Windows
 
-Install Rust, follow guide: [https://rust-lang.org/tools/install/]()
-Install Python
+Install [https://rust-lang.org/tools/install/](Rust)
+Install [https://www.python.org/](Python) 
 
 ```
 # wasm bindings
@@ -61,7 +61,7 @@ python -m pip install maturin
 #### Install dependencies
 
 Install Rust, follow guide: [https://rust-lang.org/tools/install/]() (WSL (2026.04.04): `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`)
-Install Python
+Install [https://www.python.org/](Python) 
 
 ```
 sudo apt update
@@ -101,9 +101,10 @@ wasm-pack build crates/wasm_bindings --target web --out-dir ../../frontend/js/pk
 
 ### Frontend
 
-1. Go to this directory
-2. Start server with `python .\frontend\dev_server.py` for disabled cache and a secure connection with self signed certs which are needed to use WebGPU (except for localhost where `python -m http.server 8000` works as well)
-3. Open Browser on [https://localhost/index.html](https://localhost/index.html) or [https://localhost/index.html?debug=vscode](https://localhost/index.html?debug=vscode) for debugging mode or replace localhost with IP if accessing from another device.
+1. Install OpenSSL
+2. Go to the project directory
+3. Start the development server: `python .\frontend\dev_server.py` This launches the app with caching disabled and HTTPS enabled using self-signed certificates, which are required for WebGPU support in most browsers.
+4. Open your browser and go to: [https://localhost/](https://localhost/) If you are accessing the server from another device on the same network, replace `localhost` with the host machine’s IP address.
 
 ## Code Guidelines
 
@@ -114,7 +115,7 @@ Install `pip install ruff`
 ```
 cargo fmt
 cargo clippy -- -D warnings
-cargo test -p compute_core -p data_processor
+cargo test -p compute_core -p data_processor -p simulation
 ruff check ./python_module
 pytest python_module
 ```

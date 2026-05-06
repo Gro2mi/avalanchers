@@ -1,3 +1,4 @@
+const WG_SIZE_2D: u32 = 16u;
 
 struct AtomicValue {
     value: atomic<u32>,
@@ -10,7 +11,7 @@ struct AtomicValue {
 @group(0) @binding(3) var<storage, read_write> debug: array<f32>;
 
 
-@compute @workgroup_size(16, 16, 1)
+@compute @workgroup_size(WG_SIZE_2D, WG_SIZE_2D, 1)
 fn load_release_areas(@builtin(global_invocation_id) id: vec3<u32>) {
     let gridSize = textureDimensions(release_areas_in);
     if (id.x >= gridSize.x || id.y >= gridSize.y) {

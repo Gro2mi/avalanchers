@@ -54,35 +54,6 @@ fn main() -> Result<()> {
 
     pollster::block_on(simulation.run())?;
 
-    // SimSettings::new()
-    //     .to_json(file_path)
-    //     .expect("Failed to write settings to JSON file");
-
-    // dem = Dem::load_png_as_float32(&mut self, casename)
-
-    // block_on(async {
-    //     // Use the high-level orchestrator function
-    //     let output_data = ComputeOrchestrator::initialize_and_run(
-    //         data_len,
-    //         Some(&input_data),
-    //         args.do_addition,
-    //     ).await?;
-
-    //     let output_string = output_data.iter()
-    //         .map(|f| f.to_string())
-    //         .collect::<Vec<String>>()
-    //         .join(",");
-
-    //     if let Some(output_file) = args.output {
-    //         std::fs::write(&output_file, output_string.as_bytes())?;
-    //         println!("Results written to: {}", output_file);
-    //     } else {
-    //         println!("Input: {:?}", input_data);
-    //         println!("Output: {}", output_string);
-    //     }
-
-    //     Ok(())
-    // })
     let duration = start.elapsed();
 
     info!("Time elapsed is: {:?}", duration);

@@ -138,7 +138,7 @@ jobs:
             --verbose \
             --skip-clean \
             --fail-under 70 \
-            -p compute_core -p data_processor
+            -p compute_core -p data_processor -p simulation
 
         
       - name: Build and Install Python Package
