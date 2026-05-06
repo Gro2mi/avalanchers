@@ -1,0 +1,26 @@
+[package]
+name = "simulation"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+data_processor = { workspace = true }
+compute_core = { workspace = true }
+wgpu = { workspace = true }
+anyhow = { workspace = true }
+bytemuck = { workspace = true }
+tempfile = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rand  = { workspace = true }
+regex = { workspace = true }
+futures-intrusive = { workspace = true }
+tracing = { workspace = true}
+tracing-subscriber = { workspace = true }
+test-log = { workspace = true }
+futures = { workspace = true }
+web-time = { workspace = true }
+
+
+[dev-dependencies]
+pollster = { workspace = true }

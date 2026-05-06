@@ -16,5 +16,6 @@ pyo3-log = { workspace = true }
 tracing = { workspace = true }
 pollster = { workspace = true }
 serde_json = { workspace = true }
+simulation = { workspace = true }
 compute_core = { workspace = true }
 data_processor = { workspace = true }

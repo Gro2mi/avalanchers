@@ -1,6 +1,7 @@
-use compute_core::{Simulation, TimestepData, settings::Settings};
+use compute_core::{TimestepData, settings::Settings};
 use js_sys::{Float32Array, Uint32Array};
 use serde_wasm_bindgen::from_value;
+use simulation::{Simulation, init_logging};
 use std::sync::OnceLock;
 use tracing::{info, trace};
 use wasm_bindgen::prelude::*;
@@ -11,7 +12,7 @@ static BASE_URL: OnceLock<String> = OnceLock::new();
 pub fn main() {
     std::panic::set_hook(Box::new(console_error_panic_hook::hook));
     tracing_wasm::set_as_global_default();
-    compute_core::init_logging();
+    init_logging();
     let window = window().expect("no global window");
     let location = window.location();
     let origin = location.origin().unwrap_or_default() + "/";

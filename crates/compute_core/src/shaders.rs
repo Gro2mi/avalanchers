@@ -329,7 +329,7 @@ pub fn create_shader_configs(
                     BindingType::Texture {
                         multisampled: false,
                         view_dimension: wgpu::TextureViewDimension::D2,
-                        sample_type: wgpu::TextureSampleType::Uint,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
                     },
                 ),
                 // Binding 1:

@@ -10,6 +10,7 @@ name = "avalanchers"
 [dependencies]
 console_error_panic_hook = { workspace = true }
 compute_core = { workspace = true }
+simulation = { workspace = true }
 data_processor = { workspace = true }
 wasm-bindgen = { workspace = true }
 wasm-bindgen-futures = { workspace = true }

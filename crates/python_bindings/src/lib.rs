@@ -1,9 +1,11 @@
-use compute_core::{Simulation, TimestepData, settings::Settings};
+use compute_core::{TimestepData, settings::Settings};
+use data_processor::{settings_from_json_file, settings_to_json_file};
 use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray2, ToPyArray};
 use pollster::FutureExt;
 use pyo3::exceptions::{PyIOError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pythonize::depythonize;
+use simulation::{Simulation, init_logging};
 
 // A helper trait to make error conversion less verbose
 trait IntoPyResult<T> {
@@ -95,14 +97,13 @@ impl PySettings {
 
     #[staticmethod]
     pub fn from_json(path: String) -> PyResult<Self> {
-        let settings =
-            Settings::from_json(&path).map_err(|e| PyErr::new::<PyIOError, _>(e.to_string()))?;
+        let settings = settings_from_json_file(&path)
+            .map_err(|e| PyErr::new::<PyIOError, _>(e.to_string()))?;
         Ok(PySettings { inner: settings })
     }
 
     pub fn to_json(&self, path: String) -> PyResult<()> {
-        self.inner
-            .to_json(&path)
+        settings_to_json_file(&self.inner, &path)
             .map_err(|e| PyErr::new::<PyIOError, _>(e.to_string()))
     }
 
@@ -220,6 +221,10 @@ impl PySimulation {
 
     pub fn run(&mut self) -> PyResult<()> {
         self.inner.run().block_on().map_runtime_err()
+    }
+
+    pub fn prepare(&mut self) -> PyResult<()> {
+        self.inner.prepare().block_on().map_runtime_err()
     }
 
     #[getter]
@@ -376,7 +381,7 @@ type PyTexture<'py> = (
 #[pymodule]
 fn _avalanchers(m: &Bound<'_, PyModule>) -> PyResult<()> {
     pyo3_log::init();
-    compute_core::init_logging();
+    init_logging();
 
     m.add_class::<PySimulation>()?;
     m.add_class::<PySettings>()?;

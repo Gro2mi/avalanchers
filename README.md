@@ -1,6 +1,5 @@
 # Avalanche Simulation with Rust and WebGPU
 
-
 [Try it yourself!](https://gro2mi.github.io/avalanchers/ "Avalanche Simulation")
 
 Most modern browsers now support WebGPU ([check the current status](https://github.com/gpuweb/gpuweb/wiki/Implementation-Status)). The application has been tested on Windows, Linux, and Android, though support on mobile devices may still be limited.
@@ -13,7 +12,7 @@ The core has since been rewritten in Rust, with Python and WebAssembly (WASM) bi
 
 ## Get started with Python
 
-`pip install avalanchers[viz]` once pypi upload works. For now use the released wheel.
+`pip install avalanchers[viz]`
 
 ```
 import avalanchers
@@ -27,8 +26,6 @@ avalanchers.plot2d(sim, "max_velocity")
 avalanchers.plot3d(sim, "max_velocity")
 ```
 
-Test examples are from [AvaFrame](https://docs.avaframe.org/en/latest/testing.html#tests-for-model-validation) under [EUPL-1.2 license
-](https://github.com/OpenNHM/AvaFrame#EUPL-1.2-1-ov-file)
 
 ## Known Issues with Chrome
 
@@ -123,3 +120,12 @@ cargo test -p compute_core -p data_processor
 ruff check ./python
 pytest python
 ```
+
+
+## Data Sources
+
+Test examples are from [AvaFrame](https://docs.avaframe.org/en/latest/testing.html#tests-for-model-validation) under [EUPL-1.2 license
+](https://github.com/OpenNHM/AvaFrame#EUPL-1.2-1-ov-file)
+
+
+Vals data: D'Amboise Christopher J. L., Neuhauser Michael, Teich Michaela, & Fischer Jan-Thomas. (2021). Maverick-bfw/Flow_py_inputs_results: First releases (Version v1) [Data set]. Zenodo. https://doi.org/10.5281/zenodo.5154787

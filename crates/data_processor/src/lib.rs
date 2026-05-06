@@ -1,12 +1,18 @@
 use std::fs::File;
 use std::io::Cursor;
 use std::io::{self, BufWriter, Write};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::vec::Vec;
+use tiff::decoder::{Decoder, DecodingResult};
+use tiff::tags::Tag;
 
 use bincode::{Decode, Encode, config};
-#[cfg(not(target_arch = "wasm32"))]
-use std::io::BufReader;
 use std::io::Read;
+
+use compute_core::dem::{Bounds, Dem, GeoMetadata, GeoTiff, TiffData};
+use compute_core::settings::{Settings, SimSettings};
+use compute_core::utils::*;
 
 use lz4_flex::{compress_prepend_size, decompress_size_prepended};
 #[cfg(not(target_arch = "wasm32"))]
@@ -18,7 +24,7 @@ use zstd::stream::{decode_all, encode_all};
 use image::{GenericImageView, ImageReader};
 
 #[allow(unused_imports)]
-use tracing::{info, trace};
+use tracing::{debug, error, info, trace, warn};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
 pub enum DataType {
@@ -478,6 +484,11 @@ pub async fn read_file(path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>
     }
 }
 
+pub async fn read_file_to_string(path: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let bytes = read_file(path).await?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
 pub async fn read_png(path: &str) -> Result<(Vec<u8>, usize, usize), Box<dyn std::error::Error>> {
     let bytes = read_file(PathBuf::from(path).with_extension("png").to_str().unwrap()).await?;
     // Decode from memory bytes
@@ -508,18 +519,438 @@ pub async fn fetch_from_url(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Er
     Ok(bytes.to_vec())
 }
 
+pub fn read_geo_tiff(path: &str) -> Result<GeoTiff, Box<dyn std::error::Error>> {
+    let file = File::open(path)?;
+    let mut decoder = Decoder::new(BufReader::new(file))?;
+
+    let (width, height) = decoder.dimensions()?;
+
+    // --- Metadata Extraction ---
+    // Tag 33550: ModelPixelScaleTag
+    let pixel_scales = decoder
+        .get_tag_f64_vec(Tag::Unknown(33550))
+        .unwrap_or_default();
+
+    if pixel_scales.len() >= 2 {
+        // Ensure the grid is uniform for your simulation
+        assert_eq!(
+            pixel_scales[0], pixel_scales[1],
+            "Non-uniform grid detected: X and Y scales must match for square cells."
+        );
+    } else {
+        return Err("Missing pixel scale metadata (Tag 33550)".into());
+    }
+
+    // Tag 33922: ModelTiepointTag
+    let tie_points = decoder.get_tag_f64_vec(Tag::Unknown(33922))?;
+    let nodata = decoder
+        .get_tag_f64_vec(Tag::Unknown(42113)) // Try to get the tag
+        .ok() // If it fails (missing or wrong type), return None
+        .and_then(|v| v.first().copied());
+
+    let metadata = if tie_points.len() >= 6 {
+        let origin_x = tie_points[3];
+        let origin_y = tie_points[4];
+        let bounds = Bounds {
+            xmin: origin_x as f32,
+            ymax: origin_y as f32,
+            xmax: (origin_x + width as f64 * pixel_scales[0]) as f32,
+            ymin: (origin_y - height as f64 * pixel_scales[1]) as f32,
+        };
+
+        GeoMetadata {
+            width,
+            height,
+            pixel_scale: [
+                pixel_scales[0],
+                pixel_scales[1],
+                pixel_scales.get(2).cloned().unwrap_or(0.0),
+            ],
+            tiepoints: tie_points,
+            bounds,
+            cell_size: pixel_scales[0] as f32,
+            // Assuming EPSG 4326 or similar; extraction of GeoKeyDirectoryTag is complex
+            // and usually requires a dedicated crate like 'geotiff'
+            epsg_code: 0,
+            nodata,
+        }
+    } else {
+        return Err("TIFF missing GeoTIFF tie point metadata (Tag 33922).".into());
+    };
+
+    // --- Image Data Extraction ---
+    // Note: To keep GeoTiff simple, we often normalize data to f32 for simulations
+    let data = match decoder.read_image()? {
+        DecodingResult::U8(data) => TiffData::U8(data),
+        DecodingResult::U16(data) => TiffData::U16(data),
+        DecodingResult::F32(data) => TiffData::F32(data),
+        _ => return Err("Unsupported TIFF data type".into()),
+    };
+    info!(
+        "Loaded GeoTIFF: {}x{} cells at {}m resolution",
+        width, height, metadata.pixel_scale[0]
+    );
+
+    Ok(GeoTiff { metadata, data })
+}
+
+async fn load_png_as_float32(path: &str) -> Result<Dem, Box<dyn std::error::Error>> {
+    let (rgba, width, height) = read_png(path).await.expect("Failed to load PNG");
+    let bounds: Bounds = load_bounds(path).await.expect("Failed to load bounds");
+    debug!("Loaded PNG {}: {} x {}", path, width, height);
+    let mut dem = Dem {
+        width,
+        height,
+        data1d: rgba_bytes_to_f32(&rgba),
+        data: Vec::new(),
+        x: linspace(bounds.xmin, bounds.xmax, width),
+        y: linspace(bounds.ymin, bounds.ymax, height),
+        cell_size: (bounds.xmax - bounds.xmin) / (width - 1) as f32,
+        bounds,
+        map_factor: 1.0,
+        minimum_elevation: f32::INFINITY,
+    };
+    dem.data = to_2d(&dem.data1d, width, height);
+    Ok(dem)
+}
+
+fn load_tiff_as_dem(path: &str) -> Result<Dem, Box<dyn std::error::Error>> {
+    let mut tiff: GeoTiff = read_geo_tiff(path)?;
+    tiff.flip_y();
+    let mut dem = Dem {
+        width: tiff.metadata.width as usize,
+        height: tiff.metadata.height as usize,
+        data1d: tiff.data.as_f32(),
+        data: Vec::new(),
+        x: linspace(
+            tiff.metadata.bounds.xmin,
+            tiff.metadata.bounds.xmax,
+            tiff.metadata.width as usize,
+        ),
+        y: linspace(
+            tiff.metadata.bounds.ymin,
+            tiff.metadata.bounds.ymax,
+            tiff.metadata.height as usize,
+        ),
+        cell_size: tiff.metadata.cell_size,
+        bounds: tiff.metadata.bounds,
+        map_factor: 1.0,
+        minimum_elevation: f32::INFINITY, // Will be calculated later
+    };
+    dem.data = to_2d(&dem.data1d, dem.width, dem.height);
+    Ok(dem)
+}
+
+pub fn save_grid(dem: &Dem, path: &str, data: Vec<f32>) -> Result<(), std::io::Error> {
+    let params = MetaGridParams {
+        width: dem.width as u32,
+        height: dem.height as u32,
+        cell_size: dem.cell_size,
+        map_factor: dem.map_factor,
+        epsg_code: 0,
+        top: 0.0,
+        left: 0.0,
+        data_type: DataType::F32,
+        variable: Variable::Undefined,
+        unit: Unit::Dimensionless,
+    };
+    F32Data::new(&MetaGrid::new(&params), data)
+        .save(path.as_ref())
+        .unwrap_or_else(|_| panic!("Failed to save grid {}", path));
+    Ok(())
+}
+
+pub async fn load_release_areas(path: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+
+    let data: Vec<f32> = match ext.to_lowercase().as_str() {
+        "asc" => return Err("ASC format not supported yet".into()),
+        "png" => {
+            let (rgba, _, _) = read_png(path).await?;
+            rgba.iter()
+                .skip(3) // Skip the first 3 items (starts at index 3, which is the 4th item)
+                .step_by(4) // Take every 4th item from that point onward
+                .map(|&val| (val as f32) / 100.0) // Convert &u8 back to u8
+                .collect()
+        }
+        "tif" | "tiff" => {
+            let mut tiff = read_geo_tiff(path)?;
+            tiff.flip_y();
+            tiff.data.as_f32()
+        }
+        _ => return Err(format!("Unsupported release format: {}", ext).into()),
+    };
+    Ok(data)
+}
+
+pub async fn load_dem(path: &str) -> Result<Dem, Box<dyn std::error::Error>> {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+
+    let mut dem: Dem = match ext.to_lowercase().as_str() {
+        "asc" => return Err("ASC format not supported yet".into()),
+        "png" => load_png_as_float32(path).await?,
+        "tif" | "tiff" => load_tiff_as_dem(path)?,
+        _ => return Err(format!("Unsupported DEM format: {}", ext).into()),
+    };
+
+    dem.minimum_elevation = Dem::calculate_minimum_elevation(&dem.data1d);
+
+    dem.data1d = dem
+        .data1d
+        .into_iter()
+        .map(|v| {
+            if v >= dem.minimum_elevation {
+                v
+            } else {
+                f32::NAN
+            }
+        })
+        .collect();
+    assert!(
+        dem.bounds.xmin < dem.bounds.xmax,
+        "xmin ({}) must be less than or equal to xmax ({})",
+        dem.bounds.xmin,
+        dem.bounds.xmax
+    );
+    assert!(
+        dem.bounds.ymin < dem.bounds.ymax,
+        "ymin ({}) must be less than or equal to ymax ({})",
+        dem.bounds.ymin,
+        dem.bounds.ymax
+    );
+
+    Ok(dem)
+}
+
+async fn load_bounds(path: &str) -> Result<Bounds, String> {
+    let mut aabb_path = PathBuf::from(path);
+    aabb_path.set_extension("aabb");
+    let bytes = read_file(aabb_path.to_str().expect("Load bounds file failed"))
+        .await
+        .map_err(|e| e.to_string())?;
+    let reader = BufReader::new(&bytes[..]);
+    let lines = reader.lines().map_while(Result::ok);
+    Dem::parse_bounds_lines(lines).ok_or_else(|| "Failed to parse bounds from file".to_string())
+}
+
+pub async fn create_sim_settings_and_dem_from_path(file_path: &str) -> (SimSettings, Dem) {
+    let settings = Settings {
+        dem_path: Some(file_path.to_string()),
+        ..Default::default()
+    };
+    create_sim_settings_and_dem(&settings).await
+}
+pub async fn create_sim_settings_and_dem(settings: &Settings) -> (SimSettings, Dem) {
+    let dem: Dem = match &settings.dem_path {
+        Some(path) => load_dem(path.as_ref())
+            .await
+            .expect("Failed to load DEM from path"),
+        None => Dem::default(),
+    };
+    let sim_settings = SimSettings::from_settings(settings, &dem);
+    (sim_settings, dem)
+}
+
+pub fn settings_to_json_file(settings: &Settings, path: &str) -> io::Result<()> {
+    let json = settings.dumps()?;
+    let mut file = File::create(path)?;
+    file.write_all(json.as_bytes())?;
+    Ok(())
+}
+
+pub fn settings_from_json_file(path: &str) -> io::Result<Settings> {
+    let data = std::fs::read_to_string(path)?;
+    let settings = Settings::loads(&data)?;
+    Ok(settings)
+}
+
+pub async fn sim_settings_and_dem_from_json_file(file_path: &str) -> (SimSettings, Dem) {
+    let data = std::fs::read_to_string(file_path).expect("Failed to read json file");
+    let settings = Settings::loads(&data).expect("Failed to load settings from JSON file");
+    create_sim_settings_and_dem(&settings).await
+}
+
+// pub fn load_asc(path: PathBuf) -> Self {
+//     let file = File::open(path).map_err(|e| e.to_string())?;
+//     let reader = BufReader::new(file);
+//     let mut width = 0;
+//     let mut height = 0;
+//     let mut xll = 0.0;
+//     let mut yll = 0.0;
+//     let mut cell_size = 1.0;
+//     let mut nodata_value = -9999.0;
+//     let mut data: Vec<f32> = Vec::new();
+//     let mut header_lines = 0;
+//     for line in reader.lines() {
+//         let line = line.map_err(|e| e.to_string())?;
+//         let line = line.trim();
+//         if line.is_empty() {
+//             continue;
+//         }
+//         if header_lines < 6 {
+//             let parts: Vec<&str> = line.split_whitespace().collect();
+//             match parts[0].to_lowercase().as_str() {
+//                 "ncols" => width = parts[1].parse().map_err(|e| e.to_string())?,
+//                 "nrows" => height = parts[1].parse().map_err(|e| e.to_string())?,
+//                 "xllcenter" => xll = parts[1].parse().map_err(|e| e.to_string())?,
+//                 "yllcenter" => yll = parts[1].parse().map_err(|e| e.to_string())?,
+//                 "cellsize" => cell_size = parts[1].parse().map_err(|e| e.to_string())?,
+//                 "nodata_value" => nodata_value = parts[1].parse().map_err(|e| e.to_string())?,
+//                 _ => return Err(format!("Unknown header: {}", parts[0])),
+//             }
+//             header_lines += 1;
+//         } else {
+//             for v in line.split_whitespace() {
+//                 let val: f32 = v.parse().map_err(|e| e.to_string())?;
+//                 data.push(val);
+//             }
+//         }
+//     }
+//     let mut dem = Dem {
+//         width: width,
+//         height: height,
+//         data1d: data1d,
+//         data: Vec::new(),
+//         x: linspace(bounds.xmin, bounds.xmax, width),
+//         y: linspace(bounds.ymin, bounds.ymax, height),
+//         cell_size: (bounds.xmax - bounds.xmin) / (width - 1) as f32,
+//         bounds: bounds,
+//         map_factor: 1.0,
+//     };
+//     dem.data = to_2d(&dem.data1d, width, height);
+//     dem
+// }
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use half::f16;
     use pollster::block_on;
     use std::env;
+    use std::f32::consts::PI;
     use std::fs;
     use std::fs::File;
     use std::io::Write;
     use std::time::Instant;
+    use tempfile::NamedTempFile;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const PARABOLA_PATH: &str = "../../frontend/data/avaframe/avaParabola.png";
+
+    #[test_log::test]
+    fn test_dem_new_defaults() {
+        let dem = Dem::default();
+        assert_eq!(dem.width, 0);
+        assert_eq!(dem.height, 0);
+        assert_eq!(dem.bounds.xmin, 0.0);
+        assert_eq!(dem.bounds.xmax, 1.0);
+        assert_eq!(dem.bounds.ymin, 0.0);
+        assert_eq!(dem.bounds.ymax, 1.0);
+        assert_eq!(dem.cell_size, 1.0);
+        assert_eq!(dem.map_factor, 1.0);
+        assert!(dem.data1d.is_empty());
+        assert!(dem.data.is_empty());
+        assert!(dem.x.is_empty());
+        assert!(dem.y.is_empty());
+    }
+
+    #[test_log::test]
+    fn test_get_index() {
+        let mut dem: Dem = block_on(load_dem(&PARABOLA_PATH.to_string())).unwrap();
+        dem.bounds.xmin = 100.0;
+        dem.bounds.xmax = 1000.0;
+        dem.bounds.ymin = 300.0;
+        dem.bounds.ymax = 2000.0;
+        dem.cell_size = 5.0;
+        dem.map_factor = (47.0 * PI / 180.0).cos();
+        let pt = Point {
+            x: 350.0,
+            y: 800.0,
+            z: Some(0.0),
+        };
+        let (dx, dy) = dem.get_index(&pt);
+        assert_eq!(dx, 73.3139648);
+        assert_eq!(dy, 146.627930);
+    }
+
+    #[test_log::test]
+    fn test_load_png_as_float32() {
+        let path = "../../frontend/data/avaframe/avaParabola.png";
+        let dem: Dem = block_on(load_dem(path)).expect("Failed to load PNG as float32");
+        assert_eq!(dem.width, 1001);
+        assert_eq!(dem.height, 401);
+        assert_eq!(dem.bounds.xmin, 1000.0);
+        assert_eq!(dem.bounds.xmax, 6000.0);
+        assert_eq!(dem.bounds.ymin, -5000.0);
+        assert_eq!(dem.bounds.ymax, -3000.0);
+        let mut expected: Vec<f32> = vec![
+            2200.0,
+            2193.260085,
+            2186.530510,
+            2179.811275,
+            2173.102380,
+            2166.403825,
+            2159.715610,
+            2153.037735,
+            2146.370200,
+            2139.713005,
+            2133.066150,
+            2126.429636,
+        ];
+        add(&mut expected, 1.0);
+        if dem.data1d[..expected.len()] != expected[..] {
+            println!("Expected: {:?}", expected);
+            println!("Actual:   {:?}", &dem.data1d[..expected.len()]);
+        }
+        assert_eq!(dem.data1d[..expected.len()], expected[..]);
+    }
+    #[test_log::test]
+    fn test_load_bounds() {
+        let path = "../../frontend/data/avaframe/avaInclinedPlane.png";
+        let bounds = block_on(load_bounds(path)).expect("Failed to load bounds");
+        assert_eq!(bounds.xmin, 1000.0);
+        assert_eq!(bounds.xmax, 6000.0);
+        assert_eq!(bounds.ymin, -5000.0);
+        assert_eq!(bounds.ymax, -3000.0);
+    }
+
+    #[test_log::test]
+    fn test_fetch_bounds_returns_default() {
+        let path = "dummy/path";
+        let result = std::panic::catch_unwind(|| block_on(load_bounds(path)).unwrap());
+        assert!(
+            result.is_err(),
+            "Expected panic when loading bounds from a non-existent file"
+        );
+    }
+
+    #[test_log::test]
+    fn test_tiff() {
+        let tiff = read_geo_tiff("../../data/vals/PAR6_Vals_Gries_dtm_10_utm32n_bil_.tif").unwrap();
+        assert_eq!(
+            tiff.data.byte_len(),
+            (tiff.metadata.width * tiff.metadata.height * 4) as usize
+        );
+        assert_eq!(tiff.get_f32(500, 500).unwrap(), 1370.8146);
+        assert_eq!(tiff.metadata.cell_size, 10.0);
+        assert_eq!(tiff.metadata.bounds.xmin, 684366.3320);
+        assert_eq!(tiff.metadata.bounds.ymin, 5205162.1636);
+        assert_eq!(
+            tiff.metadata.bounds.xmax,
+            684366.3320 + 10.0 * tiff.metadata.width as f32
+        );
+        assert_eq!(
+            tiff.metadata.bounds.ymax,
+            5205162.1636 + 10.0 * tiff.metadata.height as f32
+        );
+    }
 
     #[tokio::test]
     async fn test_fetch_from_url_valid() {
@@ -539,6 +970,52 @@ mod tests {
         let url = "https://this.url.does.not.exist.internal";
         let result = fetch_from_url(url).await;
         assert!(result.is_err(), "Should return error for non-existent URL");
+    }
+
+    #[test_log::test]
+    fn test_settings_to_json_and_from_json() {
+        let settings = Settings {
+            dem_path: Some(String::from("dem.png")),
+            release_areas_path: Some(String::from("release_areas.png")),
+            max_steps: Some(100),
+            sim_model: Some(1),
+            friction_model: Some(2),
+            released_particles_per_cell: Some(3),
+            density: Some(4.0),
+            slab_thickness: Some(5.0),
+            friction_coefficient: Some(6.0),
+            drag_coefficient: Some(7.0),
+            cfl: Some(8.0),
+            min_slope_angle: Some(9.0),
+            max_slope_angle: Some(10.0),
+            release_min_elevation: Some(11.0),
+            velocity_threshold: Some(12.0),
+            roughness_threshold: Some(13.0),
+        };
+        let file = NamedTempFile::new().unwrap();
+        let path = file.path().to_str().unwrap();
+        settings_to_json_file(&settings, path).unwrap();
+
+        let loaded = settings_from_json_file(path).unwrap();
+        assert_eq!(loaded.dem_path, Some(String::from("dem.png")));
+        assert_eq!(
+            loaded.release_areas_path,
+            Some(String::from("release_areas.png"))
+        );
+        assert_eq!(loaded.max_steps, Some(100));
+        assert_eq!(loaded.sim_model, Some(1));
+        assert_eq!(loaded.friction_model, Some(2));
+        assert_eq!(loaded.released_particles_per_cell, Some(3));
+        assert_eq!(loaded.density, Some(4.0));
+        assert_eq!(loaded.slab_thickness, Some(5.0));
+        assert_eq!(loaded.friction_coefficient, Some(6.0));
+        assert_eq!(loaded.drag_coefficient, Some(7.0));
+        assert_eq!(loaded.cfl, Some(8.0));
+        assert_eq!(loaded.min_slope_angle, Some(9.0));
+        assert_eq!(loaded.max_slope_angle, Some(10.0));
+        assert_eq!(loaded.release_min_elevation, Some(11.0));
+        assert_eq!(loaded.velocity_threshold, Some(12.0));
+        assert_eq!(loaded.roughness_threshold, Some(13.0));
     }
 
     // Helper to create a valid minimal PNG for testing

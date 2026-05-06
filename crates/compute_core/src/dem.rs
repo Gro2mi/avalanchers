@@ -1,12 +1,6 @@
-use std::{path::PathBuf, vec::Vec};
-
 use crate::utils::*;
-use std::io::{BufRead, BufReader};
 
-use tracing::debug;
-
-use data_processor::read_file;
-
+#[derive(Default)]
 pub struct Bounds {
     pub xmin: f32,
     pub xmax: f32,
@@ -50,47 +44,6 @@ impl Default for Dem {
 }
 
 impl Dem {
-    pub async fn new(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let ext = std::path::Path::new(path)
-            .extension()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
-
-        let mut data = match ext.to_lowercase().as_str() {
-            "asc" => return Err("ASC format not supported yet".into()),
-            "png" => Self::load_png_as_float32(path).await?,
-            _ => return Err(format!("Unsupported DEM format: {}", ext).into()),
-        };
-
-        data.minimum_elevation = Self::calculate_minimum_elevation(&data.data1d);
-
-        data.data1d = data
-            .data1d
-            .into_iter()
-            .map(|v| {
-                if v >= data.minimum_elevation {
-                    v
-                } else {
-                    f32::NAN
-                }
-            })
-            .collect();
-        assert!(
-            data.bounds.xmin < data.bounds.xmax,
-            "xmin ({}) must be less than or equal to xmax ({})",
-            data.bounds.xmin,
-            data.bounds.xmax
-        );
-        assert!(
-            data.bounds.ymin < data.bounds.ymax,
-            "ymin ({}) must be less than or equal to ymax ({})",
-            data.bounds.ymin,
-            data.bounds.ymax
-        );
-
-        Ok(data)
-    }
-
     pub fn calculate_minimum_elevation(data1d: &[f32]) -> f32 {
         data1d
             .iter()
@@ -98,79 +51,6 @@ impl Dem {
             .min_by(|a: &&f32, b: &&f32| a.total_cmp(b))
             .copied() // Convert Option<&f32> to Option<f32>
             .unwrap_or(0.0) // Provide a default if no value matches the filter
-    }
-
-    // pub fn load_asc(path: PathBuf) -> Self {
-    //     let file = File::open(path).map_err(|e| e.to_string())?;
-    //     let reader = BufReader::new(file);
-    //     let mut width = 0;
-    //     let mut height = 0;
-    //     let mut xll = 0.0;
-    //     let mut yll = 0.0;
-    //     let mut cell_size = 1.0;
-    //     let mut nodata_value = -9999.0;
-    //     let mut data: Vec<f32> = Vec::new();
-    //     let mut header_lines = 0;
-    //     for line in reader.lines() {
-    //         let line = line.map_err(|e| e.to_string())?;
-    //         let line = line.trim();
-    //         if line.is_empty() {
-    //             continue;
-    //         }
-    //         if header_lines < 6 {
-    //             let parts: Vec<&str> = line.split_whitespace().collect();
-    //             match parts[0].to_lowercase().as_str() {
-    //                 "ncols" => width = parts[1].parse().map_err(|e| e.to_string())?,
-    //                 "nrows" => height = parts[1].parse().map_err(|e| e.to_string())?,
-    //                 "xllcenter" => xll = parts[1].parse().map_err(|e| e.to_string())?,
-    //                 "yllcenter" => yll = parts[1].parse().map_err(|e| e.to_string())?,
-    //                 "cellsize" => cell_size = parts[1].parse().map_err(|e| e.to_string())?,
-    //                 "nodata_value" => nodata_value = parts[1].parse().map_err(|e| e.to_string())?,
-    //                 _ => return Err(format!("Unknown header: {}", parts[0])),
-    //             }
-    //             header_lines += 1;
-    //         } else {
-    //             for v in line.split_whitespace() {
-    //                 let val: f32 = v.parse().map_err(|e| e.to_string())?;
-    //                 data.push(val);
-    //             }
-    //         }
-    //     }
-    //     let mut dem = Dem {
-    //         width: width,
-    //         height: height,
-    //         data1d: data1d,
-    //         data: Vec::new(),
-    //         x: linspace(bounds.xmin, bounds.xmax, width),
-    //         y: linspace(bounds.ymin, bounds.ymax, height),
-    //         cell_size: (bounds.xmax - bounds.xmin) / (width - 1) as f32,
-    //         bounds: bounds,
-    //         map_factor: 1.0,
-    //     };
-    //     dem.data = to_2d(&dem.data1d, width, height);
-    //     dem
-    // }
-
-    async fn load_png_as_float32(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let (rgba, width, height) = data_processor::read_png(path)
-            .await
-            .expect("Failed to load PNG");
-        let bounds: Bounds = Dem::load_bounds(path).await.expect("Failed to load bounds");
-        debug!("Loaded PNG {}: {} x {}", path, width, height);
-        let mut dem = Dem {
-            width,
-            height,
-            data1d: data_processor::rgba_bytes_to_f32(&rgba),
-            data: Vec::new(),
-            x: linspace(bounds.xmin, bounds.xmax, width),
-            y: linspace(bounds.ymin, bounds.ymax, height),
-            cell_size: (bounds.xmax - bounds.xmin) / (width - 1) as f32,
-            bounds,
-            map_factor: 1.0,
-            minimum_elevation: f32::INFINITY,
-        };
-        dem.data = to_2d(&dem.data1d, width, height);
-        Ok(dem)
     }
 
     pub fn get_index(&self, pt: &Point) -> (f32, f32) {
@@ -188,7 +68,7 @@ impl Dem {
             z,
         }
     }
-    fn parse_bounds_lines<I: Iterator<Item = String>>(lines: I) -> Option<Bounds> {
+    pub fn parse_bounds_lines<I: Iterator<Item = String>>(lines: I) -> Option<Bounds> {
         let vals: Vec<f32> = lines.filter_map(|l| l.trim().parse::<f32>().ok()).collect();
         if vals.len() == 4 {
             Some(Bounds {
@@ -201,113 +81,92 @@ impl Dem {
             None
         }
     }
+}
 
-    async fn load_bounds(path: &str) -> Result<Bounds, String> {
-        let mut aabb_path = PathBuf::from(path);
-        aabb_path.set_extension("aabb");
-        let bytes = read_file(aabb_path.to_str().expect("Load bounds file failed"))
-            .await
-            .map_err(|e| e.to_string())?;
-        let reader = BufReader::new(&bytes[..]);
-        let lines = reader.lines().map_while(Result::ok);
-        Self::parse_bounds_lines(lines)
-            .ok_or_else(|| "Failed to parse bounds from file".to_string())
+pub struct GeoMetadata {
+    pub width: u32,
+    pub height: u32,
+    /// ModelPixelScaleTag: [scale_x, scale_y, scale_z]
+    /// Defines the size of a pixel in CRS units.
+    pub pixel_scale: [f64; 3],
+    pub cell_size: f32,
+    /// ModelTiepointTag: [i, j, k, x, y, z]
+    /// Maps pixel coordinates (i,j) to CRS coordinates (x,y).
+    pub tiepoints: Vec<f64>,
+    pub bounds: Bounds,
+    /// GeoKeyDirectoryTag: The projection/CRS information (e.g., EPSG code)
+    pub epsg_code: u32,
+    /// NoData Value: Crucial for simulations to ignore empty cells
+    pub nodata: Option<f64>,
+}
+
+pub struct GeoTiff {
+    pub metadata: GeoMetadata,
+    /// The actual grid data stored in a flat Vector for performance
+    pub data: TiffData,
+}
+
+impl GeoTiff {
+    /// Calculate the world coordinates of a specific cell (row, col)
+    pub fn cell_to_world(&self, col: u32, row: u32) -> (f64, f64) {
+        let x = self.metadata.tiepoints[3] + (col as f64 * self.metadata.pixel_scale[0]);
+        let y = self.metadata.tiepoints[4] - (row as f64 * self.metadata.pixel_scale[1]);
+        (x, y)
     }
+    pub fn get_f32(&self, col: usize, row: usize) -> Option<f32> {
+        if col >= self.metadata.width as usize || row >= self.metadata.height as usize {
+            return None; // Out of bounds
+        }
+        self.data.get_f32(col, row, self.metadata.width as usize)
+    }
+    pub fn flip_y(&mut self) {
+        // Convert current data to F32 variant and take ownership
+        let mut d = std::mem::replace(&mut self.data, TiffData::U8(vec![])).as_f32();
 
-    // #[cfg(feature = "reqwest")]
-    // async fn load_bounds_from_url(url: &str) -> Result<Bounds, String> {
-    //     let client = Client::new();
-    //     let resp = client.get(url).send().await.map_err(|e| format!("Failed to fetch bounds: {}", e))?;
-    //     let text = resp.text().await.map_err(|e| format!("Failed to read response text: {}", e))?;
-    //     let lines = text.lines().map(|l| l.to_string());
-    //     Self::parse_bounds_lines(lines).ok_or_else(|| "Failed to parse bounds from URL".to_string())
-    // }
+        // Perform the flip
+        flip_rows_flat_vec(&mut d, self.metadata.width, self.metadata.height);
+
+        // Store it back as the F32 variant
+        self.data = TiffData::F32(d);
+    }
+}
+
+#[derive(Clone)]
+pub enum TiffData {
+    U8(Vec<u8>),
+    U16(Vec<u16>),
+    F32(Vec<f32>),
+}
+
+impl TiffData {
+    pub fn as_f32(self) -> Vec<f32> {
+        match self {
+            Self::U8(v) => v.into_iter().map(|x| x as f32).collect(),
+            Self::U16(v) => v.into_iter().map(|x| x as f32).collect(),
+            Self::F32(v) => v, // No allocation/copy here!
+        }
+    }
+    pub fn byte_len(&self) -> usize {
+        match self {
+            TiffData::U8(v) => v.len() * std::mem::size_of::<u8>(),
+            TiffData::U16(v) => v.len() * std::mem::size_of::<u16>(),
+            TiffData::F32(v) => v.len() * std::mem::size_of::<f32>(),
+        }
+    }
+    pub fn get_f32(&self, col: usize, row: usize, width: usize) -> Option<f32> {
+        let index = row * width + col;
+
+        match self {
+            TiffData::U8(v) => v.get(index).map(|&val| val as f32),
+            TiffData::U16(v) => v.get(index).map(|&val| val as f32),
+            TiffData::F32(v) => v.get(index).copied(),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::f32::consts::PI;
-    const PARABOLA_PATH: &str = "../../frontend/data/avaframe/avaParabola.png";
-    use pollster::block_on;
-
-    #[test_log::test]
-    fn test_dem_new_defaults() {
-        let dem = Dem::default();
-        assert_eq!(dem.width, 0);
-        assert_eq!(dem.height, 0);
-        assert_eq!(dem.bounds.xmin, 0.0);
-        assert_eq!(dem.bounds.xmax, 1.0);
-        assert_eq!(dem.bounds.ymin, 0.0);
-        assert_eq!(dem.bounds.ymax, 1.0);
-        assert_eq!(dem.cell_size, 1.0);
-        assert_eq!(dem.map_factor, 1.0);
-        assert!(dem.data1d.is_empty());
-        assert!(dem.data.is_empty());
-        assert!(dem.x.is_empty());
-        assert!(dem.y.is_empty());
-    }
-
-    #[test_log::test]
-    fn test_get_index() {
-        let mut dem: Dem = block_on(Dem::new(&PARABOLA_PATH.to_string())).unwrap();
-        dem.bounds.xmin = 100.0;
-        dem.bounds.xmax = 1000.0;
-        dem.bounds.ymin = 300.0;
-        dem.bounds.ymax = 2000.0;
-        dem.cell_size = 5.0;
-        dem.map_factor = (47.0 * PI / 180.0).cos();
-        let pt = Point {
-            x: 350.0,
-            y: 800.0,
-            z: Some(0.0),
-        };
-        let (dx, dy) = dem.get_index(&pt);
-        assert_eq!(dx, 73.3139648);
-        assert_eq!(dy, 146.627930);
-    }
-
-    #[test_log::test]
-    fn test_load_png_as_float32() {
-        let path = "../../frontend/data/avaframe/avaParabola.png";
-        let dem: Dem =
-            block_on(Dem::load_png_as_float32(path)).expect("Failed to load PNG as float32");
-        assert_eq!(dem.width, 1001);
-        assert_eq!(dem.height, 401);
-        assert_eq!(dem.bounds.xmin, 1000.0);
-        assert_eq!(dem.bounds.xmax, 6000.0);
-        assert_eq!(dem.bounds.ymin, -5000.0);
-        assert_eq!(dem.bounds.ymax, -3000.0);
-        let mut expected: Vec<f32> = vec![
-            2200.0,
-            2193.260085,
-            2186.530510,
-            2179.811275,
-            2173.102380,
-            2166.403825,
-            2159.715610,
-            2153.037735,
-            2146.370200,
-            2139.713005,
-            2133.066150,
-            2126.429636,
-        ];
-        add(&mut expected, 1.0);
-        if dem.data1d[..expected.len()] != expected[..] {
-            println!("Expected: {:?}", expected);
-            println!("Actual:   {:?}", &dem.data1d[..expected.len()]);
-        }
-        assert_eq!(dem.data1d[..expected.len()], expected[..]);
-    }
-    #[test_log::test]
-    fn test_load_bounds() {
-        let path = "../../frontend/data/avaframe/avaInclinedPlane.png";
-        let bounds = block_on(Dem::load_bounds(path)).expect("Failed to load bounds");
-        assert_eq!(bounds.xmin, 1000.0);
-        assert_eq!(bounds.xmax, 6000.0);
-        assert_eq!(bounds.ymin, -5000.0);
-        assert_eq!(bounds.ymax, -3000.0);
-    }
     #[test_log::test]
     fn test_interpolate_elevation_flat() {
         // Flat DEM: all elevations are 10.0
@@ -340,14 +199,95 @@ mod tests {
         let interp = dem.interpolate_elevation(&pt);
         assert!((interp.z.unwrap() - 10.0).abs() < 1e-6);
     }
+    fn create_mock_metadata(width: u32, height: u32) -> GeoMetadata {
+        GeoMetadata {
+            width,
+            height,
+            // 1 pixel = 10.0 units in world space
+            pixel_scale: [10.0, 10.0, 0.0],
+            cell_size: 10.0,
+            // Tiepoint maps pixel (0,0) to world (500.0, 1000.0)
+            // Format: [i, j, k, x, y, z]
+            tiepoints: vec![0.0, 0.0, 0.0, 500.0, 1000.0, 0.0],
+            bounds: Bounds::default(), // Assuming Bounds has a default
+            epsg_code: 4326,
+            nodata: Some(-9999.0),
+        }
+    }
+
+    #[test]
+    fn test_cell_to_world_calculation() {
+        let meta = create_mock_metadata(100, 100);
+        let geotiff = GeoTiff {
+            metadata: meta,
+            data: TiffData::U8(vec![0; 10000]),
+        };
+
+        // Origin (0,0) should match tiepoint (500, 1000)
+        let (x0, y0) = geotiff.cell_to_world(0, 0);
+        assert_eq!(x0, 500.0);
+        assert_eq!(y0, 1000.0);
+
+        // Move 2 pixels right (2 * 10.0) and 3 pixels down (3 * 10.0)
+        // Note: Y usually decreases as row index increases in GeoTIFFs
+        let (x1, y1) = geotiff.cell_to_world(2, 3);
+        assert_eq!(x1, 520.0);
+        assert_eq!(y1, 970.0);
+    }
+
+    #[test]
+    fn test_tiff_data_indexing_u8() {
+        let width = 2;
+        let data = TiffData::U8(vec![
+            10, 20, // Row 0
+            30, 40, // Row 1
+        ]);
+
+        assert_eq!(data.get_f32(0, 0, width), Some(10.0));
+        assert_eq!(data.get_f32(1, 0, width), Some(20.0));
+        assert_eq!(data.get_f32(0, 1, width), Some(30.0));
+        assert_eq!(data.get_f32(5, 5, width), None); // Out of bounds
+    }
+
+    #[test]
+    fn test_tiff_data_indexing_f32() {
+        let width = 3;
+        let data = TiffData::F32(vec![1.1, 2.2, 3.3, 4.4, 5.5, 6.6]);
+
+        assert_eq!(data.get_f32(1, 1, width), Some(5.5));
+    }
+
+    #[test]
+    fn test_byte_len() {
+        let u8_data = TiffData::U8(vec![0, 0, 0]);
+        let u16_data = TiffData::U16(vec![0, 0, 0]);
+        let f32_data = TiffData::F32(vec![0.0, 0.0, 0.0]);
+
+        assert_eq!(u8_data.byte_len(), 3);
+        assert_eq!(u16_data.byte_len(), 6);
+        assert_eq!(f32_data.byte_len(), 12);
+    }
+
+    #[test]
+    fn test_as_f32_variant_check() {
+        let f32_vec = vec![1.0, 2.0];
+        let data_f32 = TiffData::F32(f32_vec.clone());
+        let data_u8 = TiffData::U8(vec![1, 2]);
+
+        assert_eq!(data_f32.as_f32(), f32_vec);
+        assert_eq!(data_u8.as_f32(), vec![1.0, 2.0]);
+    }
 
     #[test_log::test]
-    fn test_fetch_bounds_returns_default() {
-        let path = "dummy/path";
-        let result = std::panic::catch_unwind(|| block_on(Dem::load_bounds(path)).unwrap());
-        assert!(
-            result.is_err(),
-            "Expected panic when loading bounds from a non-existent file"
-        );
+    fn test_geotiff_get_f32_integration() {
+        let meta = create_mock_metadata(2, 2);
+        let geotiff = GeoTiff {
+            metadata: meta,
+            data: TiffData::U16(vec![100, 200, 300, 400]),
+        };
+
+        // Test getting value through the high-level GeoTiff struct
+        assert_eq!(geotiff.get_f32(1, 1), Some(400.0));
+        assert_eq!(geotiff.get_f32(2, 0), None); // OOB width
     }
 }

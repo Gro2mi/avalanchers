@@ -372,9 +372,88 @@ impl Timer {
     }
 }
 
+pub fn flip_rows_flat_vec<T>(data: &mut [T], width: u32, height: u32) {
+    // fn flip_y<T>(data: &mut [T], width: usize, height: usize) {
+    let height = height as usize;
+    if height < 2 {
+        return;
+    }
+
+    // row_size is the number of elements (T) per row
+    let row_size = width as usize;
+
+    for i in 0..height / 2 {
+        let top_idx = i * row_size;
+        let bottom_idx = (height - 1 - i) * row_size;
+
+        // Split the slice into two parts to allow swapping between them
+        let (left, right) = data.split_at_mut(bottom_idx);
+        let top_row = &mut left[top_idx..top_idx + row_size];
+        let bottom_row = &mut right[..row_size];
+
+        top_row.swap_with_slice(bottom_row);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn test_flip_even_rows() {
+        // 2x4 matrix (width 2, height 4)
+        let mut data = vec![
+            1, 2, // Row 0
+            3, 4, // Row 1
+            5, 6, // Row 2
+            7, 8, // Row 3
+        ];
+        flip_rows_flat_vec(&mut data, 2, 4);
+
+        let expected = vec![
+            7, 8, // Row 3 -> 0
+            5, 6, // Row 2 -> 1
+            3, 4, // Row 1 -> 2
+            1, 2, // Row 0 -> 3
+        ];
+        assert_eq!(data, expected);
+    }
+
+    #[test]
+    fn test_flip_odd_rows() {
+        // 3x3 matrix (width 3, height 3)
+        let mut data = vec![
+            1, 2, 3, // Row 0
+            4, 5, 6, // Row 1 (Middle - should stay)
+            7, 8, 9, // Row 2
+        ];
+        flip_rows_flat_vec(&mut data, 3, 3);
+
+        let expected = vec![7, 8, 9, 4, 5, 6, 1, 2, 3];
+        assert_eq!(data, expected);
+    }
+
+    #[test]
+    fn test_single_row() {
+        let mut data = vec![1, 2, 3, 4];
+        let original = data.clone();
+        flip_rows_flat_vec(&mut data, 4, 1);
+        assert_eq!(data, original, "Single row should remain unchanged");
+    }
+
+    #[test]
+    fn test_empty_data() {
+        let mut data: Vec<i32> = vec![];
+        flip_rows_flat_vec(&mut data, 0, 0);
+        assert!(data.is_empty());
+    }
+
+    #[test]
+    fn test_strings() {
+        let mut data = vec!["a", "b", "c", "d"];
+        // 1x4 matrix
+        flip_rows_flat_vec(&mut data, 1, 4);
+        assert_eq!(data, vec!["d", "c", "b", "a"]);
+    }
 
     #[test_log::test]
     fn test_bilinear_interpolate_center() {

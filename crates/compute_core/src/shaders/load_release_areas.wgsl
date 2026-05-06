@@ -3,7 +3,7 @@ struct AtomicValue {
     value: atomic<u32>,
 };
 
-@group(0) @binding(0) var release_areas_in: texture_2d<u32>;
+@group(0) @binding(0) var release_areas_in: texture_2d<f32>;
 
 @group(0) @binding(1) var release_areas_out: texture_storage_2d<rgba32float, write>;
 @group(0) @binding(2) var<storage, read_write> number_release_cells: AtomicValue;
@@ -16,7 +16,7 @@ fn load_release_areas(@builtin(global_invocation_id) id: vec3<u32>) {
     if (id.x >= gridSize.x || id.y >= gridSize.y) {
         return;
     }
-    let release_thickness = f32(textureLoad(release_areas_in, id.xy, 0).a) / 100.0;
+    let release_thickness = f32(textureLoad(release_areas_in, id.xy, 0).r);
     // this can be sped up with workgroups
     if (release_thickness > 0.01){
         textureStore(release_areas_out, id.xy, vec4f(release_thickness, 0.0, 0.0, 0.0));

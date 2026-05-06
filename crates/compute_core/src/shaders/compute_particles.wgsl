@@ -204,10 +204,7 @@ fn compute_particles(
     //     z_diff = -z_diff;
     // }
     var curvature_acceleration = z_diff * normal.z / dt / dt; // curvature acceleration
-    var g_eff = (g + curvature_acceleration);
-    if (g_eff < 0.0) {
-        g_eff = 0.0;
-    }
+    var g_eff = max(g + curvature_acceleration, 0.0);
     acceleration_normal_friction_magnitude = acceleration_by_normal_friction(g_eff * normal.z * normal, particles[particleId]);
     acceleration_friction_magnitude = acceleration_drag_friction_magnitude + acceleration_normal_friction_magnitude;
     relative_trajectory = particles[particleId].velocity * dt;
@@ -217,8 +214,6 @@ fn compute_particles(
     z_diff = new_position.z - elevation;
 
     particles[particleId].position = new_position;
-    
-        
 
     if (particleId == 0u) {
         var current: TimestepData;

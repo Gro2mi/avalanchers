@@ -164,7 +164,7 @@ fn compute_release_areas(@builtin(global_invocation_id) id: vec3<u32>) {
         textureStore(release_areas_texture, tex_pos, vec4f(0f, gpx_mask, predictor, 0f));
     } else {
         // release cell
-        textureStore(release_areas_texture, tex_pos, vec4f(1, gpx_mask, predictor, 0f));
+        textureStore(release_areas_texture, tex_pos, vec4f(sim_settings.slab_thickness, gpx_mask, predictor, 0f));
         atomicAdd(&number_release_cells.value, 1u);
         debug[0] = f32(sim_settings.slab_thickness);
     }

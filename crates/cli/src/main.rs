@@ -1,7 +1,8 @@
 // compute_cli/src/main.rs
 use anyhow::Result;
 use clap::Parser;
-use compute_core::{Simulation, settings::Settings}; // Import from
+use compute_core::settings::Settings;
+use simulation::{Simulation, init_logging};
 use std::path::PathBuf;
 use std::{env, time::Instant};
 use tracing::{debug, error, info, warn};
@@ -15,7 +16,7 @@ struct Args {
 }
 
 fn main() -> Result<()> {
-    compute_core::init_logging();
+    init_logging();
     let start = Instant::now();
     match env::current_dir() {
         Ok(path) => debug!("Current working directory: {}", path.display()),

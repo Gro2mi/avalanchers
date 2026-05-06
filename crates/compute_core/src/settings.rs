@@ -1,10 +1,9 @@
 use bytemuck::{Pod, Zeroable}; // Ensure bytemuck has the "derive" feature enabled in Cargo.toml
 use serde::{Deserialize, Serialize};
-use std::fs;
 use std::io::{self, Write};
+use std::{fmt, fs};
 
 use crate::dem::Dem;
-use std::fmt;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable, Serialize, Deserialize)]
@@ -43,7 +42,7 @@ impl SimSettings {
         Self {
             max_steps: 3000,
             sim_model: 0,
-            friction_model: FrictionModel::VoellmyMinShear.as_int(),
+            friction_model: FrictionModel::Voellmy.as_int(),
             released_particles_per_cell: 8,
             grid_shape_x: 1,
             grid_shape_y: 1,
@@ -55,8 +54,8 @@ impl SimSettings {
             drag_coefficient: 4000.0,
             cfl: 0.5,
             cell_size: 1.0,
-            min_slope_angle: 35.0,
-            max_slope_angle: 45.0,
+            min_slope_angle: 28.0,
+            max_slope_angle: 60.0,
             release_min_elevation: 1500.0,
             velocity_threshold: 1e-6,
             roughness_threshold: 0.01,
@@ -110,7 +109,7 @@ impl SimSettings {
         if let Some(val) = patch.max_slope_angle {
             settings.max_slope_angle = val;
         }
-        if let Some(val) = patch.min_elevation {
+        if let Some(val) = patch.release_min_elevation {
             settings.release_min_elevation = val;
         }
         if let Some(val) = patch.velocity_threshold {
@@ -176,7 +175,7 @@ pub struct Settings {
     pub cfl: Option<f32>,
     pub min_slope_angle: Option<f32>,
     pub max_slope_angle: Option<f32>,
-    pub min_elevation: Option<f32>,
+    pub release_min_elevation: Option<f32>,
     pub velocity_threshold: Option<f32>,
     pub roughness_threshold: Option<f32>,
 }
@@ -200,35 +199,6 @@ impl Settings {
         Ok(settings)
     }
 
-    pub fn to_json(&self, path: &str) -> io::Result<()> {
-        let json = self.dumps()?;
-        let mut file = fs::File::create(path)?;
-        file.write_all(json.as_bytes())?;
-        Ok(())
-    }
-
-    pub async fn create_from_json(file_path: &str) -> (SimSettings, Dem) {
-        let settings =
-            Settings::from_json(file_path).expect("Failed to load settings from JSON file");
-        settings.create().await
-    }
-    pub async fn create_from_path(file_path: &str) -> (SimSettings, Dem) {
-        let settings = Settings {
-            dem_path: Some(file_path.to_string()),
-            ..Default::default()
-        };
-        settings.create().await
-    }
-    pub async fn create(&self) -> (SimSettings, Dem) {
-        let dem = match &self.dem_path {
-            Some(path) => Dem::new(path.as_ref())
-                .await
-                .expect("Failed to load DEM from path"),
-            None => Dem::default(),
-        };
-        let sim_settings = SimSettings::from_settings(self, &dem);
-        (sim_settings, dem)
-    }
     pub fn get_sim_settings(&self) -> SimSettings {
         SimSettings::from_settings(self, &Dem::default())
     }
@@ -262,10 +232,7 @@ mod tests {
         let settings = SimSettings::new();
         assert_eq!(settings.max_steps, 3000);
         assert_eq!(settings.sim_model, 0);
-        assert_eq!(
-            settings.friction_model,
-            FrictionModel::VoellmyMinShear.as_int()
-        );
+        assert_eq!(settings.friction_model, FrictionModel::Voellmy.as_int());
         assert_eq!(settings.released_particles_per_cell, 8);
         assert_eq!(settings.grid_shape_x, 1);
         assert_eq!(settings.grid_shape_y, 1);
@@ -277,8 +244,8 @@ mod tests {
         assert_eq!(settings.drag_coefficient, 4000.0);
         assert_eq!(settings.cfl, 0.5);
         assert_eq!(settings.cell_size, 1.0);
-        assert_eq!(settings.min_slope_angle, 35.0);
-        assert_eq!(settings.max_slope_angle, 45.0);
+        assert_eq!(settings.min_slope_angle, 28.0);
+        assert_eq!(settings.max_slope_angle, 60.0);
         assert_eq!(settings.release_min_elevation, 1500.0);
         assert_eq!(settings.velocity_threshold, 1e-6);
         assert_eq!(settings.roughness_threshold, 0.01);
@@ -318,7 +285,7 @@ mod tests {
             cfl: Some(0.9),
             min_slope_angle: Some(10.0),
             max_slope_angle: Some(20.0),
-            min_elevation: Some(100.0),
+            release_min_elevation: Some(100.0),
             velocity_threshold: Some(0.001),
             roughness_threshold: Some(0.002),
             dem_path: Some(String::from("dem.png")),
@@ -377,52 +344,6 @@ mod tests {
             assert_eq!(variant.as_int(), i as u32);
         }
         assert_eq!(FrictionModel::from_int(99), None);
-    }
-
-    #[test_log::test]
-    fn test_settings_to_json_and_from_json() {
-        let settings = Settings {
-            dem_path: Some(String::from("dem.png")),
-            release_areas_path: Some(String::from("release_areas.png")),
-            max_steps: Some(100),
-            sim_model: Some(1),
-            friction_model: Some(2),
-            released_particles_per_cell: Some(3),
-            density: Some(4.0),
-            slab_thickness: Some(5.0),
-            friction_coefficient: Some(6.0),
-            drag_coefficient: Some(7.0),
-            cfl: Some(8.0),
-            min_slope_angle: Some(9.0),
-            max_slope_angle: Some(10.0),
-            min_elevation: Some(11.0),
-            velocity_threshold: Some(12.0),
-            roughness_threshold: Some(13.0),
-        };
-        let file = NamedTempFile::new().unwrap();
-        let path = file.path().to_str().unwrap();
-        settings.to_json(path).unwrap();
-
-        let loaded = Settings::from_json(path).unwrap();
-        assert_eq!(loaded.dem_path, Some(String::from("dem.png")));
-        assert_eq!(
-            loaded.release_areas_path,
-            Some(String::from("release_areas.png"))
-        );
-        assert_eq!(loaded.max_steps, Some(100));
-        assert_eq!(loaded.sim_model, Some(1));
-        assert_eq!(loaded.friction_model, Some(2));
-        assert_eq!(loaded.released_particles_per_cell, Some(3));
-        assert_eq!(loaded.density, Some(4.0));
-        assert_eq!(loaded.slab_thickness, Some(5.0));
-        assert_eq!(loaded.friction_coefficient, Some(6.0));
-        assert_eq!(loaded.drag_coefficient, Some(7.0));
-        assert_eq!(loaded.cfl, Some(8.0));
-        assert_eq!(loaded.min_slope_angle, Some(9.0));
-        assert_eq!(loaded.max_slope_angle, Some(10.0));
-        assert_eq!(loaded.min_elevation, Some(11.0));
-        assert_eq!(loaded.velocity_threshold, Some(12.0));
-        assert_eq!(loaded.roughness_threshold, Some(13.0));
     }
 
     #[test_log::test]
