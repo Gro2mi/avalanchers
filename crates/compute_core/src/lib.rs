@@ -3,8 +3,10 @@ use crate::buffers::{
 };
 use crate::shaders::{ComputeShaderConfig, ShaderName, generate_shader_report};
 use anyhow::{Ok, Result, anyhow};
+use std::cmp::min;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use wgpu::util::DeviceExt;
 use wgpu::{
     Adapter, BindingResource, BufferUsages, CommandEncoderDescriptor, ComputePassDescriptor,
     Device, DeviceDescriptor, Extent3d, Features, Instance, InstanceDescriptor, Limits,
@@ -259,23 +261,17 @@ impl TimestepData {
         soa.travel_distance.push(0.0);
         soa.cfl.push(0.0);
 
-        for (n, item) in aos_data
-            .iter()
-            .skip(1)
-            .take(soa.velocity_magnitude.len() - 1)
-            .enumerate()
-        {
-            let prev_pos = soa.position[n];
-            let dist = magnitude_diff(&item.position, &prev_pos);
+        for n in 1..soa.position.len() {
+            let prev_pos = soa.position[n - 1];
+            let curr_pos = soa.position[n];
 
-            // Add current dt to the previous accumulated time
-            soa.time.push(soa.time[n] + item.dt);
+            let dist = magnitude_diff(&curr_pos, &prev_pos);
+
+            soa.time.push(soa.time[n - 1] + soa.dt[n]);
             soa.step_distance.push(dist);
-            soa.travel_distance.push(soa.travel_distance[n] + dist);
-
-            // CFL Calculation
+            soa.travel_distance.push(soa.travel_distance[n - 1] + dist);
             soa.cfl
-                .push(soa.velocity_magnitude[n + 1] * item.dt / cell_size);
+                .push(soa.velocity_magnitude[n] * soa.dt[n] / cell_size);
         }
 
         soa
@@ -297,11 +293,7 @@ fn magnitude_diff(a: &[f32; 3], b: &[f32; 3]) -> f32 {
     ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
 }
 
-pub struct WorkgroupSize {}
-impl WorkgroupSize {
-    const SIZE_1D: u32 = 64;
-    const SIZE_2D: u32 = 16;
-}
+const WORKGROUP_SIZE_2D: u32 = 16;
 
 pub struct ComputeOrchestrator {
     pub instance: Instance,
@@ -312,6 +304,8 @@ pub struct ComputeOrchestrator {
     pub sampler: Sampler,
     pub max_texture_size: u32,
     pub max_storage_buffer_binding_size: u64,
+    pub max_particles: u64,
+    pub max_compute_invocations_per_workgroup: u32,
     texture_size: Extent3d,
     shader_configs: HashMap<ShaderName, ComputeShaderConfig>,
     dispatch_number_workgroups_x_2d: u32,
@@ -373,27 +367,55 @@ impl ComputeOrchestrator {
                 info.name
             ),
         }
+        let limits = adapter.limits();
         info!("GPU Name    : {}", info.name);
         debug!("Driver      : {}", info.driver);
         debug!("Backend     : {:?}", info.backend);
         debug!("Device Type : {:?}", info.device_type);
-        trace!("Adapter limits: {:?}", adapter.limits());
+        trace!("Adapter limits: {:?}", limits);
 
-        let max_texture_size = adapter.limits().max_texture_dimension_2d;
-        let max_storage_buffer_binding_size = adapter.limits().max_storage_buffer_binding_size;
+        let max_texture_size = limits.max_texture_dimension_2d;
+        let max_storage_buffer_binding_size = limits.max_storage_buffer_binding_size;
+        let max_buffer_size = limits.max_buffer_size;
+        let max_compute_invocations_per_workgroup = min(
+            limits.max_compute_invocations_per_workgroup,
+            limits.max_compute_workgroup_size_x,
+        );
         debug!(
             "Adapter limits: 
                                     - Max Compute Workgroup Size X: {:?}
                                     - Max Compute Invocations Per Workgroup: {:?} 
                                     - Max Storage Buffer Binding Size: {:.2} GB
                                     - Max Buffer Size: {:.2} GB
-                                    - Max Texture Dimension 2D: {:?}",
-            adapter.limits().max_compute_workgroup_size_x,
-            adapter.limits().max_compute_invocations_per_workgroup,
+                                    - Max Texture Dimension 2D: {:?}
+                                    - Max Compute Workgroups per Dimension: {:?}",
+            limits.max_compute_workgroup_size_x,
+            max_compute_invocations_per_workgroup,
             max_storage_buffer_binding_size as f64 / 1024.0 / 1024.0 / 1024.0,
-            adapter.limits().max_buffer_size as f64 / 1024.0 / 1024.0 / 1024.0,
-            max_texture_size
+            max_buffer_size as f64 / 1024.0 / 1024.0 / 1024.0,
+            max_texture_size,
+            limits.max_compute_workgroups_per_dimension
         );
+
+        let buffer_limit = max_storage_buffer_binding_size / Particle::BYTE_SIZE as u64;
+        let compute_limit =
+            limits.max_compute_workgroups_per_dimension * max_compute_invocations_per_workgroup;
+        let max_particles = min(buffer_limit, compute_limit as u64);
+        info!(
+            "Maximum number of particles that can be simulated with current GPU: {} (limited by {})",
+            max_particles,
+            if max_particles == buffer_limit {
+                "storage buffer binding size"
+            } else {
+                "compute shader dispatch limits"
+            }
+        );
+        trace!(
+            "Maximum number of cells that can be simulated with current GPU: {}, every {}th cell can have a single particle",
+            max_texture_size * max_texture_size,
+            (max_texture_size * max_texture_size) as f32 / max_particles as f32
+        );
+
         let mut required_features = Features::FLOAT32_FILTERABLE;
 
         // Only request timestamps if the runner actually supports them
@@ -406,12 +428,13 @@ impl ComputeOrchestrator {
                 label: Some("Compute Device"),
                 required_features,
                 required_limits: Limits {
-                    max_compute_workgroup_size_x: WorkgroupSize::SIZE_1D,
-                    max_compute_workgroup_size_y: WorkgroupSize::SIZE_2D,
+                    max_compute_workgroup_size_x: max_compute_invocations_per_workgroup,
+                    max_compute_workgroup_size_y: WORKGROUP_SIZE_2D,
                     max_compute_workgroup_size_z: 1,
-                    max_compute_invocations_per_workgroup: WorkgroupSize::SIZE_2D
-                        * WorkgroupSize::SIZE_2D, // 256
+                    max_compute_invocations_per_workgroup,
                     max_storage_buffer_binding_size,
+                    max_buffer_size,
+                    max_storage_buffers_per_shader_stage: 10,
                     ..Limits::default()
                 },
                 experimental_features: wgpu::ExperimentalFeatures::default(),
@@ -421,8 +444,12 @@ impl ComputeOrchestrator {
             .await
             .expect("Failed to create device and queue");
 
+        device.set_device_lost_callback(move |reason, message| {
+            error!("Device lost! Reason: {:?}, Message: {}", reason, message);
+        });
         let buffers = ComputeBuffers::new();
-        let shader_configs = shaders::create_shader_configs(&device)?;
+        let shader_configs =
+            shaders::create_shader_configs(&device, max_compute_invocations_per_workgroup)?;
         let texture_size = Extent3d::default();
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Linear Sampler"),
@@ -450,6 +477,8 @@ impl ComputeOrchestrator {
             sampler,
             max_texture_size,
             max_storage_buffer_binding_size,
+            max_compute_invocations_per_workgroup,
+            max_particles,
             dispatch_number_workgroups_x_2d: 0,
             dispatch_number_workgroups_y_2d: 0,
             dispatch_number_workgroups_1d: 0,
@@ -565,9 +594,9 @@ impl ComputeOrchestrator {
         };
 
         self.dispatch_number_workgroups_x_2d =
-            sim_settings.grid_shape_x.div_ceil(WorkgroupSize::SIZE_2D);
+            sim_settings.grid_shape_x.div_ceil(WORKGROUP_SIZE_2D);
         self.dispatch_number_workgroups_y_2d =
-            sim_settings.grid_shape_y.div_ceil(WorkgroupSize::SIZE_2D);
+            sim_settings.grid_shape_y.div_ceil(WORKGROUP_SIZE_2D);
 
         self.buffers = create_buffers_and_texture_descriptions(&self.device, self.texture_size);
 
@@ -683,9 +712,9 @@ impl ComputeOrchestrator {
         let texture_usage_input = TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST;
 
         self.dispatch_number_workgroups_x_2d =
-            sim_settings.grid_shape_x.div_ceil(WorkgroupSize::SIZE_2D);
+            sim_settings.grid_shape_x.div_ceil(WORKGROUP_SIZE_2D);
         self.dispatch_number_workgroups_y_2d =
-            sim_settings.grid_shape_y.div_ceil(WorkgroupSize::SIZE_2D);
+            sim_settings.grid_shape_y.div_ceil(WORKGROUP_SIZE_2D);
 
         self.buffers
             .add_texture_with_data(
@@ -726,20 +755,10 @@ impl ComputeOrchestrator {
     ) -> Result<()> {
         let particle_buffer_size = number_release_particles as usize * Particle::BYTE_SIZE;
         assert!(
-            particle_buffer_size as u64 <= self.max_storage_buffer_binding_size,
-            "Particle buffer size {} bytes exceeds max storage buffer binding size of {} bytes. Consider reducing the number of particles or using a GPU with more memory.",
-            particle_buffer_size,
-            self.max_storage_buffer_binding_size
-        );
-        trace!(
-            "Maximum number of particles that can be simulated with current GPU: {}",
-            self.max_storage_buffer_binding_size as usize / Particle::BYTE_SIZE
-        );
-        trace!(
-            "Maximum number of cells that can be simulated with current GPU: {}, every {}th cell can have a particle",
-            self.max_texture_size * self.max_texture_size,
-            (self.max_texture_size * self.max_texture_size) as f32
-                / (self.max_storage_buffer_binding_size as usize / Particle::BYTE_SIZE) as f32
+            number_release_particles as u64 <= self.max_particles,
+            "Number of particles {} exceeds the limit of {}. Consider reducing the number of particles or using a GPU with more memory.",
+            number_release_particles,
+            self.max_particles
         );
         self.buffers.write_buffer(
             &self.queue,
@@ -753,7 +772,7 @@ impl ComputeOrchestrator {
             (particle_buffer_size as f64 / self.max_storage_buffer_binding_size as f64) * 100.0
         );
         self.dispatch_number_workgroups_1d =
-            number_release_particles.div_ceil(WorkgroupSize::SIZE_1D);
+            number_release_particles.div_ceil(self.max_compute_invocations_per_workgroup);
         debug!(
             "Running initialize particles shader with number_release_particles: {}, dispatch_number_workgroups_1d: {}",
             number_release_particles, self.dispatch_number_workgroups_1d
@@ -819,6 +838,61 @@ impl ComputeOrchestrator {
             BufferName::SimSettings,
             sim_settings.as_bytes(),
         )?;
+
+        let indirect_dispatch_1d_buffer =
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Indirect Dispatch 1D Buffer"),
+                    contents: bytemuck::cast_slice(&[self.dispatch_number_workgroups_1d, 1, 1]),
+                    usage: wgpu::BufferUsages::INDIRECT
+                        | wgpu::BufferUsages::STORAGE
+                        | wgpu::BufferUsages::COPY_DST,
+                });
+
+        let indirect_dispatch_2d_buffer =
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Indirect Dispatch 2DBuffer"),
+                    contents: bytemuck::cast_slice(&[
+                        self.dispatch_number_workgroups_x_2d,
+                        self.dispatch_number_workgroups_y_2d,
+                        1,
+                    ]),
+                    usage: wgpu::BufferUsages::INDIRECT
+                        | wgpu::BufferUsages::STORAGE
+                        | wgpu::BufferUsages::COPY_DST,
+                });
+
+        let p2g_config = self
+            .shader_configs
+            .get(&ShaderName::P2G)
+            .expect("P2G shader config not found");
+
+        let p2g_bindgroup = p2g_config.create_bind_group(
+            &self.device,
+            &[
+                self.get_buffer_binding(BufferName::SimSettings),
+                self.get_buffer_binding(BufferName::Particles),
+                self.get_buffer_binding(BufferName::ThicknessGrid),
+                self.get_buffer_binding(BufferName::SimInfo),
+            ],
+        )?;
+
+        let grid_physics_config = self
+            .shader_configs
+            .get(&ShaderName::GridPhysics)
+            .expect("GridPhysics shader config not found");
+
+        let grid_physics_bindgroup = grid_physics_config.create_bind_group(
+            &self.device,
+            &[
+                self.get_buffer_binding(BufferName::SimSettings),
+                self.get_buffer_binding(BufferName::ThicknessGrid),
+                self.get_view(TextureName::Normals),
+                self.get_buffer_binding(BufferName::GridForces),
+            ],
+        )?;
+
         // Compute Particles Bind Group
         let compute_particles_config = self
             .shader_configs
@@ -840,6 +914,8 @@ impl ComputeOrchestrator {
                 self.get_buffer_binding(BufferName::TimestepData),
                 self.get_view(TextureName::Curvature),
                 self.get_buffer_binding(BufferName::OutDebugNormals),
+                self.get_buffer_binding(BufferName::ThicknessGrid),
+                self.get_buffer_binding(BufferName::GridForces),
             ],
         )?;
 
@@ -855,6 +931,7 @@ impl ComputeOrchestrator {
                 self.get_buffer_binding(BufferName::SimSettings),
                 self.get_buffer_binding(BufferName::SimInfo),
                 self.get_buffer_binding(BufferName::MaxVelocityGrid),
+                self.get_buffer_binding(BufferName::ThicknessGrid),
             ],
         )?;
 
@@ -874,15 +951,25 @@ impl ComputeOrchestrator {
                 });
 
             for _i in 0..sim_settings.max_steps {
+                // --- P2G ---
+                compute_pass.set_pipeline(&p2g_config.pipeline);
+                compute_pass.set_bind_group(0, &p2g_bindgroup, &[]);
+                compute_pass.dispatch_workgroups_indirect(&indirect_dispatch_1d_buffer, 0);
+
+                // --- Grid Physics ---
+                compute_pass.set_pipeline(&grid_physics_config.pipeline);
+                compute_pass.set_bind_group(0, &grid_physics_bindgroup, &[]);
+                compute_pass.dispatch_workgroups_indirect(&indirect_dispatch_2d_buffer, 0);
+
                 // --- computeParticles ---
                 compute_pass.set_pipeline(&compute_particles_config.pipeline);
                 compute_pass.set_bind_group(0, &compute_particles_bindgroup, &[]);
-                compute_pass.dispatch_workgroups(self.dispatch_number_workgroups_1d, 1, 1);
+                compute_pass.dispatch_workgroups_indirect(&indirect_dispatch_1d_buffer, 0);
 
                 // --- resetMaxVelocity ---
                 compute_pass.set_pipeline(&reset_max_velocity_config.pipeline);
                 compute_pass.set_bind_group(0, &reset_max_velocity_bind_group, &[]);
-                compute_pass.dispatch_workgroups(1, 1, 1);
+                compute_pass.dispatch_workgroups_indirect(&indirect_dispatch_2d_buffer, 0);
             }
         } // compute_pass dropped here (equivalent to end())
 

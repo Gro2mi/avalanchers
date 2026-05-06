@@ -3,6 +3,10 @@ import ssl
 import socket
 import os 
 import subprocess
+import mimetypes
+
+mimetypes.add_type("application/javascript", ".js")
+mimetypes.add_type("text/css", ".css")
 
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

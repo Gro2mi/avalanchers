@@ -1,17 +1,40 @@
-@group(0) @binding(1) var<storage, read_write> sim_info: SimInfo;
-@group(0) @binding(2) var<storage, read_write> max_velocity: AtomicValue;
-@group(0) @binding(3) var<storage, read_write> grid_h_atomic: array<atomic<u32>>;
+@group(0) @binding(1) var<storage, read_write> grid_h_atomic: array<atomic<i32>>;
+@group(0) @binding(2) var normals_texture: texture_2d<f32>;
+@group(0) @binding(3) var<storage, read_write> grid_forces: array<vec2f>;
 
 @compute @workgroup_size(WG_SIZE_2D, WG_SIZE_2D, 1)
-fn reset_max_velocity(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    if global_id.x < sim_settings.grid_shape.x && global_id.y < sim_settings.grid_shape.y {
-        if global_id.x == 0u && global_id.y == 0u {
-            sim_info.max_velocity = (f32(atomicLoad(&max_velocity.value)) / f32(MAX_VELOCITY_FACTOR)); // Load the current max velocity
-            // TODO load max h for cfl calculation, add sqrt(g*h)
-            atomicStore(&max_velocity.value, u32(0)); // Reset max velocity to 0 for the new timestep
-        }
-        atomicStore(&grid_h_atomic[xy_to_idx(global_id.x, global_id.y)], 0u); // Reset grid heights for the new timestep
-    }
+fn grid_physics(@builtin(global_invocation_id) id: vec3u) {
+    let idx = xy_to_idx(id.x, id.y);
+
+    // 1. Decode height and velocity[cite: 3]
+    let h = f32(atomicLoad(&grid_h_atomic[idx])) * INV_H_FACTOR;
+    // let u = f32(atomicLoad(&grid_mom_atomic[idx * 2])) / (h * SCALE_FACTOR + EPSILON);
+    // let v = f32(atomicLoad(&grid_mom_atomic[idx * 2 + 1])) / (h * SCALE_FACTOR + EPSILON);
+
+    // 2. Compute Divergence for Active/Passive state[cite: 3]
+    // TODO calculate divergence and earth pressure coefficient
+    // let div_u = (get_u(id.x + 1, id.y) - get_u(id.x - 1, id.y)) / (2.0 * dx);
+    // let k = calculate_k(div_u); // Returns k_act, k_pass, or 1.0 based on div_u[cite: 3]
+    let k = 1.0;
+    // 3. Lateral Pressure Force[cite: 3]
+    // Force = -0.5 * g * cos(theta) * k * gradient(h^2)
+    // TODO do I need to apply a filter to the height field to prevent noise in the gradient?
+    // e. g. h_ij = (1-alpha)h_ij + alpha/4 * (h_ij-1 + h_i+1j + h_ij+1 + h_i-1j) to smooth the height field and prevent noise in the gradient?
+    // TODO do i need a cutoff for small h to prevent noise in the gradient? if h < h_min -> h = 0
+    let grad_h2 = vec2f(
+        // TODO account for slope in x and y direction. multiply by cos_theta_x
+        (get_h2(id.x + 1, id.y) - get_h2(id.x - 1, id.y)) / (2.0 * sim_settings.cell_size),
+        (get_h2(id.x, id.y + 1) - get_h2(id.x, id.y - 1)) / (2.0 * sim_settings.cell_size)
+    );
+    // TODO do i need a slope limiter like minmod?
+    let n = textureLoad(normals_texture, id.xy, 0);
+    let slope_corrected_grad_h2 = grad_h2 * sqrt(1.0 - n.x * n.x);
+    grid_forces[idx] = -0.5 * g * n.z * k * slope_corrected_grad_h2;
+}
+
+fn get_h2(x: u32, y: u32) -> f32 {
+    let idx = xy_to_idx(x, y);
+    return pow(f32(atomicLoad(&grid_h_atomic[idx])) * INV_H_FACTOR, 2.0);
 }
 
 // import utils.wgsl;

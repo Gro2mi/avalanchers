@@ -978,7 +978,19 @@ mod tests {
             return;
         }
         let mut sim: Simulation = block_on(Simulation::new()).expect("Failed to create Simulation");
-        block_on(sim.create_example(INCLINED_PLANE_PATH)).expect("Failed to create simulation");
+        let settings = Settings {
+            dem_path: Some(INCLINED_PLANE_PATH.to_string()),
+            release_areas_path: Some(
+                INCLINED_PLANE_PATH
+                    .to_string()
+                    .replace(".png", "releaseTexture.png"),
+            ),
+            cfl: Some(0.3),
+            max_steps: Some(5000),
+            ..Default::default()
+        };
+        block_on(sim.create(settings)).expect("Failed to create simulation");
+        // block_on(sim.create_example(dem_path))
         block_on(sim.run()).expect("Failed to run simulation");
         let debug_buffer: Vec<f32> = block_on(sim.orchestrator.buffers.read_buffer(
             &sim.orchestrator.device,
@@ -1002,11 +1014,13 @@ mod tests {
 
         // particles dont stop, they fall off the DEM
         let particles = block_on(sim.fetch_particles()).expect("Failed to read particles buffer");
+        assert_eq!(particles.iter().filter(|&&x| x.stopped > 4000).count(), 0);
         assert_eq!(particles.iter().filter(|&&x| x.stopped < 2000).count(), 0);
 
         // max velocity should be above 39 m/s
         let max_velocity = block_on(sim.fetch_max_velocity()).expect("Failed to get max velocity");
-        assert!(max_velocity.max_value().unwrap() > 39.0);
+        assert!(max_velocity.max_value().unwrap() > 41.0);
+        assert!(max_velocity.max_value().unwrap() < 42.0);
         info!(
             "Max velocity after simulation: {:?}",
             max_velocity.max_value().unwrap()

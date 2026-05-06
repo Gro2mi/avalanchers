@@ -31,6 +31,8 @@ pub enum BufferName {
     // Debug buffers
     OutDebugNormals,
     OutDebugRelease,
+    ThicknessGrid,
+    GridForces,
 }
 
 impl BufferName {
@@ -48,6 +50,8 @@ impl BufferName {
             BufferName::ParticleIndex => "particle_index",
             BufferName::Particles => "particles",
             BufferName::TimestepData => "timestep_data",
+            BufferName::ThicknessGrid => "thickness_grid",
+            BufferName::GridForces => "grid_forces",
         }
     }
 }
@@ -677,6 +681,24 @@ pub fn create_buffers_and_texture_descriptions(
         device,
         BufferName::MaxVelocityGrid,
         atomic_grid_size,
+        BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+    );
+    compute_buffers.add_buffer(
+        device,
+        BufferName::ThicknessGrid,
+        atomic_grid_size,
+        BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+    );
+    compute_buffers.add_buffer(
+        device,
+        BufferName::ThicknessGrid,
+        atomic_grid_size,
+        BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+    );
+    compute_buffers.add_buffer(
+        device,
+        BufferName::GridForces,
+        atomic_grid_size * 2,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
     );
 

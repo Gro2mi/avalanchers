@@ -8,8 +8,8 @@ def create_mesh(sim):
     dem_mask = dem < sim.elevation_threshold + 1
     dem[dem_mask] = np.nan
     ny, nx = dem.shape
-    x = np.arange(nx).astype(np.float32)
-    y = np.arange(ny).astype(np.float32)
+    x = np.arange(nx).astype(np.float32) * sim.cell_size
+    y = np.arange(ny).astype(np.float32) * sim.cell_size
     x, y = np.meshgrid(x, y)
     return x, y, dem, dem_mask
 
@@ -39,7 +39,7 @@ def plot3d(sim, parameter, threshold_value=1, particle_threshold=0):
     clipped = grid.clip_scalar(value=threshold_value, scalars="Elevation", invert=False)
 
     # Vertical exaggeration
-    final_mesh = clipped.scale([sim.cell_size, sim.cell_size, 1.3], inplace=False)
+    final_mesh = clipped.scale([1, 1, 1.3], inplace=False)
 
 
     # 4. Visualization
@@ -108,6 +108,29 @@ def plot2d(sim, parameter, title="Avalanche Simulation", threshold_value=1, step
     plt.show()
     return fig, ax
 
+def calculate_dice(model_a, model_b):
+    """
+    Calculates the Sørensen-Dice coefficient for two binary numpy arrays.
+    
+    Args:
+        model_a (np.ndarray): Binary mask of the Reference Model.
+        model_b (np.ndarray): Binary mask of the Proposed Model.
+        
+    Returns:
+        float: Dice coefficient (0.0 to 1.0)
+    """
+    # Ensure the arrays are boolean for logical operations
+    mask_a = model_a > 0
+    mask_b = model_b > 0
+    
+    intersection = np.logical_and(mask_a, mask_b).sum()
+    total_area = mask_a.sum() + mask_b.sum()
+    
+    if total_area == 0:
+        return 1.0  # Both models agree on "no runout"
+        
+    return (2. * intersection) / total_area
+
 def plot_comparison_binary(sim, parameter, reference_array, threshold_value=1, particle_threshold=0, title="Avalanche Simulation Comparison"):
     import_plt()
     data = getattr(sim, parameter).astype(np.float32)
@@ -123,7 +146,7 @@ def plot_comparison_binary(sim, parameter, reference_array, threshold_value=1, p
     comparison[only_reference] = 1
     comparison[both] = 2
     comparison[only_sim] = 3
-    cmap = ListedColormap(['yellow', 'red', 'blue'])
+    cmap = ListedColormap(['red', 'magenta', 'blue'])
     cont = ax.contourf(
         x,
         y,
@@ -135,7 +158,8 @@ def plot_comparison_binary(sim, parameter, reference_array, threshold_value=1, p
     )
     cbar = fig.colorbar(cont, ax=ax, ticks=[0, 1, 2, 3], shrink=0.8, aspect=10)
     cbar.ax.set_yticklabels(["No avalanche", "reference only", "both", "sim only"])
-    ax.set_title(title)
+    ax.set_title(title + f"\nDice coefficient: {calculate_dice(reference_array, data):.4f}")
+    print(f"Dice coefficient: {calculate_dice(reference_array, data):.4f}")
     return fig, ax
 
 def plot_comparison(sim, parameter, reference_array, particle_threshold=0, title="Avalanche Simulation Comparison"):

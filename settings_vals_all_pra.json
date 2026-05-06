@@ -1,17 +1,16 @@
 {
     "dem_path": "data/vals/PAR6_Vals_Gries_dtm_10_utm32n_bil_.tif", 
-    "release_areas_path": "data/vals/release.tif", 
     "max_steps": 3000,
     "sim_model": 0,
     "friction_model": 1,
     "density": 200.0,
-    "slab_thickness": 0.50,
+    "slab_thickness": 1.0,
     "friction_coefficient": 0.155,
     "drag_coefficient": 4000.0,
     "cfl": 0.5,
-    "min_slope_angle": 31.0,
-    "max_slope_angle": 34.0,
-    "release_min_elevation": 1800.0,
+    "min_slope_angle": 28.0,
+    "max_slope_angle": 60.0,
+    "release_min_elevation": 1500.0,
     "velocity_threshold": 1e-6,
     "roughness_threshold": 0.01
 }

@@ -34,7 +34,7 @@ jupyter = [
 [tool.maturin]
 manifest-path = "crates/python_bindings/Cargo.toml"
 module-name = "avalanchers._avalanchers"
-python-source = "python"
+python-source = "python_module"
 
 [tool.pytest.ini_options]
 testpaths = ["python/tests"]
