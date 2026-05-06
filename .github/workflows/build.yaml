@@ -148,10 +148,10 @@ jobs:
         run: pip install pytest ruff
 
       - name: Python Linting
-        run: ruff check ./python
+        run: ruff check ./python_module
 
       - name: Python Tests
-        run: pytest ./python/tests
+        run: pytest ./python_module/tests
 
       # - name: Upload to codecov.io
       #   uses: codecov/codecov-action@v1.0.2
