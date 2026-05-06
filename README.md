@@ -26,7 +26,6 @@ avalanchers.plot2d(sim, "max_velocity")
 avalanchers.plot3d(sim, "max_velocity")
 ```
 
-
 ## Known Issues with Chrome
 
 * Chromium on Windows currently ignores the `high-performance` option in `powerPreference` WebGPU flag if you have multiple GPUs [[Issue](https://crbug.com/369219127)]. Options are:
@@ -98,8 +97,7 @@ wasm-pack build crates/wasm_bindings --target web --out-dir ../../frontend/js/pk
 
 ### Python
 
-1. Install module
-2. See `python avalanchers_example.py`
+`python avalanchers_example.py`
 
 ### Frontend
 
@@ -117,15 +115,13 @@ Install `pip install ruff`
 cargo fmt
 cargo clippy -- -D warnings
 cargo test -p compute_core -p data_processor
-ruff check ./python
-pytest python
+ruff check ./python_module
+pytest python_module
 ```
-
 
 ## Data Sources
 
 Test examples are from [AvaFrame](https://docs.avaframe.org/en/latest/testing.html#tests-for-model-validation) under [EUPL-1.2 license
 ](https://github.com/OpenNHM/AvaFrame#EUPL-1.2-1-ov-file)
-
 
 Vals data: D'Amboise Christopher J. L., Neuhauser Michael, Teich Michaela, & Fischer Jan-Thomas. (2021). Maverick-bfw/Flow_py_inputs_results: First releases (Version v1) [Data set]. Zenodo. https://doi.org/10.5281/zenodo.5154787
