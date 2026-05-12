@@ -60,3 +60,5 @@ serde-wasm-bindgen = "0.6"
 
 # cli
 clap = { version = "4.6", features = ["derive"] }
+
+criterion = { version = "0.5", features = ["html_reports"] }
