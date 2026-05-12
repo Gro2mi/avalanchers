@@ -142,10 +142,10 @@ async function runAndPlot() {
             await sim.create(simSettings);
             await sim.set_dem(dem.data1d,
                 dem.width,
-                dem.height, 
-                dem.cellSize, 
+                dem.height,
+                dem.cellSize,
                 dem.bounds.xmin, dem.bounds.xmax, dem.bounds.ymin, dem.bounds.ymax,
-                dem.mapFactor); 
+                dem.mapFactor);
         }
         else {
             await sim.create(simSettings);
@@ -154,10 +154,12 @@ async function runAndPlot() {
         await sim.run();
         simTimer.checkpoint('simulation');
         await sim.get_timestep_data();
+        // await sim.fetch_peak_flow_thickness();
         await sim.fetch_cell_count();
         simTimer.checkpoint('fetching data');
         plotTimestepData(sim);
         plotTrajectory(sim);
+        // plotVariable.value = 'peak_flow_thickness';
         plotVariable.value = 'cell_count';
         plotVariable.dispatchEvent(new Event('change'));
         plotTimer();
@@ -285,21 +287,6 @@ async function savePngFile(pngBlob) {
 // document.getElementById('exportResults').addEventListener('click', savePNG);
 
 async function main() {
-    const adapter = await navigator.gpu?.requestAdapter({
-        powerPreference: 'high-performance',
-        featureLevel: 'compatibility',
-    });
-
-    if (!adapter) {
-        alert("WebGPU is not supported or failed to initialize. Please use a compatible browser like Chrome.");
-        runButton.disabled = true;
-        runButton.textContent = "WebGPU not supported";
-    } else if (!adapter.features.has("float32-filterable") || (debug && !adapter.features.has("timestamp-query"))) {
-        alert("Your device has to support float32-filterable textures and timestamp-query to run this simulation.");
-        runButton.disabled = true;
-        runButton.textContent = "WebGPU features not supported";
-    }
-
     changeFrictionModel();
     const settings = getSettings();
     await sim.create(settings);
@@ -334,9 +321,9 @@ document.getElementById("gpxfile").addEventListener("change", async (e) => {
     // simSettings.setDem(dem);
     await sim.set_dem(dem.data1d,
         dem.width,
-        dem.height, 
-        dem.cell_size, 
-        dem.bounds.xmin, dem.bounds.xmax, dem.bounds.ymin, dem.bounds.ymax, 
+        dem.height,
+        dem.cell_size,
+        dem.bounds.xmin, dem.bounds.xmax, dem.bounds.ymin, dem.bounds.ymax,
         dem.mapFactor);
     resetPlots();
     plotDem(sim);
@@ -345,6 +332,28 @@ document.getElementById("gpxfile").addEventListener("change", async (e) => {
         runAndPlot();
     }
 });
+
+function withTimeout(promise, ms, label = "operation") {
+    let timer;
+
+    const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => {
+            reject(new Error(`${label} timed out after ${ms}ms`));
+        }, ms);
+    });
+
+    return Promise.race([
+        promise.finally(() => clearTimeout(timer)),
+        timeout
+    ]);
+}
+
+function checkWebGPU() {
+    if (!navigator.gpu) {
+        alert("WebGPU is not supported in this browser. Please use a compatible browser like Chrome or Edge with WebGPU enabled.");
+        throw new Error("WebGPU not supported");
+    }
+}
 
 var debug = false;
 let predefinedReleasePoints = true;
@@ -355,14 +364,37 @@ if (urlParams.get("debug") === "vscode") {
 }
 var isMobileDevice = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 
+
+checkWebGPU();
 await loadEngine().catch(console.error);
 main();
 async function loadEngine() {
     const statusEl = document.getElementById("status");
+    try {
+        statusEl.textContent = "Loading Engine...";
 
-    statusEl.textContent = "Loading Engine...";
-    window.wasm = await init();
-    sim = await WasmSimulation.new();
+        window.wasm = await init();
+
+        statusEl.textContent = "Creating Simulation...";
+        sim = await withTimeout(
+                WasmSimulation.new(),
+                5000,
+                "WasmSimulation.new"
+            );
 
     statusEl.textContent = "Engine Ready!";
+    } catch (err) {
+        console.error("WASM init failed:", err);
+
+        let msg = "Unknown error";
+
+        if (err instanceof Error) {
+            msg = err.message;
+        } else if (typeof err === "string") {
+            msg = err;
+        }
+
+        statusEl.textContent = `Engine load failed: ${msg}, check console for details.`;
+        statusEl.style.backgroundColor = "rgba(255, 0, 0, 0.8)";
+    }
 }

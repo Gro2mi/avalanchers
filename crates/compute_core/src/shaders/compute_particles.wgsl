@@ -24,15 +24,15 @@ struct TimestepData {
 @group(0) @binding(4) var tex_sampler: sampler;
 @group(0) @binding(5) var<storage, read_write> particles: array<Particle>;
 
-@group(0) @binding(6) var<storage, read_write> maxVelocity: AtomicValue;
+@group(0) @binding(6) var<storage, read_write> atomic_values: AtomicValues;
 
-@group(0) @binding(7) var<storage, read_write> atomic_cell_count_buffer: array<atomic<u32>>; // trajectory texture
-@group(0) @binding(8) var<storage, read_write> atomic_velocity_buffer: array<atomic<u32>>; // trajectory texture
+@group(0) @binding(7) var<storage, read_write> grid_cell_count_buffer: array<atomic<u32>>; // trajectory texture
+@group(0) @binding(8) var<storage, read_write> grid_peak_velocity_buffer: array<atomic<u32>>; // trajectory texture
 @group(0) @binding(9) var<storage, read_write> out_timestep_data: array<TimestepDataArray>; // trajectory data, fixed size 3
 
 @group(0) @binding(10) var curvature_texture: texture_2d<f32>;
 @group(0) @binding(11) var<storage, read_write> out_debug: array<f32>;
-@group(0) @binding(12) var<storage, read_write> grid_h_atomic: array<atomic<u32>>;
+@group(0) @binding(12) var<storage, read_write> grid_mass_atomic: array<u32>;
 @group(0) @binding(13) var<storage, read> grid_forces: array<vec2f>;
 // @group(0) @binding(11) var<storage, read_write> atomicBuffer: AtomicData;
 
@@ -90,15 +90,17 @@ fn compute_particles(
 
             let node_idx = xy_to_idx(u32(node_coords.x), u32(node_coords.y));
             interpolated_f += weight * grid_forces[node_idx];
-            interpolated_h += weight * f32(atomicLoad(&grid_h_atomic[node_idx])) * INV_H_FACTOR;
+            // interpolated_h += weight * f32(atomicLoad(&grid_mass_atomic[node_idx])) * INV_MASS_FACTOR / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size);
+
+            interpolated_h += weight * f32(grid_mass_atomic[node_idx]) * INV_MASS_FACTOR / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size) * normal.z;
         }
     }
-    var accel_lateral = vec3f(interpolated_f.x, interpolated_f.y, 0.0);
-    accel_lateral = (accel_lateral - dot(accel_lateral, normal) * normal) / 25.0;
+    var accel_lateral = vec3f(interpolated_f.x, interpolated_f.y, (normal.x * interpolated_f.x + normal.y * interpolated_f.y) / normal.z) / max(interpolated_h, 1e-6);
+    // accel_lateral = (accel_lateral - dot(accel_lateral, normal) * normal);
     var dt = sim_settings.cfl * sim_settings.cell_size / (sim_info.max_velocity + sim_settings.velocity_threshold);
     p.velocity = p.velocity + (acceleration_tangential + accel_lateral) * dt;
     var acceleration_normal_friction_magnitude = acceleration_by_normal_friction(effective_acceleration_normal, p);
-    let acceleration_drag_friction_magnitude = acceleration_by_drag_friction(effective_acceleration_normal, p);
+    let acceleration_drag_friction_magnitude = acceleration_by_drag_friction(effective_acceleration_normal, p, interpolated_h);
     var acceleration_friction_magnitude = acceleration_drag_friction_magnitude + acceleration_normal_friction_magnitude;
     let velocity_length = length(p.velocity);
     if velocity_length < acceleration_friction_magnitude * dt {
@@ -140,11 +142,11 @@ fn compute_particles(
     }
 
     let converted_velocity = u32(MAX_VELOCITY_FACTOR * length(p.velocity));
-    atomicMax(&maxVelocity.value, converted_velocity);
+    atomicMax(&atomic_values.peak_velocity, converted_velocity);
 
     let cell_index = uv_to_cell_index(new_uv);
-    atomicAdd(&atomic_cell_count_buffer[cell_index], 1u);
-    atomicMax(&atomic_velocity_buffer[cell_index], converted_velocity); // ensure that the velocity is not zero, this is needed for the next step
+    atomicAdd(&grid_cell_count_buffer[cell_index], 1u);
+    atomicMax(&grid_peak_velocity_buffer[cell_index], converted_velocity); // ensure that the velocity is not zero, this is needed for the next step
 
     if particleId == 0u {
         // atomicMax(&atomicBuffer.counter, step_count);
@@ -160,7 +162,7 @@ fn compute_particles(
         out_debug[10] = f32(sim_settings.world_size.x);
         out_debug[11] = f32(sim_settings.world_size.y);
         out_debug[12] = f32(sim_settings.friction_coefficient);
-        out_debug[13] = (f32(atomicLoad(&maxVelocity.value)) / f32(MAX_VELOCITY_FACTOR));
+        out_debug[13] = (f32(atomicLoad(&atomic_values.peak_flow_thickness)) / f32(MAX_VELOCITY_FACTOR));
         out_debug[14] = f32(uv_to_cell(new_uv).x);
         out_debug[15] = f32(uv_to_cell(new_uv).y);
         out_debug[16] = f32(uv_to_cell_index(new_uv));
@@ -191,7 +193,7 @@ fn update_output_data(trajectory: u32, timestep: u32, timestep_data: TimestepDat
 }
 
 fn acceleration_by_normal_friction(effective_acceleration_normal: vec3f, particle: Particle) -> f32 {
-    let mass_per_area = sim_settings.snow_density * particle.snow_thickness;
+    let mass_per_area = particle.mass / (sim_settings.cell_size * sim_settings.cell_size) * f32(sim_settings.released_particles_per_cell);
     let velocity_magnitude = length(particle.velocity);
     let model = sim_settings.friction_model;
     if velocity_magnitude < sim_settings.velocity_threshold || model >= 4u {
@@ -217,7 +219,7 @@ fn acceleration_by_normal_friction(effective_acceleration_normal: vec3f, particl
     return acceleration_magnitude;
 }
 
-fn acceleration_by_drag_friction(effective_acceleration_normal: vec3f, particle: Particle) -> f32 {
+fn acceleration_by_drag_friction(effective_acceleration_normal: vec3f, particle: Particle, h: f32) -> f32 {
     let model = sim_settings.friction_model;
     if model == 0u || model >= 4u {
         return 0.0f;
@@ -227,7 +229,7 @@ fn acceleration_by_drag_friction(effective_acceleration_normal: vec3f, particle:
     if velocity_magnitude2 < (velocity_threshold * velocity_threshold) {
         return 0.0f;
     }
-    let mass_per_area = sim_settings.snow_density * particle.snow_thickness;
+    let mass_per_area = particle.mass / (sim_settings.cell_size * sim_settings.cell_size) * f32(sim_settings.released_particles_per_cell);
     var shear_stress = 0.0f;
     let density_velocity_magnitude2 = sim_settings.snow_density * velocity_magnitude2;
     // friction model: 0 coulomb, 1 voellmy, 2 voellmy minshear, 3 samosAt
@@ -249,7 +251,7 @@ fn acceleration_by_drag_friction(effective_acceleration_normal: vec3f, particle:
         let b = 4.13;
         let normal_stress = length(effective_acceleration_normal) * mass_per_area;
         let rs = density_velocity_magnitude2 / (normal_stress + 0.001);
-        var div = max(particle.snow_thickness * r_inv, 1.0);
+        var div = max(h * r_inv, 1.0);
         div = log(div) * kappa_inv + b;
         shear_stress = min_shear_stress_samosat + density_velocity_magnitude2 / (div * div);
     }
@@ -279,17 +281,21 @@ const WG_SIZE_2D: u32 = 16u;
 const g: f32 = 9.81;
 const PI: f32 = 3.14159265358979323846;
 const RAD_TO_DEG: f32 = 180.0 / PI;
+
+// u32 limit is 4 294 967 296
 const MAX_VELOCITY_FACTOR: f32 = 1e7; // u32 limit is 430 m/s
-const H_FACTOR: f32 = 1e6; // u32 limit is 4.3km thickness
+const MASS_FACTOR: f32 = 1e1; // u32 limit is 4.3t thickness
+const H_FACTOR: f32 = 1e6;
 const INV_MAX_VELOCITY_FACTOR: f32 = 1 / MAX_VELOCITY_FACTOR; // u32 limit is 430 m/s
-const INV_H_FACTOR: f32 = 1 / H_FACTOR; // u32 limit is 4.3km thickness
+const INV_MASS_FACTOR: f32 = 1 / MASS_FACTOR; // u32 limit is 4.3km thickness
+const INV_H_FACTOR: f32 = 1 / H_FACTOR; 
+
+// TODO precompute often used values on the cpu and pass them as uniforms to avoid redundant calculations on the gpu
 
 struct Particle {
     position: vec3f,
     mass: f32,
     velocity: vec3f,
-    snow_thickness: f32,
-    C: mat2x2f,
     stopped: u32,
 };
 
@@ -320,8 +326,14 @@ struct SimSettings {
     roughness_threshold: f32,
 };
 
-struct AtomicValue {
-    value: atomic<u32>,
+struct AtomicValues {
+    peak_velocity: atomic<u32>,
+    peak_flow_thickness: atomic<u32>,
+    alpha: atomic<u32>,
+    travel_length: atomic<u32>,
+    release_volume: atomic<u32>,
+    number_release_cells: atomic<u32>,
+    number_release_particles: atomic<u32>,
 };
 
 @group(0) @binding(0) var<uniform> sim_settings: SimSettings;

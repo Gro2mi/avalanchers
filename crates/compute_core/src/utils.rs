@@ -1,5 +1,6 @@
 use rand::RngExt;
 use std::cmp::Ordering;
+use std::sync::{LazyLock, Mutex};
 
 use std::fmt::Write;
 use std::time::Duration;
@@ -319,6 +320,27 @@ pub struct Checkpoint {
     pub delta: Duration,
 }
 
+pub static GLOBAL_TIMER: LazyLock<Mutex<Timer>> =
+    LazyLock::new(|| Mutex::new(Timer::new("Global Simulation Timer")));
+
+pub fn timer_checkpoint(name: &str) {
+    if let Ok(mut timer) = GLOBAL_TIMER.lock() {
+        timer.checkpoint(name);
+    }
+}
+pub fn timer_new() {
+    if let Ok(mut timer) = GLOBAL_TIMER.lock() {
+        *timer = Timer::new("Global Simulation Timer");
+    }
+}
+pub fn timer_get_summary() -> String {
+    if let Ok(mut timer) = GLOBAL_TIMER.lock() {
+        timer.get_summary()
+    } else {
+        String::from("Error: Could not lock Global Timer")
+    }
+}
+
 pub struct Timer {
     label: String,
     start: Instant,
@@ -355,7 +377,7 @@ impl Timer {
         &self.checkpoints
     }
 
-    pub fn get_summary(&self) -> String {
+    pub fn get_summary(&mut self) -> String {
         let mut output = format!("Timer \"{}\" Summary:\n", self.label);
 
         for cp in &self.checkpoints {
@@ -367,7 +389,7 @@ impl Timer {
                 cp.name, cp.delta, cp.time_since_start
             );
         }
-
+        self.checkpoints = Vec::new();
         output
     }
 }

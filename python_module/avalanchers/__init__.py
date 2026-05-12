@@ -27,6 +27,9 @@ def plot3d(sim, parameter, threshold_value=1, particle_threshold=0):
     data[dem_mask] = np.nan
     data[data < threshold_value] = np.nan
     data[sim.cell_count < particle_threshold * sim.released_particles_per_cell] = np.nan
+
+    if parameter == "cell_count":
+        data = np.log10(data)
     
     # 2. Create the StructuredGrid
     # We pass x, y, and the elevation (dem) directly as coordinates
@@ -107,6 +110,58 @@ def plot2d(sim, parameter, title="Avalanche Simulation", threshold_value=1, step
     ax.set(title=title)
     plt.show()
     return fig, ax
+
+def plot_overview(sim, threshold_value=1, particle_threshold=0):
+    # Setup parameters, titles, and distinct colormaps
+    params = ['peak_velocity', 'peak_flow_thickness', 'cell_count']
+    colormaps = ['magma', 'viridis', 'plasma']
+    
+    import_plt() # Using your existing import helper
+    
+    # Create a figure with 3 subplots
+    fig, axes = plt.subplots(1, 3, figsize=(22, 7))
+    
+    for i, (param, cmap) in enumerate(zip(params, colormaps)):
+        ax = axes[i]
+        ax.set_aspect('equal')
+        
+        # 1. Plot DEM in the background
+        x, y, dem, dem_mask = plot_dem(sim, ax, dark=False)
+        
+        # 2. Prepare Data
+        data = getattr(sim, param).astype(np.float32)
+        data[dem_mask] = np.nan
+        
+        # Apply thresholds
+        data[data < threshold_value] = np.nan
+        if hasattr(sim, 'cell_count') and hasattr(sim, 'released_particles_per_cell'):
+            # Mask based on particle count threshold
+            data[sim.cell_count < particle_threshold * sim.released_particles_per_cell] = np.nan
+            
+        if param == "cell_count":
+            data = np.log10(data)
+        
+        # 3. Plot Simulation Results
+        surf = ax.contourf(x, y, data, cmap=cmap)
+        
+        # 4. Plot Release Areas (Cyan Outline)
+        ax.contour(x, y, sim.release_areas.astype(np.float32), 
+                   colors='cyan', linewidths=1, alpha=0.3)
+        
+        # 5. Configure Colorbar
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes("right", size="5%", pad=0.1)
+        cbar = fig.colorbar(surf, cax=cax)
+        cbar.set_label(param.replace("_", " ").title())
+        
+        ax.set_title(param.replace("_", " ").title(), fontsize=14, fontweight='bold')
+        ax.set_xlabel("X-Coordinate")
+        if i == 0:
+            ax.set_ylabel("Y-Coordinate")
+
+    plt.tight_layout()
+    plt.show()
+    return fig, axes
 
 def calculate_dice(model_a, model_b):
     """

@@ -39,5 +39,5 @@ end = time.time()
 
 print(f"Execution time without plotting: {end - start:.2f} seconds")
 
-avalanchers.plot3d(sim, "max_velocity")
-avalanchers.plot2d(sim, "max_velocity")
+avalanchers.plot3d(sim, "peak_velocity")
+avalanchers.plot2d(sim, "peak_velocity")
