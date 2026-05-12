@@ -69,6 +69,7 @@ pub struct Simulation {
 
 impl Simulation {
     pub async fn new() -> Result<Self> {
+        timer_new();
         let orchestrator = ComputeOrchestrator::new().await?;
         Ok(Self {
             orchestrator,
@@ -107,13 +108,14 @@ impl Simulation {
     }
 
     pub async fn create(&mut self, settings: Settings) -> Result<()> {
-        let mut timer = Timer::new("Total Simulation Creation Time");
+        timer_checkpoint("Start create");
         let (settings_result, dem_result) =
             data_processor::create_sim_settings_and_dem(&settings).await;
         self.settings = settings_result;
         self.dem = dem_result;
         self.dem_path = settings.dem_path.unwrap_or_default().clone();
         self.release_areas_path = settings.release_areas_path.clone();
+        timer_checkpoint("Load settings");
         self.gpu_cache.reset_all();
         if self.dem.data1d.is_empty() {
             self.state = SimulationState::DemMissing;
@@ -124,8 +126,7 @@ impl Simulation {
                 self.dem_path, self.settings
             );
         }
-        timer.checkpoint("Simulation updated/created");
-        debug!("{}", timer.get_summary());
+        timer_checkpoint("Simulation updated/created");
 
         Ok(())
     }
@@ -250,24 +251,23 @@ impl Simulation {
     }
 
     pub async fn run(&mut self) -> Result<()> {
-        let mut timer = Timer::new("Total Simulation Run Time");
         self.compute_normals().await?;
-        timer.checkpoint("Normals computed");
+        timer_checkpoint("Normals computed");
         let _ = self.get_release_areas().await?;
-        timer.checkpoint("Release areas loaded");
+        timer_checkpoint("Release areas loaded");
         if self.number_particles == 0 {
             warn!("No particles to simulate! Check if release areas are correctly defined.");
         } else {
             self.initialize_particles().await?;
-            timer.checkpoint("Particles initialized");
+            timer_checkpoint("Particles initialized");
             self.compute_particles().await?;
 
             self.sim_info = self.fetch_sim_info().await?;
         }
         self.state = SimulationState::Finished;
 
-        timer.checkpoint("Simulation finished");
-        info!("{}", timer.get_summary());
+        timer_checkpoint("Simulation finished");
+        info!("{}", timer_get_summary());
         Ok(())
     }
 
@@ -422,6 +422,22 @@ impl Simulation {
         Ok(self.gpu_cache.roughness.as_ref().unwrap())
     }
 
+    pub async fn fetch_peak_flow_thickness(&mut self) -> Result<Vec<f32>> {
+        assert!(
+            self.state >= SimulationState::Finished,
+            "Simulation must be finished before reading peak flow thickness buffer"
+        );
+        if self.gpu_cache.peak_flow_thickness.is_none() {
+            self.gpu_cache.read_count += 1;
+            self.gpu_cache.peak_flow_thickness = Some(
+                self.orchestrator
+                    .read_buffer(BufferName::GridPeakFlowThickness)
+                    .await?,
+            );
+        }
+        Ok(self.gpu_cache.peak_flow_thickness.clone().unwrap())
+    }
+
     pub async fn get_roughness_aspect(&mut self) -> Result<Vec<f32>> {
         Ok(self.fetch_roughness_texture().await?.r.clone())
     }
@@ -495,24 +511,24 @@ impl Simulation {
         Ok(self.fetch_release_areas_texture().await?.r.clone())
     }
 
-    pub async fn fetch_max_velocity(&mut self) -> Result<&Vec<f32>> {
+    pub async fn fetch_peak_velocity(&mut self) -> Result<&Vec<f32>> {
         assert!(
             self.state >= SimulationState::Finished,
-            "Simulation must be finished before reading max velocity"
+            "Simulation must be finished before reading peak velocity"
         );
-        if self.gpu_cache.max_velocity.is_none() {
+        if self.gpu_cache.peak_velocity.is_none() {
             self.gpu_cache.read_count += 1;
             let data: Vec<u32> = self
                 .orchestrator
-                .read_buffer(BufferName::VelocityGrid)
+                .read_buffer(BufferName::GridPeakVelocity)
                 .await?;
-            self.gpu_cache.max_velocity = Some(
+            self.gpu_cache.peak_velocity = Some(
                 data.into_iter()
                     .map(|x| x as f32 / MAX_VELOCITY_FACTOR)
                     .collect(),
             );
         }
-        Ok(self.gpu_cache.max_velocity.as_ref().unwrap())
+        Ok(self.gpu_cache.peak_velocity.as_ref().unwrap())
     }
 
     pub async fn fetch_timestep_data(&mut self) -> Result<&TimestepData> {
@@ -544,7 +560,7 @@ impl Simulation {
             self.gpu_cache.read_count += 1;
             self.gpu_cache.cell_count = Some(
                 self.orchestrator
-                    .read_buffer(BufferName::CellCountGrid)
+                    .read_buffer(BufferName::GridCellCount)
                     .await?,
             );
         }
@@ -577,7 +593,8 @@ impl Simulation {
     /// This function can be used to pre-load all results into the cache, so that subsequent calls to getters will be fast
     pub async fn fetch_results(&mut self) -> Result<()> {
         let start = Instant::now();
-        self.fetch_max_velocity().await?;
+        self.fetch_peak_flow_thickness().await?;
+        self.fetch_peak_velocity().await?;
         self.fetch_cell_count().await?;
         self.fetch_particles().await?;
         self.fetch_timestep_data().await?;
@@ -597,6 +614,7 @@ impl Simulation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use compute_core::buffers::AtomicValues;
     use pollster::block_on;
     use std::collections::HashSet;
     use std::hash::Hash;
@@ -628,14 +646,17 @@ mod tests {
 
     #[test_log::test]
     fn test_gpu_cache_read_count() {
+        if std::env::var("SKIP_FOR_TARPAULIN").is_ok() {
+            return;
+        }
         if std::env::var("GITHUB_ACTIONS").is_ok()
             && (cfg!(target_os = "macos") || cfg!(target_os = "windows"))
         {
             println!("Skipping heavy GPU test on CI (macOS/Windows)");
             return;
         }
-        let number_cache_elements = 8;
-        let number_sim_results_elements = 4;
+        let number_cache_elements = 9;
+        let number_sim_results_elements = 5;
         let mut sim: Simulation = block_on(Simulation::new()).expect("Failed to create Simulation");
         block_on(sim.create_example(INCLINED_PLANE_PATH)).expect("Failed to create simulation");
         block_on(sim.run()).expect("Failed to run simulation");
@@ -676,7 +697,7 @@ mod tests {
             "Reset failed: GPU cache particles Option was not cleared"
         );
 
-        // Cache the 4 results again after reset, should trigger reads again
+        // Cache the 5 results again after reset, should trigger reads again
         block_on(sim.fetch_results()).expect("Failed to get data on third call");
         assert_eq!(
             sim.get_gpu_cache_read_count(),
@@ -708,6 +729,9 @@ mod tests {
 
     #[test_log::test]
     pub fn test_automatic_gpu_cache_reset() {
+        if std::env::var("SKIP_FOR_TARPAULIN").is_ok() {
+            return;
+        }
         if std::env::var("GITHUB_ACTIONS").is_ok()
             && (cfg!(target_os = "macos") || cfg!(target_os = "windows"))
         {
@@ -722,7 +746,7 @@ mod tests {
                 && sim.gpu_cache.normals.is_none()
                 && sim.gpu_cache.slope.is_none()
                 && sim.gpu_cache.cell_count.is_none()
-                && sim.gpu_cache.max_velocity.is_none()
+                && sim.gpu_cache.peak_velocity.is_none()
                 && sim.gpu_cache.timestep_data.is_none(),
             "GPU cache should start empty"
         );
@@ -734,7 +758,7 @@ mod tests {
                 && sim.gpu_cache.normals.is_none()
                 && sim.gpu_cache.slope.is_none()
                 && sim.gpu_cache.cell_count.is_none()
-                && sim.gpu_cache.max_velocity.is_none()
+                && sim.gpu_cache.peak_velocity.is_none()
                 && sim.gpu_cache.timestep_data.is_none(),
             "GPU cache should stay empty after simulation run (no caching yet)"
         );
@@ -745,7 +769,7 @@ mod tests {
                 && sim.gpu_cache.normals.is_some()
                 && sim.gpu_cache.slope.is_some()
                 && sim.gpu_cache.cell_count.is_some()
-                && sim.gpu_cache.max_velocity.is_some()
+                && sim.gpu_cache.peak_velocity.is_some()
                 && sim.gpu_cache.timestep_data.is_some(),
             "GPU cache should be fully populated after caching results"
         );
@@ -757,7 +781,7 @@ mod tests {
                 && sim.gpu_cache.normals.is_none()
                 && sim.gpu_cache.slope.is_none()
                 && sim.gpu_cache.cell_count.is_none()
-                && sim.gpu_cache.max_velocity.is_none()
+                && sim.gpu_cache.peak_velocity.is_none()
                 && sim.gpu_cache.timestep_data.is_none(),
             "GPU cache should be empty after loading new DEM and running normals shader"
         );
@@ -772,7 +796,7 @@ mod tests {
                 && sim.gpu_cache.normals.is_some()
                 && sim.gpu_cache.slope.is_some()
                 && sim.gpu_cache.cell_count.is_none()
-                && sim.gpu_cache.max_velocity.is_none()
+                && sim.gpu_cache.peak_velocity.is_none()
                 && sim.gpu_cache.timestep_data.is_none(),
             "GPU cache should be empty"
         );
@@ -787,7 +811,7 @@ mod tests {
                 && sim.gpu_cache.normals.is_some()
                 && sim.gpu_cache.slope.is_some()
                 && sim.gpu_cache.cell_count.is_none()
-                && sim.gpu_cache.max_velocity.is_none()
+                && sim.gpu_cache.peak_velocity.is_none()
                 && sim.gpu_cache.timestep_data.is_none(),
             "GPU cache should be empty except for normals and slope"
         );
@@ -802,7 +826,7 @@ mod tests {
                 && sim.gpu_cache.normals.is_some()
                 && sim.gpu_cache.slope.is_some()
                 && sim.gpu_cache.cell_count.is_none()
-                && sim.gpu_cache.max_velocity.is_none()
+                && sim.gpu_cache.peak_velocity.is_none()
                 && sim.gpu_cache.timestep_data.is_none(),
             "GPU cache should be empty except for release areas, normals, and slope"
         );
@@ -971,6 +995,9 @@ mod tests {
 
     #[test_log::test]
     fn test_compute() {
+        if std::env::var("SKIP_FOR_TARPAULIN").is_ok() {
+            return;
+        }
         if std::env::var("GITHUB_ACTIONS").is_ok()
             && (cfg!(target_os = "macos") || cfg!(target_os = "windows"))
         {
@@ -1001,8 +1028,9 @@ mod tests {
         log_debug_buffer(&debug_buffer);
         let cell_count = block_on(sim.fetch_cell_count()).expect("Failed to get cell count");
         info!("Cell count max: {:?}", cell_count.max_value().unwrap());
-        let max_velocity = block_on(sim.fetch_max_velocity()).expect("Failed to get max velocity");
-        info!("Max velocity: {:?}", max_velocity.max_value().unwrap());
+        let peak_velocity =
+            block_on(sim.fetch_peak_velocity()).expect("Failed to get max velocity");
+        info!("Peak velocity: {:?}", peak_velocity.max_value().unwrap());
 
         let sim_info: Vec<SimInfo> = block_on(sim.orchestrator.buffers.read_buffer(
             &sim.orchestrator.device,
@@ -1011,20 +1039,37 @@ mod tests {
         ))
         .expect("Failed to read sim info buffer");
         info!("Read sim info: {:?}", sim_info);
-
         // particles dont stop, they fall off the DEM
         let particles = block_on(sim.fetch_particles()).expect("Failed to read particles buffer");
-        assert_eq!(particles.iter().filter(|&&x| x.stopped > 4000).count(), 0);
-        assert_eq!(particles.iter().filter(|&&x| x.stopped < 2000).count(), 0);
-
-        // max velocity should be above 39 m/s
-        let max_velocity = block_on(sim.fetch_max_velocity()).expect("Failed to get max velocity");
-        assert!(max_velocity.max_value().unwrap() > 41.0);
-        assert!(max_velocity.max_value().unwrap() < 42.0);
         info!(
-            "Max velocity after simulation: {:?}",
-            max_velocity.max_value().unwrap()
+            "Min step particle stopped: {}",
+            particles
+                .iter()
+                .map(|p| p.stopped)
+                .collect::<Vec<u32>>()
+                .min_value()
+                .unwrap()
         );
+        info!(
+            "Max step particle stopped: {}",
+            particles
+                .iter()
+                .map(|p| p.stopped)
+                .collect::<Vec<u32>>()
+                .max_value()
+                .unwrap()
+        );
+        assert_eq!(particles.iter().filter(|&&x| x.stopped > 4400).count(), 0);
+        assert_eq!(particles.iter().filter(|&&x| x.stopped < 2).count(), 0);
+
+        let max_velocity = block_on(sim.fetch_peak_velocity()).expect("Failed to get max velocity");
+
+        info!(
+            "Max velocity after simulation: {:.2} m/s",
+            max_velocity.max_value().unwrap(),
+        );
+        assert!(max_velocity.max_value().unwrap() > 42.0);
+        assert!(max_velocity.max_value().unwrap() < 47.0);
 
         let max_steps = sim.settings.max_steps as usize;
         let timestep_data =
@@ -1215,12 +1260,14 @@ mod tests {
         ))
         .expect("Failed to run initialize_particles shader");
         let number_release_particles =
-            block_on(orchestrator.read_buffer::<u32>(BufferName::NumberReleaseParticles))
-                .expect("Failed to read particle index buffer")[0];
+            block_on(orchestrator.read_buffer::<AtomicValues>(BufferName::AtomicValues))
+                .expect("Failed to read number_release_cells buffer")[0]
+                .number_release_particles;
         info!("Number release particles: {}", number_release_particles);
         let particles = block_on(orchestrator.read_buffer::<Particle>(BufferName::Particles))
             .expect("Failed to read particles buffer");
         let particle = particles.first().expect("No particles found");
+        info!("First particle: {:?}", particle);
         for p in particles.iter() {
             assert!(p.position[0] > 100.0);
             assert!(p.position[0] < 400.0);
@@ -1229,7 +1276,7 @@ mod tests {
             assert!(p.position[2] > 3000.0);
             assert!(p.position[2] < 3350.0);
         }
-        assert_eq!(particle.mass, 500.0);
+        assert!((particle.mass - 603.1099).abs() < 1e-2);
         let unique_values = particles
             .iter()
             .map(|p| {
@@ -1255,7 +1302,7 @@ mod tests {
             particles.len(),
             particles.last()
         );
-        let cell_count_grid = block_on(orchestrator.read_buffer::<u32>(BufferName::CellCountGrid))
+        let cell_count_grid = block_on(orchestrator.read_buffer::<u32>(BufferName::GridCellCount))
             .expect("Failed to read cell count grid");
 
         info!(

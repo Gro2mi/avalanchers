@@ -93,17 +93,21 @@ const WG_SIZE_2D: u32 = 16u;
 const g: f32 = 9.81;
 const PI: f32 = 3.14159265358979323846;
 const RAD_TO_DEG: f32 = 180.0 / PI;
+
+// u32 limit is 4 294 967 296
 const MAX_VELOCITY_FACTOR: f32 = 1e7; // u32 limit is 430 m/s
-const H_FACTOR: f32 = 1e6; // u32 limit is 4.3km thickness
+const MASS_FACTOR: f32 = 1e1; // u32 limit is 4.3t thickness
+const H_FACTOR: f32 = 1e6;
 const INV_MAX_VELOCITY_FACTOR: f32 = 1 / MAX_VELOCITY_FACTOR; // u32 limit is 430 m/s
-const INV_H_FACTOR: f32 = 1 / H_FACTOR; // u32 limit is 4.3km thickness
+const INV_MASS_FACTOR: f32 = 1 / MASS_FACTOR; // u32 limit is 4.3km thickness
+const INV_H_FACTOR: f32 = 1 / H_FACTOR; 
+
+// TODO precompute often used values on the cpu and pass them as uniforms to avoid redundant calculations on the gpu
 
 struct Particle {
     position: vec3f,
     mass: f32,
     velocity: vec3f,
-    snow_thickness: f32,
-    C: mat2x2f,
     stopped: u32,
 };
 
@@ -134,8 +138,14 @@ struct SimSettings {
     roughness_threshold: f32,
 };
 
-struct AtomicValue {
-    value: atomic<u32>,
+struct AtomicValues {
+    peak_velocity: atomic<u32>,
+    peak_flow_thickness: atomic<u32>,
+    alpha: atomic<u32>,
+    travel_length: atomic<u32>,
+    release_volume: atomic<u32>,
+    number_release_cells: atomic<u32>,
+    number_release_particles: atomic<u32>,
 };
 
 @group(0) @binding(0) var<uniform> sim_settings: SimSettings;

@@ -1,15 +1,20 @@
-@group(0) @binding(1) var<storage, read_write> grid_h_atomic: array<atomic<i32>>;
+@group(0) @binding(1) var<storage> grid_mass_atomic: array<u32>;
 @group(0) @binding(2) var normals_texture: texture_2d<f32>;
 @group(0) @binding(3) var<storage, read_write> grid_forces: array<vec2f>;
+@group(0) @binding(4) var<storage, read_write> peak_flow_thickness: array<f32>;
+@group(0) @binding(5) var<storage, read_write> atomic_values: AtomicValues;
 
 @compute @workgroup_size(WG_SIZE_2D, WG_SIZE_2D, 1)
 fn grid_physics(@builtin(global_invocation_id) id: vec3u) {
     let idx = xy_to_idx(id.x, id.y);
+    let n = textureLoad(normals_texture, id.xy, 0);
 
     // 1. Decode height and velocity[cite: 3]
-    let h = f32(atomicLoad(&grid_h_atomic[idx])) * INV_H_FACTOR;
+    let h = f32(grid_mass_atomic[idx]) * INV_MASS_FACTOR / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size) * n.z;
     // let u = f32(atomicLoad(&grid_mom_atomic[idx * 2])) / (h * SCALE_FACTOR + EPSILON);
     // let v = f32(atomicLoad(&grid_mom_atomic[idx * 2 + 1])) / (h * SCALE_FACTOR + EPSILON);
+    peak_flow_thickness[idx] = max(peak_flow_thickness[idx], h);
+    atomicMax(&atomic_values.peak_flow_thickness, u32(h * H_FACTOR)); // update peak flow thickness for cfl calculation, this is needed for the next step
 
     // 2. Compute Divergence for Active/Passive state[cite: 3]
     // TODO calculate divergence and earth pressure coefficient
@@ -21,20 +26,25 @@ fn grid_physics(@builtin(global_invocation_id) id: vec3u) {
     // TODO do I need to apply a filter to the height field to prevent noise in the gradient?
     // e. g. h_ij = (1-alpha)h_ij + alpha/4 * (h_ij-1 + h_i+1j + h_ij+1 + h_i-1j) to smooth the height field and prevent noise in the gradient?
     // TODO do i need a cutoff for small h to prevent noise in the gradient? if h < h_min -> h = 0
+    // let grad_h2 = select(vec2f(
+    //     // TODO account for slope in x and y direction. multiply by cos_theta_x
+    //     (get_h2(id.x + 1, id.y) - get_h2(id.x - 1, id.y)) / (2.0 * sim_settings.cell_size),
+    //     (get_h2(id.x, id.y + 1) - get_h2(id.x, id.y - 1)) / (2.0 * sim_settings.cell_size)
+    // ), vec2f(0.0, 0.0), h < 1e-5);
     let grad_h2 = vec2f(
         // TODO account for slope in x and y direction. multiply by cos_theta_x
         (get_h2(id.x + 1, id.y) - get_h2(id.x - 1, id.y)) / (2.0 * sim_settings.cell_size),
         (get_h2(id.x, id.y + 1) - get_h2(id.x, id.y - 1)) / (2.0 * sim_settings.cell_size)
     );
     // TODO do i need a slope limiter like minmod?
-    let n = textureLoad(normals_texture, id.xy, 0);
-    let slope_corrected_grad_h2 = grad_h2 * sqrt(1.0 - n.x * n.x);
+    // correct for slope sqrt(1-nx²), and again sqrt(1-nx²) to rotate it into 3d coordinates
+    let slope_corrected_grad_h2 = grad_h2 * vec2f(sqrt(1.0 - n.x * n.x), sqrt(1.0 - n.y * n.y));
     grid_forces[idx] = -0.5 * g * n.z * k * slope_corrected_grad_h2;
 }
 
 fn get_h2(x: u32, y: u32) -> f32 {
     let idx = xy_to_idx(x, y);
-    return pow(f32(atomicLoad(&grid_h_atomic[idx])) * INV_H_FACTOR, 2.0);
+    return pow(f32(grid_mass_atomic[idx]) * INV_MASS_FACTOR / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size), 2.0);
 }
 
 // import utils.wgsl;
@@ -44,17 +54,21 @@ const WG_SIZE_2D: u32 = 16u;
 const g: f32 = 9.81;
 const PI: f32 = 3.14159265358979323846;
 const RAD_TO_DEG: f32 = 180.0 / PI;
+
+// u32 limit is 4 294 967 296
 const MAX_VELOCITY_FACTOR: f32 = 1e7; // u32 limit is 430 m/s
-const H_FACTOR: f32 = 1e6; // u32 limit is 4.3km thickness
+const MASS_FACTOR: f32 = 1e1; // u32 limit is 4.3t thickness
+const H_FACTOR: f32 = 1e6;
 const INV_MAX_VELOCITY_FACTOR: f32 = 1 / MAX_VELOCITY_FACTOR; // u32 limit is 430 m/s
-const INV_H_FACTOR: f32 = 1 / H_FACTOR; // u32 limit is 4.3km thickness
+const INV_MASS_FACTOR: f32 = 1 / MASS_FACTOR; // u32 limit is 4.3km thickness
+const INV_H_FACTOR: f32 = 1 / H_FACTOR; 
+
+// TODO precompute often used values on the cpu and pass them as uniforms to avoid redundant calculations on the gpu
 
 struct Particle {
     position: vec3f,
     mass: f32,
     velocity: vec3f,
-    snow_thickness: f32,
-    C: mat2x2f,
     stopped: u32,
 };
 
@@ -85,8 +99,14 @@ struct SimSettings {
     roughness_threshold: f32,
 };
 
-struct AtomicValue {
-    value: atomic<u32>,
+struct AtomicValues {
+    peak_velocity: atomic<u32>,
+    peak_flow_thickness: atomic<u32>,
+    alpha: atomic<u32>,
+    travel_length: atomic<u32>,
+    release_volume: atomic<u32>,
+    number_release_cells: atomic<u32>,
+    number_release_particles: atomic<u32>,
 };
 
 @group(0) @binding(0) var<uniform> sim_settings: SimSettings;

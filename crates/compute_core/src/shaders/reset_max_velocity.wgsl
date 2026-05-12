@@ -1,16 +1,22 @@
 @group(0) @binding(1) var<storage, read_write> sim_info: SimInfo;
-@group(0) @binding(2) var<storage, read_write> max_velocity: AtomicValue;
-@group(0) @binding(3) var<storage, read_write> grid_h_atomic: array<atomic<u32>>;
+@group(0) @binding(2) var<storage, read_write> atomic_values: AtomicValues;
+@group(0) @binding(3) var<storage, read_write> grid_mass_atomic: array<u32>;
 
 @compute @workgroup_size(WG_SIZE_2D, WG_SIZE_2D, 1)
 fn reset_max_velocity(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if global_id.x < sim_settings.grid_shape.x && global_id.y < sim_settings.grid_shape.y {
         if global_id.x == 0u && global_id.y == 0u {
-            sim_info.max_velocity = (f32(atomicLoad(&max_velocity.value)) / f32(MAX_VELOCITY_FACTOR)); // Load the current max velocity
+            sim_info.max_velocity = (f32(atomicLoad(&atomic_values.peak_velocity)) / f32(MAX_VELOCITY_FACTOR)
+             + sqrt(g * f32(atomicLoad(&atomic_values.peak_flow_thickness)) * INV_H_FACTOR)); // Load the current max velocity
             // TODO load max h for cfl calculation, add sqrt(g*h)
-            atomicStore(&max_velocity.value, u32(0)); // Reset max velocity to 0 for the new timestep
+            // can this increase computation speed?
+            // let old = atomicLoad(&x);
+            // if (value > old) {
+            //     atomicMax(&x, value);
+            // }
+            atomicStore(&atomic_values.peak_velocity, u32(0)); // Reset max velocity to 0 for the new timestep
         }
-        atomicStore(&grid_h_atomic[xy_to_idx(global_id.x, global_id.y)], 0u); // Reset grid heights for the new timestep
+        grid_mass_atomic[xy_to_idx(global_id.x, global_id.y)] = 0u; // Reset grid masses for the new timestep
     }
 }
 
@@ -21,17 +27,21 @@ const WG_SIZE_2D: u32 = 16u;
 const g: f32 = 9.81;
 const PI: f32 = 3.14159265358979323846;
 const RAD_TO_DEG: f32 = 180.0 / PI;
+
+// u32 limit is 4 294 967 296
 const MAX_VELOCITY_FACTOR: f32 = 1e7; // u32 limit is 430 m/s
-const H_FACTOR: f32 = 1e6; // u32 limit is 4.3km thickness
+const MASS_FACTOR: f32 = 1e1; // u32 limit is 4.3t thickness
+const H_FACTOR: f32 = 1e6;
 const INV_MAX_VELOCITY_FACTOR: f32 = 1 / MAX_VELOCITY_FACTOR; // u32 limit is 430 m/s
-const INV_H_FACTOR: f32 = 1 / H_FACTOR; // u32 limit is 4.3km thickness
+const INV_MASS_FACTOR: f32 = 1 / MASS_FACTOR; // u32 limit is 4.3km thickness
+const INV_H_FACTOR: f32 = 1 / H_FACTOR; 
+
+// TODO precompute often used values on the cpu and pass them as uniforms to avoid redundant calculations on the gpu
 
 struct Particle {
     position: vec3f,
     mass: f32,
     velocity: vec3f,
-    snow_thickness: f32,
-    C: mat2x2f,
     stopped: u32,
 };
 
@@ -62,8 +72,14 @@ struct SimSettings {
     roughness_threshold: f32,
 };
 
-struct AtomicValue {
-    value: atomic<u32>,
+struct AtomicValues {
+    peak_velocity: atomic<u32>,
+    peak_flow_thickness: atomic<u32>,
+    alpha: atomic<u32>,
+    travel_length: atomic<u32>,
+    release_volume: atomic<u32>,
+    number_release_cells: atomic<u32>,
+    number_release_particles: atomic<u32>,
 };
 
 @group(0) @binding(0) var<uniform> sim_settings: SimSettings;

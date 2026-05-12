@@ -7,6 +7,7 @@ import mimetypes
 
 mimetypes.add_type("application/javascript", ".js")
 mimetypes.add_type("text/css", ".css")
+mimetypes.add_type("application/wasm", ".wasm")
 
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

@@ -232,15 +232,15 @@ impl WasmSimulation {
 
     #[wasm_bindgen(getter)]
     pub fn x(&self) -> Float32Array {
-        unsafe { Float32Array::view(&self.inner.dem.x) }
+        Float32Array::from(self.inner.dem.x.as_slice())
     }
 
     #[wasm_bindgen(getter)]
     pub fn y(&self) -> Float32Array {
-        unsafe { Float32Array::view(&self.inner.dem.y) }
+        Float32Array::from(self.inner.dem.y.as_slice())
     }
 
-    #[wasm_bindgen(getter, js_name = demTrajectoryInfo)]
+    #[wasm_bindgen(getter)]
     pub fn dem_trajectory_info(&self) -> Float32Array {
         let vals = [
             self.inner.dem.bounds.xmin,
@@ -250,13 +250,21 @@ impl WasmSimulation {
         Float32Array::from(&vals[..])
     }
 
-    pub async fn fetch_max_velocity(&mut self) -> Result<(), JsValue> {
-        self.inner.fetch_max_velocity().await.map_err(to_js_err)?;
+    pub async fn fetch_peak_velocity(&mut self) -> Result<(), JsValue> {
+        self.inner.fetch_peak_velocity().await.map_err(to_js_err)?;
         Ok(())
     }
 
     pub async fn fetch_cell_count(&mut self) -> Result<(), JsValue> {
         self.inner.fetch_cell_count().await.map_err(to_js_err)?;
+        Ok(())
+    }
+
+    pub async fn fetch_peak_flow_thickness(&mut self) -> Result<(), JsValue> {
+        self.inner
+            .fetch_peak_flow_thickness()
+            .await
+            .map_err(to_js_err)?;
         Ok(())
     }
 
@@ -267,7 +275,7 @@ impl WasmSimulation {
 
     #[wasm_bindgen(getter)]
     pub fn max_velocity(&self) -> Float32Array {
-        unsafe { Float32Array::view(self.inner.gpu_cache.max_velocity.as_ref().unwrap()) }
+        unsafe { Float32Array::view(self.inner.gpu_cache.peak_velocity.as_ref().unwrap()) }
     }
 
     #[wasm_bindgen(getter)]
@@ -293,6 +301,11 @@ impl WasmSimulation {
     #[wasm_bindgen(getter)]
     pub fn release_areas(&self) -> Float32Array {
         unsafe { Float32Array::view(&self.inner.gpu_cache.release_areas.as_ref().unwrap().r) }
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn peak_flow_thickness(&self) -> Float32Array {
+        unsafe { Float32Array::view(self.inner.gpu_cache.peak_flow_thickness.as_ref().unwrap()) }
     }
 
     #[wasm_bindgen]

@@ -291,13 +291,13 @@ impl PySimulation {
     }
 
     #[getter]
-    pub fn get_max_velocity<'py>(
+    pub fn get_peak_velocity<'py>(
         &mut self,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyArray2<f32>>> {
         let data = self
             .inner
-            .fetch_max_velocity()
+            .fetch_peak_velocity()
             .block_on()
             .map_runtime_err()?
             .to_vec();
@@ -329,6 +329,19 @@ impl PySimulation {
         let data = self
             .inner
             .fetch_release_areas()
+            .block_on()
+            .map_runtime_err()?;
+        self.get_layer_f32(py, data.to_vec())
+    }
+
+    #[getter]
+    pub fn get_peak_flow_thickness<'py>(
+        &mut self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        let data = self
+            .inner
+            .fetch_peak_flow_thickness()
             .block_on()
             .map_runtime_err()?;
         self.get_layer_f32(py, data.to_vec())

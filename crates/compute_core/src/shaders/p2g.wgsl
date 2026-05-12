@@ -1,5 +1,5 @@
 @group(0) @binding(1) var<storage, read> particles: array<Particle>;
-@group(0) @binding(2) var<storage, read_write> grid_h_atomic: array<atomic<u32>>;
+@group(0) @binding(2) var<storage, read_write> grid_mass_atomic: array<atomic<u32>>;
 @group(0) @binding(3) var<storage, read_write> sim_info: SimInfo;
 // @group(0) @binding(2) var<storage, read_write> grid_mom_atomic: array<atomic<i32>>; // Combined u, v
 
@@ -11,7 +11,6 @@ fn p2g(@builtin(global_invocation_id) id: vec3u) {
         return;
     }
     let p = particles[id.x];
-    let h = p.mass / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size);
 
     let grid_pos = p.position.xy / sim_settings.cell_size;
 
@@ -35,9 +34,9 @@ fn p2g(@builtin(global_invocation_id) id: vec3u) {
                 u32(node_coords.x);
 
             atomicAdd(
-                &grid_h_atomic[idx],
+                &grid_mass_atomic[idx],
                 // TODO multiply with normal_z to account for bigger cell area due to slope
-                u32(h * weight * H_FACTOR)
+                u32(p.mass * weight * MASS_FACTOR)
             );
             // atomicAdd(&grid_mom_atomic[idx * 2], i32(h * p.vel.x * weight * SCALE_FACTOR));
             // atomicAdd(&grid_mom_atomic[idx * 2 + 1], i32(h * p.vel.y * weight * SCALE_FACTOR));
@@ -52,17 +51,21 @@ const WG_SIZE_2D: u32 = 16u;
 const g: f32 = 9.81;
 const PI: f32 = 3.14159265358979323846;
 const RAD_TO_DEG: f32 = 180.0 / PI;
+
+// u32 limit is 4 294 967 296
 const MAX_VELOCITY_FACTOR: f32 = 1e7; // u32 limit is 430 m/s
-const H_FACTOR: f32 = 1e6; // u32 limit is 4.3km thickness
+const MASS_FACTOR: f32 = 1e1; // u32 limit is 4.3t thickness
+const H_FACTOR: f32 = 1e6;
 const INV_MAX_VELOCITY_FACTOR: f32 = 1 / MAX_VELOCITY_FACTOR; // u32 limit is 430 m/s
-const INV_H_FACTOR: f32 = 1 / H_FACTOR; // u32 limit is 4.3km thickness
+const INV_MASS_FACTOR: f32 = 1 / MASS_FACTOR; // u32 limit is 4.3km thickness
+const INV_H_FACTOR: f32 = 1 / H_FACTOR; 
+
+// TODO precompute often used values on the cpu and pass them as uniforms to avoid redundant calculations on the gpu
 
 struct Particle {
     position: vec3f,
     mass: f32,
     velocity: vec3f,
-    snow_thickness: f32,
-    C: mat2x2f,
     stopped: u32,
 };
 
@@ -93,8 +96,14 @@ struct SimSettings {
     roughness_threshold: f32,
 };
 
-struct AtomicValue {
-    value: atomic<u32>,
+struct AtomicValues {
+    peak_velocity: atomic<u32>,
+    peak_flow_thickness: atomic<u32>,
+    alpha: atomic<u32>,
+    travel_length: atomic<u32>,
+    release_volume: atomic<u32>,
+    number_release_cells: atomic<u32>,
+    number_release_particles: atomic<u32>,
 };
 
 @group(0) @binding(0) var<uniform> sim_settings: SimSettings;

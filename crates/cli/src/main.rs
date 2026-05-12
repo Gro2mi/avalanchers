@@ -2,6 +2,8 @@
 use anyhow::Result;
 use clap::Parser;
 use compute_core::settings::Settings;
+use compute_core::utils::MaxValue;
+use pollster::block_on;
 use simulation::{Simulation, init_logging};
 use std::path::PathBuf;
 use std::{env, time::Instant};
@@ -49,10 +51,16 @@ fn main() -> Result<()> {
     let settings = Settings::from_json(&file_path.to_string_lossy())
         .expect("Failed to load settings from JSON file");
 
-    let mut simulation: Simulation = pollster::block_on(Simulation::new())?;
-    pollster::block_on(simulation.create(settings))?;
+    let mut simulation: Simulation = block_on(Simulation::new())?;
+    block_on(simulation.create(settings))?;
 
-    pollster::block_on(simulation.run())?;
+    block_on(simulation.run())?;
+    let peak_velocity =
+        block_on(simulation.fetch_peak_velocity()).expect("Failed to get peak velocity");
+    info!(
+        "Peak velocity after simulation: {:.2} m/s",
+        peak_velocity.max_value().unwrap(),
+    );
 
     let duration = start.elapsed();
 

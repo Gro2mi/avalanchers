@@ -1,12 +1,12 @@
 @group(0) @binding(1) var<storage, read_write> sim_info: SimInfo;
 @group(0) @binding(2) var dem_texture: texture_2d<f32>;
-@group(0) @binding(3) var release_areas: texture_2d<f32>;
-@group(0) @binding(4) var tex_sampler: sampler;
+@group(0) @binding(3) var normals: texture_2d<f32>;
+@group(0) @binding(4) var release_areas: texture_2d<f32>;
+@group(0) @binding(5) var tex_sampler: sampler;
 
-@group(0) @binding(5) var<storage, read_write> particles: array<Particle>;
-@group(0) @binding(6) var<storage, read_write> number_release_particles: AtomicValue;
-@group(0) @binding(7) var<storage, read_write> atomic_cell_count_buffer: array<atomic<u32>>; // trajectory texture
-@group(0) @binding(8) var<storage, read_write> atomic_velocity_buffer: array<atomic<u32>>; // trajectory texture
+@group(0) @binding(6) var<storage, read_write> particles: array<Particle>;
+@group(0) @binding(7) var<storage, read_write> atomic_values: AtomicValues;
+@group(0) @binding(8) var<storage, read_write> grid_cell_count: array<atomic<u32>>;
 
 @group(0) @binding(9) var<storage, read_write> debug: array<f32>;
 // @group(0) @binding(9) var<uniform> tracked_particle_relative_positions: array<Particle>;
@@ -32,24 +32,25 @@ fn initialize_particles(@builtin(global_invocation_id) cell: vec3<u32>) {
     // TODO: pass timestamp as seed
     let seed = 42u;
     var rng_seed = pcg_hash(cell.x + cell.y + seed);
+    let cell_volume = snow_thickness * sim_settings.cell_size * sim_settings.cell_size / textureLoad(normals, cell.xy, 0).z;
+    let cell_mass = cell_volume * sim_settings.snow_density;
+    atomicAdd(&atomic_values.release_volume, u32(cell_volume)); // ensure that the velocity is not zero, this is needed for the next step
+    
     for (var n: u32 = 0; n < sim_settings.released_particles_per_cell; n++) {
-        let particleIndex = atomicAdd(&number_release_particles.value, 1u);
+        let particleIndex = atomicAdd(&atomic_values.number_release_particles, 1u);
 
         let r = rand2(&rng_seed);
         let cell_xy = (vec2f(cell.xy) + r);
         let elevation = textureSampleLevel(dem_texture, tex_sampler, cellf_to_uv(cell_xy), 0).x;
 
         particles[particleIndex].position = vec3f(cell_xy * sim_settings.cell_size, elevation);
-        particles[particleIndex].mass = (sim_settings.snow_density * snow_thickness * sim_settings.cell_size * sim_settings.cell_size) / f32(sim_settings.released_particles_per_cell);
+        particles[particleIndex].mass = cell_mass / f32(sim_settings.released_particles_per_cell);
         // p.velocity = rand32u(cell.xy + seed) * 1e-5;
         particles[particleIndex].velocity = vec3f(0f);
-        particles[particleIndex].snow_thickness = snow_thickness;
-        particles[particleIndex].C = mat2x2f(0f, 0f, 0f, 0f);
         particles[particleIndex].stopped = 0u;
 
-        let cell_index = position_to_cell_index(particles[particleIndex].position);
-        atomicAdd(&atomic_cell_count_buffer[cell_index], 1u);
-        atomicMax(&atomic_velocity_buffer[cell_index], u32(length(particles[particleIndex].velocity))); // ensure that the velocity is not zero, this is needed for the next step
+        let cell_index_particle = position_to_cell_index(particles[particleIndex].position);
+        atomicAdd(&grid_cell_count[cell_index_particle], 1u);
     }
 }
 
@@ -78,17 +79,21 @@ const WG_SIZE_2D: u32 = 16u;
 const g: f32 = 9.81;
 const PI: f32 = 3.14159265358979323846;
 const RAD_TO_DEG: f32 = 180.0 / PI;
+
+// u32 limit is 4 294 967 296
 const MAX_VELOCITY_FACTOR: f32 = 1e7; // u32 limit is 430 m/s
-const H_FACTOR: f32 = 1e6; // u32 limit is 4.3km thickness
+const MASS_FACTOR: f32 = 1e1; // u32 limit is 4.3t thickness
+const H_FACTOR: f32 = 1e6;
 const INV_MAX_VELOCITY_FACTOR: f32 = 1 / MAX_VELOCITY_FACTOR; // u32 limit is 430 m/s
-const INV_H_FACTOR: f32 = 1 / H_FACTOR; // u32 limit is 4.3km thickness
+const INV_MASS_FACTOR: f32 = 1 / MASS_FACTOR; // u32 limit is 4.3km thickness
+const INV_H_FACTOR: f32 = 1 / H_FACTOR; 
+
+// TODO precompute often used values on the cpu and pass them as uniforms to avoid redundant calculations on the gpu
 
 struct Particle {
     position: vec3f,
     mass: f32,
     velocity: vec3f,
-    snow_thickness: f32,
-    C: mat2x2f,
     stopped: u32,
 };
 
@@ -119,8 +124,14 @@ struct SimSettings {
     roughness_threshold: f32,
 };
 
-struct AtomicValue {
-    value: atomic<u32>,
+struct AtomicValues {
+    peak_velocity: atomic<u32>,
+    peak_flow_thickness: atomic<u32>,
+    alpha: atomic<u32>,
+    travel_length: atomic<u32>,
+    release_volume: atomic<u32>,
+    number_release_cells: atomic<u32>,
+    number_release_particles: atomic<u32>,
 };
 
 @group(0) @binding(0) var<uniform> sim_settings: SimSettings;

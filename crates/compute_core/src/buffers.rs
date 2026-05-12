@@ -1,5 +1,6 @@
+use crate::settings::SimSettings;
 use anyhow::{Result, anyhow};
-use bytemuck::Pod;
+use bytemuck::{Pod, Zeroable};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use wgpu::{
@@ -10,19 +11,29 @@ use wgpu::{
     util::{BufferInitDescriptor, DeviceExt},
 };
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct AtomicValues {
+    pub grid_peak_velocity: u32,
+    pub grid_peak_flow_thickness: u32,
+    pub alpha: u32,
+    pub travel_length: u32,
+    pub release_volume: u32,
+    pub number_release_cells: u32,
+    pub number_release_particles: u32,
+}
+
 #[derive(Eq, Hash, PartialEq, Clone)]
 pub enum BufferName {
-    /// Number of cells that release after computing/loading release areas
-    NumberReleaseCells,
-    /// Number of particles to initialize after computing/loading release areas
-    NumberReleaseParticles,
     SimInfo,
     /// Index for initializing particles using atomicAdd in the shader
     ParticleIndex,
     // atomic grids
-    CellCountGrid,
-    VelocityGrid,
-    MaxVelocityGrid,
+    GridCellCount,
+    GridPeakVelocity,
+    GridPeakFlowThickness,
+    GridMass,
+    GridForces,
     // settings/initialization dependent buffers
     SimSettings,
     Particles,
@@ -31,8 +42,7 @@ pub enum BufferName {
     // Debug buffers
     OutDebugNormals,
     OutDebugRelease,
-    ThicknessGrid,
-    GridForces,
+    AtomicValues,
 }
 
 impl BufferName {
@@ -40,18 +50,17 @@ impl BufferName {
         match self {
             BufferName::OutDebugNormals => "out_debug_normals",
             BufferName::OutDebugRelease => "out_debug_release",
-            BufferName::NumberReleaseCells => "number_release_cells",
-            BufferName::NumberReleaseParticles => "number_release_particles",
             BufferName::SimInfo => "sim_info",
             BufferName::SimSettings => "sim_settings",
-            BufferName::CellCountGrid => "cell_count_grid",
-            BufferName::VelocityGrid => "velocity_grid",
-            BufferName::MaxVelocityGrid => "max_velocity_grid",
+            BufferName::GridCellCount => "cell_count_grid",
+            BufferName::GridPeakVelocity => "max_velocity_grid",
             BufferName::ParticleIndex => "particle_index",
             BufferName::Particles => "particles",
             BufferName::TimestepData => "timestep_data",
-            BufferName::ThicknessGrid => "thickness_grid",
+            BufferName::GridMass => "grid_mass",
             BufferName::GridForces => "grid_forces",
+            BufferName::GridPeakFlowThickness => "grid_peak_flow_thickness",
+            BufferName::AtomicValues => "atomic_values",
         }
     }
 }
@@ -634,6 +643,13 @@ pub fn create_buffers_and_texture_descriptions(
         TextureFormat::Rgba8Uint,
         texture_usage_input,
     );
+
+    compute_buffers.add_buffer(
+        device,
+        BufferName::SimSettings,
+        (size_of::<SimSettings>() / 16 + 1) * 16, // Ensure 16-byte alignment
+        BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+    );
     compute_buffers.add_buffer(
         device,
         BufferName::OutDebugNormals,
@@ -649,49 +665,31 @@ pub fn create_buffers_and_texture_descriptions(
     );
     compute_buffers.add_buffer(
         device,
-        BufferName::NumberReleaseCells,
-        4,
-        BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
-    );
-    compute_buffers.add_buffer(
-        device,
-        BufferName::NumberReleaseParticles,
-        4,
-        BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
-    );
-    compute_buffers.add_buffer(
-        device,
         BufferName::SimInfo,
         size_of::<SimInfo>(),
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
     );
     compute_buffers.add_buffer(
         device,
-        BufferName::CellCountGrid,
+        BufferName::GridCellCount,
         atomic_grid_size,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC,
     );
     compute_buffers.add_buffer(
         device,
-        BufferName::VelocityGrid,
-        atomic_grid_size,
-        BufferUsages::STORAGE | BufferUsages::COPY_SRC,
-    );
-    compute_buffers.add_buffer(
-        device,
-        BufferName::MaxVelocityGrid,
+        BufferName::GridPeakVelocity,
         atomic_grid_size,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
     );
     compute_buffers.add_buffer(
         device,
-        BufferName::ThicknessGrid,
+        BufferName::GridMass,
         atomic_grid_size,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
     );
     compute_buffers.add_buffer(
         device,
-        BufferName::ThicknessGrid,
+        BufferName::GridMass,
         atomic_grid_size,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
     );
@@ -699,6 +697,18 @@ pub fn create_buffers_and_texture_descriptions(
         device,
         BufferName::GridForces,
         atomic_grid_size * 2,
+        BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+    );
+    compute_buffers.add_buffer(
+        device,
+        BufferName::GridPeakFlowThickness,
+        atomic_grid_size,
+        BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+    );
+    compute_buffers.add_buffer(
+        device,
+        BufferName::AtomicValues,
+        4 * 7,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
     );
 
@@ -715,16 +725,17 @@ mod tests {
         let cases = [
             (BufferName::OutDebugNormals, "out_debug_normals"),
             (BufferName::OutDebugRelease, "out_debug_release"),
-            (BufferName::NumberReleaseCells, "number_release_cells"),
-            (
-                BufferName::NumberReleaseParticles,
-                "number_release_particles",
-            ),
             (BufferName::SimInfo, "sim_info"),
             (BufferName::SimSettings, "sim_settings"),
-            (BufferName::CellCountGrid, "cell_count_grid"),
-            (BufferName::VelocityGrid, "velocity_grid"),
-            (BufferName::MaxVelocityGrid, "max_velocity_grid"),
+            (BufferName::GridCellCount, "cell_count_grid"),
+            (BufferName::GridPeakVelocity, "max_velocity_grid"),
+            (BufferName::GridMass, "grid_mass"),
+            (BufferName::GridForces, "grid_forces"),
+            (
+                BufferName::GridPeakFlowThickness,
+                "grid_peak_flow_thickness",
+            ),
+            (BufferName::AtomicValues, "atomic_values"),
             (BufferName::ParticleIndex, "particle_index"),
             (BufferName::Particles, "particles"),
             (BufferName::TimestepData, "timestep_data"),
