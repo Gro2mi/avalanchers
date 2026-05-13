@@ -1375,7 +1375,13 @@ mod tests {
         let release_areas = load_release_areas(base_path.with_extension("png").to_str().unwrap())
             .await
             .unwrap();
-        assert_eq!(release_areas, vec![0.0, 1.0, 2.0, 2.55]);
+        let expected = rgba
+            .iter()
+            .skip(3)
+            .step_by(4)
+            .map(|alpha| (*alpha as f32) / 100.0)
+            .collect::<Vec<_>>();
+        assert_eq!(release_areas, expected);
     }
 
     #[tokio::test]
