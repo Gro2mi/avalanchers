@@ -954,20 +954,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_fetch_from_url_valid() {
-        let url =
-            "https://www.google.com/images/branding/googlelogo/1x/googlelogo_color_272x92dp.png";
-        let result = fetch_from_url(url).await;
+        let mock_server = MockServer::start().await;
+        let png_data = create_test_png();
+
+        Mock::given(method("GET"))
+            .and(path("/image.png"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(png_data.clone(), "image/png"))
+            .mount(&mock_server)
+            .await;
+
+        let url = format!("{}/image.png", mock_server.uri());
+        let result = fetch_from_url(&url).await;
 
         assert!(result.is_ok(), "Should successfully fetch the PNG");
         let bytes = result.unwrap();
-        assert!(!bytes.is_empty(), "Fetched bytes should not be empty");
-        // Verify PNG magic numbers: [0x89, 0x50, 0x4E, 0x47]
-        assert_eq!(&bytes[0..4], &[0x89, 0x50, 0x4E, 0x47]);
+        assert_eq!(bytes, png_data, "Fetched bytes should match the mocked PNG");
     }
 
     #[tokio::test]
     async fn test_fetch_from_url_invalid() {
-        let url = "https://this.url.does.not.exist.internal";
+        let url = "not a valid url";
         let result = fetch_from_url(url).await;
         assert!(result.is_err(), "Should return error for non-existent URL");
     }
@@ -1426,7 +1432,7 @@ mod tests {
 
         save_grid(&dem, file_path.to_str().unwrap(), values.clone()).unwrap();
 
-        let stored = F32Data::load(file_path.to_str().unwrap()).unwrap();
+        let stored = F32Data::load(file_path.with_extension("bin").to_str().unwrap()).unwrap();
         assert_eq!(stored.metadata.width, 2);
         assert_eq!(stored.metadata.height, 2);
         assert_eq!(stored.metadata.cell_size, 5.0);
