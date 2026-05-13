@@ -975,7 +975,13 @@ mod tests {
     async fn test_fetch_from_url_invalid() {
         let url = "not a valid url";
         let result = fetch_from_url(url).await;
-        assert!(result.is_err(), "Should return error for non-existent URL");
+        let error = result.expect_err("Invalid URLs should return an error");
+        let error_text = error.to_string();
+        assert!(
+            error_text.contains("relative URL without a base")
+                || error_text.contains("builder error"),
+            "Unexpected invalid URL error: {error_text}"
+        );
     }
 
     #[test_log::test]
