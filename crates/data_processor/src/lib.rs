@@ -1309,6 +1309,131 @@ mod tests {
         assert_eq!(f32_bytes, bytes)
     }
 
+    #[test_log::test]
+    fn test_unit_and_variable_conversions_cover_fallbacks() {
+        assert_eq!(Unit::from_int(0), Some(Unit::MetersPerSecond));
+        assert_eq!(Unit::from_int(1), Some(Unit::Degree));
+        assert_eq!(Unit::from_int(2), Some(Unit::Kilogram));
+        assert_eq!(Unit::from_int(99), Some(Unit::Dimensionless));
+        assert_eq!(Unit::Dimensionless.as_int(), 255);
+        assert_eq!(Unit::Degree.as_str(), "°");
+
+        assert_eq!(Variable::from_int(0), Some(Variable::Velocity));
+        assert_eq!(Variable::from_int(3), Some(Variable::SlopeAspect));
+        assert_eq!(Variable::from_int(7), Some(Variable::Mass));
+        assert_eq!(Variable::from_int(99), Some(Variable::Undefined));
+        assert_eq!(Variable::NormalZ.as_int(), 6);
+        assert_eq!(Variable::Undefined.as_str(), "undefined");
+    }
+
+    #[tokio::test]
+    async fn test_read_file_helpers_support_local_and_http_sources() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let local_file_path = tmp_dir.path().join("settings.json");
+        fs::write(&local_file_path, "local settings").unwrap();
+
+        let local_bytes = read_file(local_file_path.to_str().unwrap()).await.unwrap();
+        assert_eq!(local_bytes, b"local settings");
+
+        let local_string = read_file_to_string(local_file_path.to_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(local_string, "local settings");
+
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/settings.txt"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("remote settings"))
+            .mount(&mock_server)
+            .await;
+
+        let remote_string = read_file_to_string(&format!("{}/settings.txt", mock_server.uri()))
+            .await
+            .unwrap();
+        assert_eq!(remote_string, "remote settings");
+    }
+
+    #[tokio::test]
+    async fn test_write_png_and_load_release_areas_extract_alpha_channel() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let base_path = tmp_dir.path().join("release_map");
+        let rgba = vec![
+            0, 0, 0, 0, //
+            0, 0, 0, 100, //
+            0, 0, 0, 200, //
+            0, 0, 0, 255,
+        ];
+
+        write_png(&base_path, &rgba, 2, 2).unwrap();
+
+        let release_areas = load_release_areas(base_path.with_extension("png").to_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(release_areas, vec![0.0, 1.0, 2.0, 2.55]);
+    }
+
+    #[tokio::test]
+    async fn test_create_sim_settings_helpers_load_dem_and_apply_overrides() {
+        let (sim_settings, dem) = create_sim_settings_and_dem_from_path(PARABOLA_PATH).await;
+        assert_eq!(dem.width, 1001);
+        assert_eq!(dem.height, 401);
+        assert_eq!(sim_settings.grid_shape_x, dem.width as u32);
+        assert_eq!(sim_settings.grid_shape_y, dem.height as u32);
+        assert_eq!(sim_settings.cell_size, dem.cell_size);
+
+        let settings = Settings {
+            dem_path: Some(PARABOLA_PATH.to_string()),
+            max_steps: Some(42),
+            density: Some(321.0),
+            ..Settings::default()
+        };
+        let settings_file = NamedTempFile::new().unwrap();
+        fs::write(settings_file.path(), settings.dumps().unwrap()).unwrap();
+
+        let (json_sim_settings, json_dem) =
+            sim_settings_and_dem_from_json_file(settings_file.path().to_str().unwrap()).await;
+
+        assert_eq!(json_dem.width, dem.width);
+        assert_eq!(json_dem.height, dem.height);
+        assert_eq!(json_sim_settings.max_steps, 42);
+        assert_eq!(json_sim_settings.density, 321.0);
+        assert_eq!(json_sim_settings.grid_shape_x, dem.width as u32);
+        assert_eq!(json_sim_settings.grid_shape_y, dem.height as u32);
+    }
+
+    #[test_log::test]
+    fn test_save_grid_writes_round_trippable_metadata_and_data() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let file_path = tmp_dir.path().join("saved_grid");
+        let dem = Dem {
+            width: 2,
+            height: 2,
+            bounds: Bounds {
+                xmin: 10.0,
+                xmax: 20.0,
+                ymin: 30.0,
+                ymax: 40.0,
+            },
+            data1d: vec![1.0, 2.0, 3.0, 4.0],
+            data: vec![vec![1.0, 2.0], vec![3.0, 4.0]],
+            x: vec![10.0, 20.0],
+            y: vec![30.0, 40.0],
+            cell_size: 5.0,
+            map_factor: 0.75,
+            minimum_elevation: 1.0,
+        };
+        let values = vec![9.0, 8.0, 7.0, 6.0];
+
+        save_grid(&dem, file_path.to_str().unwrap(), values.clone()).unwrap();
+
+        let stored = F32Data::load(file_path.to_str().unwrap()).unwrap();
+        assert_eq!(stored.metadata.width, 2);
+        assert_eq!(stored.metadata.height, 2);
+        assert_eq!(stored.metadata.cell_size, 5.0);
+        assert_eq!(stored.metadata.map_factor, 0.75);
+        assert_eq!(stored.data, values);
+    }
+
     #[tokio::test]
     // #[ignore]
     async fn test_write_and_read_file_size_bin() {
