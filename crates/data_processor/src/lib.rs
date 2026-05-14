@@ -239,7 +239,8 @@ impl MetaGrid {
         }
     }
 
-    fn __repr__(&self) -> String {
+    #[allow(dead_code)]
+    fn print(&self) -> String {
         format!(
             "Metadata(magic_bytes='{}', version={}, width={}, height={}, data_type={})",
             std::str::from_utf8(&self.magic_bytes.to_le_bytes()).unwrap_or("????"),
@@ -249,10 +250,9 @@ impl MetaGrid {
             self.data_type.as_str()
         )
     }
-    fn __str__(&self) -> String {
-        self.__repr__()
-    }
-    fn __eq__(&self, other: &MetaGrid) -> bool {
+
+    #[allow(dead_code)]
+    fn equals(&self, other: &MetaGrid) -> bool {
         self.magic_bytes == other.magic_bytes
             && self.version == other.version
             && self.width == other.width
@@ -321,15 +321,13 @@ impl F32Data {
         }
     }
 
-    fn __repr__(&self) -> String {
+    #[allow(dead_code)]
+    fn print(&self) -> String {
         format!(
             "F32Data(metadata={}, data_len={})",
-            self.metadata.__repr__(),
+            self.metadata.print(),
             self.data.len()
         )
-    }
-    fn __str__(&self) -> String {
-        self.__repr__()
     }
 
     pub fn save(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -1156,7 +1154,7 @@ mod tests {
         let f32data = F32Data::new(&metadata, data.clone());
         assert_eq!(f32data.metadata, metadata);
         assert_eq!(f32data.data, data);
-        let repr = f32data.__repr__();
+        let repr = f32data.print();
         assert!(repr.contains("F32Data(metadata="));
         assert!(repr.contains("data_len=3"));
     }
@@ -1176,7 +1174,7 @@ mod tests {
             unit: Unit::Dimensionless,
         };
         let metadata = MetaGrid::new(&params);
-        let repr = metadata.__repr__();
+        let repr = metadata.print();
         assert!(repr.contains("Metadata(magic_bytes='AVAG'"));
         assert!(repr.contains("version=1"));
         assert!(repr.contains("width=5"));

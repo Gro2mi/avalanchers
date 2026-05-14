@@ -116,6 +116,7 @@ struct SimInfo {
     number_particles: u32,
     elevation_threshold: f32,
     max_velocity: f32,
+    max_flow_thickness: f32,
 };
 
 struct SimSettings {
@@ -146,6 +147,7 @@ struct AtomicValues {
     release_volume: atomic<u32>,
     number_release_cells: atomic<u32>,
     number_release_particles: atomic<u32>,
+    stopped_particles: atomic<u32>,
 };
 
 @group(0) @binding(0) var<uniform> sim_settings: SimSettings;

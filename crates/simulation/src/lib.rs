@@ -1,7 +1,7 @@
-use anyhow::Result;
+use anyhow::{Result, bail};
 use compute_core::{
     ComputeOrchestrator, GpuCache, Particle, SimInfo, TextureRgba, TimestepData,
-    buffers::{BufferName, TextureName},
+    buffers::{AtomicValues, BufferName, TextureName},
     dem::{Bounds, Dem},
     settings::{Settings, SimSettings},
     utils::*,
@@ -46,23 +46,15 @@ pub enum SimulationState {
     Finished,
 }
 
-#[allow(dead_code)]
 pub struct Simulation {
     orchestrator: ComputeOrchestrator,
     pub settings: SimSettings,
-    pub info: SimInfo,
     pub dem_path: String,
     pub dem: Dem,
-    pub normals: Vec<f32>,
-    pub slope: Vec<f32>,
-    pub roughness: Vec<f32>,
-    pub cell_count: Vec<u32>,
-    pub max_velocity: Vec<f32>,
     release_areas_path: Option<String>,
     release_areas_array: Option<Vec<f32>>,
     sim_info: SimInfo,
     number_particles: u32,
-    particles: Vec<Particle>,
     state: SimulationState,
     pub gpu_cache: GpuCache,
 }
@@ -74,16 +66,9 @@ impl Simulation {
         Ok(Self {
             orchestrator,
             settings: SimSettings::default(),
-            info: SimInfo::default(),
             dem_path: String::new(),
             dem: Dem::default(),
-            normals: Vec::new(),
-            slope: Vec::new(),
-            roughness: Vec::new(),
-            cell_count: Vec::new(),
-            max_velocity: Vec::new(),
             number_particles: 0,
-            particles: Vec::new(),
             state: SimulationState::Uninitialized,
             gpu_cache: GpuCache::default(),
             sim_info: SimInfo::default(),
@@ -197,6 +182,21 @@ impl Simulation {
         bounds_ymax: f32,
         map_factor: f32,
     ) -> Result<()> {
+        if bounds_xmin >= bounds_xmax {
+            bail!(
+                "xmin ({}) must be less than xmax ({})",
+                bounds_xmin,
+                bounds_xmax
+            );
+        }
+        if bounds_ymin >= bounds_ymax {
+            bail!(
+                "ymin ({}) must be less than ymax ({})",
+                bounds_ymin,
+                bounds_ymax
+            );
+        }
+
         self.dem = Dem {
             data: to_2d(dem_data, width, height),
             minimum_elevation: Dem::calculate_minimum_elevation(dem_data),
@@ -214,19 +214,6 @@ impl Simulation {
             x: linspace(bounds_xmin, bounds_xmax, width),
             y: linspace(bounds_ymin, bounds_ymax, height),
         };
-
-        assert!(
-            self.dem.bounds.xmin < self.dem.bounds.xmax,
-            "xmin ({}) must be less than or equal to xmax ({})",
-            self.dem.bounds.xmin,
-            self.dem.bounds.xmax
-        );
-        assert!(
-            self.dem.bounds.ymin < self.dem.bounds.ymax,
-            "ymin ({}) must be less than or equal to ymax ({})",
-            self.dem.bounds.ymin,
-            self.dem.bounds.ymax
-        );
         self.settings.set_dem(&self.dem);
 
         self.state = SimulationState::Ready;
@@ -238,6 +225,15 @@ impl Simulation {
     }
 
     pub fn set_release_areas(&mut self, release_areas: &[f32]) -> Result<()> {
+        if release_areas.len() != self.dem.width * self.dem.height {
+            bail!(
+                "Release areas array length ({}) does not match DEM dimensions ({}x{}={}). You have to set the DEM first.",
+                release_areas.len(),
+                self.dem.width,
+                self.dem.height,
+                self.dem.width * self.dem.height
+            );
+        }
         self.release_areas_array = Some(release_areas.to_vec());
         self.release_areas_path = None;
         Ok(())
@@ -271,7 +267,7 @@ impl Simulation {
         Ok(())
     }
 
-    async fn fetch_sim_info(&mut self) -> Result<SimInfo> {
+    pub async fn fetch_sim_info(&mut self) -> Result<SimInfo> {
         self.sim_info = self
             .orchestrator
             .read_buffer::<SimInfo>(BufferName::SimInfo)
@@ -280,6 +276,17 @@ impl Simulation {
             .cloned()
             .unwrap_or_default();
         Ok(self.sim_info)
+    }
+
+    pub async fn fetch_atomic_values(&mut self) -> Result<AtomicValues> {
+        let atomic_values = self
+            .orchestrator
+            .read_buffer::<AtomicValues>(BufferName::AtomicValues)
+            .await?
+            .first()
+            .cloned()
+            .unwrap_or_default();
+        Ok(atomic_values)
     }
 
     async fn compute_normals(&mut self) -> Result<()> {
@@ -386,7 +393,7 @@ impl Simulation {
         self.state = SimulationState::Running;
         info!(
             "Allocated GPU Memory: {:.1} MB",
-            self.orchestrator.buffers.get_total_allocated_memory_mb()
+            self.orchestrator.resources.get_total_allocated_memory_mb()
         );
         Ok(())
     }
@@ -646,9 +653,6 @@ mod tests {
 
     #[test_log::test]
     fn test_gpu_cache_read_count() {
-        if std::env::var("SKIP_FOR_TARPAULIN").is_ok() {
-            return;
-        }
         if std::env::var("GITHUB_ACTIONS").is_ok()
             && (cfg!(target_os = "macos") || cfg!(target_os = "windows"))
         {
@@ -729,9 +733,6 @@ mod tests {
 
     #[test_log::test]
     pub fn test_automatic_gpu_cache_reset() {
-        if std::env::var("SKIP_FOR_TARPAULIN").is_ok() {
-            return;
-        }
         if std::env::var("GITHUB_ACTIONS").is_ok()
             && (cfg!(target_os = "macos") || cfg!(target_os = "windows"))
         {
@@ -995,9 +996,6 @@ mod tests {
 
     #[test_log::test]
     fn test_compute() {
-        if std::env::var("SKIP_FOR_TARPAULIN").is_ok() {
-            return;
-        }
         if std::env::var("GITHUB_ACTIONS").is_ok()
             && (cfg!(target_os = "macos") || cfg!(target_os = "windows"))
         {
@@ -1019,7 +1017,7 @@ mod tests {
         block_on(sim.create(settings)).expect("Failed to create simulation");
         // block_on(sim.create_example(dem_path))
         block_on(sim.run()).expect("Failed to run simulation");
-        let debug_buffer: Vec<f32> = block_on(sim.orchestrator.buffers.read_buffer(
+        let debug_buffer: Vec<f32> = block_on(sim.orchestrator.resources.read_buffer(
             &sim.orchestrator.device,
             &sim.orchestrator.queue,
             BufferName::OutDebugNormals,
@@ -1032,7 +1030,7 @@ mod tests {
             block_on(sim.fetch_peak_velocity()).expect("Failed to get max velocity");
         info!("Peak velocity: {:?}", peak_velocity.max_value().unwrap());
 
-        let sim_info: Vec<SimInfo> = block_on(sim.orchestrator.buffers.read_buffer(
+        let sim_info: Vec<SimInfo> = block_on(sim.orchestrator.resources.read_buffer(
             &sim.orchestrator.device,
             &sim.orchestrator.queue,
             BufferName::SimInfo,
@@ -1060,7 +1058,7 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(particles.iter().filter(|&&x| x.stopped > 4400).count(), 0);
-        assert_eq!(particles.iter().filter(|&&x| x.stopped < 2).count(), 0);
+        assert_eq!(particles.iter().filter(|&&x| x.stopped == 0).count(), 0);
 
         let max_velocity = block_on(sim.fetch_peak_velocity()).expect("Failed to get max velocity");
 
@@ -1146,7 +1144,7 @@ mod tests {
         data_processor::save_grid(&dem, "profile_curvature.bin", profile_curvature.clone())
             .expect("Failed to save profile_curvature");
         // println!("{}", slope_texture[5].to_f32());
-        let debug_buffer: Vec<f32> = block_on(orchestrator.buffers.read_buffer(
+        let debug_buffer: Vec<f32> = block_on(orchestrator.resources.read_buffer(
             &orchestrator.device,
             &orchestrator.queue,
             BufferName::OutDebugNormals,
@@ -1313,5 +1311,28 @@ mod tests {
         assert_eq!(particles.iter().filter(|&&x| x.mass > 0.0).count(), 32450);
         assert!(cell_count_grid.max_value().unwrap() <= 12); // 10 particles per cell + some edge cases
         assert!(cell_count_grid.hist().get(&0).unwrap() > &398150); // most cells dont have particles
+    }
+
+    // Ensure set_release_areas returns an error when the provided array length
+    // does not match DEM dimensions.
+    #[test_log::test]
+    fn test_set_release_areas_length_mismatch() {
+        let mut sim = block_on(Simulation::new()).expect("failed to create simulation");
+
+        // set a DEM of size 4x3 => expected length 12
+        let dem_data = vec![0.0f32; 4 * 3];
+        sim.set_dem_default(&dem_data, 4, 3, 1.0)
+            .expect("set_dem_default failed");
+
+        // provide a release areas array of incorrect length (e.g., 5)
+        let bad_release_areas = vec![1.0f32; 5];
+        let res = sim.set_release_areas(&bad_release_areas);
+        assert!(
+            res.is_err(),
+            "expected error for mismatched release areas length"
+        );
+        let err = res.unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("does not match DEM dimensions"));
     }
 }

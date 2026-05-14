@@ -37,4 +37,4 @@ module-name = "avalanchers._avalanchers"
 python-source = "python_module"
 
 [tool.pytest.ini_options]
-testpaths = ["python/tests"]
+testpaths = ["python_module/tests"]

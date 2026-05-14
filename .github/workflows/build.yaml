@@ -91,14 +91,14 @@ jobs:
             WGPU_BACKEND: vulkan 
             VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
         run:
-          cargo test -p compute_core -p data_processor --release
+          cargo test -p compute_core -p data_processor -p simulation --release
 
       - name: Test MacOS
         if: matrix.os == 'macos-latest'
         env:
           WGPU_BACKEND: metal
         run:
-          cargo test -p compute_core -p data_processor --release
+          cargo test -p compute_core -p data_processor -p simulation --release
 
       - name: Test Windows
         if: matrix.os == 'windows-latest'
@@ -138,7 +138,7 @@ jobs:
             --run-types Tests \
             --verbose \
             --skip-clean \
-            --fail-under 40 \
+            --fail-under 70 \
             -p compute_core -p data_processor -p simulation
 
         

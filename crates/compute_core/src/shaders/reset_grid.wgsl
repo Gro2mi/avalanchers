@@ -1,3 +1,15 @@
+@group(0) @binding(1) var<storage, read_write> grid_mass_atomic: array<u32>;
+
+@compute @workgroup_size(WG_SIZE_2D, WG_SIZE_2D, 1)
+fn reset_grid(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    if global_id.x < sim_settings.grid_shape.x && global_id.y < sim_settings.grid_shape.y {
+        grid_mass_atomic[xy_to_idx(global_id.x, global_id.y)] = 0u; // Reset grid masses for the new timestep
+    }
+
+}
+
+// import utils.wgsl;
+// BEGIN utils.wgsl
 const WG_SIZE_2D: u32 = 16u;
 
 const g: f32 = 9.81;
@@ -139,3 +151,4 @@ fn compute_centroid(points: ptr<function, array<vec2<f32>, 256>>, count: u32) ->
 
     return vec2<f32>(cx, cy) / (6.0 * area);
 }
+// END utils.wgsl

@@ -1,5 +1,5 @@
 use crate::buffers::{
-    BufferName, ComputeBuffers, TextureName, create_buffers_and_texture_descriptions,
+    BufferName, GpuResources, TextureName, create_buffers_and_texture_descriptions,
 };
 use crate::shaders::{ComputeShaderConfig, ShaderName, generate_shader_report};
 use crate::utils::timer_checkpoint;
@@ -7,11 +7,10 @@ use anyhow::{Ok, Result, anyhow};
 use std::cmp::min;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use wgpu::util::DeviceExt;
 use wgpu::{
-    Adapter, BindingResource, BufferUsages, CommandEncoderDescriptor, ComputePassDescriptor,
-    Device, DeviceDescriptor, Extent3d, Features, Instance, InstanceDescriptor, Limits,
-    PowerPreference, Queue, RequestAdapterOptions, Sampler, TextureFormat, TextureUsages,
+    Adapter, BufferUsages, CommandEncoderDescriptor, ComputePassDescriptor, Device,
+    DeviceDescriptor, Extent3d, Features, Instance, InstanceDescriptor, Limits, PowerPreference,
+    Queue, RequestAdapterOptions, TextureFormat, TextureUsages,
 };
 
 // use log::{debug, info, warn, error};
@@ -138,6 +137,7 @@ pub struct SimInfo {
     pub number_particles: u32,
     pub elevation_threshold: f32,
     pub max_velocity: f32,
+    pub max_flow_thickness: f32,
 }
 
 impl Default for SimInfo {
@@ -147,6 +147,7 @@ impl Default for SimInfo {
             number_particles: 0,
             elevation_threshold: 0.0,
             max_velocity: 0.0,
+            max_flow_thickness: 0.0,
         }
     }
 }
@@ -259,13 +260,6 @@ impl TimestepData {
 
         soa
     }
-
-    pub fn velocity_magnitude(&self) -> Vec<f32> {
-        self.velocity
-            .iter()
-            .map(|v| (v[0].powi(2) + v[1].powi(2) + v[2].powi(2)).sqrt())
-            .collect()
-    }
 }
 
 fn magnitude(v: &[f32; 3]) -> f32 {
@@ -283,8 +277,7 @@ pub struct ComputeOrchestrator {
     pub adapter: Adapter,
     pub device: Device,
     pub queue: Queue,
-    pub buffers: ComputeBuffers,
-    pub sampler: Sampler,
+    pub resources: GpuResources,
     pub max_texture_size: u32,
     pub max_storage_buffer_binding_size: u64,
     pub max_particles: u64,
@@ -294,6 +287,7 @@ pub struct ComputeOrchestrator {
     dispatch_number_workgroups_x_2d: u32,
     dispatch_number_workgroups_y_2d: u32,
     dispatch_number_workgroups_1d: u32,
+    has_float32_filterable: bool,
 }
 
 impl ComputeOrchestrator {
@@ -439,7 +433,7 @@ impl ComputeOrchestrator {
             error!("Device lost! Reason: {:?}, Message: {}", reason, message);
         });
         timer_checkpoint("Request GPU device");
-        let buffers = ComputeBuffers::new();
+        let buffers = GpuResources::new();
         let shader_configs = shaders::create_shader_configs(
             &device,
             max_compute_invocations_per_workgroup,
@@ -447,38 +441,15 @@ impl ComputeOrchestrator {
         )?;
         timer_checkpoint("Create shaders");
         let texture_size = Extent3d::default();
-        let filter_mode = if has_float32_filterable {
-            wgpu::FilterMode::Linear
-        } else {
-            warn!(
-                "Device does not support FLOAT32_FILTERABLE, using Nearest filtering for float textures which may reduce accuray. Consider using a GPU that supports FLOAT32_FILTERABLE for better results."
-            );
-            wgpu::FilterMode::Nearest
-        };
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("Linear Sampler"),
-            mag_filter: filter_mode,
-            min_filter: filter_mode,
-            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            lod_min_clamp: 0.0,
-            lod_max_clamp: 100.0,
-            compare: None,
-            anisotropy_clamp: 1,
-            border_color: None,
-        });
 
         Ok(Self {
             instance,
             adapter,
             device,
             queue,
-            buffers,
+            resources: buffers,
             shader_configs,
             texture_size,
-            sampler,
             max_texture_size,
             max_storage_buffer_binding_size,
             max_compute_invocations_per_workgroup,
@@ -486,6 +457,7 @@ impl ComputeOrchestrator {
             dispatch_number_workgroups_x_2d: 0,
             dispatch_number_workgroups_y_2d: 0,
             dispatch_number_workgroups_1d: 0,
+            has_float32_filterable,
         })
     }
 
@@ -494,31 +466,10 @@ impl ComputeOrchestrator {
         generate_shader_report(&self.shader_configs)
     }
 
-    fn get_sampler(&self) -> BindingResource<'_> {
-        BindingResource::Sampler(&self.sampler)
-    }
-
-    fn get_view(&self, name: TextureName) -> BindingResource<'_> {
-        let view = self
-            .buffers
-            .get_texture_view(&name)
-            .ok_or_else(|| anyhow!("Texture view '{}' not found", name))
-            .expect("Texture view not found");
-        BindingResource::TextureView(view)
-    }
-
-    fn get_buffer_binding(&self, name: BufferName) -> BindingResource<'_> {
-        self.buffers
-            .get_buffer(&name)
-            .ok_or_else(|| anyhow!("Buffer '{}' not found", name))
-            .expect("Buffer not found")
-            .as_entire_binding()
-    }
-
     pub async fn run_shader(
         &self,
         shader_name: &ShaderName,
-        resources: &[BindingResource<'_>], // Pass actual resources (buffer bindings or texture views)
+        // resources: &[BindingResource<'_>], // Pass actual resources (buffer bindings or texture views)
         dispatch_number_workgroups_x: u32,
         dispatch_number_workgroups_y: u32,
         dispatch_number_workgroups_z: u32,
@@ -540,7 +491,7 @@ impl ComputeOrchestrator {
             .get(shader_name)
             .ok_or_else(|| anyhow!("Shader '{}' not found", shader_name))?;
 
-        let bind_group = config.create_bind_group(&self.device, resources)?;
+        let bind_group = config.create_bind_group(&self.device, &self.resources)?;
 
         let mut encoder = self
             .device
@@ -574,7 +525,11 @@ impl ComputeOrchestrator {
             height: sim_settings.grid_shape_y,
             depth_or_array_layers: 1,
         };
-        self.buffers = create_buffers_and_texture_descriptions(&self.device, self.texture_size);
+        self.resources = create_buffers_and_texture_descriptions(
+            &self.device,
+            self.texture_size,
+            self.has_float32_filterable,
+        );
         Ok(())
     }
 
@@ -602,9 +557,13 @@ impl ComputeOrchestrator {
         self.dispatch_number_workgroups_y_2d =
             sim_settings.grid_shape_y.div_ceil(WORKGROUP_SIZE_2D);
 
-        self.buffers = create_buffers_and_texture_descriptions(&self.device, self.texture_size);
+        self.resources = create_buffers_and_texture_descriptions(
+            &self.device,
+            self.texture_size,
+            self.has_float32_filterable,
+        );
 
-        self.buffers.write_buffer(
+        self.resources.write_buffer(
             &self.queue,
             BufferName::SimSettings,
             sim_settings.as_bytes(),
@@ -612,7 +571,7 @@ impl ComputeOrchestrator {
 
         let texture_usage_input = TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST;
 
-        self.buffers
+        self.resources
             .add_texture_with_data(
                 &self.device,
                 &self.queue,
@@ -623,23 +582,9 @@ impl ComputeOrchestrator {
                 texture_usage_input,
             )
             .expect("Failed to add texture with data");
-        let _ = self.buffers.write_buffer(
-            &self.queue,
-            BufferName::SimSettings,
-            sim_settings.as_bytes(),
-        );
 
         self.run_shader(
             &ShaderName::AnalyzeTerrain,
-            &[
-                self.get_buffer_binding(BufferName::SimSettings),
-                self.get_view(TextureName::Dem),
-                self.get_view(TextureName::Wind),
-                self.get_view(TextureName::Normals),
-                self.get_view(TextureName::Slope),
-                self.get_view(TextureName::Curvature),
-                self.get_buffer_binding(BufferName::OutDebugNormals),
-            ],
             self.dispatch_number_workgroups_x_2d,
             self.dispatch_number_workgroups_y_2d,
             1,
@@ -652,19 +597,13 @@ impl ComputeOrchestrator {
         &mut self,
         sim_settings: &settings::SimSettings,
     ) -> Result<()> {
-        self.buffers.write_buffer(
+        self.resources.write_buffer(
             &self.queue,
             BufferName::SimSettings,
             sim_settings.as_bytes(),
         )?;
         self.run_shader(
             &ShaderName::ComputeRoughness,
-            &[
-                self.get_buffer_binding(BufferName::SimSettings),
-                self.get_view(TextureName::Normals),
-                self.get_view(TextureName::Landcover),
-                self.get_view(TextureName::Roughness),
-            ],
             self.dispatch_number_workgroups_x_2d,
             self.dispatch_number_workgroups_y_2d,
             1,
@@ -677,22 +616,13 @@ impl ComputeOrchestrator {
         &mut self,
         sim_settings: &settings::SimSettings,
     ) -> Result<u32> {
-        self.buffers.write_buffer(
+        self.resources.write_buffer(
             &self.queue,
             BufferName::SimSettings,
             sim_settings.as_bytes(),
         )?;
         self.run_shader(
             &ShaderName::ComputeReleaseAreas,
-            &[
-                self.get_buffer_binding(BufferName::SimSettings),
-                self.get_view(TextureName::Dem),
-                self.get_view(TextureName::Slope),
-                self.get_view(TextureName::Roughness),
-                self.get_view(TextureName::ReleaseAreas),
-                self.get_buffer_binding(BufferName::OutDebugRelease),
-                self.get_buffer_binding(BufferName::AtomicValues),
-            ],
             self.dispatch_number_workgroups_x_2d,
             self.dispatch_number_workgroups_y_2d,
             1,
@@ -715,7 +645,7 @@ impl ComputeOrchestrator {
     ) -> Result<u32> {
         let texture_usage_input = TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST;
 
-        self.buffers.write_buffer(
+        self.resources.write_buffer(
             &self.queue,
             BufferName::SimSettings,
             sim_settings.as_bytes(),
@@ -725,7 +655,7 @@ impl ComputeOrchestrator {
         self.dispatch_number_workgroups_y_2d =
             sim_settings.grid_shape_y.div_ceil(WORKGROUP_SIZE_2D);
 
-        self.buffers
+        self.resources
             .add_texture_with_data(
                 &self.device,
                 &self.queue,
@@ -738,13 +668,6 @@ impl ComputeOrchestrator {
             .expect("Failed to add texture with data");
         self.run_shader(
             &ShaderName::LoadReleaseAreas,
-            &[
-                self.get_buffer_binding(BufferName::SimSettings),
-                self.get_view(TextureName::ReleaseAreas),
-                self.get_buffer_binding(BufferName::AtomicValues),
-                self.get_buffer_binding(BufferName::OutDebugRelease),
-                self.get_view(TextureName::ReleaseAreasInput),
-            ],
             self.dispatch_number_workgroups_x_2d,
             self.dispatch_number_workgroups_y_2d,
             1,
@@ -771,7 +694,7 @@ impl ComputeOrchestrator {
             number_release_particles,
             self.max_particles
         );
-        self.buffers.write_buffer(
+        self.resources.write_buffer(
             &self.queue,
             BufferName::SimSettings,
             sim_settings.as_bytes(),
@@ -788,7 +711,7 @@ impl ComputeOrchestrator {
             "Running initialize particles shader with number_release_particles: {}, dispatch_number_workgroups_1d: {}",
             number_release_particles, self.dispatch_number_workgroups_1d
         );
-        self.buffers.add_buffer_with_data(
+        self.resources.add_buffer_with_data(
             &self.device,
             BufferName::ParticleIndex,
             &[0u32],
@@ -799,19 +722,9 @@ impl ComputeOrchestrator {
             particle_buffer_size,
             BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
         );
+
         self.run_shader(
             &ShaderName::InitializeParticles,
-            &[
-                self.get_buffer_binding(BufferName::SimSettings),
-                self.get_buffer_binding(BufferName::SimInfo),
-                self.get_view(TextureName::Dem),
-                self.get_view(TextureName::Normals),
-                self.get_view(TextureName::ReleaseAreas),
-                self.get_sampler(),
-                self.get_buffer_binding(BufferName::Particles),
-                self.get_buffer_binding(BufferName::AtomicValues),
-                self.get_buffer_binding(BufferName::GridCellCount),
-            ],
             self.dispatch_number_workgroups_x_2d,
             self.dispatch_number_workgroups_y_2d,
             1,
@@ -839,78 +752,43 @@ impl ComputeOrchestrator {
         );
 
         let sim_info: SimInfo = SimInfo {
-            timestep: 0,
             number_particles: number_release_particles,
-            elevation_threshold: 0.0,
-            max_velocity: 0.0,
+            ..Default::default()
         };
-        self.buffers.write_buffer(
+        self.resources.write_buffer(
             &self.queue,
             BufferName::SimInfo,
             bytemuck::bytes_of(&sim_info),
         )?;
 
-        self.buffers.write_buffer(
+        self.resources.write_buffer(
             &self.queue,
             BufferName::SimSettings,
             sim_settings.as_bytes(),
         )?;
 
-        let indirect_dispatch_1d_buffer =
-            self.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Indirect Dispatch 1D Buffer"),
-                    contents: bytemuck::cast_slice(&[self.dispatch_number_workgroups_1d, 1, 1]),
-                    usage: wgpu::BufferUsages::INDIRECT
-                        | wgpu::BufferUsages::STORAGE
-                        | wgpu::BufferUsages::COPY_DST,
-                });
+        let update_sim_info_config = self
+            .shader_configs
+            .get(&ShaderName::UpdateSimInfo)
+            .expect("UpdateSimInfo shader config not found");
 
-        let indirect_dispatch_2d_buffer =
-            self.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Indirect Dispatch 2DBuffer"),
-                    contents: bytemuck::cast_slice(&[
-                        self.dispatch_number_workgroups_x_2d,
-                        self.dispatch_number_workgroups_y_2d,
-                        1,
-                    ]),
-                    usage: wgpu::BufferUsages::INDIRECT
-                        | wgpu::BufferUsages::STORAGE
-                        | wgpu::BufferUsages::COPY_DST,
-                });
+        let update_sim_info_bindgroup =
+            update_sim_info_config.create_bind_group(&self.device, &self.resources)?;
 
         let p2g_config = self
             .shader_configs
             .get(&ShaderName::P2G)
             .expect("P2G shader config not found");
 
-        let p2g_bindgroup = p2g_config.create_bind_group(
-            &self.device,
-            &[
-                self.get_buffer_binding(BufferName::SimSettings),
-                self.get_buffer_binding(BufferName::Particles),
-                self.get_buffer_binding(BufferName::GridMass),
-                self.get_buffer_binding(BufferName::SimInfo),
-            ],
-        )?;
+        let p2g_bindgroup = p2g_config.create_bind_group(&self.device, &self.resources)?;
 
         let grid_physics_config = self
             .shader_configs
             .get(&ShaderName::GridPhysics)
             .expect("GridPhysics shader config not found");
 
-        let grid_physics_bindgroup = grid_physics_config.create_bind_group(
-            &self.device,
-            &[
-                self.get_buffer_binding(BufferName::SimSettings),
-                self.get_buffer_binding(BufferName::GridMass),
-                self.get_view(TextureName::Normals),
-                self.get_buffer_binding(BufferName::GridForces),
-                self.get_buffer_binding(BufferName::GridPeakFlowThickness),
-                self.get_buffer_binding(BufferName::AtomicValues),
-            ],
-        )?;
+        let grid_physics_bindgroup =
+            grid_physics_config.create_bind_group(&self.device, &self.resources)?;
 
         // Compute Particles Bind Group
         let compute_particles_config = self
@@ -918,41 +796,17 @@ impl ComputeOrchestrator {
             .get(&ShaderName::ComputeParticles)
             .expect("ComputeParticles shader config not found");
 
-        let compute_particles_bindgroup = compute_particles_config.create_bind_group(
-            &self.device,
-            &[
-                self.get_buffer_binding(BufferName::SimSettings),
-                self.get_buffer_binding(BufferName::SimInfo),
-                self.get_view(TextureName::Dem),
-                self.get_view(TextureName::Normals),
-                self.get_sampler(),
-                self.get_buffer_binding(BufferName::Particles),
-                self.get_buffer_binding(BufferName::AtomicValues),
-                self.get_buffer_binding(BufferName::GridCellCount),
-                self.get_buffer_binding(BufferName::GridPeakVelocity),
-                self.get_buffer_binding(BufferName::TimestepData),
-                self.get_view(TextureName::Curvature),
-                self.get_buffer_binding(BufferName::OutDebugNormals),
-                self.get_buffer_binding(BufferName::GridMass),
-                self.get_buffer_binding(BufferName::GridForces),
-            ],
-        )?;
+        let compute_particles_bindgroup =
+            compute_particles_config.create_bind_group(&self.device, &self.resources)?;
 
-        let reset_max_velocity_config = self
+        let reset_grid_config = self
             .shader_configs
-            .get(&ShaderName::ResetMaxVelocity)
-            .expect("ResetMaxVelocity shader config not found");
+            .get(&ShaderName::ResetGrid)
+            .expect("ResetGrid shader config not found");
 
-        // Reset Max Velocity Bind Group
-        let reset_max_velocity_bind_group = reset_max_velocity_config.create_bind_group(
-            &self.device,
-            &[
-                self.get_buffer_binding(BufferName::SimSettings),
-                self.get_buffer_binding(BufferName::SimInfo),
-                self.get_buffer_binding(BufferName::AtomicValues),
-                self.get_buffer_binding(BufferName::GridMass),
-            ],
-        )?;
+        // Reset Grid Bind Group
+        let reset_grid_bind_group =
+            reset_grid_config.create_bind_group(&self.device, &self.resources)?;
 
         // Create command encoder
         let mut command_encoder =
@@ -970,29 +824,52 @@ impl ComputeOrchestrator {
                 });
 
             for _i in 0..sim_settings.max_steps {
+                // let mut indirect_dispatch_pass =
+                //     command_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                //         label: Some("Calculate Indirect Dispatch Args Pass"),
+                //         ..Default::default()
+                //     });
+                // indirect_dispatch_pass.set_pipeline(&indirect_dispatch_config.pipeline);
+                // indirect_dispatch_pass.set_bind_group(0, &indirect_dispatch_bindgroup, &[]);
+                // indirect_dispatch_pass.dispatch_workgroups(1, 1, 1);
+                // drop(indirect_dispatch_pass);
                 // --- P2G ---
                 compute_pass.set_pipeline(&p2g_config.pipeline);
                 compute_pass.set_bind_group(0, &p2g_bindgroup, &[]);
-                compute_pass.dispatch_workgroups_indirect(&indirect_dispatch_1d_buffer, 0);
+                compute_pass.dispatch_workgroups(self.dispatch_number_workgroups_1d, 1, 1);
 
                 // --- Grid Physics ---
                 compute_pass.set_pipeline(&grid_physics_config.pipeline);
                 compute_pass.set_bind_group(0, &grid_physics_bindgroup, &[]);
-                compute_pass.dispatch_workgroups_indirect(&indirect_dispatch_2d_buffer, 0);
+                compute_pass.dispatch_workgroups(
+                    self.dispatch_number_workgroups_x_2d,
+                    self.dispatch_number_workgroups_y_2d,
+                    1,
+                );
 
                 // --- computeParticles ---
                 compute_pass.set_pipeline(&compute_particles_config.pipeline);
                 compute_pass.set_bind_group(0, &compute_particles_bindgroup, &[]);
-                compute_pass.dispatch_workgroups_indirect(&indirect_dispatch_1d_buffer, 0);
+                compute_pass.dispatch_workgroups(self.dispatch_number_workgroups_1d, 1, 1);
 
-                // --- resetMaxVelocity ---
-                compute_pass.set_pipeline(&reset_max_velocity_config.pipeline);
-                compute_pass.set_bind_group(0, &reset_max_velocity_bind_group, &[]);
-                compute_pass.dispatch_workgroups_indirect(&indirect_dispatch_2d_buffer, 0);
+                // --- updateSimInfo ---
+                compute_pass.set_pipeline(&update_sim_info_config.pipeline);
+                compute_pass.set_bind_group(0, &update_sim_info_bindgroup, &[]);
+                compute_pass.dispatch_workgroups(1, 1, 1);
+
+                // --- resetGrid ---
+                compute_pass.set_pipeline(&reset_grid_config.pipeline);
+                compute_pass.set_bind_group(0, &reset_grid_bind_group, &[]);
+                compute_pass.dispatch_workgroups(
+                    self.dispatch_number_workgroups_x_2d,
+                    self.dispatch_number_workgroups_y_2d,
+                    1,
+                );
+
+                // drop(compute_pass);
             }
-        } // compute_pass dropped here (equivalent to end())
+        }
 
-        // Submit commands
         self.queue.submit(Some(command_encoder.finish()));
         Ok(())
     }
@@ -1000,7 +877,7 @@ impl ComputeOrchestrator {
         &self,
         name: TextureName,
     ) -> Result<(Vec<T>, Vec<T>, Vec<T>, Vec<T>)> {
-        self.buffers
+        self.resources
             .read_texture(&self.device, &self.queue, name)
             .await
     }
@@ -1009,13 +886,13 @@ impl ComputeOrchestrator {
         name: TextureName,
         data: &[T],
     ) -> Result<()> {
-        self.buffers.write_texture::<T>(&self.queue, name, data)
+        self.resources.write_texture::<T>(&self.queue, name, data)
     }
     pub async fn read_texture_single_channel<T: bytemuck::Pod + Send + Sync>(
         &self,
         name: TextureName,
     ) -> Result<Vec<T>> {
-        self.buffers
+        self.resources
             .read_texture_single_channel(&self.device, &self.queue, name)
             .await
     }
@@ -1023,13 +900,13 @@ impl ComputeOrchestrator {
         &self,
         name: BufferName,
     ) -> Result<Vec<T>> {
-        self.buffers
+        self.resources
             .read_buffer(&self.device, &self.queue, name)
             .await
     }
 
     pub fn add_buffer(&mut self, name: BufferName, size_bytes: usize, usage: BufferUsages) {
-        self.buffers
+        self.resources
             .add_buffer(&self.device, name, size_bytes, usage);
     }
 }

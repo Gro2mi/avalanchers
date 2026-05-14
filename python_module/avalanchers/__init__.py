@@ -95,17 +95,12 @@ def plot2d(sim, parameter, title="Avalanche Simulation", threshold_value=1, step
     data[dem_mask] = np.nan
     data[data < threshold_value] = np.nan
     data[sim.cell_count < particle_threshold * sim.released_particles_per_cell] = np.nan
-    # surf = ax.contourf(xx, yy, flow_velocity, cmap='viridis', levels=get_levels(flow_velocity, step), vmin=0.01)
-    surf = ax.contourf(x, y, data, cmap='magma')#, levels=get_levels(np.array(max_velocity - 1), step), vmin=0.00001)
+    surf = ax.contourf(x, y, data, cmap='magma')
     ax.contour(x, y, sim.release_areas.astype(np.float32), colors='cyan', linewidths=1, alpha=0.3)
     divider = make_axes_locatable(ax)
-    cax = divider.append_axes("right", size="5%", pad=0.1)  # Adjust size and padding
-    # cbar = fig.colorbar(surf, ax=ax, ticks=[round(tick) for tick in get_levels(flow_velocity, step)], cax=cax)
+    cax = divider.append_axes("right", size="5%", pad=0.1)
     cbar = fig.colorbar(surf, ax=ax, cax=cax)
     cbar.set_label(parameter.replace("_", " ").title())
-    # rounded_ticks = [round(tick) for tick in cbar.get_ticks()]
-    # cbar.set_ticks(rounded_ticks)
-    # cbar.ax.yaxis.set_major_locator(MaxNLocator(integer=True))
 
     ax.set(title=title)
     plt.show()
@@ -116,7 +111,7 @@ def plot_overview(sim, threshold_value=1, particle_threshold=0):
     params = ['peak_velocity', 'peak_flow_thickness', 'cell_count']
     colormaps = ['magma', 'viridis', 'plasma']
     
-    import_plt() # Using your existing import helper
+    import_plt()
     
     # Create a figure with 3 subplots
     fig, axes = plt.subplots(1, 3, figsize=(22, 7))
@@ -213,8 +208,9 @@ def plot_comparison_binary(sim, parameter, reference_array, threshold_value=1, p
     )
     cbar = fig.colorbar(cont, ax=ax, ticks=[0, 1, 2, 3], shrink=0.8, aspect=10)
     cbar.ax.set_yticklabels(["No avalanche", "reference only", "both", "sim only"])
-    ax.set_title(title + f"\nDice coefficient: {calculate_dice(reference_array, data):.4f}")
-    print(f"Dice coefficient: {calculate_dice(reference_array, data):.4f}")
+    dice = calculate_dice(reference_array, data)
+    ax.set_title(title + f"\nDice coefficient: {dice:.4f}")
+    print(f"Dice coefficient: {dice:.4f}")
     return fig, ax
 
 def plot_comparison(sim, parameter, reference_array, particle_threshold=0, title="Avalanche Simulation Comparison"):
@@ -233,10 +229,10 @@ def plot_comparison(sim, parameter, reference_array, particle_threshold=0, title
     levels = np.linspace(-max_abs, max_abs, 21)
     cont = ax.contourf(x, y, diff, cmap='bwr', levels=levels)
     fig.colorbar(cont, ax=ax,  shrink=0.8, aspect=10)
-    ax.set_title(f"Difference in {parameter.replace('_', ' ').title()} (reference - sim), red ref faster, blue sim faster")
-
-    # cbar.ax.set_yticklabels(["No avalanche", "webigeo and dfa", "webigeo only", "dfa only"])
-    ax.set_title(title)
+    cbar.ax.set_yticklabels(["No avalanche", "reference only", "both", "sim only"])
+    dice = calculate_dice(reference_array, data)
+    ax.set_title(title  + f"\nDice coefficient: {dice:.4f}")
+    print(f"Dice coefficient: {dice:.4f}")
     return fig, ax
 
 def is_jupyter():
