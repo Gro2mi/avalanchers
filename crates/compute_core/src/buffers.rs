@@ -3,16 +3,20 @@ use anyhow::{Result, anyhow};
 use bytemuck::{Pod, Zeroable};
 use std::borrow::Cow;
 use std::collections::HashMap;
+use tracing::warn;
 use wgpu::{
     Buffer, BufferDescriptor, BufferUsages, COPY_BYTES_PER_ROW_ALIGNMENT, CommandEncoderDescriptor,
-    Device, Extent3d, MapMode, Origin3d, Queue, TexelCopyBufferInfo, TexelCopyBufferLayout,
-    TexelCopyTextureInfo, Texture, TextureDescriptor, TextureDimension, TextureFormat,
-    TextureUsages, TextureView, TextureViewDescriptor,
+    Device, Extent3d, MapMode, Origin3d, Queue, Sampler, TexelCopyBufferInfo,
+    TexelCopyBufferLayout, TexelCopyTextureInfo, Texture, TextureDescriptor, TextureDimension,
+    TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
     util::{BufferInitDescriptor, DeviceExt},
 };
 
+use crate::SimInfo;
+use crate::utils::split_channels;
+
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable, Default)]
 pub struct AtomicValues {
     pub grid_peak_velocity: u32,
     pub grid_peak_flow_thickness: u32,
@@ -21,6 +25,7 @@ pub struct AtomicValues {
     pub release_volume: u32,
     pub number_release_cells: u32,
     pub number_release_particles: u32,
+    pub stopped_particles: u32,
 }
 
 #[derive(Eq, Hash, PartialEq, Clone)]
@@ -71,6 +76,29 @@ impl std::fmt::Display for BufferName {
     }
 }
 
+impl std::str::FromStr for BufferName {
+    type Err = String;
+
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        match name {
+            "out_debug_normals" => Ok(BufferName::OutDebugNormals),
+            "out_debug_release" => Ok(BufferName::OutDebugRelease),
+            "sim_info" => Ok(BufferName::SimInfo),
+            "sim_settings" => Ok(BufferName::SimSettings),
+            "cell_count_grid" => Ok(BufferName::GridCellCount),
+            "max_velocity_grid" => Ok(BufferName::GridPeakVelocity),
+            "particle_index" => Ok(BufferName::ParticleIndex),
+            "particles" => Ok(BufferName::Particles),
+            "timestep_data" => Ok(BufferName::TimestepData),
+            "grid_mass" => Ok(BufferName::GridMass),
+            "grid_forces" => Ok(BufferName::GridForces),
+            "grid_peak_flow_thickness" => Ok(BufferName::GridPeakFlowThickness),
+            "atomic_values" => Ok(BufferName::AtomicValues),
+            _ => Err(format!("Unknown buffer name: {}", name)),
+        }
+    }
+}
+
 #[derive(Eq, Hash, PartialEq, Clone)]
 pub enum TextureName {
     Wind,
@@ -109,41 +137,53 @@ impl std::fmt::Display for TextureName {
         write!(f, "{}", self.to_str())
     }
 }
+impl std::str::FromStr for TextureName {
+    type Err = String;
 
-// Re-export features for conditional compilation
-// #[cfg(feature = "native")]
-// pub use pollster::block_on;
-// #[cfg(feature = "wasm")]
-// pub use wasm_bindgen_futures::spawn_local;
-
-use crate::SimInfo;
-use crate::utils::split_channels;
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        match name {
+            "wind" => Ok(TextureName::Wind),
+            "normals" => Ok(TextureName::Normals),
+            "slope" => Ok(TextureName::Slope),
+            "roughness" => Ok(TextureName::Roughness),
+            "release_areas" => Ok(TextureName::ReleaseAreas),
+            "landcover" => Ok(TextureName::Landcover),
+            "staging_buffer" => Ok(TextureName::StagingBuffer),
+            "dem" => Ok(TextureName::Dem),
+            "release_areas_input" => Ok(TextureName::ReleaseAreasInput),
+            "cell_count" => Ok(TextureName::CellCount),
+            "curvature" => Ok(TextureName::Curvature),
+            _ => Err(format!("Unknown texture name: {}", name)),
+        }
+    }
+}
 
 // Helper function for alignment
 fn align_up(value: u32, alignment: u32) -> u32 {
     value.div_ceil(alignment) * alignment
 }
 
-// --- 1. Buffer and Texture Management (UPDATED) ---
-pub struct ComputeBuffers {
+pub struct GpuResources {
     buffers: HashMap<BufferName, Buffer>,
     textures: HashMap<TextureName, Texture>,
-    texture_views: HashMap<TextureName, TextureView>, // Store views as they are used in bind groups
+    texture_views: HashMap<TextureName, TextureView>,
+    samplers: HashMap<String, Sampler>,
     total_allocated_buffer_bytes: usize, // Track total allocated buffer size for debugging/monitoring
 }
 
-impl Default for ComputeBuffers {
+impl Default for GpuResources {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl ComputeBuffers {
+impl GpuResources {
     pub fn new() -> Self {
         Self {
             buffers: HashMap::new(),
             textures: HashMap::new(),
             texture_views: HashMap::new(),
+            samplers: HashMap::new(),
             total_allocated_buffer_bytes: 0,
         }
     }
@@ -164,6 +204,10 @@ impl ComputeBuffers {
         device
             .poll(wgpu::PollType::Poll)
             .expect("Failed to poll device");
+    }
+
+    pub fn get_sampler(&self, name: &str) -> Option<&Sampler> {
+        self.samplers.get(name)
     }
 
     pub fn add_buffer(
@@ -581,8 +625,35 @@ pub const DEBUG_BUFFER_SIZE: usize = 100 * 4;
 pub fn create_buffers_and_texture_descriptions(
     device: &Device,
     texture_size: Extent3d,
-) -> ComputeBuffers {
-    let mut compute_buffers = ComputeBuffers::default();
+    has_float32_filterable: bool,
+) -> GpuResources {
+    let mut gpu_resources = GpuResources::default();
+    let filter_mode = if has_float32_filterable {
+        wgpu::FilterMode::Linear
+    } else {
+        warn!(
+            "Device does not support FLOAT32_FILTERABLE, using Nearest filtering for float textures which may reduce accuray. Consider using a GPU that supports FLOAT32_FILTERABLE for better results."
+        );
+        wgpu::FilterMode::Nearest
+    };
+    gpu_resources.samplers.insert(
+        "sampler".to_string(),
+        device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Linear Sampler"),
+            mag_filter: filter_mode,
+            min_filter: filter_mode,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            lod_min_clamp: 0.0,
+            lod_max_clamp: 100.0,
+            compare: None,
+            anisotropy_clamp: 1,
+            border_color: None,
+        }),
+    );
+
     let texture_usage_default = TextureUsages::TEXTURE_BINDING
         | TextureUsages::STORAGE_BINDING
         | TextureUsages::COPY_DST
@@ -594,49 +665,49 @@ pub fn create_buffers_and_texture_descriptions(
     let buffer_usage_output = BufferUsages::STORAGE | BufferUsages::COPY_SRC;
     let atomic_grid_size = (texture_size.width * texture_size.height * 4) as usize;
 
-    compute_buffers.add_texture(
+    gpu_resources.add_texture(
         device,
         TextureName::Wind,
         texture_size,
         TextureFormat::Rgba32Float,
         texture_usage_input,
     );
-    compute_buffers.add_texture(
+    gpu_resources.add_texture(
         device,
         TextureName::Normals,
         texture_size,
         TextureFormat::Rgba32Float,
         texture_usage_output,
     );
-    compute_buffers.add_texture(
+    gpu_resources.add_texture(
         device,
         TextureName::Slope,
         texture_size,
         TextureFormat::Rgba32Float,
         texture_usage_output,
     );
-    compute_buffers.add_texture(
+    gpu_resources.add_texture(
         device,
         TextureName::Curvature,
         texture_size,
         TextureFormat::Rgba32Float,
         texture_usage_output,
     );
-    compute_buffers.add_texture(
+    gpu_resources.add_texture(
         device,
         TextureName::Roughness,
         texture_size,
         TextureFormat::Rgba32Float,
         texture_usage_default,
     );
-    compute_buffers.add_texture(
+    gpu_resources.add_texture(
         device,
         TextureName::ReleaseAreas,
         texture_size,
         TextureFormat::Rgba32Float,
         texture_usage_default,
     );
-    compute_buffers.add_texture(
+    gpu_resources.add_texture(
         device,
         TextureName::Landcover,
         texture_size,
@@ -644,75 +715,75 @@ pub fn create_buffers_and_texture_descriptions(
         texture_usage_input,
     );
 
-    compute_buffers.add_buffer(
+    gpu_resources.add_buffer(
         device,
         BufferName::SimSettings,
-        (size_of::<SimSettings>() / 16 + 1) * 16, // Ensure 16-byte alignment
+        ((size_of::<SimSettings>() - 1) / 16 + 1) * 16, // Ensure 16-byte alignment
         BufferUsages::UNIFORM | BufferUsages::COPY_DST,
     );
-    compute_buffers.add_buffer(
+    gpu_resources.add_buffer(
         device,
         BufferName::OutDebugNormals,
         DEBUG_BUFFER_SIZE,
         buffer_usage_output,
     );
 
-    compute_buffers.add_buffer(
+    gpu_resources.add_buffer(
         device,
         BufferName::OutDebugRelease,
         DEBUG_BUFFER_SIZE,
         buffer_usage_output,
     );
-    compute_buffers.add_buffer(
+    gpu_resources.add_buffer(
         device,
         BufferName::SimInfo,
         size_of::<SimInfo>(),
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
     );
-    compute_buffers.add_buffer(
+    gpu_resources.add_buffer(
         device,
         BufferName::GridCellCount,
         atomic_grid_size,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC,
     );
-    compute_buffers.add_buffer(
+    gpu_resources.add_buffer(
         device,
         BufferName::GridPeakVelocity,
         atomic_grid_size,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
     );
-    compute_buffers.add_buffer(
+    gpu_resources.add_buffer(
         device,
         BufferName::GridMass,
         atomic_grid_size,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
     );
-    compute_buffers.add_buffer(
+    gpu_resources.add_buffer(
         device,
         BufferName::GridMass,
         atomic_grid_size,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
     );
-    compute_buffers.add_buffer(
+    gpu_resources.add_buffer(
         device,
         BufferName::GridForces,
         atomic_grid_size * 2,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
     );
-    compute_buffers.add_buffer(
+    gpu_resources.add_buffer(
         device,
         BufferName::GridPeakFlowThickness,
         atomic_grid_size,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
     );
-    compute_buffers.add_buffer(
+    gpu_resources.add_buffer(
         device,
         BufferName::AtomicValues,
-        4 * 7,
+        ((size_of::<AtomicValues>() - 1) / 16 + 1) * 16,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
     );
 
-    compute_buffers
+    gpu_resources
 }
 
 #[cfg(test)]
@@ -784,7 +855,7 @@ mod tests {
     #[test]
     fn prepare_buffer_contents_returns_borrowed_when_already_16_byte_aligned() {
         let data = [1u32, 2, 3, 4]; // 16 bytes
-        let prepared = ComputeBuffers::prepare_buffer_contents(&data);
+        let prepared = GpuResources::prepare_buffer_contents(&data);
 
         assert!(matches!(prepared, Cow::Borrowed(_)));
         assert_eq!(prepared.len(), 16);
@@ -794,7 +865,7 @@ mod tests {
     #[test]
     fn prepare_buffer_contents_pads_when_not_16_byte_aligned() {
         let data = [1u32, 2, 3]; // 12 bytes
-        let prepared = ComputeBuffers::prepare_buffer_contents(&data);
+        let prepared = GpuResources::prepare_buffer_contents(&data);
 
         assert!(matches!(prepared, Cow::Owned(_)));
         assert_eq!(prepared.len(), 16);
@@ -806,7 +877,7 @@ mod tests {
     fn prepare_buffer_contents_is_always_multiple_of_16_and_prefix_is_original() {
         for len in 0usize..33 {
             let data: Vec<u8> = (0..len as u8).collect();
-            let prepared = ComputeBuffers::prepare_buffer_contents(&data);
+            let prepared = GpuResources::prepare_buffer_contents(&data);
 
             assert_eq!(prepared.len() % 16, 0);
             assert_eq!(&prepared[..data.len()], data.as_slice());
@@ -845,7 +916,7 @@ mod tests {
 
     #[test]
     fn compute_buffers_default_starts_empty() {
-        let buffers = ComputeBuffers::default();
+        let buffers = GpuResources::default();
         assert!(buffers.get_buffer(&BufferName::SimInfo).is_none());
         assert!(buffers.get_texture(&TextureName::Wind).is_none());
         assert!(buffers.get_texture_view(&TextureName::Wind).is_none());

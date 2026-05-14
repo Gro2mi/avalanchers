@@ -50,8 +50,7 @@ fn compute_particles(
         return;
     }
     var p = particles[particleId];
-    // do at least one step, otherwise simulation might stop too early
-    if p.stopped > 1u {
+    if p.stopped != 0u {
         return;
     }
     let uv = position_to_uv(p.position);
@@ -106,6 +105,7 @@ fn compute_particles(
     if velocity_length < acceleration_friction_magnitude * dt {
         dt = velocity_length / acceleration_friction_magnitude;
         p.stopped = sim_info.timestep;
+        // atomicAdd(&atomic_values.stopped_particles, 1u);
     }
     if velocity_length > sim_settings.velocity_threshold {
         p.velocity -= acceleration_friction_magnitude * (p.velocity / velocity_length) * dt;
@@ -134,11 +134,10 @@ fn compute_particles(
         current.acceleration_normal = acceleration_normal;
         current.elevation = elevation;
         current.uv = new_uv;
-        current.g_eff = length(effective_acceleration_normal);
+        current.g_eff = length(accel_lateral);
         update_output_data(0u, sim_info.timestep, current);
 
         // out_debug[2] = f32(p.position.x);
-        sim_info.timestep = sim_info.timestep + 1u;
     }
 
     let converted_velocity = u32(MAX_VELOCITY_FACTOR * length(p.velocity));
@@ -173,6 +172,7 @@ fn compute_particles(
     // stop criterion friction
     if length(p.velocity) < sim_settings.velocity_threshold {
         p.stopped = sim_info.timestep;
+        // atomicAdd(&atomic_values.stopped_particles, 1u);
         particles[particleId] = p;
         return;
     }
@@ -180,6 +180,7 @@ fn compute_particles(
     if new_uv.x < 0.0 || new_uv.x > 1.0 || new_uv.y < 0.0 || new_uv.y > 1.0 
         || elevation < sim_info.elevation_threshold {
         p.stopped = sim_info.timestep;
+        // atomicAdd(&atomic_values.stopped_particles, 1u);
         particles[particleId] = p;
         return;
     }
@@ -304,6 +305,7 @@ struct SimInfo {
     number_particles: u32,
     elevation_threshold: f32,
     max_velocity: f32,
+    max_flow_thickness: f32,
 };
 
 struct SimSettings {
@@ -334,6 +336,7 @@ struct AtomicValues {
     release_volume: atomic<u32>,
     number_release_cells: atomic<u32>,
     number_release_particles: atomic<u32>,
+    stopped_particles: atomic<u32>,
 };
 
 @group(0) @binding(0) var<uniform> sim_settings: SimSettings;

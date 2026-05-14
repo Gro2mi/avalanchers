@@ -58,10 +58,15 @@ fn main() -> Result<()> {
     let peak_velocity =
         block_on(simulation.fetch_peak_velocity()).expect("Failed to get peak velocity");
     info!(
-        "Peak velocity after simulation: {:.2} m/s",
+        "Peak velocity during simulation: {:.2} m/s",
         peak_velocity.max_value().unwrap(),
     );
 
+    let sim_info = block_on(simulation.fetch_sim_info()).expect("Failed to get sim info");
+    info!("{:#?}", sim_info);
+    let atomic_values =
+        block_on(simulation.fetch_atomic_values()).expect("Failed to get atomic values");
+    info!("{:#?}", atomic_values);
     let duration = start.elapsed();
 
     info!("Time elapsed is: {:?}", duration);

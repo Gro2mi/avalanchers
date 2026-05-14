@@ -1,23 +1,15 @@
+
 @group(0) @binding(1) var<storage, read_write> sim_info: SimInfo;
 @group(0) @binding(2) var<storage, read_write> atomic_values: AtomicValues;
-@group(0) @binding(3) var<storage, read_write> grid_mass_atomic: array<u32>;
 
-@compute @workgroup_size(WG_SIZE_2D, WG_SIZE_2D, 1)
-fn reset_max_velocity(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    if global_id.x < sim_settings.grid_shape.x && global_id.y < sim_settings.grid_shape.y {
-        if global_id.x == 0u && global_id.y == 0u {
-            sim_info.max_velocity = (f32(atomicLoad(&atomic_values.peak_velocity)) / f32(MAX_VELOCITY_FACTOR)
-             + sqrt(g * f32(atomicLoad(&atomic_values.peak_flow_thickness)) * INV_H_FACTOR)); // Load the current max velocity
-            // TODO load max h for cfl calculation, add sqrt(g*h)
-            // can this increase computation speed?
-            // let old = atomicLoad(&x);
-            // if (value > old) {
-            //     atomicMax(&x, value);
-            // }
-            atomicStore(&atomic_values.peak_velocity, u32(0)); // Reset max velocity to 0 for the new timestep
-        }
-        grid_mass_atomic[xy_to_idx(global_id.x, global_id.y)] = 0u; // Reset grid masses for the new timestep
-    }
+@compute @workgroup_size(1, 1, 1)
+fn update_sim_info(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let max_flow_thickness = f32(atomicLoad(&atomic_values.peak_flow_thickness)) * INV_H_FACTOR;
+    sim_info.timestep = sim_info.timestep + 1u;
+    sim_info.max_velocity = (f32(atomicLoad(&atomic_values.peak_velocity)) / f32(MAX_VELOCITY_FACTOR)
+        + sqrt(g * max_flow_thickness)); 
+    sim_info.max_flow_thickness = max_flow_thickness; 
+    atomicStore(&atomic_values.peak_velocity, u32(0)); 
 }
 
 // import utils.wgsl;
@@ -50,6 +42,7 @@ struct SimInfo {
     number_particles: u32,
     elevation_threshold: f32,
     max_velocity: f32,
+    max_flow_thickness: f32,
 };
 
 struct SimSettings {
@@ -80,6 +73,7 @@ struct AtomicValues {
     release_volume: atomic<u32>,
     number_release_cells: atomic<u32>,
     number_release_particles: atomic<u32>,
+    stopped_particles: atomic<u32>,
 };
 
 @group(0) @binding(0) var<uniform> sim_settings: SimSettings;

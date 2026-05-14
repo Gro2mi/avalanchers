@@ -1,10 +1,13 @@
-use crate::buffers::{BufferName, TextureName};
+use crate::buffers::AtomicValues;
+use crate::buffers::{BufferName, GpuResources, TextureName};
 use anyhow::Result;
+use core::panic;
 use regex::Regex;
 use std::num::NonZero;
+use tracing::error;
 use wgpu::{
     BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
-    BindGroupLayoutEntry, BindingType, BufferBindingType, ComputePipeline,
+    BindGroupLayoutEntry, BindingResource, BindingType, BufferBindingType, ComputePipeline,
     ComputePipelineDescriptor, Device, PipelineLayoutDescriptor, ShaderModuleDescriptor,
     ShaderSource, ShaderStages, StorageTextureAccess, TextureFormat, TextureViewDimension,
 };
@@ -58,7 +61,7 @@ macro_rules! define_shaders {
 
 define_shaders! {
     AnalyzeTerrain => "analyze_terrain",
-    ResetMaxVelocity => "reset_max_velocity",
+    ResetGrid => "reset_grid",
     LoadReleaseAreas => "load_release_areas",
     ComputeRoughness => "compute_roughness",
     ComputeReleaseAreas => "compute_release_areas",
@@ -68,6 +71,7 @@ define_shaders! {
     GridPhysics => "grid_physics",
     Utils => "utils",
     Random => "random",
+    UpdateSimInfo => "update_sim_info",
 }
 
 impl std::fmt::Display for ShaderName {
@@ -236,10 +240,11 @@ impl ComputeShaderConfig {
     pub fn create_bind_group(
         &self,
         device: &Device,
-        resources: &[wgpu::BindingResource],
+        resources: &GpuResources,
     ) -> Result<BindGroup> {
+        let binding_resources = self.create_resources(resources);
         let mut bg_entries = Vec::new();
-        for (i, resource) in resources.iter().enumerate() {
+        for (i, resource) in binding_resources.iter().enumerate() {
             bg_entries.push(BindGroupEntry {
                 binding: i as u32,
                 resource: resource.clone(),
@@ -250,6 +255,54 @@ impl ComputeShaderConfig {
             layout: &self.bind_group_layout,
             entries: &bg_entries,
         }))
+    }
+
+    pub fn create_resources<'a>(
+        &'a self,
+        gpu_resources: &'a GpuResources,
+    ) -> Vec<BindingResource<'a>> {
+        let mut resources: Vec<BindingResource<'a>> = Vec::new();
+        for (binding_name, binding_type) in self.binding_names.iter().zip(self.binding_types.iter())
+        {
+            match binding_type {
+                BindingType::Buffer { .. } => {
+                    let buf_name: BufferName = binding_name
+                        .parse()
+                        .expect("Invalid buffer name in shader config");
+                    let buf = gpu_resources
+                        .get_buffer(&buf_name)
+                        .expect("Buffer not found in GpuResources");
+                    resources.push(BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: buf,
+                        offset: 0,
+                        size: None,
+                    }));
+                }
+                BindingType::Texture { .. } | BindingType::StorageTexture { .. } => {
+                    let texture_name: TextureName = binding_name
+                        .parse()
+                        .expect("Invalid texture name in shader config");
+                    let view = gpu_resources
+                        .get_texture_view(&texture_name)
+                        .expect("Texture view not found in GpuResources");
+                    resources.push(BindingResource::TextureView(view));
+                }
+
+                BindingType::Sampler(_) => {
+                    // For simplicity, we use a single sampler for all shaders that need it.
+                    // In a more complex implementation, you might want to allow different samplers.
+                    let sampler = gpu_resources.get_sampler("sampler").expect("Sampler 'sampler' not found in GpuResources for shader that requires a sampler");
+                    resources.push(BindingResource::Sampler(sampler));
+                }
+                _ => {
+                    error!(
+                        "Unsupported binding type for '{}': {:?}",
+                        binding_name, binding_type
+                    );
+                }
+            }
+        }
+        resources
     }
 }
 
@@ -601,7 +654,10 @@ pub fn create_shader_configs(
                     BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: false },
                         has_dynamic_offset: false,
-                        min_binding_size: Some(NonZero::new(4 * 7).unwrap()),
+                        min_binding_size: Some(
+                            NonZero::new(((size_of::<AtomicValues>() as u64 - 1) / 16 + 1) * 16)
+                                .unwrap(),
+                        ),
                     },
                 ),
                 // Binding 8:
@@ -756,11 +812,39 @@ pub fn create_shader_configs(
         )?,
     );
     shader_configs.insert(
-        ShaderName::ResetMaxVelocity,
+        ShaderName::ResetGrid,
         ComputeShaderConfig::new(
             device,
-            ShaderName::ResetMaxVelocity,
-            load_shader_source(ShaderName::ResetMaxVelocity),
+            ShaderName::ResetGrid,
+            load_shader_source(ShaderName::ResetGrid),
+            &[
+                // Binding 0:
+                (
+                    BufferName::SimSettings.to_string(),
+                    BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                // Binding 1:
+                (
+                    BufferName::GridMass.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+            ],
+        )?,
+    );
+    shader_configs.insert(
+        ShaderName::UpdateSimInfo,
+        ComputeShaderConfig::new(
+            device,
+            ShaderName::UpdateSimInfo,
+            load_shader_source(ShaderName::UpdateSimInfo),
             &[
                 // Binding 0:
                 (
@@ -783,15 +867,6 @@ pub fn create_shader_configs(
                 // Binding 2:
                 (
                     BufferName::AtomicValues.to_string(),
-                    BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                ),
-                // Binding 3:
-                (
-                    BufferName::GridMass.to_string(),
                     BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: false },
                         has_dynamic_offset: false,
@@ -875,7 +950,7 @@ pub fn create_shader_configs(
                 ),
                 // Binding 2:
                 (
-                    TextureName::Slope.to_string(),
+                    TextureName::Normals.to_string(),
                     BindingType::Texture {
                         multisampled: false,
                         view_dimension: wgpu::TextureViewDimension::D2,

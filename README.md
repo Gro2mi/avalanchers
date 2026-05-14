@@ -38,8 +38,8 @@ avalanchers.plot3d(sim, "max_velocity")
 
 ### Windows
 
-Install [https://rust-lang.org/tools/install/](Rust)
-Install [https://www.python.org/](Python) 
+Install [Rust](https://rust-lang.org/tools/install/)
+Install [Python](https://www.python.org/) 
 
 ```
 # wasm bindings
@@ -60,8 +60,8 @@ python -m pip install maturin
 
 #### Install dependencies
 
-Install Rust, follow guide: [https://rust-lang.org/tools/install/]() (WSL (2026.04.04): `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`)
-Install [https://www.python.org/](Python) 
+Install [Rust](https://rust-lang.org/tools/install/) (WSL (2026.04.04): `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`)
+Install [Python](https://www.python.org/) 
 
 ```
 sudo apt update
