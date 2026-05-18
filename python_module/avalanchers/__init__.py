@@ -5,7 +5,7 @@ from ._avalanchers import * # noqa: F403
 
 def create_mesh(sim):
     dem = sim.dem
-    dem_mask = dem < sim.elevation_threshold + 1
+    dem_mask = dem < sim.elevation_threshold 
     dem[dem_mask] = np.nan
     ny, nx = dem.shape
     x = np.arange(nx).astype(np.float32) * sim.cell_size
@@ -13,7 +13,7 @@ def create_mesh(sim):
     x, y = np.meshgrid(x, y)
     return x, y, dem, dem_mask
 
-def plot3d(sim, parameter, threshold_value=1, particle_threshold=0):
+def plot3d(sim, parameter, particles=False, threshold_value=1e-3, particle_threshold=0):
     try:
         import pyvista as pv
     except ImportError:
@@ -26,10 +26,17 @@ def plot3d(sim, parameter, threshold_value=1, particle_threshold=0):
 
     data[dem_mask] = np.nan
     data[data < threshold_value] = np.nan
-    data[sim.cell_count < particle_threshold * sim.released_particles_per_cell] = np.nan
+    if particle_threshold > 0:
+        data[sim.cell_count < particle_threshold * sim.released_particles_per_cell] = np.nan
+    # data[sim.peak_flow_thickness < 1.5 / sim.released_particles_per_cell/2] = np.nan
 
     if parameter == "cell_count":
         data = np.log10(data)
+    if parameter == "peak_velocity":
+        data[sim.peak_velocity < 1] = np.nan
+    if parameter == "peak_flow_thickness":
+        data[sim.peak_flow_thickness < 0.5] = np.nan
+
     
     # 2. Create the StructuredGrid
     # We pass x, y, and the elevation (dem) directly as coordinates
@@ -56,8 +63,21 @@ def plot3d(sim, parameter, threshold_value=1, particle_threshold=0):
         edge_color="black",
         show_edges=False
     )
+    if particles:
+        # add particles
+        positions = sim.positions.copy()
+        positions[:, 2] *= 1.3
+        poly = pv.PolyData(positions)
+        plotter.add_mesh(
+            poly,
+            color="red",
+            point_size=3,
+            render_points_as_spheres=True,
+            # style='points_gaussian',
+        )
     plotter.enable_eye_dome_lighting()
     plotter.show(jupyter_backend='trame') if is_jupyter() else plotter.show()
+    return plotter
 
 def plot_dem(sim, ax, dark=True):
     import_plt()
@@ -72,41 +92,50 @@ def plot_dem(sim, ax, dark=True):
     return xx, yy, dem, dem_mask
 
 def import_plt():
-    global plt, make_axes_locatable, ListedColormap
+    global plt, make_axes_locatable, ListedColormap, mpltPath
     try:
         import matplotlib.pyplot as _plt
         from mpl_toolkits.axes_grid1 import make_axes_locatable as _make_axes_locatable
+        import matplotlib.path as _mpltPath
         # from matplotlib.colors
         plt = _plt
         make_axes_locatable = _make_axes_locatable
         ListedColormap = importlib.import_module("matplotlib.colors").ListedColormap
+        mpltPath = _mpltPath
     except ImportError:
         raise ImportError(
             "The 'matplotlib' package is required for 2d plots. "
             "Install it using: pip install 'avalanchers[viz]'"
         )
 
-def plot2d(sim, parameter, title="Avalanche Simulation", threshold_value=1, step=10, max_velocity=100, dark=True, particle_threshold=0): 
+def plot2d(sim, parameter, title="Avalanche Simulation", threshold_value=1e-3, particle_threshold=0): 
     import_plt()
-    data = getattr(sim, parameter).astype(np.float32)
     fig, ax = plt.subplots(figsize=(10, 8))
-    ax.set_aspect('equal')
-    x, y, dem, dem_mask = plot_dem(sim, ax, dark=False)
-    data[dem_mask] = np.nan
-    data[data < threshold_value] = np.nan
-    data[sim.cell_count < particle_threshold * sim.released_particles_per_cell] = np.nan
-    surf = ax.contourf(x, y, data, cmap='magma')
-    ax.contour(x, y, sim.release_areas.astype(np.float32), colors='cyan', linewidths=1, alpha=0.3)
+    ax, surf = ax2d(ax, sim, parameter, title, threshold_value, particle_threshold)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes("right", size="5%", pad=0.1)
     cbar = fig.colorbar(surf, ax=ax, cax=cax)
     cbar.set_label(parameter.replace("_", " ").title())
-
-    ax.set(title=title)
-    plt.show()
+    if not is_jupyter():    
+        plt.show()
     return fig, ax
 
-def plot_overview(sim, threshold_value=1, particle_threshold=0):
+def ax2d(ax, sim, parameter, title="Avalanche Simulation", threshold_value=1e-3, particle_threshold=0):
+    import_plt()
+    data = getattr(sim, parameter).astype(np.float32)
+    ax.set_aspect('equal')
+    x, y, _, dem_mask = plot_dem(sim, ax, dark=False)
+    data[dem_mask] = np.nan
+    data[data < threshold_value] = np.nan
+    if sim.state == "Finished":
+        # Mask based on particle count threshold
+        data[sim.cell_count < particle_threshold * sim.released_particles_per_cell] = np.nan
+    surf = ax.contourf(x, y, data, cmap='magma')
+    ax.contour(x, y, sim.release_areas.astype(np.float32), colors='cyan', linewidths=1, alpha=0.3)
+    ax.set(title=title)
+    return ax, surf
+
+def plot_overview(sim, threshold_value=1e-3, particle_threshold=0):
     # Setup parameters, titles, and distinct colormaps
     params = ['peak_velocity', 'peak_flow_thickness', 'cell_count']
     colormaps = ['magma', 'viridis', 'plasma']
@@ -129,7 +158,7 @@ def plot_overview(sim, threshold_value=1, particle_threshold=0):
         
         # Apply thresholds
         data[data < threshold_value] = np.nan
-        if hasattr(sim, 'cell_count') and hasattr(sim, 'released_particles_per_cell'):
+        if sim.state == "Finished":
             # Mask based on particle count threshold
             data[sim.cell_count < particle_threshold * sim.released_particles_per_cell] = np.nan
             
@@ -228,7 +257,7 @@ def plot_comparison(sim, parameter, reference_array, particle_threshold=0, title
         max_abs = 1.0
     levels = np.linspace(-max_abs, max_abs, 21)
     cont = ax.contourf(x, y, diff, cmap='bwr', levels=levels)
-    fig.colorbar(cont, ax=ax,  shrink=0.8, aspect=10)
+    cbar = fig.colorbar(cont, ax=ax,  shrink=0.8, aspect=10)
     cbar.ax.set_yticklabels(["No avalanche", "reference only", "both", "sim only"])
     dice = calculate_dice(reference_array, data)
     ax.set_title(title  + f"\nDice coefficient: {dice:.4f}")

@@ -23,7 +23,8 @@ pub fn init_logging() {
             "error,simulation=trace,compute_core=trace,data_processor=debug,cli=debug",
         );
         #[cfg(not(debug_assertions))]
-        let filter = EnvFilter::new("error,compute_core=info,data_processor=info,cli=info");
+        let filter =
+            EnvFilter::new("error,simulation=info,compute_core=info,data_processor=info,cli=info");
 
         let _ = tracing_subscriber::registry()
             .with(fmt::layer().with_target(false))
@@ -97,6 +98,9 @@ impl Simulation {
         let (settings_result, dem_result) =
             data_processor::create_sim_settings_and_dem(&settings).await;
         self.settings = settings_result;
+        if let Some(batch_steps) = settings.batch_compute_steps {
+            self.orchestrator.batch_compute_steps = batch_steps;
+        }
         self.dem = dem_result;
         self.dem_path = settings.dem_path.unwrap_or_default().clone();
         self.release_areas_path = settings.release_areas_path.clone();
@@ -364,14 +368,12 @@ impl Simulation {
     }
 
     async fn initialize_particles(&mut self) -> Result<()> {
-        assert!(
-            self.state >= SimulationState::ReleaseAreasComputed,
-            "Release areas must be computed before initializing particles"
-        );
-        assert_ne!(
-            self.number_particles, 0,
-            "Number of particles must be greater than 0 to initialize particles"
-        );
+        if self.state < SimulationState::ReleaseAreasComputed {
+            bail!("Release areas must be computed before initializing particles");
+        }
+        if self.number_particles == 0 {
+            bail!("No particles to initialize! Check if release areas are correctly defined.");
+        }
         self.gpu_cache.reset_simulation_result();
         // set parameters that depend on the number of particles
         self.orchestrator
@@ -388,7 +390,11 @@ impl Simulation {
         );
         self.gpu_cache.reset_simulation_result();
         self.orchestrator
-            .run_compute_particles(&self.settings, self.number_particles)
+            .run_compute_particles(
+                &self.settings,
+                self.number_particles,
+                self.dem.minimum_elevation,
+            )
             .await?;
         self.state = SimulationState::Running;
         info!(
@@ -575,16 +581,27 @@ impl Simulation {
     }
 
     pub async fn fetch_particles(&mut self) -> Result<&Vec<Particle>> {
-        assert!(
-            self.state >= SimulationState::ParticlesInitialized,
-            "Simulation must be finished before reading cell count grid"
-        );
+        if self.state < SimulationState::ParticlesInitialized {
+            bail!("Simulation must be initialized before reading particles");
+        }
         if self.gpu_cache.particles.is_none() {
             self.gpu_cache.read_count += 1;
             self.gpu_cache.particles =
                 Some(self.orchestrator.read_buffer(BufferName::Particles).await?);
         }
         Ok(self.gpu_cache.particles.as_ref().unwrap())
+    }
+
+    pub async fn get_release_mass(&mut self) -> Result<f32> {
+        let particles = self.fetch_particles().await?;
+        let mass_total: f32 = particles.iter().map(|p| p.mass).sum();
+        Ok(mass_total)
+    }
+
+    pub async fn get_release_volume(&mut self) -> Result<f32> {
+        let particles = self.fetch_particles().await?;
+        let mass_total: f32 = particles.iter().map(|p| p.mass).sum();
+        Ok(mass_total / self.settings.density)
     }
 
     pub async fn get_compute_particles_debug(&self) -> Result<Vec<f32>> {
@@ -653,9 +670,7 @@ mod tests {
 
     #[test_log::test]
     fn test_gpu_cache_read_count() {
-        if std::env::var("GITHUB_ACTIONS").is_ok()
-            && (cfg!(target_os = "macos") || cfg!(target_os = "windows"))
-        {
+        if std::env::var("GITHUB_ACTIONS").is_ok() {
             println!("Skipping heavy GPU test on CI (macOS/Windows)");
             return;
         }
@@ -733,9 +748,7 @@ mod tests {
 
     #[test_log::test]
     pub fn test_automatic_gpu_cache_reset() {
-        if std::env::var("GITHUB_ACTIONS").is_ok()
-            && (cfg!(target_os = "macos") || cfg!(target_os = "windows"))
-        {
+        if std::env::var("GITHUB_ACTIONS").is_ok() {
             println!("Skipping heavy GPU test on CI (macOS/Windows)");
             return;
         }
@@ -996,9 +1009,7 @@ mod tests {
 
     #[test_log::test]
     fn test_compute() {
-        if std::env::var("GITHUB_ACTIONS").is_ok()
-            && (cfg!(target_os = "macos") || cfg!(target_os = "windows"))
-        {
+        if std::env::var("GITHUB_ACTIONS").is_ok() {
             println!("Skipping heavy GPU test on CI (macOS/Windows)");
             return;
         }
@@ -1057,7 +1068,7 @@ mod tests {
                 .max_value()
                 .unwrap()
         );
-        assert_eq!(particles.iter().filter(|&&x| x.stopped > 4400).count(), 0);
+        assert_eq!(particles.iter().filter(|&&x| x.stopped > 4500).count(), 0);
         assert_eq!(particles.iter().filter(|&&x| x.stopped == 0).count(), 0);
 
         let max_velocity = block_on(sim.fetch_peak_velocity()).expect("Failed to get max velocity");

@@ -6,6 +6,50 @@ use std::{fmt, fs};
 use crate::dem::Dem;
 
 #[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct SimFlags {
+    pub mask: u32,
+}
+
+impl SimFlags {
+    pub fn new(
+        curvature: bool,
+        particle_interaction: bool,
+        earth_pressure_coefficient: bool,
+        entrainment: bool,
+    ) -> Self {
+        let mut mask = 0u32;
+        if curvature {
+            mask |= 1 << 0;
+        }
+        if particle_interaction {
+            mask |= 1 << 1;
+        }
+        if earth_pressure_coefficient {
+            mask |= 1 << 2;
+        }
+        if entrainment {
+            mask |= 1 << 3;
+        }
+
+        SimFlags { mask }
+    }
+
+    pub fn from_u32(value: u32) -> Self {
+        SimFlags { mask: value }
+    }
+
+    pub fn is_curvature_enabled(&self) -> bool {
+        (self.mask & (1 << 0)) != 0
+    }
+    pub fn is_particle_interaction_enabled(&self) -> bool {
+        (self.mask & (1 << 1)) != 0
+    }
+    pub fn is_entrainment_enabled(&self) -> bool {
+        (self.mask & (1 << 2)) != 0
+    }
+}
+#[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable, Serialize, Deserialize)]
 pub struct SimSettings {
     // Integers
@@ -22,6 +66,13 @@ pub struct SimSettings {
     pub slab_thickness: f32,
     pub friction_coefficient: f32,
     pub drag_coefficient: f32,
+    pub n0: f32,
+    pub i0: f32,
+    pub mu0: f32,
+    pub mu2: f32,
+    pub grain_diameter: f32,
+    pub internal_friction_angle: f32,
+    pub basal_friction_angle: f32,
     pub cfl: f32,
     pub cell_size: f32,
     pub min_slope_angle: f32,
@@ -29,6 +80,7 @@ pub struct SimSettings {
     pub release_min_elevation: f32,
     pub velocity_threshold: f32,
     pub roughness_threshold: f32,
+    pub flags: u32,
 }
 
 impl Default for SimSettings {
@@ -50,15 +102,26 @@ impl SimSettings {
             world_size_y: 1.0,
             density: 200.0,
             slab_thickness: 1.0,
+
             friction_coefficient: 0.155,
             drag_coefficient: 4000.0,
+            n0: 70.0,
+            i0: 0.29,
+            mu0: 0.38,
+            mu2: 0.65,
+            grain_diameter: 0.002,
+            internal_friction_angle: 40.0,
+            basal_friction_angle: 25.0,
+
             cfl: 0.5,
             cell_size: 1.0,
+            velocity_threshold: 1e-6,
+            roughness_threshold: 0.01,
+            flags: SimFlags::new(true, true, true, true).mask,
+
             min_slope_angle: 28.0,
             max_slope_angle: 60.0,
             release_min_elevation: 1500.0,
-            velocity_threshold: 1e-6,
-            roughness_threshold: 0.01,
         }
     }
 
@@ -100,6 +163,27 @@ impl SimSettings {
         if let Some(val) = patch.drag_coefficient {
             settings.drag_coefficient = val;
         }
+        if let Some(val) = patch.n0 {
+            settings.n0 = val;
+        }
+        if let Some(val) = patch.i0 {
+            settings.i0 = val;
+        }
+        if let Some(val) = patch.mu0 {
+            settings.mu0 = val;
+        }
+        if let Some(val) = patch.mu2 {
+            settings.mu2 = val;
+        }
+        if let Some(val) = patch.grain_diameter {
+            settings.grain_diameter = val;
+        }
+        if let Some(val) = patch.internal_friction_angle {
+            settings.internal_friction_angle = val;
+        }
+        if let Some(val) = patch.basal_friction_angle {
+            settings.basal_friction_angle = val;
+        }
         if let Some(val) = patch.cfl {
             settings.cfl = val;
         }
@@ -117,6 +201,34 @@ impl SimSettings {
         }
         if let Some(val) = patch.roughness_threshold {
             settings.roughness_threshold = val;
+        }
+        if let Some(val) = patch.enable_curvature {
+            if val {
+                settings.flags |= 1 << 0;
+            } else {
+                settings.flags &= !(1 << 0);
+            }
+        }
+        if let Some(val) = patch.enable_particle_interaction {
+            if val {
+                settings.flags |= 1 << 1;
+            } else {
+                settings.flags &= !(1 << 1);
+            }
+        }
+        if let Some(val) = patch.enable_earth_pressure_coefficient {
+            if val {
+                settings.flags |= 1 << 2;
+            } else {
+                settings.flags &= !(1 << 2);
+            }
+        }
+        if let Some(val) = patch.enable_entrainment {
+            if val {
+                settings.flags |= 1 << 3;
+            } else {
+                settings.flags &= !(1 << 3);
+            }
         }
         settings.set_dem(dem);
         settings
@@ -166,18 +278,32 @@ pub struct Settings {
     pub release_areas_path: Option<String>,
     pub max_steps: Option<u32>,
     pub sim_model: Option<u32>,
+    pub batch_compute_steps: Option<u32>,
     pub friction_model: Option<u32>,
     pub released_particles_per_cell: Option<u32>,
     pub density: Option<f32>,
     pub slab_thickness: Option<f32>,
     pub friction_coefficient: Option<f32>,
     pub drag_coefficient: Option<f32>,
+    pub n0: Option<f32>,
+    pub i0: Option<f32>,
+    pub mu0: Option<f32>,
+    pub mu2: Option<f32>,
+    pub grain_diameter: Option<f32>,
+    pub internal_friction_angle: Option<f32>,
+    pub basal_friction_angle: Option<f32>,
+
     pub cfl: Option<f32>,
     pub min_slope_angle: Option<f32>,
     pub max_slope_angle: Option<f32>,
     pub release_min_elevation: Option<f32>,
     pub velocity_threshold: Option<f32>,
     pub roughness_threshold: Option<f32>,
+
+    pub enable_curvature: Option<bool>,
+    pub enable_particle_interaction: Option<bool>,
+    pub enable_earth_pressure_coefficient: Option<bool>,
+    pub enable_entrainment: Option<bool>,
 }
 
 impl Settings {
@@ -273,7 +399,7 @@ mod tests {
 
     #[test_log::test]
     fn test_simsettings_from_json_patch() {
-        let patch = Settings {
+        let mut patch = Settings {
             max_steps: Some(42),
             sim_model: Some(1),
             friction_model: Some(2),
@@ -282,6 +408,14 @@ mod tests {
             slab_thickness: Some(5.6),
             friction_coefficient: Some(0.2),
             drag_coefficient: Some(999.0),
+            n0: Some(1.0),
+            i0: Some(2.0),
+            mu0: Some(0.1),
+            mu2: Some(0.3),
+            grain_diameter: Some(0.5),
+            internal_friction_angle: Some(30.0),
+            basal_friction_angle: Some(45.0),
+            batch_compute_steps: Some(100),
             cfl: Some(0.9),
             min_slope_angle: Some(10.0),
             max_slope_angle: Some(20.0),
@@ -290,28 +424,72 @@ mod tests {
             roughness_threshold: Some(0.002),
             dem_path: Some(String::from("dem.png")),
             release_areas_path: Some(String::from("release_area.png")),
+            enable_curvature: Some(false),
+            enable_particle_interaction: Some(false),
+            enable_earth_pressure_coefficient: Some(false),
+            enable_entrainment: Some(false),
         };
         let dem = create_test_dem();
-        let settings = SimSettings::from_settings(&patch, &dem);
-        assert_eq!(settings.max_steps, 42);
-        assert_eq!(settings.sim_model, 1);
-        assert_eq!(settings.friction_model, 2);
-        assert_eq!(settings.released_particles_per_cell, 3);
-        assert_eq!(settings.density, 123.4);
-        assert_eq!(settings.slab_thickness, 5.6);
-        assert_eq!(settings.friction_coefficient, 0.2);
-        assert_eq!(settings.drag_coefficient, 999.0);
-        assert_eq!(settings.cfl, 0.9);
-        assert_eq!(settings.min_slope_angle, 10.0);
-        assert_eq!(settings.max_slope_angle, 20.0);
-        assert_eq!(settings.release_min_elevation, 100.0);
-        assert_eq!(settings.velocity_threshold, 0.001);
-        assert_eq!(settings.roughness_threshold, 0.002);
-        assert_eq!(settings.grid_shape_x, dem.width as u32);
-        assert_eq!(settings.grid_shape_y, dem.height as u32);
-        assert_eq!(settings.cell_size, dem.cell_size);
-        assert_eq!(settings.world_size_x, dem.cell_size * dem.width as f32);
-        assert_eq!(settings.world_size_y, dem.cell_size * dem.height as f32);
+        let mut sim_settings = SimSettings::from_settings(&patch, &dem);
+        assert_eq!(sim_settings.max_steps, 42);
+        assert_eq!(sim_settings.sim_model, 1);
+        assert_eq!(sim_settings.friction_model, 2);
+        assert_eq!(sim_settings.released_particles_per_cell, 3);
+        assert_eq!(sim_settings.density, 123.4);
+        assert_eq!(sim_settings.slab_thickness, 5.6);
+        assert_eq!(sim_settings.friction_coefficient, 0.2);
+        assert_eq!(sim_settings.drag_coefficient, 999.0);
+        assert_eq!(sim_settings.cfl, 0.9);
+        assert_eq!(sim_settings.min_slope_angle, 10.0);
+        assert_eq!(sim_settings.max_slope_angle, 20.0);
+        assert_eq!(sim_settings.release_min_elevation, 100.0);
+        assert_eq!(sim_settings.velocity_threshold, 0.001);
+        assert_eq!(sim_settings.roughness_threshold, 0.002);
+        assert_eq!(sim_settings.grid_shape_x, dem.width as u32);
+        assert_eq!(sim_settings.grid_shape_y, dem.height as u32);
+        assert_eq!(sim_settings.cell_size, dem.cell_size);
+        assert_eq!(sim_settings.world_size_x, dem.cell_size * dem.width as f32);
+        assert_eq!(sim_settings.world_size_y, dem.cell_size * dem.height as f32);
+        assert_eq!(sim_settings.n0, 1.0);
+        assert_eq!(sim_settings.i0, 2.0);
+        assert_eq!(sim_settings.mu0, 0.1);
+        assert_eq!(sim_settings.mu2, 0.3);
+        assert_eq!(sim_settings.grain_diameter, 0.5);
+        assert_eq!(sim_settings.internal_friction_angle, 30.0);
+        assert_eq!(sim_settings.basal_friction_angle, 45.0);
+        assert_eq!(
+            sim_settings.flags,
+            SimFlags::new(false, false, false, false).mask
+        );
+
+        // Test enabling flags one by one
+        patch.enable_curvature = Some(true);
+        sim_settings = SimSettings::from_settings(&patch, &dem);
+        assert_eq!(
+            sim_settings.flags,
+            SimFlags::new(true, false, false, false).mask
+        );
+
+        patch.enable_particle_interaction = Some(true);
+        sim_settings = SimSettings::from_settings(&patch, &dem);
+        assert_eq!(
+            sim_settings.flags,
+            SimFlags::new(true, true, false, false).mask
+        );
+
+        patch.enable_earth_pressure_coefficient = Some(true);
+        sim_settings = SimSettings::from_settings(&patch, &dem);
+        assert_eq!(
+            sim_settings.flags,
+            SimFlags::new(true, true, true, false).mask
+        );
+
+        patch.enable_entrainment = Some(true);
+        sim_settings = SimSettings::from_settings(&patch, &dem);
+        assert_eq!(
+            sim_settings.flags,
+            SimFlags::new(true, true, true, true).mask
+        );
     }
 
     #[test_log::test]
@@ -327,6 +505,35 @@ mod tests {
         assert_eq!(settings.max_steps, deserialized.max_steps);
         assert_eq!(settings.sim_model, deserialized.sim_model);
         assert_eq!(settings.friction_model, deserialized.friction_model);
+        assert_eq!(
+            settings.released_particles_per_cell,
+            deserialized.released_particles_per_cell
+        );
+        assert_eq!(settings.grid_shape_x, deserialized.grid_shape_x);
+        assert_eq!(settings.grid_shape_y, deserialized.grid_shape_y);
+        assert_eq!(settings.world_size_x, deserialized.world_size_x);
+        assert_eq!(settings.world_size_y, deserialized.world_size_y);
+        assert_eq!(settings.density, deserialized.density);
+        assert_eq!(settings.slab_thickness, deserialized.slab_thickness);
+        assert_eq!(
+            settings.friction_coefficient,
+            deserialized.friction_coefficient
+        );
+        assert_eq!(settings.drag_coefficient, deserialized.drag_coefficient);
+        assert_eq!(settings.cfl, deserialized.cfl);
+        assert_eq!(settings.cell_size, deserialized.cell_size);
+        assert_eq!(settings.min_slope_angle, deserialized.min_slope_angle);
+        assert_eq!(settings.max_slope_angle, deserialized.max_slope_angle);
+        assert_eq!(
+            settings.release_min_elevation,
+            deserialized.release_min_elevation
+        );
+        assert_eq!(settings.velocity_threshold, deserialized.velocity_threshold);
+        assert_eq!(
+            settings.roughness_threshold,
+            deserialized.roughness_threshold
+        );
+        assert_eq!(settings.flags, deserialized.flags);
     }
 
     #[test_log::test]
