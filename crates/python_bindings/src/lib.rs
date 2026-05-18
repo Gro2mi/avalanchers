@@ -254,6 +254,17 @@ impl PySimulation {
                 PyErr::new::<PyValueError, _>("Dimension mismatch during texture conversion")
             })
     }
+
+    #[getter]
+    pub fn dem_bounds<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<f32>>> {
+        let bounds = [
+            self.inner.dem.bounds.xmin,
+            self.inner.dem.bounds.xmax,
+            self.inner.dem.bounds.ymin,
+            self.inner.dem.bounds.ymax,
+        ];
+        Ok(bounds.to_pyarray(py))
+    }
     /// Generic helper to get a 2D array from a GPU-backed buffer
     fn get_layer_u32<'py>(
         &self,
@@ -322,6 +333,18 @@ impl PySimulation {
     }
 
     #[getter]
+    pub fn get_normals_y<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        let normals = self.inner.get_normals_y().block_on().map_runtime_err()?;
+        self.get_layer_f32(py, normals.to_vec())
+    }
+
+    #[getter]
+    pub fn get_normals_z<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        let normals = self.inner.get_normals_z().block_on().map_runtime_err()?;
+        self.get_layer_f32(py, normals.to_vec())
+    }
+
+    #[getter]
     pub fn get_release_areas<'py>(
         &mut self,
         py: Python<'py>,
@@ -362,6 +385,42 @@ impl PySimulation {
     #[getter]
     pub fn get_elevation_threshold(&self) -> f32 {
         self.inner.get_sim_info().elevation_threshold
+    }
+
+    #[getter]
+    fn get_positions<'py>(&mut self, py: Python<'py>) -> Bound<'py, PyArray2<f32>> {
+        let particles = self
+            .inner
+            .fetch_particles()
+            .block_on()
+            .map_runtime_err()
+            .expect("Failed to fetch particles");
+        let mut flat_positions: Vec<f32> = Vec::with_capacity(particles.len() * 3);
+
+        for p in particles {
+            flat_positions.extend_from_slice(&p.position);
+        }
+
+        // Convert the flat Vec into an Nx3 NumPy Array
+        flat_positions
+            .to_pyarray(py)
+            .reshape([particles.len(), 3])
+            .unwrap()
+    }
+
+    #[getter]
+    fn get_stopped<'py>(&mut self, py: Python<'py>) -> Bound<'py, PyArray1<u32>> {
+        let particles = self
+            .inner
+            .fetch_particles()
+            .block_on()
+            .map_runtime_err()
+            .expect("Failed to fetch particles");
+        particles
+            .iter()
+            .map(|p| p.stopped)
+            .collect::<Vec<u32>>()
+            .to_pyarray(py)
     }
 
     fn convert_rgba_texture<'py>(

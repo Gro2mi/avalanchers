@@ -1,8 +1,6 @@
 const WG_SIZE_2D: u32 = 16u;
 
 const g: f32 = 9.81;
-const PI: f32 = 3.14159265358979323846;
-const RAD_TO_DEG: f32 = 180.0 / PI;
 
 // u32 limit is 4 294 967 296
 const MAX_VELOCITY_FACTOR: f32 = 1e7; // u32 limit is 430 m/s
@@ -19,15 +17,28 @@ struct Particle {
     mass: f32,
     velocity: vec3f,
     stopped: u32,
+    travel_length: f32,
+};
+
+struct ParticleAlpha {
+    alpha: f32,
+    start_elevation: f32,
 };
 
 struct SimInfo {
     timestep: u32,
+    dt: f32,
+    elapsed_time: f32,
     number_particles: u32,
     elevation_threshold: f32,
     max_velocity: f32,
     max_flow_thickness: f32,
+    flags: u32,
 };
+
+const SIM_INFO_OUT_OF_BOUNDS: u32 = 1u << 0u;
+const SIM_INFO_CFL_EXCEEDED: u32 = 1u << 1u;
+const SIM_INFO_IS_NAN: u32 = 1u << 2u;
 
 struct SimSettings {
     num_steps: u32,
@@ -40,6 +51,13 @@ struct SimSettings {
     slab_thickness: f32,
     friction_coefficient: f32,
     drag_coefficient: f32,
+    n0: f32,
+    i0: f32,
+    mu0: f32,
+    mu2: f32,
+    grain_diameter: f32,
+    internal_friction_angle: f32,
+    basal_friction_angle: f32,
     cfl: f32,
     cell_size: f32,
     min_slope_angle: f32,
@@ -47,6 +65,7 @@ struct SimSettings {
     min_elevation: f32,
     velocity_threshold: f32,
     roughness_threshold: f32,
+    flags: u32,
 };
 
 struct AtomicValues {

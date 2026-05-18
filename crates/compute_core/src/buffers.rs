@@ -3,7 +3,8 @@ use anyhow::{Result, anyhow};
 use bytemuck::{Pod, Zeroable};
 use std::borrow::Cow;
 use std::collections::HashMap;
-use tracing::warn;
+#[allow(unused_imports)]
+use tracing::{info, trace, warn};
 use wgpu::{
     Buffer, BufferDescriptor, BufferUsages, COPY_BYTES_PER_ROW_ALIGNMENT, CommandEncoderDescriptor,
     Device, Extent3d, MapMode, Origin3d, Queue, Sampler, TexelCopyBufferInfo,
@@ -57,8 +58,8 @@ impl BufferName {
             BufferName::OutDebugRelease => "out_debug_release",
             BufferName::SimInfo => "sim_info",
             BufferName::SimSettings => "sim_settings",
-            BufferName::GridCellCount => "cell_count_grid",
-            BufferName::GridPeakVelocity => "max_velocity_grid",
+            BufferName::GridCellCount => "grid_cell_count",
+            BufferName::GridPeakVelocity => "grid_peak_velocity",
             BufferName::ParticleIndex => "particle_index",
             BufferName::Particles => "particles",
             BufferName::TimestepData => "timestep_data",
@@ -85,8 +86,8 @@ impl std::str::FromStr for BufferName {
             "out_debug_release" => Ok(BufferName::OutDebugRelease),
             "sim_info" => Ok(BufferName::SimInfo),
             "sim_settings" => Ok(BufferName::SimSettings),
-            "cell_count_grid" => Ok(BufferName::GridCellCount),
-            "max_velocity_grid" => Ok(BufferName::GridPeakVelocity),
+            "grid_cell_count" => Ok(BufferName::GridCellCount),
+            "grid_peak_velocity" => Ok(BufferName::GridPeakVelocity),
             "particle_index" => Ok(BufferName::ParticleIndex),
             "particles" => Ok(BufferName::Particles),
             "timestep_data" => Ok(BufferName::TimestepData),
@@ -798,8 +799,8 @@ mod tests {
             (BufferName::OutDebugRelease, "out_debug_release"),
             (BufferName::SimInfo, "sim_info"),
             (BufferName::SimSettings, "sim_settings"),
-            (BufferName::GridCellCount, "cell_count_grid"),
-            (BufferName::GridPeakVelocity, "max_velocity_grid"),
+            (BufferName::GridCellCount, "grid_cell_count"),
+            (BufferName::GridPeakVelocity, "grid_peak_velocity"),
             (BufferName::GridMass, "grid_mass"),
             (BufferName::GridForces, "grid_forces"),
             (

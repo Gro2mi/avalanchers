@@ -14,13 +14,6 @@
 
 @compute @workgroup_size(WG_SIZE_2D, WG_SIZE_2D, 1)
 fn initialize_particles(@builtin(global_invocation_id) cell: vec3<u32>) {
-    if cell.x == 0 && cell.y == 0 {
-        // set max velocity for the first timestep, 
-        // 3.5 m/s^2 for tangential acceleration at 50° slope
-        sim_info.max_velocity = sqrt(2f * sim_settings.cfl * sim_settings.cell_size / 3.5);
-        sim_info.elevation_threshold = minElevation() - 0.1;
-    }
-
     if cell.x >= sim_settings.grid_shape.x || cell.y >= sim_settings.grid_shape.y {
         return;
     }
@@ -31,54 +24,39 @@ fn initialize_particles(@builtin(global_invocation_id) cell: vec3<u32>) {
 
     // TODO: pass timestamp as seed
     let seed = 42u;
-    var rng_seed = pcg_hash(cell.x + cell.y + seed);
+    var rng_seed = pcg_hash((cell.x * 73856093u) ^
+    (cell.y * 19349663u) ^
+    seed);
     let cell_volume = snow_thickness * sim_settings.cell_size * sim_settings.cell_size / textureLoad(normals, cell.xy, 0).z;
     let cell_mass = cell_volume * sim_settings.snow_density;
     atomicAdd(&atomic_values.release_volume, u32(cell_volume)); // ensure that the velocity is not zero, this is needed for the next step
     
     for (var n: u32 = 0; n < sim_settings.released_particles_per_cell; n++) {
-        let particleIndex = atomicAdd(&atomic_values.number_release_particles, 1u);
-
+        var p: Particle;
         let r = rand2(&rng_seed);
         let cell_xy = (vec2f(cell.xy) + r);
         let elevation = textureSampleLevel(dem_texture, tex_sampler, cellf_to_uv(cell_xy), 0).x;
 
-        particles[particleIndex].position = vec3f(cell_xy * sim_settings.cell_size, elevation);
-        particles[particleIndex].mass = cell_mass / f32(sim_settings.released_particles_per_cell);
+        p.position = vec3f(cell_xy * sim_settings.cell_size, elevation);
+        p.mass = cell_mass / f32(sim_settings.released_particles_per_cell);
         // p.velocity = rand32u(cell.xy + seed) * 1e-5;
-        particles[particleIndex].velocity = vec3f(0f);
-        particles[particleIndex].stopped = 0u;
+        p.velocity = vec3f(0f);
+        p.stopped = 0u;
+
+        let particleIndex = atomicAdd(&atomic_values.number_release_particles, 1u);
+        particles[particleIndex] = p;
 
         let cell_index_particle = position_to_cell_index(particles[particleIndex].position);
         atomicAdd(&grid_cell_count[cell_index_particle], 1u);
     }
 }
 
-const MIN_VALID_ELEVATION: f32 = 0.9; 
-
-fn minElevation() -> f32 {
-    // find the minimum elevation in the height texture
-    var min_val: f32 = 1e10;
-
-    for (var y: u32 = 0; y < sim_settings.grid_shape.y; y++) {
-        for (var x: u32 = 0; x < sim_settings.grid_shape.x; x++) {
-            let value = textureLoad(dem_texture, vec2u(x, y), 0).x;
-            // Only consider values above the minimum valid elevation threshold
-            if value < min_val && value > MIN_VALID_ELEVATION {
-                min_val = value;
-            }
-        }
-    }
-    return min_val;
-}
 
 // import utils.wgsl;
 // BEGIN utils.wgsl
 const WG_SIZE_2D: u32 = 16u;
 
 const g: f32 = 9.81;
-const PI: f32 = 3.14159265358979323846;
-const RAD_TO_DEG: f32 = 180.0 / PI;
 
 // u32 limit is 4 294 967 296
 const MAX_VELOCITY_FACTOR: f32 = 1e7; // u32 limit is 430 m/s
@@ -95,15 +73,28 @@ struct Particle {
     mass: f32,
     velocity: vec3f,
     stopped: u32,
+    travel_length: f32,
+};
+
+struct ParticleAlpha {
+    alpha: f32,
+    start_elevation: f32,
 };
 
 struct SimInfo {
     timestep: u32,
+    dt: f32,
+    elapsed_time: f32,
     number_particles: u32,
     elevation_threshold: f32,
     max_velocity: f32,
     max_flow_thickness: f32,
+    flags: u32,
 };
+
+const SIM_INFO_OUT_OF_BOUNDS: u32 = 1u << 0u;
+const SIM_INFO_CFL_EXCEEDED: u32 = 1u << 1u;
+const SIM_INFO_IS_NAN: u32 = 1u << 2u;
 
 struct SimSettings {
     num_steps: u32,
@@ -116,6 +107,13 @@ struct SimSettings {
     slab_thickness: f32,
     friction_coefficient: f32,
     drag_coefficient: f32,
+    n0: f32,
+    i0: f32,
+    mu0: f32,
+    mu2: f32,
+    grain_diameter: f32,
+    internal_friction_angle: f32,
+    basal_friction_angle: f32,
     cfl: f32,
     cell_size: f32,
     min_slope_angle: f32,
@@ -123,6 +121,7 @@ struct SimSettings {
     min_elevation: f32,
     velocity_threshold: f32,
     roughness_threshold: f32,
+    flags: u32,
 };
 
 struct AtomicValues {

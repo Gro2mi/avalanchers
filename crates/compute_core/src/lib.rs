@@ -1,6 +1,7 @@
 use crate::buffers::{
-    BufferName, GpuResources, TextureName, create_buffers_and_texture_descriptions,
+    AtomicValues, BufferName, GpuResources, TextureName, create_buffers_and_texture_descriptions,
 };
+use crate::settings::SimFlags;
 use crate::shaders::{ComputeShaderConfig, ShaderName, generate_shader_report};
 use crate::utils::timer_checkpoint;
 use anyhow::{Ok, Result, anyhow};
@@ -79,6 +80,8 @@ pub struct Particle {
     pub mass: f32,
     pub velocity: [f32; 3],
     pub stopped: u32,
+    pub travel_length: f32,
+    pub _pad: [f32; 3], // Padding to make the struct size a multiple of 16 bytes (for better GPU alignment)
 }
 
 impl Hash for Particle {
@@ -118,38 +121,29 @@ impl PartialEq for Particle {
 impl Eq for Particle {}
 
 impl Particle {
-    pub const BYTE_SIZE: usize = 8 * 4;
-
     pub fn new() -> Self {
         Self {
             position: [0.0; 3],
             mass: 0.0,
             velocity: [0.0; 3],
             stopped: 0,
+            travel_length: 0.0,
+            _pad: [0.0; 3],
         }
     }
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct SimInfo {
     pub timestep: u32,
+    pub dt: f32,
+    pub elapsed_time: f32,
     pub number_particles: u32,
     pub elevation_threshold: f32,
     pub max_velocity: f32,
     pub max_flow_thickness: f32,
-}
-
-impl Default for SimInfo {
-    fn default() -> Self {
-        Self {
-            timestep: 0,
-            number_particles: 0,
-            elevation_threshold: 0.0,
-            max_velocity: 0.0,
-            max_flow_thickness: 0.0,
-        }
-    }
+    pub flags: u32,
 }
 
 #[repr(C)]
@@ -282,6 +276,7 @@ pub struct ComputeOrchestrator {
     pub max_storage_buffer_binding_size: u64,
     pub max_particles: u64,
     pub max_compute_invocations_per_workgroup: u32,
+    pub batch_compute_steps: u32,
     texture_size: Extent3d,
     shader_configs: HashMap<ShaderName, ComputeShaderConfig>,
     dispatch_number_workgroups_x_2d: u32,
@@ -375,7 +370,7 @@ impl ComputeOrchestrator {
             limits.max_compute_workgroups_per_dimension
         );
 
-        let buffer_limit = max_storage_buffer_binding_size / Particle::BYTE_SIZE as u64;
+        let buffer_limit = max_storage_buffer_binding_size / std::mem::size_of::<Particle>() as u64;
         let compute_limit =
             limits.max_compute_workgroups_per_dimension * max_compute_invocations_per_workgroup;
         let max_particles = min(buffer_limit, compute_limit as u64);
@@ -458,6 +453,7 @@ impl ComputeOrchestrator {
             dispatch_number_workgroups_y_2d: 0,
             dispatch_number_workgroups_1d: 0,
             has_float32_filterable,
+            batch_compute_steps: 200,
         })
     }
 
@@ -496,7 +492,7 @@ impl ComputeOrchestrator {
         let mut encoder = self
             .device
             .create_command_encoder(&CommandEncoderDescriptor {
-                label: Some("Compute Encoder"),
+                label: Some(&format!("Compute Encoder for shader: {}", shader_name)),
             });
         {
             let mut compute_pass = encoder.begin_compute_pass(&ComputePassDescriptor {
@@ -687,7 +683,8 @@ impl ComputeOrchestrator {
         sim_settings: &settings::SimSettings,
         number_release_particles: u32,
     ) -> Result<()> {
-        let particle_buffer_size = number_release_particles as usize * Particle::BYTE_SIZE;
+        let particle_buffer_size =
+            number_release_particles as usize * std::mem::size_of::<Particle>();
         assert!(
             number_release_particles as u64 <= self.max_particles,
             "Number of particles {} exceeds the limit of {}. Consider reducing the number of particles or using a GPU with more memory.",
@@ -735,7 +732,7 @@ impl ComputeOrchestrator {
             .read_buffer::<u32>(BufferName::AtomicValues)
             .await
             .expect("Failed to read release volume buffer")[4];
-        info!("Release volume: {}", release_volume);
+        info!("Estimated release volume: {}", release_volume);
         Ok(())
     }
 
@@ -743,6 +740,7 @@ impl ComputeOrchestrator {
         &mut self,
         sim_settings: &settings::SimSettings,
         number_release_particles: u32,
+        minimum_dem_elevation: f32,
     ) -> Result<()> {
         debug!("Start simulation");
         self.add_buffer(
@@ -752,7 +750,11 @@ impl ComputeOrchestrator {
         );
 
         let sim_info: SimInfo = SimInfo {
+            timestep: 1,
             number_particles: number_release_particles,
+            // estimated timestep for a 60 degree slope
+            dt: (2.0 * sim_settings.cfl * sim_settings.cell_size / (9.81 * 0.866) as f32).sqrt(),
+            elevation_threshold: minimum_dem_elevation - 0.1,
             ..Default::default()
         };
         self.resources.write_buffer(
@@ -808,69 +810,104 @@ impl ComputeOrchestrator {
         let reset_grid_bind_group =
             reset_grid_config.create_bind_group(&self.device, &self.resources)?;
 
-        // Create command encoder
-        let mut command_encoder =
-            self.device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("Compute Encoder"),
-                });
+        let mut current_step = 0;
+        let mut atomic_values = AtomicValues::default();
+        while current_step < sim_settings.max_steps {
+            // Determine how many steps to run in this specific hardware batch
+            let steps_to_run = std::cmp::min(
+                self.batch_compute_steps,
+                sim_settings.max_steps - current_step,
+            );
 
-        // Begin compute pass
-        {
-            let mut compute_pass =
-                command_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("Compute Pass"),
-                    timestamp_writes: None,
-                });
+            // 1. Create a fresh command encoder for this batch
+            let mut command_encoder =
+                self.device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some(&format!(
+                            "Compute Particles Compute Encoder - Batch Starting Step {}",
+                            current_step
+                        )),
+                    });
 
-            for _i in 0..sim_settings.max_steps {
-                // let mut indirect_dispatch_pass =
-                //     command_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                //         label: Some("Calculate Indirect Dispatch Args Pass"),
-                //         ..Default::default()
-                //     });
-                // indirect_dispatch_pass.set_pipeline(&indirect_dispatch_config.pipeline);
-                // indirect_dispatch_pass.set_bind_group(0, &indirect_dispatch_bindgroup, &[]);
-                // indirect_dispatch_pass.dispatch_workgroups(1, 1, 1);
-                // drop(indirect_dispatch_pass);
-                // --- P2G ---
-                compute_pass.set_pipeline(&p2g_config.pipeline);
-                compute_pass.set_bind_group(0, &p2g_bindgroup, &[]);
-                compute_pass.dispatch_workgroups(self.dispatch_number_workgroups_1d, 1, 1);
+            // 2. Open the compute pass and run the sub-steps
+            {
+                let mut compute_pass =
+                    command_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some("Compute Particles Compute Pass Batch"),
+                        timestamp_writes: None,
+                    });
 
-                // --- Grid Physics ---
-                compute_pass.set_pipeline(&grid_physics_config.pipeline);
-                compute_pass.set_bind_group(0, &grid_physics_bindgroup, &[]);
-                compute_pass.dispatch_workgroups(
-                    self.dispatch_number_workgroups_x_2d,
-                    self.dispatch_number_workgroups_y_2d,
-                    1,
-                );
+                for _i in 0..steps_to_run {
+                    if SimFlags::from_u32(sim_settings.flags).is_particle_interaction_enabled() {
+                        // --- P2G ---
+                        compute_pass.set_pipeline(&p2g_config.pipeline);
+                        compute_pass.set_bind_group(0, &p2g_bindgroup, &[]);
+                        compute_pass.dispatch_workgroups(self.dispatch_number_workgroups_1d, 1, 1);
 
-                // --- computeParticles ---
-                compute_pass.set_pipeline(&compute_particles_config.pipeline);
-                compute_pass.set_bind_group(0, &compute_particles_bindgroup, &[]);
-                compute_pass.dispatch_workgroups(self.dispatch_number_workgroups_1d, 1, 1);
+                        // --- Grid Physics ---
+                        compute_pass.set_pipeline(&grid_physics_config.pipeline);
+                        compute_pass.set_bind_group(0, &grid_physics_bindgroup, &[]);
+                        compute_pass.dispatch_workgroups(
+                            self.dispatch_number_workgroups_x_2d,
+                            self.dispatch_number_workgroups_y_2d,
+                            1,
+                        );
+                    }
 
-                // --- updateSimInfo ---
-                compute_pass.set_pipeline(&update_sim_info_config.pipeline);
-                compute_pass.set_bind_group(0, &update_sim_info_bindgroup, &[]);
-                compute_pass.dispatch_workgroups(1, 1, 1);
+                    // --- computeParticles ---
+                    compute_pass.set_pipeline(&compute_particles_config.pipeline);
+                    compute_pass.set_bind_group(0, &compute_particles_bindgroup, &[]);
+                    compute_pass.dispatch_workgroups(self.dispatch_number_workgroups_1d, 1, 1);
 
-                // --- resetGrid ---
-                compute_pass.set_pipeline(&reset_grid_config.pipeline);
-                compute_pass.set_bind_group(0, &reset_grid_bind_group, &[]);
-                compute_pass.dispatch_workgroups(
-                    self.dispatch_number_workgroups_x_2d,
-                    self.dispatch_number_workgroups_y_2d,
-                    1,
-                );
+                    // --- updateSimInfo ---
+                    compute_pass.set_pipeline(&update_sim_info_config.pipeline);
+                    compute_pass.set_bind_group(0, &update_sim_info_bindgroup, &[]);
+                    compute_pass.dispatch_workgroups(1, 1, 1);
 
-                // drop(compute_pass);
+                    // --- resetGrid ---
+                    compute_pass.set_pipeline(&reset_grid_config.pipeline);
+                    compute_pass.set_bind_group(0, &reset_grid_bind_group, &[]);
+                    compute_pass.dispatch_workgroups(
+                        self.dispatch_number_workgroups_x_2d,
+                        self.dispatch_number_workgroups_y_2d,
+                        1,
+                    );
+                }
             }
-        }
 
-        self.queue.submit(Some(command_encoder.finish()));
+            // 3. Submit the batch to execution right now
+            self.queue.submit(Some(command_encoder.finish()));
+            current_step += steps_to_run;
+
+            atomic_values = self
+                .read_buffer::<AtomicValues>(BufferName::AtomicValues)
+                .await
+                .expect("Failed to read AtomicValues buffer")[0];
+            if atomic_values.stopped_particles == number_release_particles {
+                info!(
+                    "Simulation finished early at step {} as all particles have stopped!",
+                    current_step
+                );
+                break;
+            }
+            // else {
+            //     trace!(
+            //         "Step {}. Time: {:.4}, dt: {:.4}, Max velocity: {:.4}, Max flow thickness: {:.4}, stopped particles: {}, total particles: {}",
+            //         current_step, sim_info.elapsed_time, sim_info.dt, sim_info.max_velocity, sim_info.max_flow_thickness, atomic_values.stopped_particles, number_release_particles
+            //     );
+            // }
+        }
+        let sim_info = self
+            .read_buffer::<SimInfo>(BufferName::SimInfo)
+            .await
+            .expect("Failed to read SimInfo buffer")[0];
+        info!("{:#?}", sim_info);
+        info!("{:#?}", atomic_values);
+        if atomic_values.stopped_particles != number_release_particles {
+            warn!(
+                "Simulation reached max steps without all particles stopping. Consider increasing max_steps or checking for issues in the simulation."
+            );
+        }
         Ok(())
     }
     pub async fn read_texture<T: bytemuck::Pod + Send + Sync>(
@@ -976,16 +1013,7 @@ mod tests {
 
     #[test]
     fn test_particle_memory_layout() {
-        // This is CRITICAL for WebGPU.
-        // We verify the size of the struct matches your constant.
-        assert_eq!(
-            mem::size_of::<Particle>(),
-            Particle::BYTE_SIZE,
-            "Particle struct size does not match BYTE_SIZE constant!"
-        );
-
-        // Verify that the size is exactly 64 bytes (16 * 4)
-        assert_eq!(mem::size_of::<Particle>(), 32);
+        assert_eq!(mem::size_of::<Particle>(), 48);
     }
 
     #[test]

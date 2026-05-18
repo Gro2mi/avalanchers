@@ -983,12 +983,24 @@ mod tests {
             slab_thickness: Some(5.0),
             friction_coefficient: Some(6.0),
             drag_coefficient: Some(7.0),
+            n0: Some(1.0),
+            i0: Some(2.0),
+            mu0: Some(0.1),
+            mu2: Some(0.3),
+            grain_diameter: Some(0.5),
+            internal_friction_angle: Some(30.0),
+            basal_friction_angle: Some(45.0),
+            batch_compute_steps: Some(100),
             cfl: Some(8.0),
             min_slope_angle: Some(9.0),
             max_slope_angle: Some(10.0),
             release_min_elevation: Some(11.0),
             velocity_threshold: Some(12.0),
             roughness_threshold: Some(13.0),
+            enable_curvature: Some(true),
+            enable_entrainment: Some(true),
+            enable_particle_interaction: Some(true),
+            enable_earth_pressure_coefficient: Some(true),
         };
         let file = NamedTempFile::new().unwrap();
         let path = file.path().to_str().unwrap();
@@ -1014,6 +1026,17 @@ mod tests {
         assert_eq!(loaded.release_min_elevation, Some(11.0));
         assert_eq!(loaded.velocity_threshold, Some(12.0));
         assert_eq!(loaded.roughness_threshold, Some(13.0));
+        assert_eq!(loaded.enable_curvature, Some(true));
+        assert_eq!(loaded.enable_entrainment, Some(true));
+        assert_eq!(loaded.enable_particle_interaction, Some(true));
+        assert_eq!(loaded.enable_earth_pressure_coefficient, Some(true));
+        assert_eq!(loaded.n0, Some(1.0));
+        assert_eq!(loaded.i0, Some(2.0));
+        assert_eq!(loaded.mu0, Some(0.1));
+        assert_eq!(loaded.mu2, Some(0.3));
+        assert_eq!(loaded.grain_diameter, Some(0.5));
+        assert_eq!(loaded.internal_friction_angle, Some(30.0));
+        assert_eq!(loaded.basal_friction_angle, Some(45.0));
     }
 
     // Helper to create a valid minimal PNG for testing

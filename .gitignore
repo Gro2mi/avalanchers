@@ -223,3 +223,9 @@ poetry.toml
 pyrightconfig.json
 
 # End of https://www.toptal.com/developers/gitignore/api/python
+data/stubai/10DTM_pilotStubai.tif
+data/stubai/avaScen_HochwinterDry5_WorstCase_20260508135932.gpkg
+data/stubai/avaScen_HochwinterDry5_WorstCase.geojson
+settings_stubai.json
+stubai_release_areas.png
+stubai.qgz
