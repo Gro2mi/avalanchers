@@ -215,6 +215,83 @@ impl EsriGrid {
             None
         }
     }
+
+    /// Helper to export the grid directly to a file path.
+    pub fn to_file<P: AsRef<Path>>(&self, path: P) -> Result<(), String> {
+        let file = File::create(path).map_err(|e| format!("Failed to create file: {}", e))?;
+        let writer = BufWriter::new(file);
+        self.to_writer(writer)
+    }
+
+    /// Exports the ESRI ASCII grid layout to any stream implementing `Write`.
+    pub fn to_writer<W: Write>(&self, mut writer: W) -> Result<(), String> {
+        // 1. Write metadata headers
+        writeln!(writer, "ncols         {}", self.header.ncols)
+            .map_err(|e| format!("Header write error: {}", e))?;
+        writeln!(writer, "nrows         {}", self.header.nrows)
+            .map_err(|e| format!("Header write error: {}", e))?;
+
+        // Fallback checks to output whatever raw metadata spatial scheme was provided
+        if let Some(xcenter) = self.header.xllcenter {
+            writeln!(writer, "xllcenter     {}", xcenter)
+                .map_err(|e| format!("Header write error: {}", e))?;
+        } else {
+            writeln!(writer, "xllcorner     {}", self.header.get_xllcorner())
+                .map_err(|e| format!("Header write error: {}", e))?;
+        }
+
+        if let Some(ycenter) = self.header.yllcenter {
+            writeln!(writer, "yllcenter     {}", ycenter)
+                .map_err(|e| format!("Header write error: {}", e))?;
+        } else {
+            writeln!(writer, "yllcorner     {}", self.header.get_yllcorner())
+                .map_err(|e| format!("Header write error: {}", e))?;
+        }
+
+        writeln!(writer, "cellsize      {}", self.header.cellsize)
+            .map_err(|e| format!("Header write error: {}", e))?;
+
+        // Optional nodata configuration mapping
+        if let Some(nodata) = self.header.nodata_value {
+            writeln!(writer, "NODATA_value  {}", nodata)
+                .map_err(|e| format!("Header write error: {}", e))?;
+        }
+
+        // 2. Format and stream matrix data blocks row by row
+        let nodata_val = self.header.nodata_value.unwrap_or(-9999.0);
+
+        // Iterate through the vector by splitting it into fixed-size row chunks
+        for row in self.data.chunks_exact(self.header.ncols) {
+            let mut first = true;
+            for &val in row {
+                if !first {
+                    write!(writer, " ").map_err(|e| format!("Data write error: {}", e))?;
+                }
+                first = false;
+
+                // Handle NaN filtering
+                let target_val = if val.is_nan() { nodata_val } else { val };
+
+                // Clean formatting optimization: strips trailing decimals if the float is a whole integer
+                if target_val.fract() == 0.0 {
+                    write!(writer, "{}", target_val as i64)
+                        .map_err(|e| format!("Data write error: {}", e))?;
+                } else {
+                    write!(writer, "{}", target_val)
+                        .map_err(|e| format!("Data write error: {}", e))?;
+                }
+            }
+            // End the current row with a system newline character
+            writeln!(writer).map_err(|e| format!("Data newline error: {}", e))?;
+        }
+
+        // Explicitly flush the final byte streams out of buffers
+        writer
+            .flush()
+            .map_err(|e| format!("Buffer flush error: {}", e))?;
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
@@ -1968,5 +2045,48 @@ NODATA_value  -1
         // Assert the computed helpers handle the half-cell offset calculation dynamically
         assert_eq!(grid.header.get_xllcorner(), 45.0);
         assert_eq!(grid.header.get_yllcorner(), 45.0);
+    }
+    #[test]
+    fn test_round_trip_export() {
+        use std::io::Cursor;
+
+        // Create a model layout containing standard values, a raw center coordinate, and a NaN element
+        let original_header = EsriGridHeader {
+            ncols: 3,
+            nrows: 2,
+            cellsize: 10.0,
+            nodata_value: Some(-999.0),
+            xllcorner: None,
+            yllcorner: None,
+            xllcenter: Some(100.0),
+            yllcenter: Some(200.0),
+        };
+
+        let original_grid = EsriGrid {
+            header: original_header,
+            data: vec![1.5, f32::NAN as f32, 3.0, 4.25, 5.0, 6.1],
+        };
+
+        // 1. Export the struct to a memory vector (Simulating writing a file)
+        let mut buffer = Vec::new();
+        assert!(original_grid.to_writer(&mut buffer).is_ok());
+
+        // Convert output buffer to a string so you can inspect the format if needed
+        let output_string = String::from_utf8(buffer.clone()).unwrap();
+        println!("Generated File Output:\n{}", output_string);
+
+        // 2. Parse that generated string right back into a new EsriGrid struct
+        let cursor = Cursor::new(buffer);
+        let parsed_grid = EsriGrid::from_reader(cursor).unwrap();
+
+        // 3. Verify parity transformations across bounds and NaN replacement rules
+        assert_eq!(parsed_grid.header.ncols, original_grid.header.ncols);
+        assert_eq!(parsed_grid.header.xllcenter, Some(100.0));
+
+        // Check cell indexing structure
+        assert_eq!(parsed_grid.get(0, 0), Some(1.5));
+        assert_eq!(parsed_grid.get(0, 1), Some(-999.0)); // The NaN became the specified nodata value
+        assert_eq!(parsed_grid.get(0, 2), Some(3.0));
+        assert_eq!(parsed_grid.get(1, 1), Some(5.0));
     }
 }

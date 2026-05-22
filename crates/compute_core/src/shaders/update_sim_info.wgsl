@@ -12,6 +12,7 @@ fn update_sim_info(@builtin(global_invocation_id) global_id: vec3<u32>) {
     sim_info.elapsed_time = sim_info.elapsed_time + sim_info.dt;
     sim_info.max_flow_thickness = max_flow_thickness;
     atomicStore(&atomic_values.peak_velocity, u32(0));
+    atomicStore(&atomic_values.peak_flow_thickness, u32(0));
 }
 
 // import utils.wgsl;
