@@ -1,0 +1,30 @@
+@group(0) @binding(1) var demTexture: texture_2d<f32>;
+@group(0) @binding(2) var normalTexture: texture_2d<f32>; // Your normal map
+@group(0) @binding(3) var demSampler: sampler;
+
+struct FragmentInput {
+    @location(0) vUV: vec2<f32>,
+    @location(1) height: f32,
+};
+
+@fragment
+fn main(input: FragmentInput) -> @location(0) vec4<f32> {
+    // 1. Sample the normal from your texture
+    // Assuming normals are stored as (x, y, z) in (R, G, B)
+    let rawNormal = textureSample(normalTexture, demSampler, input.vUV).rgb;
+    
+    // 2. Unpack the normal if it's stored in [0, 1] range
+    // (If your compute shader wrote signed floats to a texture format like rgba32float, 
+    // you might not need this step)
+    let normal = normalize(rawNormal * 2.0 - 1.0);
+
+    // 3. Simple Diffuse Lighting (Sunlight)
+    let sunDirection = normalize(vec3<f32>(0.5, 1.0, 0.5));
+    let diffuse = max(dot(normal, sunDirection), 0.0);
+    
+    // 4. Color based on height (or just white for snow)
+    let baseColor = vec3<f32>(0.9, 0.9, 1.0); // Slight blue tint for snow
+    let finalColor = baseColor * (diffuse + 0.2); // +0.2 for ambient light
+
+    return vec4<f32>(finalColor, 1.0);
+}
