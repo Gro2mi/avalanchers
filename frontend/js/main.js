@@ -11,7 +11,6 @@ window.dem = new Dem();
 window.sim = null;
 window.wasm = null;
 
-const wasm = await init();
 const demDropdown = document.getElementById('demDropdown');
 const frictionModelDropdown = document.getElementById('frictionModelDropdown');
 

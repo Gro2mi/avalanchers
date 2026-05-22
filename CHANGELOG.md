@@ -9,7 +9,7 @@ All notable changes to this project might be documented in this file.
 - Criterion benchmark
 - Internal friction angle as threshold for pressure force
 - samosAT friction model is useful now with particle interaction enabled
-- ESRI ASCII input support
+- ESRI ASCII support
 
 ## [0.1.0] - 2026-05-04
 

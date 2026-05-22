@@ -177,7 +177,7 @@ impl WasmSimulation {
         map_factor: f32,
     ) -> Result<(), JsValue> {
         self.inner
-            .set_dem(
+            .set_dem_with_bounds(
                 dem_data,
                 width as usize,
                 height as usize,

@@ -9,6 +9,12 @@ members = [
 ]
 resolver = "3"
 
+[workspace.package]
+version = "0.2.0"
+license = "GPL-3.0-only"
+authors = ["Markus Rampp"]
+edition = "2024"
+
 
 [workspace.dependencies]
 tracing = "0.1"

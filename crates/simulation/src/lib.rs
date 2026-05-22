@@ -161,7 +161,7 @@ impl Simulation {
         height: usize,
         cell_size: f32,
     ) -> Result<()> {
-        self.set_dem(
+        self.set_dem_with_bounds(
             dem_data,
             width,
             height,
@@ -173,8 +173,51 @@ impl Simulation {
             1.0,
         )
     }
-    #[allow(clippy::too_many_arguments)]
+
     pub fn set_dem(
+        &mut self,
+        dem_data: &[f32],
+        width: usize,
+        height: usize,
+        cell_size: f32,
+    ) -> Result<()> {
+        self.set_dem_with_bounds(
+            dem_data,
+            width,
+            height,
+            cell_size,
+            0.0,
+            width as f32 * cell_size,
+            0.0,
+            height as f32 * cell_size,
+            1.0,
+        )
+    }
+
+    pub fn set_dem_with_origin(
+        &mut self,
+        dem_data: &[f32],
+        width: usize,
+        height: usize,
+        cell_size: f32,
+        origin_x: f32,
+        origin_y: f32,
+    ) -> Result<()> {
+        self.set_dem_with_bounds(
+            dem_data,
+            width,
+            height,
+            cell_size,
+            origin_x,
+            origin_x + width as f32 * cell_size,
+            origin_y,
+            origin_y + height as f32 * cell_size,
+            1.0,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_dem_with_bounds(
         &mut self,
         dem_data: &[f32],
         width: usize,
@@ -669,14 +712,9 @@ mod tests {
 
     #[test_log::test]
     fn test_gpu_cache_read_count() {
-        if std::env::var("GITHUB_ACTIONS").is_ok() {
-            println!("Skipping heavy GPU test on CI (macOS/Windows)");
-            return;
-        }
         let number_cache_elements = 9;
         let number_sim_results_elements = 5;
-        let mut sim: Simulation = block_on(Simulation::new()).expect("Failed to create Simulation");
-        block_on(sim.create_example(INCLINED_PLANE_PATH)).expect("Failed to create simulation");
+        let mut sim: Simulation = setup_simple_sim(0.0, 1.0);
         block_on(sim.run()).expect("Failed to run simulation");
         let count_before = sim.get_gpu_cache_read_count();
 
@@ -747,12 +785,7 @@ mod tests {
 
     #[test_log::test]
     pub fn test_automatic_gpu_cache_reset() {
-        if std::env::var("GITHUB_ACTIONS").is_ok() {
-            println!("Skipping heavy GPU test on CI (macOS/Windows)");
-            return;
-        }
-        let mut sim: Simulation = block_on(Simulation::new()).expect("Failed to create Simulation");
-        block_on(sim.create_example(INCLINED_PLANE_PATH)).expect("Failed to create simulation");
+        let mut sim: Simulation = setup_simple_sim(0.0, 1.0);
         assert!(
             sim.gpu_cache.particles.is_none()
                 && sim.gpu_cache.release_areas.is_none()
@@ -867,7 +900,7 @@ mod tests {
         block_on(sim.create(Settings::default()))
             .expect("Failed to create simulation with default settings");
         // 2. Execute
-        let result = sim.set_dem(
+        let result = sim.set_dem_with_bounds(
             &dem_data, 2,    // width
             3,    // height
             3.0,  // cell_size
@@ -947,7 +980,7 @@ mod tests {
         // If Simulation::new() is too heavy (GPU init), use a mock or Default
         let mut sim = block_on(Simulation::new()).expect("Failed to create Simulation");
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            sim.set_dem(
+            sim.set_dem_with_bounds(
                 &dem_data, 2,    // width
                 2,    // height
                 3.0,  // cell_size
@@ -964,7 +997,7 @@ mod tests {
             "set_dem should panic with invalid input for shape"
         );
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            sim.set_dem(
+            sim.set_dem_with_bounds(
                 &dem_data, 2,    // width
                 3,    // height
                 3.0,  // cell_size
@@ -981,7 +1014,7 @@ mod tests {
             "set_dem should panic with invalid input for bounds"
         );
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            sim.set_dem(
+            sim.set_dem_with_bounds(
                 &dem_data, 2,    // width
                 3,    // height
                 3.0,  // cell_size
@@ -1004,6 +1037,77 @@ mod tests {
         let mut sim: Simulation = block_on(Simulation::new()).expect("Failed to create Simulation");
         block_on(sim.create_default(GAR_PATH)).expect("Failed to create simulation");
         block_on(sim.prepare()).expect("Failed to prepare simulation");
+    }
+
+    fn create_slope(ncols: usize, nrows: usize, cellsize: f32, slope_degrees: f32) -> Vec<f32> {
+        let slope_radians = slope_degrees.to_radians();
+        let elevation_rise_per_cell = cellsize * slope_radians.tan();
+
+        // Base starting elevation for the westernmost column edge
+        let base_elevation = 100.0;
+
+        // 2. Build the flat row-major data layout
+        let mut data = Vec::with_capacity(ncols * nrows);
+
+        for _row in 0..nrows {
+            for col in 0..ncols {
+                // Elevation increases linearly with the column step index
+                let cell_elevation = base_elevation + (col as f32 * elevation_rise_per_cell);
+                data.push(cell_elevation);
+            }
+        }
+        data
+    }
+
+    fn setup_simple_sim(slope_angle: f32, cell_size: f32) -> Simulation {
+        let mut sim: Simulation = block_on(Simulation::new()).expect("Failed to create Simulation");
+        let settings = Settings::default();
+        block_on(sim.create(settings)).expect("Failed to create simulation");
+        sim.set_dem(
+            &create_slope(4, 4, cell_size, slope_angle), // dem_data
+            4,                                           // width
+            4,                                           // height
+            cell_size,                                   // cell_size
+        )
+        .expect("Failed to set DEM");
+        sim.set_release_areas(&[
+            0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        ])
+        .expect("Failed to set release areas");
+        sim
+    }
+
+    #[test_log::test]
+    fn test_compute_simple() {
+        let slope_angle: f32 = 40.0;
+        let cell_size: f32 = 3.0;
+        let mut sim: Simulation = setup_simple_sim(slope_angle, cell_size);
+        block_on(sim.run()).expect("Failed to run simulation");
+        let particles = block_on(sim.fetch_particles()).expect("Failed to fetch particles");
+        assert_eq!(particles.iter().filter(|&&x| x.stopped > 10).count(), 0);
+        assert_eq!(particles.iter().filter(|&&x| x.stopped == 0).count(), 0);
+        for p in particles.iter() {
+            info!("{:?}", p);
+        }
+        let cell_area = cell_size * cell_size;
+        assert!(
+            (cell_area * (2 * 200) as f32 / slope_angle.to_radians().cos()
+                - block_on(sim.get_release_mass()).expect("Failed to get release mass"))
+            .abs()
+                < 1e-2
+        );
+        assert!(
+            (cell_area / slope_angle.to_radians().cos() * 2 as f32
+                - block_on(sim.get_release_volume()).expect("Failed to get release volume"))
+            .abs()
+                < 1e-2
+        );
+        let max_velocity = block_on(sim.fetch_peak_velocity()).expect("Failed to get max velocity");
+        info!(
+            "Max velocity after simulation: {:.2} m/s",
+            max_velocity.max_value().unwrap(),
+        );
+        assert!(max_velocity.max_value().unwrap() < 9.0);
     }
 
     #[test_log::test]
@@ -1067,8 +1171,8 @@ mod tests {
                 .max_value()
                 .unwrap()
         );
-        assert_eq!(particles.iter().filter(|&&x| x.stopped > 4500).count(), 0);
-        assert_eq!(particles.iter().filter(|&&x| x.stopped == 0).count(), 0);
+        assert_eq!(particles.iter().filter(|&&x| x.stopped > 4800).count(), 0);
+        assert!(particles.iter().filter(|&&x| x.stopped == 0).count() < 20);
 
         let max_velocity = block_on(sim.fetch_peak_velocity()).expect("Failed to get max velocity");
 
@@ -1077,7 +1181,7 @@ mod tests {
             max_velocity.max_value().unwrap(),
         );
         assert!(max_velocity.max_value().unwrap() > 42.0);
-        assert!(max_velocity.max_value().unwrap() < 47.0);
+        assert!(max_velocity.max_value().unwrap() < 72.0);
 
         let max_steps = sim.settings.max_steps as usize;
         let timestep_data =

@@ -157,8 +157,23 @@ impl PySimulation {
         Ok(())
     }
 
+    pub fn set_dem(&mut self, dem_data: PyReadonlyArray2<f32>, cell_size: f32) -> PyResult<()> {
+        let view = dem_data.as_array();
+        let height = view.shape()[0];
+        let width = view.shape()[1];
+
+        // Ensure the data is contiguous in memory so we can treat it as a slice
+        let slice = dem_data.as_slice()?;
+
+        self.inner
+            .set_dem(slice, width, height, cell_size)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
-    pub fn set_dem(
+    pub fn set_dem_with_bounds(
         &mut self,
         dem_data: PyReadonlyArray2<f32>, // Accepts (height, width) array
         cell_size: f32,
@@ -177,7 +192,7 @@ impl PySimulation {
         let slice = dem_data.as_slice()?;
 
         self.inner
-            .set_dem(
+            .set_dem_with_bounds(
                 slice,
                 width,
                 height,
