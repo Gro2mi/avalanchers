@@ -64,7 +64,7 @@ fn compute_particles(
     if is_nan(normal.x) {
         particles[particleId].stopped = 1000000000u + sim_info.timestep;
         atomicAdd(&atomic_values.stopped_particles, 1u);
-        sim_info.flags |= 1u << 3u;
+        sim_info.flags |= SIM_INFO_PARTICLE_OUT_OF_DEM_DATA;
         return;
     }
     // --- project velocity onto tangent plane ---
@@ -114,7 +114,8 @@ fn compute_particles(
                 interpolated_h += weight * f32(grid_mass_atomic[node_idx]) * INV_MASS_FACTOR / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size) * safe_normal_z;
             }
         }
-        accel_lateral = select(accel_lateral, vec3f(interpolated_f.x, interpolated_f.y, (normal.x * interpolated_f.x + normal.y * interpolated_f.y) / safe_normal_z) / interpolated_h, interpolated_h > 1e-4);
+
+        accel_lateral = vec3f(interpolated_f.x, interpolated_f.y, (normal.x * interpolated_f.x + normal.y * interpolated_f.y) / safe_normal_z);
         // accel_lateral = (accel_lateral - dot(accel_lateral, normal) * normal);
     }
     // var dt = sim_settings.cfl * sim_settings.cell_size / (sim_info.max_velocity + sim_settings.velocity_threshold);
@@ -158,7 +159,7 @@ fn compute_particles(
         current.elevation = elevation;
         current.uv = new_uv;
         current.g_eff = length(accel_lateral);
-        update_output_data(0u, sim_info.timestep, current);
+        update_output_data(0u, sim_info.timestep - 1, current);
 
         // out_debug[2] = f32(p.position.x);
     }
@@ -198,6 +199,7 @@ fn compute_particles(
         particles[particleId].stopped = 1100000000u + sim_info.timestep;
         atomicAdd(&atomic_values.stopped_particles, 1u);
         sim_info.flags |= SIM_INFO_IS_NAN;
+        sim_info.flags |= SIM_INFO_PARTICLE_OUT_OF_DEM_DATA;
         return;
     }
     if is_nan(p.velocity.x) {
@@ -225,13 +227,13 @@ fn compute_particles(
         sim_info.flags |= SIM_INFO_OUT_OF_BOUNDS;
         return;
     }
-
     particles[particleId] = p;
 }
 
 fn is_nan(x: f32) -> bool {
-    // return x != x;
-    let highVal = 1000000.0;
+    // https://marktension.nl/blog/detecting-nans-on-webgpu/
+    // if one operand is a NaN, the other is returned.
+    let highVal = 1e38;
     let x2 = min(x, highVal);
     return x2 == highVal;
 }
@@ -370,6 +372,7 @@ struct SimInfo {
 const SIM_INFO_OUT_OF_BOUNDS: u32 = 1u << 0u;
 const SIM_INFO_CFL_EXCEEDED: u32 = 1u << 1u;
 const SIM_INFO_IS_NAN: u32 = 1u << 2u;
+const SIM_INFO_PARTICLE_OUT_OF_DEM_DATA: u32 = 1u << 3u;
 
 struct SimSettings {
     num_steps: u32,

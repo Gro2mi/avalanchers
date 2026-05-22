@@ -388,13 +388,8 @@ impl PySimulation {
     }
 
     #[getter]
-    fn get_positions<'py>(&mut self, py: Python<'py>) -> Bound<'py, PyArray2<f32>> {
-        let particles = self
-            .inner
-            .fetch_particles()
-            .block_on()
-            .map_runtime_err()
-            .expect("Failed to fetch particles");
+    fn get_positions<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        let particles = self.inner.fetch_particles().block_on().map_runtime_err()?;
         let mut flat_positions: Vec<f32> = Vec::with_capacity(particles.len() * 3);
 
         for p in particles {
@@ -405,22 +400,16 @@ impl PySimulation {
         flat_positions
             .to_pyarray(py)
             .reshape([particles.len(), 3])
-            .unwrap()
     }
 
     #[getter]
-    fn get_stopped<'py>(&mut self, py: Python<'py>) -> Bound<'py, PyArray1<u32>> {
-        let particles = self
-            .inner
-            .fetch_particles()
-            .block_on()
-            .map_runtime_err()
-            .expect("Failed to fetch particles");
-        particles
+    fn get_stopped<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<u32>>> {
+        let particles = self.inner.fetch_particles().block_on().map_runtime_err()?;
+        Ok(particles
             .iter()
             .map(|p| p.stopped)
             .collect::<Vec<u32>>()
-            .to_pyarray(py)
+            .to_pyarray(py))
     }
 
     fn convert_rgba_texture<'py>(

@@ -4,12 +4,16 @@ import socket
 import os 
 import subprocess
 import mimetypes
+import shutil
 
 mimetypes.add_type("application/javascript", ".js")
 mimetypes.add_type("text/css", ".css")
 mimetypes.add_type("application/wasm", ".wasm")
 
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
+os.makedirs("data", exist_ok=True)
+shutil.copytree(os.path.join("..", "data", "avaframe"), os.path.join("data", "avaframe"), dirs_exist_ok=True)
+
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.connect(("8.8.8.8", 80))
 ip = s.getsockname()[0]

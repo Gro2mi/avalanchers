@@ -2,10 +2,12 @@
 use anyhow::Result;
 use clap::Parser;
 use compute_core::settings::Settings;
-use compute_core::utils::MaxValue;
+#[allow(unused_imports)]
+use compute_core::utils::{MaxValue, timer_checkpoint, timer_get_summary, timer_new};
 use pollster::block_on;
 use simulation::{Simulation, init_logging};
-use std::path::PathBuf;
+#[allow(unused_imports)]
+use std::path::{Path, PathBuf};
 use std::{env, time::Instant};
 use tracing::{debug, error, info, warn};
 
@@ -18,6 +20,7 @@ struct Args {
 }
 
 fn main() -> Result<()> {
+    timer_new();
     init_logging();
     let start = Instant::now();
     match env::current_dir() {
@@ -47,6 +50,7 @@ fn main() -> Result<()> {
             PathBuf::from("settings.json")
         }
     };
+    timer_checkpoint("Startup");
 
     let settings = Settings::from_json(&file_path.to_string_lossy())
         .expect("Failed to load settings from JSON file");
@@ -55,18 +59,67 @@ fn main() -> Result<()> {
     block_on(simulation.create(settings.clone()))?;
 
     block_on(simulation.run())?;
+    timer_checkpoint("Fetch data from GPU");
+
+    block_on(simulation.fetch_peak_velocity()).expect("Failed to get peak velocity");
+
+    block_on(simulation.fetch_peak_flow_thickness()).expect("Failed to get peak flow thickness");
+
+    block_on(simulation.fetch_cell_count()).expect("Failed to get cell count");
+
     let peak_velocity =
         block_on(simulation.fetch_peak_velocity()).expect("Failed to get peak velocity");
     info!(
         "Peak velocity during simulation: {:.2} m/s",
         peak_velocity.max_value().unwrap(),
     );
+    // timer_checkpoint("Write data to disk");
+    // let bytes_v: &[u8] = unsafe {
+    //     std::slice::from_raw_parts(
+    //         peak_velocity.as_ptr() as *const u8,
+    //         peak_velocity.len() * std::mem::size_of::<f32>(),
+    //     )
+    // };
+    // data_processor::write_bin(Path::new("peak_velocity.bin"), bytes_v);
+    // let peak_flow_thickness = block_on(simulation.fetch_peak_flow_thickness()).expect("Failed to get peak flow thickness");
+    // let bytes_f: &[u8] = unsafe {
+    //     std::slice::from_raw_parts(
+    //         peak_flow_thickness.as_ptr() as *const u8,
+    //         peak_flow_thickness.len() * std::mem::size_of::<f32>(),
+    //     )
+    // };
+    // data_processor::write_bin(Path::new("peak_flow_thickness.bin"), bytes_f);
+
+    // let cell_count = block_on(simulation.fetch_cell_count()).expect("Failed to get cell count");
+    // let bytes_c: &[u8] = unsafe {
+    //     std::slice::from_raw_parts(
+    //         cell_count.as_ptr() as *const u8,
+    //         cell_count.len() * std::mem::size_of::<f32>(),
+    //     )
+    // };
+    // data_processor::write_bin(Path::new("cell_count.bin"), bytes_c);
+
+    // info!("{}", timer_get_summary());
 
     let particles = block_on(simulation.fetch_particles()).expect("Failed to get final positions");
     for particle in particles
         .iter()
         .filter(|p| p.velocity[0].is_nan() || p.velocity[1].is_nan() || p.velocity[2].is_nan())
     {
+        info!(
+            "Out of bounds particle: Position = ({:.2}, {:.2}, {:.2}), mass: {:.2}, velocity: ({:.2}, {:.2}, {:.2}), stopped: {}",
+            // particle[0].stopped,
+            particle.position[0],
+            particle.position[1],
+            particle.position[2],
+            particle.mass,
+            particle.velocity[0],
+            particle.velocity[1],
+            particle.velocity[2],
+            particle.stopped
+        );
+    }
+    for particle in particles.iter().filter(|p| p.stopped > 100000) {
         info!(
             "Out of bounds particle: Position = ({:.2}, {:.2}, {:.2}), mass: {:.2}, velocity: ({:.2}, {:.2}, {:.2}), stopped: {}",
             // particle[0].stopped,

@@ -26,6 +26,197 @@ use image::{GenericImageView, ImageReader};
 #[allow(unused_imports)]
 use tracing::{debug, error, info, trace, warn};
 
+#[derive(Debug, Clone)]
+pub struct EsriGridHeader {
+    pub ncols: usize,
+    pub nrows: usize,
+    pub cellsize: f32,
+    pub nodata_value: Option<f32>,
+    pub xllcorner: Option<f32>,
+    pub yllcorner: Option<f32>,
+    pub xllcenter: Option<f32>,
+    pub yllcenter: Option<f32>,
+}
+
+impl EsriGridHeader {
+    /// Computes or retrieves the absolute lower-left corner (outer edge) of the grid
+    pub fn get_xllcorner(&self) -> f32 {
+        match self.xllcorner {
+            Some(corner) => corner,
+            None => {
+                self.xllcenter
+                    .expect("Header must have xllcorner or xllcenter")
+                    - (self.cellsize / 2.0)
+            }
+        }
+    }
+
+    pub fn get_yllcorner(&self) -> f32 {
+        match self.yllcorner {
+            Some(corner) => corner,
+            None => {
+                self.yllcenter
+                    .expect("Header must have yllcorner or yllcenter")
+                    - (self.cellsize / 2.0)
+            }
+        }
+    }
+
+    /// Computes or retrieves the center coordinate of the bottom-left cell
+    pub fn get_xllcenter(&self) -> f32 {
+        match self.xllcenter {
+            Some(center) => center,
+            None => {
+                self.xllcorner
+                    .expect("Header must have xllcorner or xllcenter")
+                    + (self.cellsize / 2.0)
+            }
+        }
+    }
+
+    pub fn get_yllcenter(&self) -> f32 {
+        match self.yllcenter {
+            Some(center) => center,
+            None => {
+                self.yllcorner
+                    .expect("Header must have yllcorner or yllcenter")
+                    + (self.cellsize / 2.0)
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct EsriGrid {
+    pub header: EsriGridHeader,
+    /// Flat vector representing the 2D grid in row-major order
+    pub data: Vec<f32>,
+}
+
+impl EsriGrid {
+    /// Parses an ESRI ASCII grid file from a given path.
+    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, String> {
+        let file = File::open(path).map_err(|e| format!("Failed to open file: {}", e))?;
+        let reader = BufReader::new(file);
+        Self::from_reader(reader)
+    }
+
+    /// Parses the grid from any type implementing `BufRead`.
+    pub fn from_reader<R: BufRead>(mut reader: R) -> Result<Self, String> {
+        let mut ncols = 0;
+        let mut nrows = 0;
+        let mut xllcorner = None;
+        let mut yllcorner = None;
+        let mut xllcenter = None;
+        let mut yllcenter = None;
+        let mut cellsize = 0.0;
+        let mut nodata_value = None;
+
+        let mut lines_iter = reader.by_ref().lines();
+
+        // 1. Parse Header (First 6 metadata lines)
+        for _ in 0..6 {
+            let line = match lines_iter.next() {
+                Some(Ok(l)) => l,
+                Some(Err(e)) => return Err(format!("Error reading header line: {}", e)),
+                None => return Err("Unexpected end of file while parsing header".to_string()),
+            };
+
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() < 2 {
+                return Err(format!("Invalid header line: '{}'", line));
+            }
+
+            let key = parts[0].to_lowercase();
+            let value = parts[1];
+
+            match key.as_str() {
+                "ncols" => ncols = value.parse().map_err(|_| "Invalid ncols value")?,
+                "nrows" => nrows = value.parse().map_err(|_| "Invalid nrows value")?,
+                "xllcorner" => {
+                    xllcorner = Some(value.parse().map_err(|_| "Invalid xllcorner value")?)
+                }
+                "yllcorner" => {
+                    yllcorner = Some(value.parse().map_err(|_| "Invalid yllcorner value")?)
+                }
+                "xllcenter" => {
+                    xllcenter = Some(value.parse().map_err(|_| "Invalid xllcenter value")?)
+                }
+                "yllcenter" => {
+                    yllcenter = Some(value.parse().map_err(|_| "Invalid yllcenter value")?)
+                }
+                "cellsize" => cellsize = value.parse().map_err(|_| "Invalid cellsize value")?,
+                "nodata_value" => {
+                    nodata_value = Some(value.parse().map_err(|_| "Invalid nodata_value")?)
+                }
+                _ => return Err(format!("Unknown header key: {}", parts[0])),
+            }
+        }
+        if xllcorner.is_none() && xllcenter.is_none() {
+            return Err("Missing X origin coordinate (xllcorner or xllcenter)".to_string());
+        }
+        if yllcorner.is_none() && yllcenter.is_none() {
+            return Err("Missing Y origin coordinate (yllcorner or yllcenter)".to_string());
+        }
+
+        let header = EsriGridHeader {
+            ncols,
+            nrows,
+            xllcorner,
+            yllcorner,
+            xllcenter,
+            yllcenter,
+            cellsize,
+            nodata_value,
+        };
+
+        // 2. Parse Data Matrix
+        // Pre-allocate space to avoid re-allocations during push loops
+        let mut data: Vec<f32> = Vec::with_capacity(header.ncols * header.nrows);
+
+        for line_result in lines_iter {
+            let line = line_result.map_err(|e| format!("Error reading data line: {}", e))?;
+
+            // Skip purely empty lines
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            // Split by whitespace and parse values
+            for token in line.split_whitespace() {
+                let val: f32 = token
+                    .parse()
+                    .map_err(|_| format!("Failed to parse data token: '{}'", token))?;
+                data.push(val);
+            }
+        }
+
+        // 3. Validation Check
+        let expected_size = header.ncols * header.nrows;
+        if data.len() != expected_size {
+            return Err(format!(
+                "Data size mismatch. Expected {} values ({}x{}), but found {}.",
+                expected_size,
+                header.ncols,
+                header.nrows,
+                data.len()
+            ));
+        }
+
+        Ok(EsriGrid { header, data })
+    }
+
+    /// Helper to look up a value at a given 2D index (row, col)
+    pub fn get(&self, row: usize, col: usize) -> Option<f32> {
+        if row < self.header.nrows && col < self.header.ncols {
+            let index = row * self.header.ncols + col;
+            Some(self.data[index])
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
 pub enum DataType {
     F16,
@@ -592,23 +783,58 @@ pub fn read_geo_tiff(path: &str) -> Result<GeoTiff, Box<dyn std::error::Error>> 
     Ok(GeoTiff { metadata, data })
 }
 
-async fn load_png_as_float32(path: &str) -> Result<Dem, Box<dyn std::error::Error>> {
+async fn load_png_as_dem(path: &str) -> Result<Dem, Box<dyn std::error::Error>> {
     let (rgba, width, height) = read_png(path).await.expect("Failed to load PNG");
-    let bounds: Bounds = load_bounds(path).await.expect("Failed to load bounds");
+    let mut bounds: Bounds = load_bounds(path).await.expect("Failed to load bounds");
     debug!("Loaded PNG {}: {} x {}", path, width, height);
+    let cell_size = (bounds.xmax - bounds.xmin) / (width - 1) as f32;
+    bounds.xmin -= 0.5 * cell_size;
+    bounds.xmax += 0.5 * cell_size;
+    bounds.ymin -= 0.5 * cell_size;
+    bounds.ymax += 0.5 * cell_size;
     let mut dem = Dem {
         width,
         height,
         data1d: rgba_bytes_to_f32(&rgba),
         data: Vec::new(),
+        // TODO bounds were exported wrong. Rework when png files get metadata embedded.
         x: linspace(bounds.xmin, bounds.xmax, width),
         y: linspace(bounds.ymin, bounds.ymax, height),
-        cell_size: (bounds.xmax - bounds.xmin) / (width - 1) as f32,
+        cell_size,
         bounds,
         map_factor: 1.0,
         minimum_elevation: f32::INFINITY,
     };
     dem.data = to_2d(&dem.data1d, width, height);
+    Ok(dem)
+}
+
+fn load_asc_as_dem(path: &str) -> Result<Dem, Box<dyn std::error::Error>> {
+    let mut grid = EsriGrid::from_file(path)?;
+    flip_rows_flat_vec(
+        &mut grid.data,
+        grid.header.ncols as u32,
+        grid.header.nrows as u32,
+    );
+    let bounds = Bounds {
+        xmin: grid.header.get_xllcorner(),
+        xmax: grid.header.get_xllcorner() + grid.header.ncols as f32 * grid.header.cellsize,
+        ymin: grid.header.get_yllcorner(),
+        ymax: grid.header.get_yllcorner() + grid.header.nrows as f32 * grid.header.cellsize,
+    };
+    let mut dem = Dem {
+        width: grid.header.ncols,
+        height: grid.header.nrows,
+        data1d: grid.data,
+        data: Vec::new(),
+        x: linspace(bounds.xmin, bounds.xmax, grid.header.ncols),
+        y: linspace(bounds.ymin, bounds.ymax, grid.header.nrows),
+        cell_size: grid.header.cellsize,
+        bounds,
+        map_factor: 1.0,
+        minimum_elevation: f32::INFINITY,
+    };
+    dem.data = to_2d(&dem.data1d, dem.width, dem.height);
     Ok(dem)
 }
 
@@ -665,7 +891,10 @@ pub async fn load_release_areas(path: &str) -> Result<Vec<f32>, Box<dyn std::err
         .unwrap_or("");
 
     let data: Vec<f32> = match ext.to_lowercase().as_str() {
-        "asc" => return Err("ASC format not supported yet".into()),
+        "asc" => {
+            let grid = EsriGrid::from_file(path)?;
+            grid.data
+        }
         "png" => {
             let (rgba, _, _) = read_png(path).await?;
             rgba.iter()
@@ -691,8 +920,8 @@ pub async fn load_dem(path: &str) -> Result<Dem, Box<dyn std::error::Error>> {
         .unwrap_or("");
 
     let mut dem: Dem = match ext.to_lowercase().as_str() {
-        "asc" => return Err("ASC format not supported yet".into()),
-        "png" => load_png_as_float32(path).await?,
+        "asc" => load_asc_as_dem(path)?,
+        "png" => load_png_as_dem(path).await?,
         "tif" | "tiff" => load_tiff_as_dem(path)?,
         _ => return Err(format!("Unsupported DEM format: {}", ext).into()),
     };
@@ -834,6 +1063,7 @@ mod tests {
     use std::f32::consts::PI;
     use std::fs;
     use std::fs::File;
+    use std::io::Cursor;
     use std::io::Write;
     use std::time::Instant;
     use tempfile::NamedTempFile;
@@ -884,10 +1114,10 @@ mod tests {
         let dem: Dem = block_on(load_dem(path)).expect("Failed to load PNG as float32");
         assert_eq!(dem.width, 1001);
         assert_eq!(dem.height, 401);
-        assert_eq!(dem.bounds.xmin, 1000.0);
-        assert_eq!(dem.bounds.xmax, 6000.0);
-        assert_eq!(dem.bounds.ymin, -5000.0);
-        assert_eq!(dem.bounds.ymax, -3000.0);
+        assert_eq!(dem.bounds.xmin, 997.5);
+        assert_eq!(dem.bounds.xmax, 6002.5);
+        assert_eq!(dem.bounds.ymin, -5002.5);
+        assert_eq!(dem.bounds.ymax, -2997.5);
         let mut expected: Vec<f32> = vec![
             2200.0,
             2193.260085,
@@ -1443,5 +1673,300 @@ mod tests {
             .expect("Failed to get file metadata")
             .len();
         print!(" {:>10} bytes", file_size);
+    }
+
+    #[test_log::test]
+    fn test_unit_and_variable_conversions_cover_fallbacks() {
+        assert_eq!(Unit::from_int(0), Some(Unit::MetersPerSecond));
+        assert_eq!(Unit::from_int(1), Some(Unit::Degree));
+        assert_eq!(Unit::from_int(2), Some(Unit::Kilogram));
+        assert_eq!(Unit::from_int(99), Some(Unit::Dimensionless));
+        assert_eq!(Unit::Dimensionless.as_int(), 255);
+        assert_eq!(Unit::Degree.as_str(), "°");
+
+        assert_eq!(Variable::from_int(0), Some(Variable::Velocity));
+        assert_eq!(Variable::from_int(3), Some(Variable::SlopeAspect));
+        assert_eq!(Variable::from_int(7), Some(Variable::Mass));
+        assert_eq!(Variable::from_int(99), Some(Variable::Undefined));
+        assert_eq!(Variable::NormalZ.as_int(), 6);
+        assert_eq!(Variable::Undefined.as_str(), "undefined");
+    }
+
+    #[tokio::test]
+    async fn test_read_file_helpers_support_local_and_http_sources() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let local_file_path = tmp_dir.path().join("settings.json");
+        fs::write(&local_file_path, "local settings").unwrap();
+
+        let local_bytes = read_file(local_file_path.to_str().unwrap()).await.unwrap();
+        assert_eq!(local_bytes, b"local settings");
+
+        let local_string = read_file_to_string(local_file_path.to_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(local_string, "local settings");
+
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/settings.txt"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("remote settings"))
+            .mount(&mock_server)
+            .await;
+
+        let remote_string = read_file_to_string(&format!("{}/settings.txt", mock_server.uri()))
+            .await
+            .unwrap();
+        assert_eq!(remote_string, "remote settings");
+    }
+
+    #[tokio::test]
+    async fn test_write_png_and_load_release_areas_extract_alpha_channel() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let base_path = tmp_dir.path().join("release_map");
+        let rgba = vec![
+            0, 0, 0, 0, //
+            0, 0, 0, 100, //
+            0, 0, 0, 200, //
+            0, 0, 0, 255,
+        ];
+
+        write_png(&base_path, &rgba, 2, 2).unwrap();
+
+        let release_areas = load_release_areas(base_path.with_extension("png").to_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(release_areas, vec![0.0, 1.0, 2.0, 2.55]);
+    }
+
+    #[tokio::test]
+    async fn test_create_sim_settings_helpers_load_dem_and_apply_overrides() {
+        let (sim_settings, dem) = create_sim_settings_and_dem_from_path(PARABOLA_PATH).await;
+        assert_eq!(dem.width, 1001);
+        assert_eq!(dem.height, 401);
+        assert_eq!(sim_settings.grid_shape_x, dem.width as u32);
+        assert_eq!(sim_settings.grid_shape_y, dem.height as u32);
+        assert_eq!(sim_settings.cell_size, dem.cell_size);
+
+        let settings = Settings {
+            dem_path: Some(PARABOLA_PATH.to_string()),
+            max_steps: Some(42),
+            density: Some(321.0),
+            ..Settings::default()
+        };
+        let settings_file = NamedTempFile::new().unwrap();
+        fs::write(settings_file.path(), settings.dumps().unwrap()).unwrap();
+
+        let (json_sim_settings, json_dem) =
+            sim_settings_and_dem_from_json_file(settings_file.path().to_str().unwrap()).await;
+
+        assert_eq!(json_dem.width, dem.width);
+        assert_eq!(json_dem.height, dem.height);
+        assert_eq!(json_sim_settings.max_steps, 42);
+        assert_eq!(json_sim_settings.density, 321.0);
+        assert_eq!(json_sim_settings.grid_shape_x, dem.width as u32);
+        assert_eq!(json_sim_settings.grid_shape_y, dem.height as u32);
+    }
+
+    #[test_log::test]
+    fn test_save_grid_writes_round_trippable_metadata_and_data() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let file_path = tmp_dir.path().join("saved_grid.bin");
+        let dem = Dem {
+            width: 2,
+            height: 2,
+            bounds: Bounds {
+                xmin: 10.0,
+                xmax: 20.0,
+                ymin: 30.0,
+                ymax: 40.0,
+            },
+            data1d: vec![1.0, 2.0, 3.0, 4.0],
+            data: vec![vec![1.0, 2.0], vec![3.0, 4.0]],
+            x: vec![10.0, 20.0],
+            y: vec![30.0, 40.0],
+            cell_size: 5.0,
+            map_factor: 0.75,
+            minimum_elevation: 1.0,
+        };
+        let values = vec![9.0, 8.0, 7.0, 6.0];
+
+        save_grid(&dem, file_path.to_str().unwrap(), values.clone()).unwrap();
+
+        let stored = F32Data::load(file_path.to_str().unwrap()).unwrap();
+        assert_eq!(stored.metadata.width, 2);
+        assert_eq!(stored.metadata.height, 2);
+        assert_eq!(stored.metadata.cell_size, 5.0);
+        assert_eq!(stored.metadata.map_factor, 0.75);
+        assert_eq!(stored.data, values);
+    }
+
+    #[test]
+    fn test_valid_esri_grid_parsing() {
+        let valid_data = "\
+ncols         3
+nrows         2
+xllcorner     100.0
+yllcorner     200.0
+cellsize      5.0
+NODATA_value  -9999.0
+1.0 2.0 3.0
+4.0 -9999.0 6.0
+";
+
+        let cursor = Cursor::new(valid_data);
+        let result = EsriGrid::from_reader(cursor);
+
+        // Verify parsing succeeded
+        assert!(result.is_ok(), "Expected valid grid to parse successfully");
+        let grid = result.unwrap();
+
+        // Verify header values
+        assert_eq!(grid.header.ncols, 3);
+        assert_eq!(grid.header.nrows, 2);
+        assert_eq!(grid.header.xllcorner, Some(100.0));
+        assert_eq!(grid.header.yllcorner, Some(200.0));
+        assert_eq!(grid.header.cellsize, 5.0);
+        assert_eq!(grid.header.nodata_value, Some(-9999.0));
+
+        // Verify 2D data index extraction
+        assert_eq!(grid.get(0, 0), Some(1.0));
+        assert_eq!(grid.get(0, 2), Some(3.0));
+        assert_eq!(grid.get(1, 1), Some(-9999.0));
+        assert_eq!(grid.get(1, 2), Some(6.0));
+
+        // Verify bounds checking
+        assert_eq!(grid.get(2, 0), None); // Out of bounds row
+        assert_eq!(grid.get(0, 3), None); // Out of bounds col
+    }
+
+    #[test]
+    fn test_variant_header_center() {
+        // Some ESRI grids use xllcenter/yllcenter instead of corner
+        let center_data = "\
+ncols         2
+nrows         2
+xllcenter     50.0
+yllcenter     50.0
+cellsize      2.5
+NODATA_value  -1
+0.0 1.0
+2.0 3.0";
+
+        let cursor = Cursor::new(center_data);
+        let grid = EsriGrid::from_reader(cursor).unwrap();
+
+        assert_eq!(grid.header.get_xllcorner(), 48.75);
+        assert_eq!(grid.header.get_yllcorner(), 48.75);
+    }
+
+    #[test]
+    fn test_data_mismatch_fewer_elements() {
+        // Header claims 3x2 (6 elements), but only 5 are provided
+        let broken_data = "\
+ncols         3
+nrows         2
+xllcorner     0.0
+yllcorner     0.0
+cellsize      1.0
+NODATA_value  -999
+1.0 2.0 3.0
+4.0 5.0";
+
+        let cursor = Cursor::new(broken_data);
+        let result = EsriGrid::from_reader(cursor);
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err();
+        assert!(
+            err_msg.contains("Data size mismatch"),
+            "Expected dimension mismatch error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_invalid_header_key() {
+        let bad_header = "\
+ncols         3
+invalid_key   2
+xllcorner     0.0
+yllcorner     0.0
+cellsize      1.0
+NODATA_value  -999
+1.0 2.0 3.0";
+
+        let cursor = Cursor::new(bad_header);
+        let result = EsriGrid::from_reader(cursor);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Unknown header key"));
+    }
+
+    #[test]
+    fn test_unparsed_token() {
+        let bad_token = "\
+ncols         2
+nrows         1
+xllcorner     0.0
+yllcorner     0.0
+cellsize      1.0
+NODATA_value  -999
+1.0 corrupt_data";
+
+        let cursor = Cursor::new(bad_token);
+        let result = EsriGrid::from_reader(cursor);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Failed to parse data token"));
+    }
+    #[test_log::test]
+    fn test_dem_png_asc_equality() {
+        let png_path = "../../data/avaframe/avaGar.png";
+        let asc_path = "../../data/avaframe/avaGar_remeshedDEM5.00.asc";
+
+        let png_dem = block_on(load_dem(png_path)).expect("Failed to load PNG DEM");
+        let asc_dem = block_on(load_dem(asc_path)).expect("Failed to load ASC DEM");
+
+        assert_eq!(png_dem.width, asc_dem.width);
+        assert_eq!(png_dem.height, asc_dem.height);
+        assert_eq!(png_dem.cell_size, asc_dem.cell_size);
+        assert_eq!(png_dem.bounds, asc_dem.bounds);
+        assert!(vecs_are_equal(&png_dem.data1d, &asc_dem.data1d));
+    }
+
+    fn vecs_are_equal(a: &[f32], b: &[f32]) -> bool {
+        if a.len() != b.len() {
+            return false;
+        }
+
+        a.iter()
+            .zip(b.iter())
+            .all(|(x, y)| x == y || (x.is_nan() && y.is_nan()))
+    }
+
+    #[test]
+    fn test_variant_header_center_preserved() {
+        let center_data = "\
+ncols         2
+nrows         2
+xllcenter     50.0
+yllcenter     50.0
+cellsize      10.0
+NODATA_value  -1
+0.0 1.0
+2.0 3.0";
+
+        let cursor = Cursor::new(center_data);
+        let grid = EsriGrid::from_reader(cursor).unwrap();
+
+        // Assert the raw values are captured exactly as written
+        assert_eq!(grid.header.xllcenter, Some(50.0));
+        assert_eq!(grid.header.yllcenter, Some(50.0));
+        assert_eq!(grid.header.xllcorner, None);
+        assert_eq!(grid.header.yllcorner, None);
+
+        // Assert the computed helpers handle the half-cell offset calculation dynamically
+        assert_eq!(grid.header.get_xllcorner(), 45.0);
+        assert_eq!(grid.header.get_yllcorner(), 45.0);
     }
 }
