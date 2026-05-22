@@ -106,6 +106,10 @@ wasm-pack build crates/wasm_bindings --target web --out-dir ../../frontend/js/pk
 3. Start the development server: `python .\frontend\dev_server.py` This launches the app with caching disabled and HTTPS enabled using self-signed certificates, which are required for WebGPU support in most browsers.
 4. Open your browser and go to: [https://localhost/](https://localhost/) If you are accessing the server from another device on the same network, replace `localhost` with the host machine’s IP address.
 
+### Benchmarks
+
+```cargo bench -p simulation```
+
 ## Code Guidelines
 
 Before pushing use:

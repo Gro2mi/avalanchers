@@ -36,10 +36,15 @@ fn grid_physics(@builtin(global_invocation_id) id: vec3u) {
         (get_h2(id.x + 1, id.y) - get_h2(id.x - 1, id.y)) / (2.0 * sim_settings.cell_size),
         (get_h2(id.x, id.y + 1) - get_h2(id.x, id.y - 1)) / (2.0 * sim_settings.cell_size)
     );
+    let grad_h = grad_h2 * 0.5 / (h + 1e-5);
+
+
     // TODO do i need a slope limiter like minmod?
     // correct for slope sqrt(1-nx²), and again sqrt(1-nx²) to rotate it into 3d coordinates
-    let slope_corrected_grad_h2 = grad_h2 * vec2f(sqrt(1.0 - n.x * n.x), sqrt(1.0 - n.y * n.y));
-    grid_forces[idx] = -0.5 * g * n.z * k * slope_corrected_grad_h2;
+    // let slope_corrected_grad_h2 = grad_h2 * vec2f(sqrt(1.0 - n.x * n.x), sqrt(1.0 - n.y * n.y));
+    let slope_corrected_grad_h = grad_h * vec2f(sqrt(1.0 - n.x * n.x), sqrt(1.0 - n.y * n.y));
+    let lateral_factor = select(vec2f(0.0), slope_corrected_grad_h, length(slope_corrected_grad_h) > tan(radians(sim_settings.internal_friction_angle)));
+    grid_forces[idx] = -g * n.z * k * slope_corrected_grad_h;
 }
 
 fn get_h2(x: u32, y: u32) -> f32 {
@@ -90,6 +95,7 @@ struct SimInfo {
 const SIM_INFO_OUT_OF_BOUNDS: u32 = 1u << 0u;
 const SIM_INFO_CFL_EXCEEDED: u32 = 1u << 1u;
 const SIM_INFO_IS_NAN: u32 = 1u << 2u;
+const SIM_INFO_PARTICLE_OUT_OF_DEM_DATA: u32 = 1u << 3u;
 
 struct SimSettings {
     num_steps: u32,

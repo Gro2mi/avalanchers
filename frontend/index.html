@@ -69,6 +69,15 @@
             </select>
         </div>
         <div class="mb-3 d-flex align-items-center">
+            <label for="enable_curvature" class="me-2 mb-0" style="min-width: 140px;">Curvature:</label>
+            <input type="checkbox" id="enable_curvature" class="form-check-input" checked>
+        </div>
+        <div class="mb-3 d-flex align-items-center">
+            <label for="enable_particle_interaction" class="me-2 mb-0" style="min-width: 140px;">Particle Interaction:</label>
+            <input type="checkbox" id="enable_particle_interaction" class="form-check-input" checked>
+        </div>
+        
+        <div class="mb-3 d-flex align-items-center">
             <label for="frictionModelDropdown" class="me-2 mb-0" style="min-width: 140px;">Friction Model:</label>
             <select id="frictionModelDropdown" class="form-select w-auto">
                 <option value="coulomb">Coulomb</option>
@@ -109,6 +118,12 @@
                 class="form-range w-auto" style="max-width:200px;">
             <span id="releasedParticlesPerCellValue" class="ms-2">4</span>
         </div>
+        <div class="mb-3 d-flex align-items-center">
+            <label for="internalFrictionAngleSlider" class="me-2 mb-0" style="min-width: 140px;">Internal Friction Angle (°):</label>
+            <input type="range" id="internalFrictionAngleSlider" min="0" max="60" value="35" step="0.1"
+                class="form-range w-auto" style="max-width:200px;">
+            <span id="internalFrictionAngleValue" class="ms-2">35</span>
+        </div>
     </div>
 
     <button id="prepareSimulation" class="btn btn-primary">Prepare Simulation</button>
@@ -122,7 +137,7 @@
             <label for="plotVariable" class="me-2 mb-0" style="min-width: 140px;">Plot Variable: </label>
             <select id="plotVariable" class="form-select w-auto">
                 <option value="peak_flow_thickness">Peak Flow Thickness</option>
-                <option value="max_velocity">Peak Flow Velocity</option>
+                <option value="peak_velocity">Peak Flow Velocity</option>
                 <option value="cell_count">Cell Count</option>
                 <option value="release_areas">Release Area</option>
                 <option value="roughness">Roughness</option>

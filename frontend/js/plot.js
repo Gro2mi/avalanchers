@@ -90,9 +90,9 @@ function createRandomMatrix2D(width, height) {
 }
 
 async function updatePlots(sim, selectedVariable) {
-    await sim.fetch_cell_count();
+    // await sim.fetch_cell_count();
     // await sim.fetch_peak_flow_thickness();
-    sim.fetch_results();
+    // sim.fetch_results();
 
     if (selectedVariable === 'elevation') {
         Plotly.restyle(demPlot, {
@@ -164,8 +164,7 @@ function plotGpx(gpx, dem) {
     Plotly.addTraces(demPlot, [lineTrace]);
 }
 
-async function plotTrajectory(sim) {
-    timestepData = await sim.get_timestep_data();
+async function plotTrajectory(timestepData) {
     const [xminBounds, yminBounds, mapFactor] = sim.dem_trajectory_info;
     const lineTrace = {
         type: 'scatter3d',
@@ -199,8 +198,8 @@ async function plotTrajectory(sim) {
     Plotly.addTraces(demPlot, [lineTrace]);
 }
 
-async function plotTimestepData(sim) {
-    const timestepData = await sim.get_timestep_data();
+async function plotTimestepData(timestepData) {
+    
     let x = new Float32Array(timestepData.time);
     let n = timestepData.time.length;
     const friction = {

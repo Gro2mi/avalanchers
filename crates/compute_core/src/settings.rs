@@ -45,8 +45,11 @@ impl SimFlags {
     pub fn is_particle_interaction_enabled(&self) -> bool {
         (self.mask & (1 << 1)) != 0
     }
-    pub fn is_entrainment_enabled(&self) -> bool {
+    pub fn is_earth_pressure_coefficient_enabled(&self) -> bool {
         (self.mask & (1 << 2)) != 0
+    }
+    pub fn is_entrainment_enabled(&self) -> bool {
+        (self.mask & (1 << 3)) != 0
     }
 }
 #[repr(C)]

@@ -644,11 +644,10 @@ mod tests {
     use std::hash::Hash;
     use std::hash::Hasher;
 
-    const INCLINED_PLANE_PATH: &str = "../../frontend/data/avaframe/avaInclinedPlane.png";
-    const RELEASE_TEXTURE_PATH: &str =
-        "../../frontend/data/avaframe/avaInclinedPlanereleaseTexture.png";
-    const GAR_PATH: &str = "../../frontend/data/avaframe/avaGar.png";
-    const GAR_RELEASE_TEXTURE_PATH: &str = "../../frontend/data/avaframe/avaGarreleaseTexture.png";
+    const INCLINED_PLANE_PATH: &str = "../../data/avaframe/avaInclinedPlane.png";
+    const RELEASE_TEXTURE_PATH: &str = "../../data/avaframe/avaInclinedPlanereleaseTexture.png";
+    const GAR_PATH: &str = "../../data/avaframe/avaGar.png";
+    const GAR_RELEASE_TEXTURE_PATH: &str = "../../data/avaframe/avaGarreleaseTexture.png";
 
     #[test]
     fn test_init_logging_idempotent() {

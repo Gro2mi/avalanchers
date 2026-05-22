@@ -1,6 +1,7 @@
 {
     "dem_path": "data/vals/PAR6_Vals_Gries_dtm_10_utm32n_bil_.tif", 
     "max_steps": 3000,
+    "released_particles_per_cell": 4,
     "sim_model": 0,
     "friction_model": 1,
     "density": 200.0,

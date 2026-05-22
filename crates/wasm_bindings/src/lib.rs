@@ -274,7 +274,7 @@ impl WasmSimulation {
     }
 
     #[wasm_bindgen(getter)]
-    pub fn max_velocity(&self) -> Float32Array {
+    pub fn peak_velocity(&self) -> Float32Array {
         unsafe { Float32Array::view(self.inner.gpu_cache.peak_velocity.as_ref().unwrap()) }
     }
 
