@@ -11,7 +11,6 @@ window.dem = new Dem();
 window.sim = null;
 window.wasm = null;
 
-const wasm = await init();
 const demDropdown = document.getElementById('demDropdown');
 const frictionModelDropdown = document.getElementById('frictionModelDropdown');
 
@@ -31,6 +30,11 @@ const frictionCoefficientSlider = document.getElementById('frictionCoefficientSl
 const frictionCoefficientValue = document.getElementById('frictionCoefficientValue');
 frictionCoefficientSlider.addEventListener('input', () => {
     frictionCoefficientValue.textContent = frictionCoefficientSlider.value;
+});
+const internalFrictionAngleSlider = document.getElementById('internalFrictionAngleSlider');
+const internalFrictionAngleValue = document.getElementById('internalFrictionAngleValue');
+internalFrictionAngleSlider.addEventListener('input', () => {
+    internalFrictionAngleValue.textContent = internalFrictionAngleSlider.value;
 });
 const dragCoefficientSlider = document.getElementById('dragCoefficientSlider');
 const dragCoefficientValue = document.getElementById('dragCoefficientValue');
@@ -76,6 +80,11 @@ frictionModelDropdown.addEventListener('change', (event) => {
     changeFrictionModel();
 });
 
+function updateFrictionControlsFromModel() {
+    const selectedModel = frictionModelDropdown.selectedOptions[0].text;
+    dragCoefficientSlider.disabled = selectedModel == 'Coulomb' || selectedModel == 'samosAT';
+}
+
 function changeFrictionModel() {
     const selectedModel = frictionModelDropdown.selectedOptions[0].text;
     if (selectedModel == 'Coulomb') {
@@ -85,18 +94,16 @@ function changeFrictionModel() {
         frictionCoefficientSlider.value = 0.155;
         frictionCoefficientValue.textContent = frictionCoefficientSlider.value;
     }
-    if (selectedModel == 'Coulomb' || selectedModel == 'samosAT') {
-        dragCoefficientSlider.disabled = true;
-    } else {
-        dragCoefficientSlider.disabled = false;
-    }
+    updateFrictionControlsFromModel();
 }
 function setSettingsDisabled(flag) {
     const controls = document.querySelectorAll('#simSettingsDiv input, #simSettingsDiv select, #simSettingsDiv textarea, #simSettingsDiv button');
     controls.forEach(el => el.disabled = flag);
     runButton.disabled = flag;
     prepareButton.disabled = flag;
-    changeFrictionModel();
+    if (!flag) {
+        updateFrictionControlsFromModel();
+    }
     if (flag) {
         runButton.textContent = "Running...";
     } else {
@@ -142,10 +149,10 @@ async function runAndPlot() {
             await sim.create(simSettings);
             await sim.set_dem(dem.data1d,
                 dem.width,
-                dem.height, 
-                dem.cellSize, 
+                dem.height,
+                dem.cellSize,
                 dem.bounds.xmin, dem.bounds.xmax, dem.bounds.ymin, dem.bounds.ymax,
-                dem.mapFactor); 
+                dem.mapFactor);
         }
         else {
             await sim.create(simSettings);
@@ -153,17 +160,24 @@ async function runAndPlot() {
         simTimer = new Timer('AvalancheSimulation');
         await sim.run();
         simTimer.checkpoint('simulation');
-        await sim.get_timestep_data();
-        await sim.fetch_cell_count();
+        // await sim.get_timestep_data();
+        await sim.fetch_peak_velocity();
+        
+        // await sim.fetch_cell_count();
         simTimer.checkpoint('fetching data');
-        plotTimestepData(sim);
-        plotTrajectory(sim);
-        plotVariable.value = 'cell_count';
+        const timestepData = await sim.get_timestep_data();
+        plotTimestepData(timestepData);
+        plotTrajectory(timestepData);
+        plotVariable.value = 'peak_velocity';
+        // plotVariable.value = 'cell_count';
         plotVariable.dispatchEvent(new Event('change'));
         plotTimer();
         // if (exportResultsCheckbox.checked) {
         //     await exportResults();
         // }
+        
+        const fetchResultsFuture = sim.fetch_results();
+        await fetchResultsFuture;
     } catch (error) {
         console.error('Error during simulation:', error);
     }
@@ -197,8 +211,8 @@ window.addEventListener('DOMContentLoaded', () => {
 
 function getSettings() {
     const simSettings = {
-        dem_path: window.location + "data/avaframe/" + demDropdown.value + ".png",
-        release_areas_path: window.location + "data/avaframe/" + demDropdown.value + "releaseTexture.png",
+        dem_path: window.location.pathname.replace(/\/[^\/]+\.[^\/]+$/, "/") + "data/avaframe/" + demDropdown.value + ".png",
+        release_areas_path: window.location.pathname.replace(/\/[^\/]+\.[^\/]+$/, "/") + "data/avaframe/" + demDropdown.value + "releaseTexture.png",
         max_steps: parseInt(stepSlider.value),
         sim_model: 0,
         friction_model: frictionModelDropdown.selectedIndex,
@@ -208,6 +222,9 @@ function getSettings() {
         drag_coefficient: parseInt(dragCoefficientSlider.value),
         cfl: parseFloat(cflSlider.value),
         released_particles_per_cell: parseInt(releasedParticlesPerCellSlider.value),
+        enable_curvature: document.getElementById('enable_curvature').checked,
+        enable_particle_interaction: document.getElementById('enable_particle_interaction').checked,
+        internal_friction_angle: parseFloat(internalFrictionAngleSlider.value),
     };
     return simSettings;
 }
@@ -285,21 +302,6 @@ async function savePngFile(pngBlob) {
 // document.getElementById('exportResults').addEventListener('click', savePNG);
 
 async function main() {
-    const adapter = await navigator.gpu?.requestAdapter({
-        powerPreference: 'high-performance',
-        featureLevel: 'compatibility',
-    });
-
-    if (!adapter) {
-        alert("WebGPU is not supported or failed to initialize. Please use a compatible browser like Chrome.");
-        runButton.disabled = true;
-        runButton.textContent = "WebGPU not supported";
-    } else if (!adapter.features.has("float32-filterable") || (debug && !adapter.features.has("timestamp-query"))) {
-        alert("Your device has to support float32-filterable textures and timestamp-query to run this simulation.");
-        runButton.disabled = true;
-        runButton.textContent = "WebGPU features not supported";
-    }
-
     changeFrictionModel();
     const settings = getSettings();
     await sim.create(settings);
@@ -334,9 +336,9 @@ document.getElementById("gpxfile").addEventListener("change", async (e) => {
     // simSettings.setDem(dem);
     await sim.set_dem(dem.data1d,
         dem.width,
-        dem.height, 
-        dem.cell_size, 
-        dem.bounds.xmin, dem.bounds.xmax, dem.bounds.ymin, dem.bounds.ymax, 
+        dem.height,
+        dem.cell_size,
+        dem.bounds.xmin, dem.bounds.xmax, dem.bounds.ymin, dem.bounds.ymax,
         dem.mapFactor);
     resetPlots();
     plotDem(sim);
@@ -345,6 +347,28 @@ document.getElementById("gpxfile").addEventListener("change", async (e) => {
         runAndPlot();
     }
 });
+
+function withTimeout(promise, ms, label = "operation") {
+    let timer;
+
+    const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => {
+            reject(new Error(`${label} timed out after ${ms}ms`));
+        }, ms);
+    });
+
+    return Promise.race([
+        promise.finally(() => clearTimeout(timer)),
+        timeout
+    ]);
+}
+
+function checkWebGPU() {
+    if (!navigator.gpu) {
+        alert("WebGPU is not supported in this browser. Please use a compatible browser like Chrome or Edge with WebGPU enabled.");
+        throw new Error("WebGPU not supported");
+    }
+}
 
 var debug = false;
 let predefinedReleasePoints = true;
@@ -355,14 +379,37 @@ if (urlParams.get("debug") === "vscode") {
 }
 var isMobileDevice = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 
+
+checkWebGPU();
 await loadEngine().catch(console.error);
 main();
 async function loadEngine() {
     const statusEl = document.getElementById("status");
+    try {
+        statusEl.textContent = "Loading Engine...";
 
-    statusEl.textContent = "Loading Engine...";
-    window.wasm = await init();
-    sim = await WasmSimulation.new();
+        window.wasm = await init();
+
+        statusEl.textContent = "Creating Simulation...";
+        sim = await withTimeout(
+                WasmSimulation.new(),
+                5000,
+                "WasmSimulation.new"
+            );
 
     statusEl.textContent = "Engine Ready!";
+    } catch (err) {
+        console.error("WASM init failed:", err);
+
+        let msg = "Unknown error";
+
+        if (err instanceof Error) {
+            msg = err.message;
+        } else if (typeof err === "string") {
+            msg = err;
+        }
+
+        statusEl.textContent = `Engine load failed: ${msg}, check console for details.`;
+        statusEl.style.backgroundColor = "rgba(255, 0, 0, 0.8)";
+    }
 }

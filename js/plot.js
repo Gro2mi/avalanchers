@@ -90,13 +90,13 @@ function createRandomMatrix2D(width, height) {
 }
 
 async function updatePlots(sim, selectedVariable) {
-    // await sim.fetch_max_velocity();
-    await sim.fetch_cell_count();
-    sim.fetch_results();
+    // await sim.fetch_cell_count();
+    // await sim.fetch_peak_flow_thickness();
+    // sim.fetch_results();
 
     if (selectedVariable === 'elevation') {
         Plotly.restyle(demPlot, {
-            surfacecolor: [to2D(new Float32Array(sim.dem), new Float32Array(sim.width), new Float32Array(sim.height))],
+            surfacecolor: [to2D(new Float32Array(sim.dem), sim.width, sim.height)],
             colorscale: 'Earth',
             cmin: [0],
             cmax: [4000],
@@ -133,7 +133,9 @@ async function updatePlots(sim, selectedVariable) {
         const cellCountLog = new Float32Array(sim.cell_count).map(val => Math.log10(val));
         plotOptions.surfacecolor = [to2D(cellCountLog, sim.width, sim.height)];
         traceHist.x = cellCountLog.filter(val => val > 0);
-    } else if (selectedVariable === 'max_velocity') {
+    } else if (selectedVariable === 'peak_velocity') {
+        traceHist.x = traceHist.x.filter(val => val > 1e-5)
+    }else if (selectedVariable === 'peak_flow_thickness') {
         traceHist.x = traceHist.x.filter(val => val > 1e-5)
     }
     Plotly.restyle(demPlot, plotOptions, [0]);
@@ -162,9 +164,8 @@ function plotGpx(gpx, dem) {
     Plotly.addTraces(demPlot, [lineTrace]);
 }
 
-async function plotTrajectory(sim) {
-    timestepData = await sim.get_timestep_data();
-    const [xminBounds, yminBounds, mapFactor] = sim.demTrajectoryInfo;
+async function plotTrajectory(timestepData) {
+    const [xminBounds, yminBounds, mapFactor] = sim.dem_trajectory_info;
     const lineTrace = {
         type: 'scatter3d',
         mode: 'line+markers',
@@ -197,8 +198,8 @@ async function plotTrajectory(sim) {
     Plotly.addTraces(demPlot, [lineTrace]);
 }
 
-async function plotTimestepData(sim) {
-    const timestepData = await sim.get_timestep_data();
+async function plotTimestepData(timestepData) {
+    
     let x = new Float32Array(timestepData.time);
     let n = timestepData.time.length;
     const friction = {

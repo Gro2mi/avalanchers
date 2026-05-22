@@ -3,8 +3,29 @@ import ssl
 import socket
 import os 
 import subprocess
+import mimetypes
+import shutil
+
+mimetypes.add_type("application/javascript", ".js")
+mimetypes.add_type("text/css", ".css")
+mimetypes.add_type("application/wasm", ".wasm")
 
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
+os.makedirs("data", exist_ok=True)
+src_root = os.path.join("..", "data", "avaframe")
+dst_root = os.path.join("data", "avaframe")
+
+# Copy files from src_root to dst_root, but do not overwrite existing files.
+for root, dirs, files in os.walk(src_root):
+    rel_root = os.path.relpath(root, src_root)
+    target_root = os.path.join(dst_root, rel_root) if rel_root != "." else dst_root
+    os.makedirs(target_root, exist_ok=True)
+    for f in files:
+        src_path = os.path.join(root, f)
+        dst_path = os.path.join(target_root, f)
+        if not os.path.exists(dst_path):
+            shutil.copy2(src_path, dst_path)
+
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.connect(("8.8.8.8", 80))
 ip = s.getsockname()[0]
