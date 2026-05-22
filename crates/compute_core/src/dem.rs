@@ -1,6 +1,6 @@
 use crate::utils::*;
 
-#[derive(Default)]
+#[derive(Default, Debug, PartialEq)]
 pub struct Bounds {
     pub xmin: f32,
     pub xmax: f32,

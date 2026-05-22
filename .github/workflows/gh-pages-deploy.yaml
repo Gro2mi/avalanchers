@@ -34,6 +34,8 @@ jobs:
           mkdir -p deploy_dir
           # Sync frontend source
           rsync -av --exclude='*.pem' --exclude='.*py' --exclude='*.rp' --exclude='*.gpx' frontend/ deploy_dir/
+          mkdir -p deploy_dir/data/avaframe
+          rsync -av --exclude='*.pem' --exclude='.*py' --exclude='*.rp' --exclude='*.gpx' data/avaframe/ deploy_dir/data/avaframe/
 
           # Ensure the target directory exists before copying
           mkdir -p deploy_dir/js/pkg/

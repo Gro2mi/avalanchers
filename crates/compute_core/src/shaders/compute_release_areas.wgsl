@@ -101,6 +101,7 @@ struct SimInfo {
 const SIM_INFO_OUT_OF_BOUNDS: u32 = 1u << 0u;
 const SIM_INFO_CFL_EXCEEDED: u32 = 1u << 1u;
 const SIM_INFO_IS_NAN: u32 = 1u << 2u;
+const SIM_INFO_PARTICLE_OUT_OF_DEM_DATA: u32 = 1u << 3u;
 
 struct SimSettings {
     num_steps: u32,

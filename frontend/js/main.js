@@ -32,6 +32,11 @@ const frictionCoefficientValue = document.getElementById('frictionCoefficientVal
 frictionCoefficientSlider.addEventListener('input', () => {
     frictionCoefficientValue.textContent = frictionCoefficientSlider.value;
 });
+const internalFrictionAngleSlider = document.getElementById('internalFrictionAngleSlider');
+const internalFrictionAngleValue = document.getElementById('internalFrictionAngleValue');
+internalFrictionAngleSlider.addEventListener('input', () => {
+    internalFrictionAngleValue.textContent = internalFrictionAngleSlider.value;
+});
 const dragCoefficientSlider = document.getElementById('dragCoefficientSlider');
 const dragCoefficientValue = document.getElementById('dragCoefficientValue');
 dragCoefficientSlider.addEventListener('input', () => {
@@ -76,6 +81,11 @@ frictionModelDropdown.addEventListener('change', (event) => {
     changeFrictionModel();
 });
 
+function updateFrictionControlsFromModel() {
+    const selectedModel = frictionModelDropdown.selectedOptions[0].text;
+    dragCoefficientSlider.disabled = selectedModel == 'Coulomb' || selectedModel == 'samosAT';
+}
+
 function changeFrictionModel() {
     const selectedModel = frictionModelDropdown.selectedOptions[0].text;
     if (selectedModel == 'Coulomb') {
@@ -85,18 +95,16 @@ function changeFrictionModel() {
         frictionCoefficientSlider.value = 0.155;
         frictionCoefficientValue.textContent = frictionCoefficientSlider.value;
     }
-    if (selectedModel == 'Coulomb' || selectedModel == 'samosAT') {
-        dragCoefficientSlider.disabled = true;
-    } else {
-        dragCoefficientSlider.disabled = false;
-    }
+    updateFrictionControlsFromModel();
 }
 function setSettingsDisabled(flag) {
     const controls = document.querySelectorAll('#simSettingsDiv input, #simSettingsDiv select, #simSettingsDiv textarea, #simSettingsDiv button');
     controls.forEach(el => el.disabled = flag);
     runButton.disabled = flag;
     prepareButton.disabled = flag;
-    changeFrictionModel();
+    if (!flag) {
+        updateFrictionControlsFromModel();
+    }
     if (flag) {
         runButton.textContent = "Running...";
     } else {
@@ -153,19 +161,24 @@ async function runAndPlot() {
         simTimer = new Timer('AvalancheSimulation');
         await sim.run();
         simTimer.checkpoint('simulation');
-        await sim.get_timestep_data();
-        // await sim.fetch_peak_flow_thickness();
-        await sim.fetch_cell_count();
+        // await sim.get_timestep_data();
+        await sim.fetch_peak_velocity();
+        
+        // await sim.fetch_cell_count();
         simTimer.checkpoint('fetching data');
-        plotTimestepData(sim);
-        plotTrajectory(sim);
-        // plotVariable.value = 'peak_flow_thickness';
-        plotVariable.value = 'cell_count';
+        const timestepData = await sim.get_timestep_data();
+        plotTimestepData(timestepData);
+        plotTrajectory(timestepData);
+        plotVariable.value = 'peak_velocity';
+        // plotVariable.value = 'cell_count';
         plotVariable.dispatchEvent(new Event('change'));
         plotTimer();
         // if (exportResultsCheckbox.checked) {
         //     await exportResults();
         // }
+        
+        const fetchResultsFuture = sim.fetch_results();
+        await fetchResultsFuture;
     } catch (error) {
         console.error('Error during simulation:', error);
     }
@@ -210,6 +223,9 @@ function getSettings() {
         drag_coefficient: parseInt(dragCoefficientSlider.value),
         cfl: parseFloat(cflSlider.value),
         released_particles_per_cell: parseInt(releasedParticlesPerCellSlider.value),
+        enable_curvature: document.getElementById('enable_curvature').checked,
+        enable_particle_interaction: document.getElementById('enable_particle_interaction').checked,
+        internal_friction_angle: parseFloat(internalFrictionAngleSlider.value),
     };
     return simSettings;
 }

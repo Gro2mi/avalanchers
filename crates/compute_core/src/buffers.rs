@@ -633,7 +633,7 @@ pub fn create_buffers_and_texture_descriptions(
         wgpu::FilterMode::Linear
     } else {
         warn!(
-            "Device does not support FLOAT32_FILTERABLE, using Nearest filtering for float textures which may reduce accuray. Consider using a GPU that supports FLOAT32_FILTERABLE for better results."
+            "Device does not support FLOAT32_FILTERABLE, using Nearest filtering for float textures which may reduce accuracy. Consider using a GPU that supports FLOAT32_FILTERABLE for better results."
         );
         wgpu::FilterMode::Nearest
     };
@@ -750,12 +750,6 @@ pub fn create_buffers_and_texture_descriptions(
     gpu_resources.add_buffer(
         device,
         BufferName::GridPeakVelocity,
-        atomic_grid_size,
-        BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
-    );
-    gpu_resources.add_buffer(
-        device,
-        BufferName::GridMass,
         atomic_grid_size,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
     );

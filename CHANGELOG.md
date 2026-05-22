@@ -2,6 +2,15 @@
 
 All notable changes to this project might be documented in this file.
 
+## [0.2.0] - 2026-05-20
+
+### Added
+- Particle interactions with a grid based flow height and resulting pressure force
+- Criterion benchmark
+- Internal friction angle as threshold for pressure force
+- samosAT friction model is useful now with particle interaction enabled
+- ESRI ASCII input support
+
 ## [0.1.0] - 2026-05-04
 
 ### Added
