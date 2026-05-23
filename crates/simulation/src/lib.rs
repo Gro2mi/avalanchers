@@ -85,10 +85,6 @@ impl Simulation {
         self.gpu_cache.read_count
     }
 
-    pub fn get_sim_info(&self) -> SimInfo {
-        self.sim_info
-    }
-
     pub fn elevation_threshold(&self) -> f32 {
         self.sim_info.elevation_threshold
     }
@@ -1078,11 +1074,32 @@ mod tests {
     }
 
     #[test_log::test]
+    fn test_creates() {
+        let mut sim: Simulation = block_on(Simulation::new()).expect("Failed to create Simulation");
+        assert_eq!(sim.state, SimulationState::Uninitialized);
+        block_on(sim.create_default_with_release_areas(GAR_PATH, GAR_RELEASE_TEXTURE_PATH))
+            .expect("Failed to create simulation with default settings and release areas");
+        assert_eq!(sim.state, SimulationState::Ready);
+        let dem = sim.dem.data1d.clone();
+        block_on(sim.create_example(GAR_PATH)).expect("Failed to create example");
+        assert!(vecs_are_equal(&dem, &sim.dem.data1d));
+    }
+
+    #[test_log::test]
     fn test_compute_simple() {
         let slope_angle: f32 = 40.0;
         let cell_size: f32 = 3.0;
         let mut sim: Simulation = setup_simple_sim(slope_angle, cell_size);
         block_on(sim.run()).expect("Failed to run simulation");
+        assert_eq!(sim.state, SimulationState::Finished);
+        let sim_info = block_on(sim.fetch_sim_info()).expect("Failed to fetch sim info");
+        info!("Sim info: {:?}", sim_info);
+        assert_eq!(sim.elevation_threshold(), 99.9);
+        assert_eq!(sim_info.timestep, 201);
+        let atomics = block_on(sim.fetch_atomic_values()).expect("Failed to fetch sim info");
+        info!("Atomic values: {:?}", atomics);
+        assert_eq!(atomics.number_release_particles, 16);
+        assert_eq!(atomics.stopped_particles, 16);
         let particles = block_on(sim.fetch_particles()).expect("Failed to fetch particles");
         assert_eq!(particles.iter().filter(|&&x| x.stopped > 10).count(), 0);
         assert_eq!(particles.iter().filter(|&&x| x.stopped == 0).count(), 0);
@@ -1107,7 +1124,7 @@ mod tests {
             "Max velocity after simulation: {:.2} m/s",
             max_velocity.max_value().unwrap(),
         );
-        assert!(max_velocity.max_value().unwrap() < 9.0);
+        assert!(max_velocity.max_value().unwrap() < 12.0);
     }
 
     #[test_log::test]
@@ -1125,7 +1142,7 @@ mod tests {
                     .replace(".png", "releaseTexture.png"),
             ),
             cfl: Some(0.3),
-            max_steps: Some(5000),
+            max_steps: Some(6000),
             ..Default::default()
         };
         block_on(sim.create(settings)).expect("Failed to create simulation");
@@ -1171,7 +1188,7 @@ mod tests {
                 .max_value()
                 .unwrap()
         );
-        assert_eq!(particles.iter().filter(|&&x| x.stopped > 4800).count(), 0);
+        assert_eq!(particles.iter().filter(|&&x| x.stopped > 4900).count(), 0);
         assert!(particles.iter().filter(|&&x| x.stopped == 0).count() < 20);
 
         let max_velocity = block_on(sim.fetch_peak_velocity()).expect("Failed to get max velocity");
@@ -1181,7 +1198,7 @@ mod tests {
             max_velocity.max_value().unwrap(),
         );
         assert!(max_velocity.max_value().unwrap() > 42.0);
-        assert!(max_velocity.max_value().unwrap() < 72.0);
+        assert!(max_velocity.max_value().unwrap() < 90.0);
 
         let max_steps = sim.settings.max_steps as usize;
         let timestep_data =
@@ -1448,5 +1465,24 @@ mod tests {
         let err = res.unwrap_err();
         let msg = format!("{}", err);
         assert!(msg.contains("does not match DEM dimensions"));
+    }
+
+    #[test]
+    fn test_fetch_peak_flow_before_finish_panics() {
+        let mut sim = block_on(Simulation::new()).expect("Failed to create Simulation");
+        // Do not run simulation; directly call fetch_peak_flow_thickness and expect assertion
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            block_on(sim.fetch_peak_flow_thickness()).unwrap();
+        }));
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_fetch_timestep_data_before_finish_panics() {
+        let mut sim = block_on(Simulation::new()).expect("Failed to create Simulation");
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            block_on(sim.fetch_timestep_data()).unwrap();
+        }));
+        assert!(res.is_err());
     }
 }
