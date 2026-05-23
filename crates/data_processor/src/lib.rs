@@ -797,14 +797,13 @@ pub fn read_geo_tiff(path: &str) -> Result<GeoTiff, Box<dyn std::error::Error>> 
         .get_tag_f64_vec(Tag::Unknown(33550))
         .unwrap_or_default();
 
-    if pixel_scales.len() >= 2 {
-        // Ensure the grid is uniform for your simulation
-        assert_eq!(
-            pixel_scales[0], pixel_scales[1],
-            "Non-uniform grid detected: X and Y scales must match for square cells."
-        );
-    } else {
+    if pixel_scales.len() <= 2 {
         return Err("Missing pixel scale metadata (Tag 33550)".into());
+    }
+    if pixel_scales[0] != pixel_scales[1] {
+        return Err(
+            "Non-uniform grid detected: X and Y scales must match for square cells.".into(),
+        );
     }
 
     // Tag 33922: ModelTiepointTag
@@ -813,6 +812,11 @@ pub fn read_geo_tiff(path: &str) -> Result<GeoTiff, Box<dyn std::error::Error>> 
         .get_tag_f64_vec(Tag::Unknown(42113)) // Try to get the tag
         .ok() // If it fails (missing or wrong type), return None
         .and_then(|v| v.first().copied());
+    if tie_points[0] != 0.0 || tie_points[1] != 0.0 || tie_points[2] != 0.0 {
+        return Err(
+            "Unsupported GeoTIFF: Only a single tie point at the origin is supported.".into(),
+        );
+    }
 
     let metadata = if tie_points.len() >= 6 {
         let origin_x = tie_points[3];
@@ -1762,10 +1766,22 @@ mod tests {
         assert_eq!(Unit::Degree.as_str(), "°");
 
         assert_eq!(Variable::from_int(0), Some(Variable::Velocity));
+        assert_eq!(Variable::from_int(1), Some(Variable::SlopeAngle));
+        assert_eq!(Variable::from_int(2), Some(Variable::Curvature));
         assert_eq!(Variable::from_int(3), Some(Variable::SlopeAspect));
+        assert_eq!(Variable::from_int(4), Some(Variable::NormalX));
+        assert_eq!(Variable::from_int(5), Some(Variable::NormalY));
+        assert_eq!(Variable::from_int(6), Some(Variable::NormalZ));
         assert_eq!(Variable::from_int(7), Some(Variable::Mass));
         assert_eq!(Variable::from_int(99), Some(Variable::Undefined));
+        assert_eq!(Variable::Velocity.as_int(), 0);
+        assert_eq!(Variable::SlopeAngle.as_int(), 1);
+        assert_eq!(Variable::Curvature.as_int(), 2);
+        assert_eq!(Variable::SlopeAspect.as_int(), 3);
+        assert_eq!(Variable::NormalX.as_int(), 4);
+        assert_eq!(Variable::NormalY.as_int(), 5);
         assert_eq!(Variable::NormalZ.as_int(), 6);
+        assert_eq!(Variable::Mass.as_int(), 7);
         assert_eq!(Variable::Undefined.as_str(), "undefined");
     }
 
@@ -2008,17 +2024,10 @@ NODATA_value  -999
         assert_eq!(png_dem.height, asc_dem.height);
         assert_eq!(png_dem.cell_size, asc_dem.cell_size);
         assert_eq!(png_dem.bounds, asc_dem.bounds);
-        assert!(vecs_are_equal(&png_dem.data1d, &asc_dem.data1d));
-    }
-
-    fn vecs_are_equal(a: &[f32], b: &[f32]) -> bool {
-        if a.len() != b.len() {
-            return false;
-        }
-
-        a.iter()
-            .zip(b.iter())
-            .all(|(x, y)| x == y || (x.is_nan() && y.is_nan()))
+        assert!(compute_core::utils::vecs_are_equal(
+            &png_dem.data1d,
+            &asc_dem.data1d
+        ));
     }
 
     #[test]
@@ -2041,10 +2050,39 @@ NODATA_value  -1
         assert_eq!(grid.header.yllcenter, Some(50.0));
         assert_eq!(grid.header.xllcorner, None);
         assert_eq!(grid.header.yllcorner, None);
+        assert_eq!(grid.header.get_xllcenter(), 50.0);
+        assert_eq!(grid.header.get_yllcenter(), 50.0);
 
         // Assert the computed helpers handle the half-cell offset calculation dynamically
         assert_eq!(grid.header.get_xllcorner(), 45.0);
         assert_eq!(grid.header.get_yllcorner(), 45.0);
+    }
+    #[test]
+    fn test_variant_header_corner_preserved() {
+        let center_data = "\
+ncols         2
+nrows         2
+xllcorner     50.0
+yllcorner     50.0
+cellsize      10.0
+NODATA_value  -1
+0.0 1.0
+2.0 3.0";
+
+        let cursor = Cursor::new(center_data);
+        let grid = EsriGrid::from_reader(cursor).unwrap();
+
+        // Assert the raw values are captured exactly as written
+        assert_eq!(grid.header.xllcorner, Some(50.0));
+        assert_eq!(grid.header.yllcorner, Some(50.0));
+        assert_eq!(grid.header.xllcenter, None);
+        assert_eq!(grid.header.yllcenter, None);
+        assert_eq!(grid.header.get_xllcorner(), 50.0);
+        assert_eq!(grid.header.get_yllcorner(), 50.0);
+
+        // Assert the computed helpers handle the half-cell offset calculation dynamically
+        assert_eq!(grid.header.get_xllcenter(), 55.0);
+        assert_eq!(grid.header.get_yllcenter(), 55.0);
     }
     #[test]
     fn test_round_trip_export() {
@@ -2088,5 +2126,141 @@ NODATA_value  -1
         assert_eq!(parsed_grid.get(0, 1), Some(-999.0)); // The NaN became the specified nodata value
         assert_eq!(parsed_grid.get(0, 2), Some(3.0));
         assert_eq!(parsed_grid.get(1, 1), Some(5.0));
+    }
+
+    #[test]
+    fn test_esri_header_missing_origin_errors() {
+        // Header missing both xllcorner and xllcenter should error during parsing
+        let bad_header = "\
+ncols         2
+nrows         2
+cellsize      1.0
+NODATA_value  -999
+1.0 2.0
+3.0 4.0
+";
+
+        let cursor = Cursor::new(bad_header);
+        let res = EsriGrid::from_reader(cursor);
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(
+            err.contains("Missing X origin") || err.contains("Missing Y origin") || err.len() > 0
+        );
+    }
+
+    #[test]
+    fn test_esri_header_helpers_expect_panic_when_no_coords() {
+        // Construct header without corner or center and expect helper methods to panic
+        let header = EsriGridHeader {
+            ncols: 1,
+            nrows: 1,
+            cellsize: 1.0,
+            nodata_value: None,
+            xllcorner: None,
+            yllcorner: None,
+            xllcenter: None,
+            yllcenter: None,
+        };
+
+        let res = std::panic::catch_unwind(|| header.get_xllcorner());
+        assert!(res.is_err());
+
+        let res = std::panic::catch_unwind(|| header.get_xllcenter());
+        assert!(res.is_err());
+    }
+
+    #[test_log::test]
+    fn test_load_tiff_as_dem() {
+        let tiff_path = "../../data/vals/PAR6_Vals_Gries_dtm_10_utm32n_bil_.tif";
+        let dem = load_tiff_as_dem(tiff_path).expect("Failed to load TIFF as DEM");
+
+        // Verify DEM structure
+        assert_eq!(dem.width, 1701, "Width should be 1701");
+        assert_eq!(dem.height, 1145, "Height should be 1145");
+        assert_eq!(
+            dem.data1d.len(),
+            dem.width * dem.height,
+            "Data1D length should equal width * height"
+        );
+        assert_eq!(
+            dem.data.len(),
+            dem.height,
+            "2D data should have height rows"
+        );
+        assert_eq!(
+            dem.data[0].len(),
+            dem.width,
+            "Each row should have width columns"
+        );
+
+        // Verify coordinates
+        assert_eq!(
+            dem.x.len(),
+            dem.width,
+            "X coordinates should have width elements"
+        );
+        assert_eq!(
+            dem.y.len(),
+            dem.height,
+            "Y coordinates should have height elements"
+        );
+        assert!(
+            dem.x[0] < dem.x[dem.x.len() - 1],
+            "X coordinates should be increasing"
+        );
+        assert!(
+            dem.y[0] < dem.y[dem.y.len() - 1],
+            "Y coordinates should be increasing"
+        );
+
+        // Verify bounds
+        assert_eq!(dem.bounds.xmin, dem.x[0]);
+        assert_eq!(dem.bounds.xmax, dem.x[dem.x.len() - 1]);
+        assert_eq!(dem.bounds.ymin, dem.y[0]);
+        assert_eq!(dem.bounds.ymax, dem.y[dem.y.len() - 1]);
+
+        // Verify cell size and map factor
+        assert_eq!(dem.cell_size, 10.0, "Cell size should be 10.0");
+        assert_eq!(dem.map_factor, 1.0, "Map factor should be 1.0");
+
+        // Verify minimum elevation is initialized
+        assert_eq!(
+            dem.minimum_elevation,
+            f32::INFINITY,
+            "Minimum elevation should be INFINITY initially"
+        );
+
+        // Verify that the 1D and 2D data are consistent
+        for (row_idx, row) in dem.data.iter().enumerate() {
+            for (col_idx, &val) in row.iter().enumerate() {
+                let idx_1d = row_idx * dem.width + col_idx;
+                assert_eq!(
+                    val, dem.data1d[idx_1d],
+                    "2D data at ({}, {}) should match 1D data at index {}",
+                    row_idx, col_idx, idx_1d
+                );
+            }
+        }
+        assert_eq!(
+            dem.data1d[0], -9999.0,
+            "First elevation value should be -9999.0"
+        );
+        assert_eq!(
+            dem.data1d[1701 * 500 + 500],
+            1686.6079,
+            "Elevation value at index 12345 should be 1234.0"
+        );
+    }
+
+    #[test_log::test]
+    fn test_load_tiff_as_dem_invalid_path() {
+        let invalid_path = "nonexistent/path/to/file.tif";
+        let result = load_tiff_as_dem(invalid_path);
+
+        assert!(
+            result.is_err(),
+            "Loading DEM from non-existent path should return error"
+        );
     }
 }

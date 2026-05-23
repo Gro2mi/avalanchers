@@ -398,8 +398,13 @@ impl PySimulation {
     }
 
     #[getter]
-    pub fn get_elevation_threshold(&self) -> f32 {
-        self.inner.get_sim_info().elevation_threshold
+    pub fn get_elevation_threshold(&mut self) -> PyResult<f32> {
+        Ok(self
+            .inner
+            .fetch_sim_info()
+            .block_on()
+            .map_runtime_err()?
+            .elevation_threshold)
     }
 
     #[getter]

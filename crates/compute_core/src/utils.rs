@@ -394,6 +394,16 @@ impl Timer {
     }
 }
 
+pub fn vecs_are_equal(a: &[f32], b: &[f32]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+
+    a.iter()
+        .zip(b.iter())
+        .all(|(x, y)| x == y || (x.is_nan() && y.is_nan()))
+}
+
 pub fn flip_rows_flat_vec<T>(data: &mut [T], width: u32, height: u32) {
     // fn flip_y<T>(data: &mut [T], width: usize, height: usize) {
     let height = height as usize;
