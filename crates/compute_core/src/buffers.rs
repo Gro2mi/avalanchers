@@ -39,6 +39,7 @@ pub enum BufferName {
     GridPeakVelocity,
     GridPeakFlowThickness,
     GridMass,
+    GridMomentum,
     GridForces,
     // settings/initialization dependent buffers
     SimSettings,
@@ -49,6 +50,7 @@ pub enum BufferName {
     OutDebugNormals,
     OutDebugRelease,
     AtomicValues,
+    NewCellsRollingWindow,
 }
 
 impl BufferName {
@@ -64,9 +66,11 @@ impl BufferName {
             BufferName::Particles => "particles",
             BufferName::TimestepData => "timestep_data",
             BufferName::GridMass => "grid_mass",
+            BufferName::GridMomentum => "grid_momentum",
             BufferName::GridForces => "grid_forces",
             BufferName::GridPeakFlowThickness => "grid_peak_flow_thickness",
             BufferName::AtomicValues => "atomic_values",
+            BufferName::NewCellsRollingWindow => "new_cells_rolling_window",
         }
     }
 }
@@ -92,9 +96,11 @@ impl std::str::FromStr for BufferName {
             "particles" => Ok(BufferName::Particles),
             "timestep_data" => Ok(BufferName::TimestepData),
             "grid_mass" => Ok(BufferName::GridMass),
+            "grid_momentum" => Ok(BufferName::GridMomentum),
             "grid_forces" => Ok(BufferName::GridForces),
             "grid_peak_flow_thickness" => Ok(BufferName::GridPeakFlowThickness),
             "atomic_values" => Ok(BufferName::AtomicValues),
+            "new_cells_rolling_window" => Ok(BufferName::NewCellsRollingWindow),
             _ => Err(format!("Unknown buffer name: {}", name)),
         }
     }
@@ -169,7 +175,6 @@ pub struct GpuResources {
     textures: HashMap<TextureName, Texture>,
     texture_views: HashMap<TextureName, TextureView>,
     samplers: HashMap<String, Sampler>,
-    total_allocated_buffer_bytes: usize, // Track total allocated buffer size for debugging/monitoring
 }
 
 impl Default for GpuResources {
@@ -185,12 +190,21 @@ impl GpuResources {
             textures: HashMap::new(),
             texture_views: HashMap::new(),
             samplers: HashMap::new(),
-            total_allocated_buffer_bytes: 0,
         }
     }
 
-    pub fn get_total_allocated_memory_mb(&self) -> f64 {
-        self.total_allocated_buffer_bytes as f64 / (1024.0 * 1024.0)
+    pub fn get_total_allocated_memory_mb(&self) -> f32 {
+        let mut total_allocated_memory = 0;
+        for buffer in self.buffers.values() {
+            total_allocated_memory += buffer.size();
+        }
+        for texture in self.textures.values() {
+            total_allocated_memory += texture.size().width as u64
+                * texture.size().height as u64
+                * texture.size().depth_or_array_layers as u64
+                * texture.format().block_copy_size(None).unwrap_or(4) as u64; // Approximate size for tracking
+        }
+        total_allocated_memory as f32 / (1024.0 * 1024.0)
     }
 
     fn poll(&self, device: &Device) {
@@ -225,7 +239,6 @@ impl GpuResources {
             mapped_at_creation: false,
         });
         self.buffers.insert(name, buffer);
-        self.total_allocated_buffer_bytes += size_bytes;
     }
 
     pub fn add_buffer_with_data<T: bytemuck::Pod + Send + Sync>(
@@ -241,7 +254,6 @@ impl GpuResources {
             usage,
         });
         self.buffers.insert(name, buffer);
-        self.total_allocated_buffer_bytes += std::mem::size_of_val(data);
     }
 
     pub fn prepare_buffer_contents<T: Pod>(original_data: &[T]) -> Cow<'_, [u8]> {
@@ -364,10 +376,6 @@ impl GpuResources {
 
         self.textures.insert(label.clone(), texture);
         self.texture_views.insert(label, view);
-        self.total_allocated_buffer_bytes +=
-            (texture_size.width * texture_size.height * texture_size.depth_or_array_layers)
-                as usize
-                * format.block_copy_size(None).unwrap_or(4) as usize; // Approximate size for tracking
     }
 
     /// Adds a new texture with initial data, handling 256-byte row alignment.
@@ -454,10 +462,6 @@ impl GpuResources {
 
         self.textures.insert(label.clone(), texture);
         self.texture_views.insert(label, view);
-        self.total_allocated_buffer_bytes +=
-            (texture_size.width * texture_size.height * texture_size.depth_or_array_layers)
-                as usize
-                * format.block_copy_size(None).unwrap_or(4) as usize; // Approximate size for tracking
         Ok(())
     }
 
@@ -761,6 +765,12 @@ pub fn create_buffers_and_texture_descriptions(
     );
     gpu_resources.add_buffer(
         device,
+        BufferName::GridMomentum,
+        atomic_grid_size * 2,
+        BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+    );
+    gpu_resources.add_buffer(
+        device,
         BufferName::GridForces,
         atomic_grid_size * 2,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
@@ -775,6 +785,12 @@ pub fn create_buffers_and_texture_descriptions(
         device,
         BufferName::AtomicValues,
         ((size_of::<AtomicValues>() - 1) / 16 + 1) * 16,
+        BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+    );
+    gpu_resources.add_buffer_with_data(
+        device,
+        BufferName::NewCellsRollingWindow,
+        &[999999999u32; 40],
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
     );
 
