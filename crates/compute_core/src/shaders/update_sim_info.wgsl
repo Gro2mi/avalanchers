@@ -1,11 +1,28 @@
 
 @group(0) @binding(1) var<storage, read_write> sim_info: SimInfo;
 @group(0) @binding(2) var<storage, read_write> atomic_values: AtomicValues;
+@group(0) @binding(3) var<storage, read_write> new_cells_rolling_window: array<u32>;
 
 @compute @workgroup_size(1, 1, 1)
 fn update_sim_info(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    if atomicLoad(&atomic_values.stopped_particles) == sim_info.number_particles {
+        sim_info.flags = sim_info.flags | SIM_INFO_ALL_PARTICLES_STOPPED;
+        sim_info.flags = sim_info.flags | SIM_INFO_STOPPED;
+        return;
+    }
+    var sum_new_cells: u32 = 0u;
+    for (var i: u32 = 0u; i < 40u; i = i + 1u) {
+        sum_new_cells = sum_new_cells + new_cells_rolling_window[i];
+    }
+    if sum_new_cells < 4u {
+        sim_info.flags = sim_info.flags | SIM_INFO_NO_NEW_CELLS;
+        sim_info.flags = sim_info.flags | SIM_INFO_STOPPED;
+        return;
+    } 
+
     let max_flow_thickness = f32(atomicLoad(&atomic_values.peak_flow_thickness)) * INV_H_FACTOR;
     sim_info.timestep = sim_info.timestep + 1u;
+    new_cells_rolling_window[sim_info.timestep % 40u] = 0u; // reset the count for the new cells in the current timestep
     sim_info.max_velocity = f32(atomicLoad(&atomic_values.peak_velocity)) * INV_MAX_VELOCITY_FACTOR;
     let expected_max_velocity = sim_info.max_velocity + sqrt(g * max_flow_thickness);
     sim_info.dt = max(0.01, sim_settings.cfl * sim_settings.cell_size / expected_max_velocity);
@@ -25,9 +42,11 @@ const g: f32 = 9.81;
 const MAX_VELOCITY_FACTOR: f32 = 1e7; // u32 limit is 430 m/s
 const MASS_FACTOR: f32 = 1e1; // u32 limit is 4.3t thickness
 const H_FACTOR: f32 = 1e6;
+const MOMENTUM_FACTOR: f32 = 1e2; 
 const INV_MAX_VELOCITY_FACTOR: f32 = 1 / MAX_VELOCITY_FACTOR; // u32 limit is 430 m/s
 const INV_MASS_FACTOR: f32 = 1 / MASS_FACTOR; // u32 limit is 4.3km thickness
 const INV_H_FACTOR: f32 = 1 / H_FACTOR; 
+const INV_MOMENTUM_FACTOR: f32 = 1 / MOMENTUM_FACTOR;
 
 // TODO precompute often used values on the cpu and pass them as uniforms to avoid redundant calculations on the gpu
 
@@ -59,6 +78,9 @@ const SIM_INFO_OUT_OF_BOUNDS: u32 = 1u << 0u;
 const SIM_INFO_CFL_EXCEEDED: u32 = 1u << 1u;
 const SIM_INFO_IS_NAN: u32 = 1u << 2u;
 const SIM_INFO_PARTICLE_OUT_OF_DEM_DATA: u32 = 1u << 3u;
+const SIM_INFO_STOPPED: u32 = 1u << 31u;
+const SIM_INFO_ALL_PARTICLES_STOPPED: u32 = 1u << 30u;
+const SIM_INFO_NO_NEW_CELLS: u32 = 1u << 29u;
 
 struct SimSettings {
     num_steps: u32,
@@ -111,8 +133,9 @@ fn cellf_to_uv(cell: vec2f) -> vec2f {
     return (cell + 0.5) / vec2f(sim_settings.grid_shape);
 }
 
+
 fn position_to_uv(position: vec3f) -> vec2f {
-    return position.xy / vec2f(sim_settings.world_size);
+    return (position.xy + 0.5 * sim_settings.cell_size) / (vec2f(sim_settings.world_size)); // add some padding to ensure particles outside the world bounds are still captured in the simulation info
 }
 
 fn position_to_cell_index(position: vec3f) -> u32 {

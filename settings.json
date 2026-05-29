@@ -1,7 +1,7 @@
 {
   "dem_path": "data/avaframe/avaMal.png",
   "release_areas_path": "data/avaframe/avaMalreleaseTexture.png",
-  "max_steps": 3000,
+  "max_steps": 10000,
   "released_particles_per_cell": 4,
   "slab_thickness": 1.0,
   "friction_coefficient": 0.155,

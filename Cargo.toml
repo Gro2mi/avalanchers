@@ -36,6 +36,7 @@ tempfile = "3"
 futures = "0.3"
 futures-intrusive = "0.5"
 web-time = "1.1"
+bitflags = "2"
 
 data_processor = { path = "crates/data_processor" }
 

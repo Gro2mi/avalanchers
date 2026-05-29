@@ -836,6 +836,24 @@ pub fn create_shader_configs(
                         min_binding_size: None,
                     },
                 ),
+                // Binding 2:
+                (
+                    BufferName::AtomicValues.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                // Binding 3:
+                (
+                    BufferName::GridMomentum.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
             ],
         )?,
     );
@@ -867,6 +885,15 @@ pub fn create_shader_configs(
                 // Binding 2:
                 (
                     BufferName::AtomicValues.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                // Binding 3:
+                (
+                    BufferName::NewCellsRollingWindow.to_string(),
                     BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: false },
                         has_dynamic_offset: false,
@@ -911,6 +938,15 @@ pub fn create_shader_configs(
                     },
                 ),
                 // Binding 3:
+                (
+                    BufferName::GridMomentum.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                // Binding 4:
                 (
                     BufferName::SimInfo.to_string(),
                     BindingType::Buffer {
@@ -980,6 +1016,42 @@ pub fn create_shader_configs(
                 // Binding 5:
                 (
                     BufferName::AtomicValues.to_string(),
+                    BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                // Binding 6:
+                (
+                    BufferName::GridMomentum.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                // Binding 7:
+                (
+                    TextureName::Curvature.to_string(),
+                    BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    },
+                ),
+                // Binding 8:
+                (
+                    BufferName::NewCellsRollingWindow.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                // Binding 9:
+                (
+                    BufferName::SimInfo.to_string(),
                     BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: false },
                         has_dynamic_offset: false,

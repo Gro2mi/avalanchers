@@ -24,6 +24,21 @@ use dem::Dem;
 #[allow(unused_imports)]
 use tracing::{debug, error, info, trace, warn};
 
+use bitflags::bitflags;
+
+bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct SimInfoFlags: u32 {
+        const OUT_OF_BOUNDS          = 1 << 0;
+        const CFL_EXCEEDED           = 1 << 1;
+        const IS_NAN                 = 1 << 2;
+        const PARTICLE_OUT_OF_DEM    = 1 << 3;
+        const STOPPED                = 1 << 31;
+        const PARTICLES_STOPPED = 1 << 30;
+        const NO_NEW_CELLS  = 1 << 29;
+    }
+}
+
 pub struct TextureRgba<T> {
     pub r: Vec<T>,
     pub g: Vec<T>,
@@ -749,7 +764,7 @@ impl ComputeOrchestrator {
             BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
         );
 
-        let sim_info: SimInfo = SimInfo {
+        let mut sim_info: SimInfo = SimInfo {
             timestep: 1,
             number_particles: number_release_particles,
             // estimated timestep for a 60 degree slope
@@ -809,9 +824,7 @@ impl ComputeOrchestrator {
         // Reset Grid Bind Group
         let reset_grid_bind_group =
             reset_grid_config.create_bind_group(&self.device, &self.resources)?;
-
         let mut current_step = 0;
-        let mut atomic_values = AtomicValues::default();
         while current_step < sim_settings.max_steps {
             // Determine how many steps to run in this specific hardware batch
             let steps_to_run = std::cmp::min(
@@ -839,6 +852,14 @@ impl ComputeOrchestrator {
 
                 for _i in 0..steps_to_run {
                     if SimFlags::from_u32(sim_settings.flags).is_particle_interaction_enabled() {
+                        // --- resetGrid ---
+                        compute_pass.set_pipeline(&reset_grid_config.pipeline);
+                        compute_pass.set_bind_group(0, &reset_grid_bind_group, &[]);
+                        compute_pass.dispatch_workgroups(
+                            self.dispatch_number_workgroups_x_2d,
+                            self.dispatch_number_workgroups_y_2d,
+                            1,
+                        );
                         // --- P2G ---
                         compute_pass.set_pipeline(&p2g_config.pipeline);
                         compute_pass.set_bind_group(0, &p2g_bindgroup, &[]);
@@ -863,15 +884,6 @@ impl ComputeOrchestrator {
                     compute_pass.set_pipeline(&update_sim_info_config.pipeline);
                     compute_pass.set_bind_group(0, &update_sim_info_bindgroup, &[]);
                     compute_pass.dispatch_workgroups(1, 1, 1);
-
-                    // --- resetGrid ---
-                    compute_pass.set_pipeline(&reset_grid_config.pipeline);
-                    compute_pass.set_bind_group(0, &reset_grid_bind_group, &[]);
-                    compute_pass.dispatch_workgroups(
-                        self.dispatch_number_workgroups_x_2d,
-                        self.dispatch_number_workgroups_y_2d,
-                        1,
-                    );
                 }
             }
 
@@ -879,13 +891,32 @@ impl ComputeOrchestrator {
             self.queue.submit(Some(command_encoder.finish()));
             current_step += steps_to_run;
 
-            atomic_values = self
-                .read_buffer::<AtomicValues>(BufferName::AtomicValues)
+            sim_info = self
+                .read_buffer::<SimInfo>(BufferName::SimInfo)
                 .await
-                .expect("Failed to read AtomicValues buffer")[0];
-            if atomic_values.stopped_particles == number_release_particles {
+                .expect("Failed to read SimInfo buffer")[0];
+            // info!("{:#?},", sim_info);
+            let flags = SimInfoFlags::from_bits_retain(sim_info.flags);
+            if flags.contains(SimInfoFlags::STOPPED) {
+                let reason = match flags {
+                    _ if flags.contains(SimInfoFlags::PARTICLES_STOPPED) => {
+                        "all particles have stopped moving"
+                    }
+                    _ if flags.contains(SimInfoFlags::NO_NEW_CELLS) => {
+                        "no new cells were conquered by particles"
+                    }
+                    _ => "unknown reason",
+                };
                 info!(
-                    "Simulation finished early at step {} as all particles have stopped!",
+                    "Simulation finished at step {} because {}.",
+                    sim_info.timestep, reason
+                );
+
+                break;
+            }
+            if flags.contains(SimInfoFlags::NO_NEW_CELLS) {
+                info!(
+                    "Simulation finished early at step {} as no new cells were conquered by particles!",
                     current_step
                 );
                 break;
@@ -897,13 +928,21 @@ impl ComputeOrchestrator {
             //     );
             // }
         }
-        let sim_info = self
-            .read_buffer::<SimInfo>(BufferName::SimInfo)
+        // info!("{:?}", new_cells);
+
+        info!(
+            "New cells conquered in the last 100 steps: {:?}",
+            self.read_buffer::<u32>(BufferName::NewCellsRollingWindow)
+                .await
+                .expect("Failed to read AtomicValues buffer")
+        );
+        let atomic_values = self
+            .read_buffer::<AtomicValues>(BufferName::AtomicValues)
             .await
-            .expect("Failed to read SimInfo buffer")[0];
+            .expect("Failed to read AtomicValues buffer")[0];
         info!("{:#?}", sim_info);
         info!("{:#?}", atomic_values);
-        if atomic_values.stopped_particles != number_release_particles {
+        if sim_info.flags < SimInfoFlags::PARTICLES_STOPPED.bits() {
             warn!(
                 "Simulation reached max steps without all particles stopping. Consider increasing max_steps or checking for issues in the simulation."
             );

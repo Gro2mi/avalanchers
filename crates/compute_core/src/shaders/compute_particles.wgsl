@@ -49,6 +49,9 @@ fn compute_particles(
     if particleId >= sim_info.number_particles {
         return;
     }
+    if sim_info.flags >= SIM_INFO_STOPPED {
+        return;
+    }
     var p = particles[particleId];
     if p.stopped != 0u {
         return;
@@ -58,7 +61,7 @@ fn compute_particles(
     let use_earth_pressure_coefficient: bool = (sim_settings.flags & (1u << 2u)) != 0u;
     let use_entrainment: bool = (sim_settings.flags & (1u << 3u)) != 0u;
     let uv = position_to_uv(p.position);
-
+    
     let normal = get_normal(uv);
     
     if is_nan(normal.x) {
@@ -125,8 +128,8 @@ fn compute_particles(
     p.velocity = p.velocity + (acceleration_tangential + accel_lateral) * dt;
 
     // --- compute resisting accelerations ---
-    var acceleration_normal_friction_magnitude = acceleration_by_normal_friction(effective_acceleration_normal, p);
-    let acceleration_drag_friction_magnitude = select(acceleration_by_drag_friction(effective_acceleration_normal, p, interpolated_h), 0.0, sim_info.timestep == 0u);
+    var acceleration_normal_friction_magnitude = acceleration_by_normal_friction(effective_acceleration_normal, p, interpolated_h);
+    let acceleration_drag_friction_magnitude = acceleration_by_drag_friction(effective_acceleration_normal, p, interpolated_h);
     var acceleration_friction_magnitude = acceleration_drag_friction_magnitude + acceleration_normal_friction_magnitude;
 
     // --- update velocity with resisting accelerations ---
@@ -143,9 +146,10 @@ fn compute_particles(
     var relative_trajectory = (p.velocity + v_prev) * 0.5 * dt;
     var new_position = p.position + relative_trajectory;
     var new_uv = position_to_uv(new_position);
-    new_position = p.position + relative_trajectory;
     var elevation = get_elevation(new_uv);
     p.position = new_position;
+    // TODO more sophisticated projection methods
+    p.position.z = elevation;
 
     if particleId == sim_info.number_particles / 2u {
         var current: TimestepData;
@@ -167,12 +171,16 @@ fn compute_particles(
     // --- update output ---
     let v_mag = length(p.velocity);
     let converted_velocity = u32(MAX_VELOCITY_FACTOR * v_mag);
-    atomicMax(&atomic_values.peak_velocity, converted_velocity);
+
+    if converted_velocity > atomicLoad(&atomic_values.peak_velocity) {
+        atomicMax(&atomic_values.peak_velocity, converted_velocity);
+    }
 
     let cell_index = uv_to_cell_index(new_uv);
     atomicAdd(&grid_cell_count_buffer[cell_index], 1u);
-    atomicMax(&grid_peak_velocity_buffer[cell_index], converted_velocity); // ensure that the velocity is not zero, this is needed for the next step
-
+    if converted_velocity > atomicLoad(&grid_peak_velocity_buffer[cell_index]) {
+        atomicMax(&grid_peak_velocity_buffer[cell_index], converted_velocity); // ensure that the velocity is not zero, this is needed for the next step
+    }
     if particleId == sim_info.number_particles / 2u {
         // atomicMax(&atomicBuffer.counter, step_count);
         out_debug[0] = f32(p.position.x);
@@ -192,8 +200,6 @@ fn compute_particles(
         out_debug[15] = f32(uv_to_cell(new_uv).y);
         out_debug[16] = f32(uv_to_cell_index(new_uv));
     }
-    // TODO more sophisticated projection methods
-    p.position.z = elevation;
 
     if is_nan(p.position.x) {
         particles[particleId].stopped = 1100000000u + sim_info.timestep;
@@ -242,7 +248,7 @@ fn update_output_data(trajectory: u32, timestep: u32, timestep_data: TimestepDat
     out_timestep_data[timestep].trajectories[trajectory] = timestep_data;
 }
 
-fn acceleration_by_normal_friction(effective_acceleration_normal: vec3f, particle: Particle) -> f32 {
+fn acceleration_by_normal_friction(effective_acceleration_normal: vec3f, particle: Particle, h: f32) -> f32 {
     let mass_per_area = particle.mass / (sim_settings.cell_size * sim_settings.cell_size) * f32(sim_settings.released_particles_per_cell);
     let velocity_magnitude = length(particle.velocity);
     let model = sim_settings.friction_model;
@@ -270,6 +276,16 @@ fn acceleration_by_normal_friction(effective_acceleration_normal: vec3f, particl
         // let n0 = sim_settings.n0;
         // shear_stress = friction_coefficient * normal_stress + (1 - friction_coefficient) * n0 - (1 - friction_coefficient) * n0 * exp(-normal_stress / n0);
     }
+    // mu(I) friction model
+    else if model == 5u {
+        let grain_diameter = sim_settings.grain_diameter;
+        let i0 = sim_settings.i0;
+        let mu0 = sim_settings.mu0;
+        let mu2 = sim_settings.mu2;
+        let inertial_number = 2.5*sqrt(velocity_magnitude) / h * grain_diameter / sqrt(max(length(effective_acceleration_normal), 1e-6) * h);
+        let muI = mu0 + (mu2 - mu0) / (i0 / inertial_number + 1.0);
+        shear_stress = muI * normal_stress;
+    }
     let acceleration_magnitude = shear_stress / max(mass_per_area, 1e-6);
     return acceleration_magnitude;
 }
@@ -280,8 +296,7 @@ fn acceleration_by_drag_friction(effective_acceleration_normal: vec3f, particle:
         return 0.0f;
     }
     let velocity_magnitude2 = dot(particle.velocity, particle.velocity);
-    let velocity_threshold = sim_settings.velocity_threshold;
-    if velocity_magnitude2 < (velocity_threshold * velocity_threshold) {
+    if velocity_magnitude2 < 1e-8{
         return 0.0f;
     }
     let mass_per_area = particle.mass / (sim_settings.cell_size * sim_settings.cell_size) * f32(sim_settings.released_particles_per_cell);
@@ -339,9 +354,11 @@ const g: f32 = 9.81;
 const MAX_VELOCITY_FACTOR: f32 = 1e7; // u32 limit is 430 m/s
 const MASS_FACTOR: f32 = 1e1; // u32 limit is 4.3t thickness
 const H_FACTOR: f32 = 1e6;
+const MOMENTUM_FACTOR: f32 = 1e2; 
 const INV_MAX_VELOCITY_FACTOR: f32 = 1 / MAX_VELOCITY_FACTOR; // u32 limit is 430 m/s
 const INV_MASS_FACTOR: f32 = 1 / MASS_FACTOR; // u32 limit is 4.3km thickness
 const INV_H_FACTOR: f32 = 1 / H_FACTOR; 
+const INV_MOMENTUM_FACTOR: f32 = 1 / MOMENTUM_FACTOR;
 
 // TODO precompute often used values on the cpu and pass them as uniforms to avoid redundant calculations on the gpu
 
@@ -373,6 +390,9 @@ const SIM_INFO_OUT_OF_BOUNDS: u32 = 1u << 0u;
 const SIM_INFO_CFL_EXCEEDED: u32 = 1u << 1u;
 const SIM_INFO_IS_NAN: u32 = 1u << 2u;
 const SIM_INFO_PARTICLE_OUT_OF_DEM_DATA: u32 = 1u << 3u;
+const SIM_INFO_STOPPED: u32 = 1u << 31u;
+const SIM_INFO_ALL_PARTICLES_STOPPED: u32 = 1u << 30u;
+const SIM_INFO_NO_NEW_CELLS: u32 = 1u << 29u;
 
 struct SimSettings {
     num_steps: u32,
@@ -425,8 +445,9 @@ fn cellf_to_uv(cell: vec2f) -> vec2f {
     return (cell + 0.5) / vec2f(sim_settings.grid_shape);
 }
 
+
 fn position_to_uv(position: vec3f) -> vec2f {
-    return position.xy / vec2f(sim_settings.world_size);
+    return (position.xy + 0.5 * sim_settings.cell_size) / (vec2f(sim_settings.world_size)); // add some padding to ensure particles outside the world bounds are still captured in the simulation info
 }
 
 fn position_to_cell_index(position: vec3f) -> u32 {

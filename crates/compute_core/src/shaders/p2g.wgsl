@@ -1,13 +1,15 @@
 @group(0) @binding(1) var<storage, read> particles: array<Particle>;
 @group(0) @binding(2) var<storage, read_write> grid_mass_atomic: array<atomic<u32>>;
-@group(0) @binding(3) var<storage, read_write> sim_info: SimInfo;
-// @group(0) @binding(2) var<storage, read_write> grid_mom_atomic: array<atomic<i32>>; // Combined u, v
+@group(0) @binding(3) var<storage, read_write> grid_momentum_atomic: array<atomic<i32>>; // Combined u, v
+@group(0) @binding(4) var<storage, read_write> sim_info: SimInfo;
 
 override WG_SIZE_1D: u32 = 1u;
 @compute @workgroup_size(WG_SIZE_1D, 1, 1)
 fn p2g(@builtin(global_invocation_id) id: vec3u) {
-
     if id.x >= sim_info.number_particles {
+        return;
+    }
+    if sim_info.flags >= SIM_INFO_STOPPED {
         return;
     }
     let p = particles[id.x];
@@ -35,11 +37,10 @@ fn p2g(@builtin(global_invocation_id) id: vec3u) {
 
             atomicAdd(
                 &grid_mass_atomic[idx],
-                // TODO multiply with normal_z to account for bigger cell area due to slope
                 u32(p.mass * weight * MASS_FACTOR)
             );
-            // atomicAdd(&grid_mom_atomic[idx * 2], i32(h * p.vel.x * weight * SCALE_FACTOR));
-            // atomicAdd(&grid_mom_atomic[idx * 2 + 1], i32(h * p.vel.y * weight * SCALE_FACTOR));
+            atomicAdd(&grid_momentum_atomic[idx * 2], i32(p.mass * p.velocity.x * weight * MOMENTUM_FACTOR));
+            atomicAdd(&grid_momentum_atomic[idx * 2 + 1], i32(p.mass * p.velocity.y * weight * MOMENTUM_FACTOR));
         }
     }
 }
@@ -54,9 +55,11 @@ const g: f32 = 9.81;
 const MAX_VELOCITY_FACTOR: f32 = 1e7; // u32 limit is 430 m/s
 const MASS_FACTOR: f32 = 1e1; // u32 limit is 4.3t thickness
 const H_FACTOR: f32 = 1e6;
+const MOMENTUM_FACTOR: f32 = 1e2; 
 const INV_MAX_VELOCITY_FACTOR: f32 = 1 / MAX_VELOCITY_FACTOR; // u32 limit is 430 m/s
 const INV_MASS_FACTOR: f32 = 1 / MASS_FACTOR; // u32 limit is 4.3km thickness
 const INV_H_FACTOR: f32 = 1 / H_FACTOR; 
+const INV_MOMENTUM_FACTOR: f32 = 1 / MOMENTUM_FACTOR;
 
 // TODO precompute often used values on the cpu and pass them as uniforms to avoid redundant calculations on the gpu
 
@@ -88,6 +91,9 @@ const SIM_INFO_OUT_OF_BOUNDS: u32 = 1u << 0u;
 const SIM_INFO_CFL_EXCEEDED: u32 = 1u << 1u;
 const SIM_INFO_IS_NAN: u32 = 1u << 2u;
 const SIM_INFO_PARTICLE_OUT_OF_DEM_DATA: u32 = 1u << 3u;
+const SIM_INFO_STOPPED: u32 = 1u << 31u;
+const SIM_INFO_ALL_PARTICLES_STOPPED: u32 = 1u << 30u;
+const SIM_INFO_NO_NEW_CELLS: u32 = 1u << 29u;
 
 struct SimSettings {
     num_steps: u32,
@@ -140,8 +146,9 @@ fn cellf_to_uv(cell: vec2f) -> vec2f {
     return (cell + 0.5) / vec2f(sim_settings.grid_shape);
 }
 
+
 fn position_to_uv(position: vec3f) -> vec2f {
-    return position.xy / vec2f(sim_settings.world_size);
+    return (position.xy + 0.5 * sim_settings.cell_size) / (vec2f(sim_settings.world_size)); // add some padding to ensure particles outside the world bounds are still captured in the simulation info
 }
 
 fn position_to_cell_index(position: vec3f) -> u32 {

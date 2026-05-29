@@ -672,6 +672,43 @@ impl Simulation {
         );
         Ok(())
     }
+
+    pub fn print_grid(&self, grid: &[f32], max_w: usize, max_h: usize) {
+        // 1. Calculate dynamic strides to fit within max_w and max_h
+        let stride_w = self.dem.width.div_ceil(max_w);
+        let stride_h = self.dem.height.div_ceil(max_h);
+
+        // We use the same stride for both dimensions to maintain aspect ratio
+        let stride = stride_w.max(stride_h);
+
+        let chars = " .:-=+*#%@";
+        let n = chars.len() - 1;
+
+        for y in (0..self.dem.height).step_by(stride) {
+            for x in (0..self.dem.width).step_by(stride) {
+                let mut sum = 0.0;
+                let mut count = 0;
+
+                // Average the local box
+                for dy in 0..stride {
+                    for dx in 0..stride {
+                        let cur_y = y + dy;
+                        let cur_x = x + dx;
+
+                        if cur_y < self.dem.height && cur_x < self.dem.width {
+                            sum += grid[cur_y * self.dem.width + cur_x];
+                            count += 1;
+                        }
+                    }
+                }
+
+                let avg = if count > 0 { sum / count as f32 } else { 0.0 };
+                let index = (avg.clamp(0.0, 1.0) * n as f32).round() as usize;
+                print!("{}", chars.chars().nth(index).unwrap());
+            }
+            println!();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1095,7 +1132,7 @@ mod tests {
         let sim_info = block_on(sim.fetch_sim_info()).expect("Failed to fetch sim info");
         info!("Sim info: {:?}", sim_info);
         assert_eq!(sim.elevation_threshold(), 99.9);
-        assert_eq!(sim_info.timestep, 201);
+        assert!(sim_info.timestep < 10);
         let atomics = block_on(sim.fetch_atomic_values()).expect("Failed to fetch sim info");
         info!("Atomic values: {:?}", atomics);
         assert_eq!(atomics.number_release_particles, 16);
