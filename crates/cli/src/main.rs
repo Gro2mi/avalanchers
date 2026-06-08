@@ -65,7 +65,7 @@ fn main() -> Result<()> {
 
     block_on(simulation.fetch_peak_flow_thickness()).expect("Failed to get peak flow thickness");
 
-    let peak_velocity: Vec<f32> = block_on(simulation.fetch_peak_flow_thickness())
+    let peak_velocity: Vec<f32> = block_on(simulation.fetch_peak_velocity())
         .expect("Failed to get peak velocity")
         .to_vec();
     info!(

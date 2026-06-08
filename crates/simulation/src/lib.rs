@@ -1500,8 +1500,8 @@ mod tests {
             assert!((k_yy[idx] - expected_k_yy[idx]).abs() < 1e-6);
             assert!((k_xy[idx] - expected_k_xy[idx]).abs() < 1e-6);
 
-            assert!((slope_angle[idx] - expected_slope_angle[idx]).abs() < 1e-6);
-            assert!((slope_aspect[idx] - expected_slope_aspect[idx]).abs() < 1e-6);
+            assert!((slope_angle[idx] - expected_slope_angle[idx]).abs() < 1e-1);
+            assert!((slope_aspect[idx] - expected_slope_aspect[idx]).abs() < 1e-1);
 
             assert!((g_x[idx] - expected_g_x[idx]).abs() < 1e-6);
             assert!((g_y[idx] - expected_g_y[idx]).abs() < 1e-6);

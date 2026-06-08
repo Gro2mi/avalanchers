@@ -62,7 +62,9 @@ def plot3d(sim, parameter, particles=False, threshold_value=1e-3):
     if particles:
         # add particles
         
-        positions = sim.particles_position.copy()
+        positions_xy = sim.particles_position.copy()
+        z = sim.particles_elevation.copy()
+        positions = np.column_stack([positions_xy, z])
         positions[:, 2] *= 1.3
         poly = pv.PolyData(positions)
         plotter.add_mesh(
@@ -138,7 +140,7 @@ def ax2d(ax, sim, parameter, title="Avalanche Simulation", threshold_value=1e-3)
 def plot_overview(sim, threshold_value=1e-3):
     # Setup parameters, titles, and distinct colormaps
     params = ['peak_velocity', 'peak_flow_thickness']
-    colormaps = ['magma', 'viridis', 'plasma']
+    colormaps = ['magma', 'viridis']
     
     import_plt()
     

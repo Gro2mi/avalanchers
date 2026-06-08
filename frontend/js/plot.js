@@ -129,11 +129,7 @@ async function updatePlots(sim, selectedVariable) {
         },
     };
     traceHist.x = new Float32Array(sim[selectedVariable]).filter((val, index) => (sim.dem[index] > 0));
-    if (selectedVariable === 'cell_count') {
-        const cellCountLog = new Float32Array(sim.cell_count).map(val => Math.log10(val));
-        plotOptions.surfacecolor = [to2D(cellCountLog, sim.width, sim.height)];
-        traceHist.x = cellCountLog.filter(val => val > 0);
-    } else if (selectedVariable === 'peak_velocity') {
+    if (selectedVariable === 'peak_velocity') {
         traceHist.x = traceHist.x.filter(val => val > 1e-5)
     }else if (selectedVariable === 'peak_flow_thickness') {
         traceHist.x = traceHist.x.filter(val => val > 1e-5)

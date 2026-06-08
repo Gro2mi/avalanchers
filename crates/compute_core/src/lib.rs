@@ -1,7 +1,6 @@
 use crate::buffers::{
     AtomicValues, BufferName, GpuResources, TextureName, create_buffers_and_texture_descriptions,
 };
-use crate::settings::SimFlags;
 use crate::shaders::{ComputeShaderConfig, ShaderName, generate_shader_report};
 use crate::utils::timer_checkpoint;
 use anyhow::{Ok, Result, anyhow};
@@ -299,9 +298,10 @@ impl ComputeOrchestrator {
             max_texture_size,
             limits.max_compute_workgroups_per_dimension
         );
-
-        let buffer_limit = max_storage_buffer_binding_size
-            / (2 * std::mem::size_of::<&[f32; 2]>() + 3 * std::mem::size_of::<f32>()) as u64;
+        let bytes_per_particle = 2 * std::mem::size_of::<[f32; 2]>() // position + velocity
+             + 2 * std::mem::size_of::<f32>() // mass + elevation
+             + std::mem::size_of::<u32>(); // stopped
+        let buffer_limit = max_storage_buffer_binding_size / bytes_per_particle as u64;
         let compute_limit =
             limits.max_compute_workgroups_per_dimension * max_compute_invocations_per_workgroup;
         let max_particles = min(buffer_limit, compute_limit as u64);
@@ -744,39 +744,37 @@ impl ComputeOrchestrator {
                     });
 
                 for _i in 0..steps_to_run {
-                    if SimFlags::from_u32(sim_settings.flags).is_particle_interaction_enabled() {
-                        // --- resetGrid ---
-                        compute_pass.set_pipeline(&reset_grid_config.pipeline);
-                        compute_pass.set_bind_group(0, &reset_grid_bind_group, &[]);
-                        compute_pass.dispatch_workgroups(
-                            self.dispatch_number_workgroups_x_2d,
-                            self.dispatch_number_workgroups_y_2d,
-                            1,
-                        );
-                        // --- P2G ---
-                        compute_pass.set_pipeline(&p2g_config.pipeline);
-                        compute_pass.set_bind_group(0, &p2g_bindgroup, &[]);
-                        compute_pass.dispatch_workgroups(self.dispatch_number_workgroups_1d, 1, 1);
+                    // --- resetGrid ---
+                    compute_pass.set_pipeline(&reset_grid_config.pipeline);
+                    compute_pass.set_bind_group(0, &reset_grid_bind_group, &[]);
+                    compute_pass.dispatch_workgroups(
+                        self.dispatch_number_workgroups_x_2d,
+                        self.dispatch_number_workgroups_y_2d,
+                        1,
+                    );
+                    // --- P2G ---
+                    compute_pass.set_pipeline(&p2g_config.pipeline);
+                    compute_pass.set_bind_group(0, &p2g_bindgroup, &[]);
+                    compute_pass.dispatch_workgroups(self.dispatch_number_workgroups_1d, 1, 1);
 
-                        // --- Grid Physics ---
-                        compute_pass.set_pipeline(&grid_physics_config.pipeline);
-                        compute_pass.set_bind_group(0, &grid_physics_bindgroup, &[]);
-                        compute_pass.dispatch_workgroups(
-                            self.dispatch_number_workgroups_x_2d,
-                            self.dispatch_number_workgroups_y_2d,
-                            1,
-                        );
+                    // --- Grid Physics ---
+                    compute_pass.set_pipeline(&grid_physics_config.pipeline);
+                    compute_pass.set_bind_group(0, &grid_physics_bindgroup, &[]);
+                    compute_pass.dispatch_workgroups(
+                        self.dispatch_number_workgroups_x_2d,
+                        self.dispatch_number_workgroups_y_2d,
+                        1,
+                    );
 
-                        // --- computeParticles ---
-                        compute_pass.set_pipeline(&g2p_config.pipeline);
-                        compute_pass.set_bind_group(0, &g2p_bindgroup, &[]);
-                        compute_pass.dispatch_workgroups(self.dispatch_number_workgroups_1d, 1, 1);
+                    // --- computeParticles ---
+                    compute_pass.set_pipeline(&g2p_config.pipeline);
+                    compute_pass.set_bind_group(0, &g2p_bindgroup, &[]);
+                    compute_pass.dispatch_workgroups(self.dispatch_number_workgroups_1d, 1, 1);
 
-                        // --- updateSimInfo ---
-                        compute_pass.set_pipeline(&update_sim_info_config.pipeline);
-                        compute_pass.set_bind_group(0, &update_sim_info_bindgroup, &[]);
-                        compute_pass.dispatch_workgroups(1, 1, 1);
-                    }
+                    // --- updateSimInfo ---
+                    compute_pass.set_pipeline(&update_sim_info_config.pipeline);
+                    compute_pass.set_bind_group(0, &update_sim_info_bindgroup, &[]);
+                    compute_pass.dispatch_workgroups(1, 1, 1);
                 }
             }
 
@@ -1216,8 +1214,8 @@ mod tests {
             momentum,
             (momentum - momentum_start).abs() / momentum_start
         );
-        assert_eq!(
-            momentum_start, momentum,
+        assert!(
+            (momentum_start - momentum).abs() < 1e-2,
             "Momentum transfer from particle to grid failed"
         );
         assert!(

@@ -260,7 +260,7 @@ impl WasmSimulation {
 
     #[wasm_bindgen(getter)]
     pub fn slope_aspect(&self) -> Float32Array {
-        unsafe { Float32Array::view(self.inner.gpu_cache.slope_angle.as_ref().unwrap()) }
+        unsafe { Float32Array::view(self.inner.gpu_cache.slope_aspect.as_ref().unwrap()) }
     }
 
     #[wasm_bindgen(getter)]

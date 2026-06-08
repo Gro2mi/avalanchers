@@ -62,7 +62,6 @@ macro_rules! define_shaders {
 define_shaders! {
     AnalyzeTerrain => "analyze_terrain",
     ResetGrid => "reset_grid",
-    LoadReleaseAreas => "load_release_areas",
     ComputeRoughness => "compute_roughness",
     ComputeReleaseAreas => "compute_release_areas",
     InitializeParticles => "initialize_particles",
