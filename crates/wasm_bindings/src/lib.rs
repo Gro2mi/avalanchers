@@ -1,5 +1,5 @@
 use compute_core::{TimestepData, settings::Settings};
-use js_sys::{Float32Array, Uint32Array};
+use js_sys::Float32Array;
 use serde_wasm_bindgen::from_value;
 use simulation::{Simulation, init_logging};
 use std::sync::OnceLock;
@@ -52,29 +52,14 @@ impl WasmTimestepData {
         unsafe { Float32Array::view(&self.inner.dt) }
     }
 
-    #[wasm_bindgen(getter, js_name = accelerationFrictionMagnitude)]
-    pub fn acceleration_friction_magnitude(&self) -> Float32Array {
-        unsafe { Float32Array::view(&self.inner.acceleration_friction_magnitude) }
-    }
-
-    #[wasm_bindgen(getter, js_name = elevation)]
-    pub fn elevation(&self) -> Float32Array {
-        unsafe { Float32Array::view(&self.inner.elevation) }
-    }
-
-    #[wasm_bindgen(getter, js_name = gEff)]
-    pub fn g_eff(&self) -> Float32Array {
-        unsafe { Float32Array::view(&self.inner.g_eff) }
-    }
+    // #[wasm_bindgen(getter, js_name = elevation)]
+    // pub fn elevation(&self) -> Float32Array {
+    //     unsafe { Float32Array::view(&self.inner.elevation) }
+    // }
 
     #[wasm_bindgen(getter, js_name = velocityMagnitude)]
     pub fn velocity_magnitude(&self) -> Float32Array {
         unsafe { Float32Array::view(&self.inner.velocity_magnitude) }
-    }
-
-    #[wasm_bindgen(getter, js_name = accelerationTangentialMagnitude)]
-    pub fn acceleration_tangential_magnitude(&self) -> Float32Array {
-        unsafe { Float32Array::view(&self.inner.acceleration_tangential_magnitude) }
     }
 
     #[wasm_bindgen(getter, js_name = time)]
@@ -84,12 +69,12 @@ impl WasmTimestepData {
 
     #[wasm_bindgen(getter, js_name = stepDistance)]
     pub fn step_distance(&self) -> Float32Array {
-        unsafe { Float32Array::view(&self.inner.step_distance) }
+        unsafe { Float32Array::view(&self.inner.step_distance2d) }
     }
 
     #[wasm_bindgen(getter, js_name = travelDistance)]
     pub fn travel_distance(&self) -> Float32Array {
-        unsafe { Float32Array::view(&self.inner.travel_distance) }
+        unsafe { Float32Array::view(&self.inner.travel_distance2d) }
     }
 
     #[wasm_bindgen(getter, js_name = cfl)]
@@ -255,11 +240,6 @@ impl WasmSimulation {
         Ok(())
     }
 
-    pub async fn fetch_cell_count(&mut self) -> Result<(), JsValue> {
-        self.inner.fetch_cell_count().await.map_err(to_js_err)?;
-        Ok(())
-    }
-
     pub async fn fetch_peak_flow_thickness(&mut self) -> Result<(), JsValue> {
         self.inner
             .fetch_peak_flow_thickness()
@@ -279,28 +259,23 @@ impl WasmSimulation {
     }
 
     #[wasm_bindgen(getter)]
-    pub fn cell_count(&self) -> Uint32Array {
-        unsafe { Uint32Array::view(self.inner.gpu_cache.cell_count.as_ref().unwrap()) }
-    }
-
-    #[wasm_bindgen(getter)]
     pub fn slope_aspect(&self) -> Float32Array {
-        unsafe { Float32Array::view(&self.inner.gpu_cache.slope.as_ref().unwrap().g) }
+        unsafe { Float32Array::view(self.inner.gpu_cache.slope_angle.as_ref().unwrap()) }
     }
 
     #[wasm_bindgen(getter)]
     pub fn slope_angle(&self) -> Float32Array {
-        unsafe { Float32Array::view(&self.inner.gpu_cache.slope.as_ref().unwrap().r) }
+        unsafe { Float32Array::view(self.inner.gpu_cache.slope_angle.as_ref().unwrap()) }
     }
 
     #[wasm_bindgen(getter)]
     pub fn roughness(&self) -> Float32Array {
-        unsafe { Float32Array::view(&self.inner.gpu_cache.roughness.as_ref().unwrap().r) }
+        unsafe { Float32Array::view(self.inner.gpu_cache.roughness.as_ref().unwrap()) }
     }
 
     #[wasm_bindgen(getter)]
     pub fn release_areas(&self) -> Float32Array {
-        unsafe { Float32Array::view(&self.inner.gpu_cache.release_areas.as_ref().unwrap().r) }
+        unsafe { Float32Array::view(self.inner.gpu_cache.release_areas.as_ref().unwrap()) }
     }
 
     #[wasm_bindgen(getter)]

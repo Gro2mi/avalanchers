@@ -65,9 +65,7 @@ fn main() -> Result<()> {
 
     block_on(simulation.fetch_peak_flow_thickness()).expect("Failed to get peak flow thickness");
 
-    block_on(simulation.fetch_cell_count()).expect("Failed to get cell count");
-
-    let peak_velocity: Vec<f32> = block_on(simulation.fetch_peak_velocity())
+    let peak_velocity: Vec<f32> = block_on(simulation.fetch_peak_flow_thickness())
         .expect("Failed to get peak velocity")
         .to_vec();
     info!(
@@ -102,49 +100,13 @@ fn main() -> Result<()> {
 
     // info!("{}", timer_get_summary());
 
-    let particles = block_on(simulation.fetch_particles()).expect("Failed to get final positions");
-    for particle in particles
-        .iter()
-        .filter(|p| p.velocity[0].is_nan() || p.velocity[1].is_nan() || p.velocity[2].is_nan())
-    {
-        info!(
-            "Out of bounds particle: Position = ({:.2}, {:.2}, {:.2}), mass: {:.2}, velocity: ({:.2}, {:.2}, {:.2}), stopped: {}",
-            // particle[0].stopped,
-            particle.position[0],
-            particle.position[1],
-            particle.position[2],
-            particle.mass,
-            particle.velocity[0],
-            particle.velocity[1],
-            particle.velocity[2],
-            particle.stopped
-        );
-    }
-    let out_of_bounds_count = particles.iter().filter(|p| p.stopped > 100000).count();
-    if out_of_bounds_count > 0 {
-        warn!("{} particles stopped out of bounds.", out_of_bounds_count);
-    }
-    // for particle in particles.iter().filter(|p| p.stopped > 100000) {
-    //     info!(
-    //         "Out of bounds particle: Position = ({:.2}, {:.2}, {:.2}), mass: {:.2}, velocity: ({:.2}, {:.2}, {:.2}), stopped: {}",
-    //         // particle[0].stopped,
-    //         particle.position[0],
-    //         particle.position[1],
-    //         particle.position[2],
-    //         particle.mass,
-    //         particle.velocity[0],
-    //         particle.velocity[1],
-    //         particle.velocity[2],
-    //         particle.stopped
-    //     );
-    // }
     info!(
         "Total mass of particles: {:.2} kg",
-        block_on(simulation.get_release_mass()).unwrap()
+        block_on(simulation.get_total_mass()).unwrap()
     );
     info!(
         "Total release volume: {:.2} m3",
-        block_on(simulation.get_release_volume()).unwrap()
+        block_on(simulation.get_total_volume()).unwrap()
     );
     simulation.print_grid(&peak_velocity, 20, 20);
     let duration = start.elapsed();

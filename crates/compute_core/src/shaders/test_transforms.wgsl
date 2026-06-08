@@ -1,123 +1,87 @@
-@group(0) @binding(1) var dem_texture: texture_2d<f32>;
-// dynamics: vec4<f32>,  // x = g_x, y = g_y, z = K_xx, w = K_yy
-@group(0) @binding(2) var<storage, read_write> terrain_dynamics: array<vec4<f32>>;
-@group(0) @binding(3) var<storage, read_write> slope_angle_buffer: array<f32>;
-@group(0) @binding(4) var<storage, read_write> slope_aspect_buffer: array<f32>;
-// metrics: vec4<f32>,   // x = l_x, y = l_y, z = J, w = K_xy
-@group(0) @binding(5) var terrain_metrics: texture_storage_2d<rgba32float, write>;
-@group(0) @binding(6) var<storage, read_write> debug: array<f32>;
+struct CellTestData {
+    idx_from_uv: u32,
+    idx_from_xy: u32,
+    idx_from_x_y: u32,
+    error_code: i32,     // -1 = Pass, 0 = didnt run, 1 = Index Flatten, 2 = Round-trip, 3 = Position
 
-@compute @workgroup_size(WG_SIZE_2D, WG_SIZE_2D, 1)
-fn analyze_terrain(@builtin(global_invocation_id) id: vec3<u32>) {
-    // boundary guard
-    if id.x < 1 || id.x >= sim_settings.grid_shape.x - 1 || id.y < 1 || id.y >= sim_settings.grid_shape.y - 1 {
+    cell_x: u32,
+    cell_y: u32,
+    rt_cell_x: u32,
+    rt_cell_y: u32,
+
+    mock_pos_x: f32,
+    mock_pos_y: f32,
+    computed_idx: u32,
+    expected_idx: u32,
+}
+
+@group(0) @binding(1) var<storage, read_write> test_results: array<CellTestData>;
+
+@compute @workgroup_size(16, 16, 1)
+fn test_transforms(@builtin(global_invocation_id) global_id: vec3u) {
+    if (global_id.x >= sim_settings.grid_shape.x || global_id.y >= sim_settings.grid_shape.y) {
         return;
     }
 
-    let dx = sim_settings.cell_size;
-    let dy = sim_settings.cell_size;
-    let coords = vec2<i32>(id.xy);
+    let cell = global_id.xy;
+    let linear_idx = xy_to_idx(cell);
+    let uv = cell_to_uv(cell);
 
-    // 2. Fetch 9-Point Stencil Neighborhood
-    let z_cc = textureLoad(dem_texture, coords, 0).r;
+    // Prepare our diagnostic snapshot
+    var data: CellTestData;
+    data.cell_x = cell.x;
+    data.cell_y = cell.y;
+    data.error_code = -1i;
 
-    let z_l = textureLoad(dem_texture, coords + vec2<i32>(-1, 0), 0).r;
-    let z_r = textureLoad(dem_texture, coords + vec2<i32>(1, 0), 0).r;
-    let z_d = textureLoad(dem_texture, coords + vec2<i32>(0, -1), 0).r;
-    let z_u = textureLoad(dem_texture, coords + vec2<i32>(0, 1), 0).r;
+    // -------------------------------------------------------------------------
+    // TEST 1: Index Flattening
+    // -------------------------------------------------------------------------
+    data.idx_from_uv  = uv_to_idx(uv);
+    data.idx_from_xy  = xy_to_idx(cell);
+    data.idx_from_x_y = x_y_to_idx(cell.x, cell.y);
 
-    let z_lu = textureLoad(dem_texture, coords + vec2<i32>(-1, 1), 0).r;
-    let z_ru = textureLoad(dem_texture, coords + vec2<i32>(1, 1), 0).r;
-    let z_ld = textureLoad(dem_texture, coords + vec2<i32>(-1, -1), 0).r;
-    let z_rd = textureLoad(dem_texture, coords + vec2<i32>(1, -1), 0).r;
-
-    // 3. First Derivatives (Slopes)
-    let dB_dx = (z_r - z_l) / (2.0 * dx);
-    let dB_dy = (z_u - z_d) / (2.0 * dy);
-
-    // 4. Metric Coefficients & Surface Jacobian
-    let l_x = sqrt(1.0 + dB_dx * dB_dx);
-    let l_y = sqrt(1.0 + dB_dy * dB_dy);
-    let J = sqrt(1.0 + dB_dx * dB_dx + dB_dy * dB_dy);
-
-    // 5. Second Derivatives (Hessian Matrix)
-    let dB_dx2 = (z_r - 2.0 * z_cc + z_l) / (dx * dx);
-    let dB_dy2 = (z_u - 2.0 * z_cc + z_d) / (dy * dy);
-    let dB_dxdy = (z_ru + z_ld - z_lu - z_rd) / (4.0 * dx * dy);
-
-    // 6. Curvatures
-    let K_xx = dB_dx2 / J;
-    let K_yy = dB_dy2 / J;
-    let K_xy = dB_dxdy / J;
-
-    // 7. Slope-parallel Driving Gravity Forces (m/s^2)
-    let g_x = -g * dB_dx / l_x;
-    let g_y = -g * dB_dy / l_y;
-
-    // 8. --- CALCULATE SLOPE ANGLE & ASPECT IN DEGREES ---
-
-    // Magnitude of the terrain gradient vector
-    let slope_magnitude = sqrt(dB_dx * dB_dx + dB_dy * dB_dy);
-
-    // Angle computation: atan(gradient)
-    let slope_angle_deg = degrees(atan(slope_magnitude));
-
-    var slope_aspect_deg = 0.0;
-
-    // Safety check: prevent division/undefined states on perfectly flat terrain
-    if slope_magnitude > 1e-5 {
-        // atan2(y, x) returns the math angle counter-clockwise from East (+x)
-        let aspect_rad = atan2(dB_dy, dB_dx);
-
-        // Convert counter-clockwise from East to clockwise from North
-        slope_aspect_deg = 90.0 - degrees(aspect_rad);
-
-        // Wrap negative angles back into the positive 0° - 360° compass range
-        if slope_aspect_deg < 0.0 {
-            slope_aspect_deg += 360.0;
-        }
-    } else {
-        // GIS convention representation for flat terrain (Aspect = -1)
-        slope_aspect_deg = -1.0;
+    if (data.idx_from_uv != data.idx_from_xy || data.idx_from_xy != data.idx_from_x_y) {
+        data.error_code = 1i;
+        test_results[linear_idx] = data;
+        return;
     }
 
-    // 9. Write everything to WebGPU Storage Buffers
-    let index = xy_to_idx(id.xy);
+    // -------------------------------------------------------------------------
+    // TEST 2: Round-Tripping Cell
+    // -------------------------------------------------------------------------
+    let cell_roundtrip = uv_to_cell(uv);
+    data.rt_cell_x = cell_roundtrip.x;
+    data.rt_cell_y = cell_roundtrip.y;
 
-    // Curvilinear physics buffer
-    textureStore(terrain_metrics, coords, vec4f(l_x, l_y, J, K_xy));
-    terrain_dynamics[index] = vec4<f32>(g_x, g_y, K_xx, K_yy);
+    if (any(cell != cell_roundtrip)) {
+        data.error_code = 2i;
+        test_results[linear_idx] = data;
+        return;
+    }
 
-    // New analysis buffers
-    slope_angle_buffer[index] = slope_angle_deg;
-    slope_aspect_buffer[index] = slope_aspect_deg;
+    // -------------------------------------------------------------------------
+    // TEST 3: Position Index Routing
+    // -------------------------------------------------------------------------
+    let mock_world_pos = (vec2f(cell) + 0.5) * sim_settings.cell_size;
+    data.mock_pos_x    = mock_world_pos.x;
+    data.mock_pos_y    = mock_world_pos.y;
+    
+    data.computed_idx  = position_to_idx(mock_world_pos);
+    
+    let shifted_uv     = position_to_uv(mock_world_pos);
+    data.expected_idx  = uv_to_idx(shifted_uv);
 
-    // if(cell.x == 0 && cell.y == 0) {
-    //     debug[0] = normal.x;
-    //     debug[1] = normal.y;
-    //     debug[2] = normal.z;
-    //     debug[3] = resolution;
-    //     debug[4] = dx;
-    //     debug[5] = dy;
-    //     debug[6] = dxx;
-    //     debug[7] = dyy;
-    //     debug[8] = dxy;
-    //     debug[9] = profile_curvature;
-    //     debug[10] = left;
-    //     debug[11] = right;
-    //     debug[12] = up;
-    //     debug[13] = down;
-    //     debug[14] = center;
-    //     debug[15] = slope_angle;
-    //     debug[16] = slope_aspect;
-    //     debug[17] = up_right;
-    //     debug[18] = down_right;
-    //     debug[19] = up_left;
-    //     debug[20] = down_left;
-    // }
+    if (data.computed_idx != data.expected_idx) {
+        data.error_code = 3i;
+        test_results[linear_idx] = data;
+        return;
+    }
+
+    // Write out the pristine passing state
+    test_results[linear_idx] = data;
 }
 
-// import utils.wgsl;
+// import utils.wgsl
 // BEGIN utils.wgsl
 const WG_SIZE_2D: u32 = 16u;
 

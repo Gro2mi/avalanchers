@@ -21,7 +21,7 @@ use crate::utils::split_channels;
 pub struct AtomicValues {
     pub grid_peak_velocity: u32,
     pub grid_peak_flow_thickness: u32,
-    pub alpha: u32,
+    pub expected_max_velocity: u32,
     pub travel_length: u32,
     pub release_volume: u32,
     pub number_release_cells: u32,
@@ -40,37 +40,60 @@ pub enum BufferName {
     GridPeakFlowThickness,
     GridMass,
     GridMomentum,
-    GridForces,
+    GridVelocity,
     // settings/initialization dependent buffers
     SimSettings,
-    Particles,
+
+    ParticlesPosition,
+    ParticlesVelocity,
+    ParticlesMass,
+    ParticlesStopped,
+    ParticlesElevation,
+
     /// timestep data of the 0 index particle
     TimestepData,
     // Debug buffers
-    OutDebugNormals,
-    OutDebugRelease,
+    Debug,
     AtomicValues,
     NewCellsRollingWindow,
+
+    // x = g_x, y = g_y, z = K_xx, w = K_yy
+    TerrainDynamics,
+    SlopeAngle,
+    SlopeAspect,
+    Roughness,
+    ReleaseAreas,
+
+    TestOutput,
 }
 
 impl BufferName {
     pub fn to_str(&self) -> &'static str {
         match self {
-            BufferName::OutDebugNormals => "out_debug_normals",
-            BufferName::OutDebugRelease => "out_debug_release",
+            BufferName::Debug => "debug",
             BufferName::SimInfo => "sim_info",
             BufferName::SimSettings => "sim_settings",
             BufferName::GridCellCount => "grid_cell_count",
             BufferName::GridPeakVelocity => "grid_peak_velocity",
             BufferName::ParticleIndex => "particle_index",
-            BufferName::Particles => "particles",
+            BufferName::ParticlesPosition => "particles_position",
+            BufferName::ParticlesVelocity => "particles_velocity",
+            BufferName::ParticlesMass => "particles_mass",
+            BufferName::ParticlesStopped => "particles_stopped",
+            BufferName::ParticlesElevation => "particles_elevation",
             BufferName::TimestepData => "timestep_data",
             BufferName::GridMass => "grid_mass",
             BufferName::GridMomentum => "grid_momentum",
-            BufferName::GridForces => "grid_forces",
+            BufferName::GridVelocity => "grid_forces",
             BufferName::GridPeakFlowThickness => "grid_peak_flow_thickness",
             BufferName::AtomicValues => "atomic_values",
             BufferName::NewCellsRollingWindow => "new_cells_rolling_window",
+            BufferName::TerrainDynamics => "terrain",
+            BufferName::SlopeAngle => "slope_angle",
+            BufferName::SlopeAspect => "slope_aspect",
+            BufferName::Roughness => "roughness",
+            BufferName::ReleaseAreas => "release_areas",
+            BufferName::TestOutput => "test_output",
         }
     }
 }
@@ -86,21 +109,30 @@ impl std::str::FromStr for BufferName {
 
     fn from_str(name: &str) -> Result<Self, Self::Err> {
         match name {
-            "out_debug_normals" => Ok(BufferName::OutDebugNormals),
-            "out_debug_release" => Ok(BufferName::OutDebugRelease),
+            "debug" => Ok(BufferName::Debug),
             "sim_info" => Ok(BufferName::SimInfo),
             "sim_settings" => Ok(BufferName::SimSettings),
             "grid_cell_count" => Ok(BufferName::GridCellCount),
             "grid_peak_velocity" => Ok(BufferName::GridPeakVelocity),
             "particle_index" => Ok(BufferName::ParticleIndex),
-            "particles" => Ok(BufferName::Particles),
+            "particles_position" => Ok(BufferName::ParticlesPosition),
+            "particles_velocity" => Ok(BufferName::ParticlesVelocity),
+            "particles_mass" => Ok(BufferName::ParticlesMass),
+            "particles_stopped" => Ok(BufferName::ParticlesStopped),
+            "particles_elevation" => Ok(BufferName::ParticlesElevation),
             "timestep_data" => Ok(BufferName::TimestepData),
             "grid_mass" => Ok(BufferName::GridMass),
             "grid_momentum" => Ok(BufferName::GridMomentum),
-            "grid_forces" => Ok(BufferName::GridForces),
+            "grid_forces" => Ok(BufferName::GridVelocity),
             "grid_peak_flow_thickness" => Ok(BufferName::GridPeakFlowThickness),
             "atomic_values" => Ok(BufferName::AtomicValues),
             "new_cells_rolling_window" => Ok(BufferName::NewCellsRollingWindow),
+            "terrain" => Ok(BufferName::TerrainDynamics),
+            "slope_angle" => Ok(BufferName::SlopeAngle),
+            "slope_aspect" => Ok(BufferName::SlopeAspect),
+            "roughness" => Ok(BufferName::Roughness),
+            "release_areas" => Ok(BufferName::ReleaseAreas),
+            "test_output" => Ok(BufferName::TestOutput),
             _ => Err(format!("Unknown buffer name: {}", name)),
         }
     }
@@ -108,33 +140,16 @@ impl std::str::FromStr for BufferName {
 
 #[derive(Eq, Hash, PartialEq, Clone)]
 pub enum TextureName {
-    Wind,
-    Normals,
-    Slope,
-    Roughness,
-    ReleaseAreas,
-    Landcover,
-    StagingBuffer,
     Dem,
-    ReleaseAreasInput,
-    CellCount,
-    Curvature,
+    // x = l_x, y = l_y, z = J, w = K_xy
+    TerrainMetrics,
 }
 
 impl TextureName {
     pub fn to_str(&self) -> &'static str {
         match self {
-            TextureName::Wind => "wind",
-            TextureName::Normals => "normals",
-            TextureName::Slope => "slope",
-            TextureName::Roughness => "roughness",
-            TextureName::ReleaseAreas => "release_areas",
-            TextureName::Landcover => "landcover",
-            TextureName::StagingBuffer => "staging_buffer",
             TextureName::Dem => "dem",
-            TextureName::ReleaseAreasInput => "release_areas_input",
-            TextureName::CellCount => "cell_count",
-            TextureName::Curvature => "curvature",
+            TextureName::TerrainMetrics => "terrain_metrics",
         }
     }
 }
@@ -149,17 +164,8 @@ impl std::str::FromStr for TextureName {
 
     fn from_str(name: &str) -> Result<Self, Self::Err> {
         match name {
-            "wind" => Ok(TextureName::Wind),
-            "normals" => Ok(TextureName::Normals),
-            "slope" => Ok(TextureName::Slope),
-            "roughness" => Ok(TextureName::Roughness),
-            "release_areas" => Ok(TextureName::ReleaseAreas),
-            "landcover" => Ok(TextureName::Landcover),
-            "staging_buffer" => Ok(TextureName::StagingBuffer),
             "dem" => Ok(TextureName::Dem),
-            "release_areas_input" => Ok(TextureName::ReleaseAreasInput),
-            "cell_count" => Ok(TextureName::CellCount),
-            "curvature" => Ok(TextureName::Curvature),
+            "terrain_metrics" => Ok(TextureName::TerrainMetrics),
             _ => Err(format!("Unknown texture name: {}", name)),
         }
     }
@@ -193,7 +199,7 @@ impl GpuResources {
         }
     }
 
-    pub fn get_total_allocated_memory_mb(&self) -> f32 {
+    pub fn get_total_allocated_memory_mb(&self) -> f64 {
         let mut total_allocated_memory = 0;
         for buffer in self.buffers.values() {
             total_allocated_memory += buffer.size();
@@ -204,7 +210,7 @@ impl GpuResources {
                 * texture.size().depth_or_array_layers as u64
                 * texture.format().block_copy_size(None).unwrap_or(4) as u64; // Approximate size for tracking
         }
-        total_allocated_memory as f32 / (1024.0 * 1024.0)
+        total_allocated_memory as f64 / (1024.0 * 1024.0)
     }
 
     fn poll(&self, device: &Device) {
@@ -664,62 +670,19 @@ pub fn create_buffers_and_texture_descriptions(
         | TextureUsages::COPY_DST
         | TextureUsages::COPY_SRC;
 
-    let texture_usage_input = TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST;
-    let texture_usage_output =
-        TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_SRC | TextureUsages::STORAGE_BINDING;
+    // let texture_usage_input = TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST;
+    // let texture_usage_output =
+    //     TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_SRC | TextureUsages::STORAGE_BINDING;
     let buffer_usage_output = BufferUsages::STORAGE | BufferUsages::COPY_SRC;
-    let atomic_grid_size = (texture_size.width * texture_size.height * 4) as usize;
+    let grid_bytes_size = (texture_size.width * texture_size.height * 4) as usize;
 
     gpu_resources.add_texture(
         device,
-        TextureName::Wind,
-        texture_size,
-        TextureFormat::Rgba32Float,
-        texture_usage_input,
-    );
-    gpu_resources.add_texture(
-        device,
-        TextureName::Normals,
-        texture_size,
-        TextureFormat::Rgba32Float,
-        texture_usage_output,
-    );
-    gpu_resources.add_texture(
-        device,
-        TextureName::Slope,
-        texture_size,
-        TextureFormat::Rgba32Float,
-        texture_usage_output,
-    );
-    gpu_resources.add_texture(
-        device,
-        TextureName::Curvature,
-        texture_size,
-        TextureFormat::Rgba32Float,
-        texture_usage_output,
-    );
-    gpu_resources.add_texture(
-        device,
-        TextureName::Roughness,
+        TextureName::TerrainMetrics,
         texture_size,
         TextureFormat::Rgba32Float,
         texture_usage_default,
     );
-    gpu_resources.add_texture(
-        device,
-        TextureName::ReleaseAreas,
-        texture_size,
-        TextureFormat::Rgba32Float,
-        texture_usage_default,
-    );
-    gpu_resources.add_texture(
-        device,
-        TextureName::Landcover,
-        texture_size,
-        TextureFormat::Rgba8Uint,
-        texture_usage_input,
-    );
-
     gpu_resources.add_buffer(
         device,
         BufferName::SimSettings,
@@ -728,14 +691,7 @@ pub fn create_buffers_and_texture_descriptions(
     );
     gpu_resources.add_buffer(
         device,
-        BufferName::OutDebugNormals,
-        DEBUG_BUFFER_SIZE,
-        buffer_usage_output,
-    );
-
-    gpu_resources.add_buffer(
-        device,
-        BufferName::OutDebugRelease,
+        BufferName::Debug,
         DEBUG_BUFFER_SIZE,
         buffer_usage_output,
     );
@@ -748,37 +704,37 @@ pub fn create_buffers_and_texture_descriptions(
     gpu_resources.add_buffer(
         device,
         BufferName::GridCellCount,
-        atomic_grid_size,
+        grid_bytes_size,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC,
     );
     gpu_resources.add_buffer(
         device,
         BufferName::GridPeakVelocity,
-        atomic_grid_size,
+        grid_bytes_size,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
     );
     gpu_resources.add_buffer(
         device,
         BufferName::GridMass,
-        atomic_grid_size,
+        grid_bytes_size,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
     );
     gpu_resources.add_buffer(
         device,
         BufferName::GridMomentum,
-        atomic_grid_size * 2,
+        grid_bytes_size * 2,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
     );
     gpu_resources.add_buffer(
         device,
-        BufferName::GridForces,
-        atomic_grid_size * 2,
+        BufferName::GridVelocity,
+        grid_bytes_size * 2,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
     );
     gpu_resources.add_buffer(
         device,
         BufferName::GridPeakFlowThickness,
-        atomic_grid_size,
+        grid_bytes_size,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
     );
     gpu_resources.add_buffer(
@@ -790,8 +746,38 @@ pub fn create_buffers_and_texture_descriptions(
     gpu_resources.add_buffer_with_data(
         device,
         BufferName::NewCellsRollingWindow,
-        &[999999999u32; 40],
+        &[40u32; 40],
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+    );
+    gpu_resources.add_buffer(
+        device,
+        BufferName::TerrainDynamics,
+        grid_bytes_size * 4,
+        BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+    );
+    gpu_resources.add_buffer(
+        device,
+        BufferName::SlopeAngle,
+        grid_bytes_size,
+        BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+    );
+    gpu_resources.add_buffer(
+        device,
+        BufferName::SlopeAspect,
+        grid_bytes_size,
+        BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+    );
+    gpu_resources.add_buffer(
+        device,
+        BufferName::Roughness,
+        grid_bytes_size,
+        BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+    );
+    gpu_resources.add_buffer(
+        device,
+        BufferName::ReleaseAreas,
+        grid_bytes_size,
+        BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
     );
 
     gpu_resources
@@ -805,22 +791,36 @@ mod tests {
     #[test]
     fn buffer_name_to_str_covers_all_variants() {
         let cases = [
-            (BufferName::OutDebugNormals, "out_debug_normals"),
-            (BufferName::OutDebugRelease, "out_debug_release"),
+            (BufferName::Debug, "debug"),
             (BufferName::SimInfo, "sim_info"),
             (BufferName::SimSettings, "sim_settings"),
             (BufferName::GridCellCount, "grid_cell_count"),
             (BufferName::GridPeakVelocity, "grid_peak_velocity"),
             (BufferName::GridMass, "grid_mass"),
-            (BufferName::GridForces, "grid_forces"),
+            (BufferName::GridMomentum, "grid_momentum"),
+            (BufferName::GridVelocity, "grid_forces"),
             (
                 BufferName::GridPeakFlowThickness,
                 "grid_peak_flow_thickness",
             ),
             (BufferName::AtomicValues, "atomic_values"),
             (BufferName::ParticleIndex, "particle_index"),
-            (BufferName::Particles, "particles"),
+            (BufferName::ParticlesPosition, "particles_position"),
+            (BufferName::ParticlesVelocity, "particles_velocity"),
+            (BufferName::ParticlesMass, "particles_mass"),
+            (BufferName::ParticlesStopped, "particles_stopped"),
+            (BufferName::ParticlesElevation, "particles_elevation"),
             (BufferName::TimestepData, "timestep_data"),
+            (
+                BufferName::NewCellsRollingWindow,
+                "new_cells_rolling_window",
+            ),
+            (BufferName::TerrainDynamics, "terrain"),
+            (BufferName::SlopeAngle, "slope_angle"),
+            (BufferName::SlopeAspect, "slope_aspect"),
+            (BufferName::Roughness, "roughness"),
+            (BufferName::ReleaseAreas, "release_areas"),
+            (BufferName::TestOutput, "test_output"),
         ];
 
         for (name, expected) in cases {
@@ -832,17 +832,8 @@ mod tests {
     #[test]
     fn texture_name_to_str_covers_all_variants() {
         let cases = [
-            (TextureName::Wind, "wind"),
-            (TextureName::Normals, "normals"),
-            (TextureName::Slope, "slope"),
-            (TextureName::Curvature, "curvature"),
-            (TextureName::Roughness, "roughness"),
-            (TextureName::ReleaseAreas, "release_areas"),
-            (TextureName::Landcover, "landcover"),
-            (TextureName::StagingBuffer, "staging_buffer"),
             (TextureName::Dem, "dem"),
-            (TextureName::ReleaseAreasInput, "release_areas_input"),
-            (TextureName::CellCount, "cell_count"),
+            (TextureName::TerrainMetrics, "terrain_metrics"),
         ];
 
         for (name, expected) in cases {
@@ -906,13 +897,13 @@ mod tests {
             depth_or_array_layers: 1,
         };
         let desc = texture_descriptor(
-            &TextureName::Normals,
+            &TextureName::TerrainMetrics,
             size,
             TextureFormat::Rgba32Float,
             TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
         );
 
-        assert_eq!(desc.label, Some("normals"));
+        assert_eq!(desc.label, Some("terrain_metrics"));
         assert_eq!(desc.size.width, 64);
         assert_eq!(desc.size.height, 32);
         assert_eq!(desc.size.depth_or_array_layers, 1);
@@ -929,8 +920,12 @@ mod tests {
     fn compute_buffers_default_starts_empty() {
         let buffers = GpuResources::default();
         assert!(buffers.get_buffer(&BufferName::SimInfo).is_none());
-        assert!(buffers.get_texture(&TextureName::Wind).is_none());
-        assert!(buffers.get_texture_view(&TextureName::Wind).is_none());
+        assert!(buffers.get_texture(&TextureName::TerrainMetrics).is_none());
+        assert!(
+            buffers
+                .get_texture_view(&TextureName::TerrainMetrics)
+                .is_none()
+        );
     }
 
     #[test]

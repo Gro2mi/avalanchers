@@ -1,27 +1,67 @@
-@group(0) @binding(1) var release_areas_out: texture_storage_2d<rgba32float, write>;
-@group(0) @binding(2) var<storage, read_write> atomic_values: AtomicValues;
-@group(0) @binding(3) var<storage, read_write> debug: array<f32>;
-@group(0) @binding(4) var release_areas_in: texture_2d<f32>;
+struct DiagnosticInput {
+    physical_position: vec3f,
+    target_cell: vec2u,
+};
 
-@compute @workgroup_size(WG_SIZE_2D, WG_SIZE_2D, 1)
-fn load_release_areas(@builtin(global_invocation_id) id: vec3<u32>) {
-    let gridSize = textureDimensions(release_areas_in);
-    if id.x >= gridSize.x || id.y >= gridSize.y {
-        return;
-    }
-    let release_thickness = f32(textureLoad(release_areas_in, id.xy, 0).r);
-    // this can be sped up with workgroups
-    if release_thickness > 0.01 {
-        textureStore(release_areas_out, id.xy, vec4f(release_thickness * sim_settings.slab_thickness, 0.0, 0.0, 0.0));
-        atomicAdd(&atomic_values.number_release_cells, 1u);
-    }
-    if id.x == 103 && id.y == 269 {
-        debug[0] = release_thickness;
-        debug[1] = f32(atomicLoad(&atomic_values.number_release_cells));
-    }
+struct TestSamplingOutput {
+    position_x: f32,
+    position_y: f32,
+    u: f32,
+    v: f32,
+    cell_x: u32,
+    cell_y: u32,
+    
+    // Continuous sampled data (Filtered via sampler)
+    dem_sampled: f32,
+    dem_sampled_as_expected: i32,
+    
+    // Exact cell data (Unfiltered via textureLoad)
+    dem_loaded: f32,
+    dem_loaded_as_expected: i32,
+};
+
+@group(0) @binding(1) var dem_texture: texture_2d<f32>;
+@group(0) @binding(2) var tex_sampler: sampler;
+@group(0) @binding(3) var<storage, read_write> test_outputs: array<TestSamplingOutput>;
+
+
+@compute @workgroup_size(64)
+fn test_sampling(@builtin(global_invocation_id) id: vec3u) {
+    let idx = id.x;
+    // Assuming array size check is handled host-side or via dynamic array length
+    if (idx > sim_settings.grid_shape.x * sim_settings.model_type) { return; }
+
+    
+    var output: TestSamplingOutput;
+    output.dem_loaded_as_expected = -1;
+    output.dem_sampled_as_expected = -1;
+    
+    // --- METHOD A: Continuous Sampling (Good for moving particles) ---
+    // Map physical positions straight to UV without arbitrary half-cell padding additions
+    let step = 1.0 / f32(sim_settings.model_type) * sim_settings.cell_size; // arbitrary small step to test sampling around the position
+    let position = vec2f(step * f32(idx), 0.0);
+    let uv = position_to_uv(position);
+    output.position_x = position.x;
+    output.position_y = position.y;
+    output.u = uv.x;
+    output.v = uv.y;
+    
+    output.dem_sampled = textureSampleLevel(dem_texture, tex_sampler, uv, 0.0).x;
+    
+    // --- METHOD B: Discrete Loading (Good for grid-locked cellular updates) ---
+    // Directly target integer pixel units without interpolation artifacts
+    let cell_idx = uv_to_cell(uv);
+    output.cell_x = cell_idx.x;
+    output.cell_y = cell_idx.y;
+    
+    // textureLoad takes absolute integer coordinates (vec2u/vec2i) and an explicit mip level (0)
+    output.dem_loaded = textureLoad(dem_texture, cell_idx, 0).x;
+    
+    // Write back findings to CPU-readable buffer
+    test_outputs[idx] = output;
 }
 
-// import utils.wgsl;
+// import utils.wgsl
 // BEGIN utils.wgsl
 const WG_SIZE_2D: u32 = 16u;
 
@@ -31,26 +71,14 @@ const g: f32 = 9.81;
 const MAX_VELOCITY_FACTOR: f32 = 1e7; // u32 limit is 430 m/s
 const MASS_FACTOR: f32 = 1e1; // u32 limit is 4.3t thickness
 const H_FACTOR: f32 = 1e6;
-const MOMENTUM_FACTOR: f32 = 1e2; 
+// TODO calculate momentum factor
+const MOMENTUM_FACTOR: f32 = 1e-2; 
 const INV_MAX_VELOCITY_FACTOR: f32 = 1 / MAX_VELOCITY_FACTOR; // u32 limit is 430 m/s
 const INV_MASS_FACTOR: f32 = 1 / MASS_FACTOR; // u32 limit is 4.3km thickness
 const INV_H_FACTOR: f32 = 1 / H_FACTOR; 
 const INV_MOMENTUM_FACTOR: f32 = 1 / MOMENTUM_FACTOR;
 
 // TODO precompute often used values on the cpu and pass them as uniforms to avoid redundant calculations on the gpu
-
-struct Particle {
-    position: vec3f,
-    mass: f32,
-    velocity: vec3f,
-    stopped: u32,
-    travel_length: f32,
-};
-
-struct ParticleAlpha {
-    alpha: f32,
-    start_elevation: f32,
-};
 
 struct SimInfo {
     timestep: u32,
@@ -102,7 +130,7 @@ struct SimSettings {
 struct AtomicValues {
     peak_velocity: atomic<u32>,
     peak_flow_thickness: atomic<u32>,
-    alpha: atomic<u32>,
+    expected_max_velocity: atomic<u32>,
     travel_length: atomic<u32>,
     release_volume: atomic<u32>,
     number_release_cells: atomic<u32>,
@@ -122,29 +150,47 @@ fn cellf_to_uv(cell: vec2f) -> vec2f {
     return (cell + 0.5) / vec2f(sim_settings.grid_shape);
 }
 
-
-fn position_to_uv(position: vec3f) -> vec2f {
-    return (position.xy + 0.5 * sim_settings.cell_size) / (vec2f(sim_settings.world_size)); // add some padding to ensure particles outside the world bounds are still captured in the simulation info
+fn position_to_uv(position: vec2f) -> vec2f {
+    return (position.xy) / (vec2f(sim_settings.world_size)); // add some padding to ensure particles outside the world bounds are still captured in the simulation info
 }
 
-fn position_to_cell_index(position: vec3f) -> u32 {
+fn position_to_idx(position: vec2f) -> u32 {
     let uv = position_to_uv(position);
-    return uv_to_cell_index(uv);
+    return uv_to_idx(uv);
 }
+
+fn position_to_cell(position: vec2f) -> vec2u {
+    return vec2u(floor(position / sim_settings.cell_size));
+}
+
 
 fn uv_to_cell(uv: vec2f) -> vec2u {
-    return vec2u(clamp(uv * vec2f(sim_settings.grid_shape), vec2f(0.0), vec2f(sim_settings.grid_shape - 1u)));
+    let epsilon = 1e-5f; // A tiny offset to counteract negative rounding bias
+    let scaled_uv = uv * vec2f(sim_settings.grid_shape) + epsilon;
+    let max_bound = vec2f(sim_settings.grid_shape - 1u);
+    
+    return vec2u(clamp(scaled_uv, vec2f(0.0), max_bound));
 }
 
-fn uv_to_cell_index(uv: vec2f) -> u32 {
+fn uv_to_idx(uv: vec2f) -> u32 {
     let cell = uv_to_cell(uv);
     // return cell.x * sim_settings.grid_shape.y + cell.y;
     return (cell.y % sim_settings.grid_shape.y * sim_settings.grid_shape.x +
               (cell.x % sim_settings.grid_shape.x));
 }
 
-fn xy_to_idx(x: u32, y: u32) -> u32 {
+fn x_y_to_idx(x: u32, y: u32) -> u32 {
     return y * sim_settings.grid_shape.x + x;
+}
+
+fn xy_to_idx(xy: vec2<u32>) -> u32 {
+    return xy.y * sim_settings.grid_shape.x + xy.x;
+}
+
+fn idx_to_xy(idx: u32) -> vec2<u32> {
+    let x = idx % sim_settings.grid_shape.x;
+    let y = idx / sim_settings.grid_shape.x;
+    return vec2u(x, y);
 }
 
 fn quadratic_weight(d: f32) -> f32 {
@@ -157,13 +203,13 @@ fn quadratic_weight(d: f32) -> f32 {
     return 0.0;
 }
 
-fn calculate_weight(particle_position: vec2f, node_position: vec2i) -> f32 {
+fn calculate_weight(particle_position: vec2f, node_position: vec2u) -> f32 {
     let dist = particle_position - vec2f(node_position);
     return quadratic_weight(dist.x) * quadratic_weight(dist.y);
 }
 
-fn get_base_node(grid_pos: vec2f) -> vec2i {
-    return vec2i(floor(grid_pos - vec2f(0.5)));
+fn get_base_node(grid_pos: vec2f) -> vec2u {
+    return vec2u(floor(grid_pos - vec2f(0.5)));
 }
 
 fn compute_centroid(points: ptr<function, array<vec2<f32>, 256>>, count: u32) -> vec2<f32> {

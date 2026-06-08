@@ -1,25 +1,96 @@
-@group(0) @binding(1) var<storage, read_write> sim_info: SimInfo;
-@group(0) @binding(2) var<storage> particles_position: array<vec2<f32>>;
-@group(0) @binding(3) var<storage> particles_velocity: array<vec2<f32>>;
-@group(0) @binding(4) var<storage> particles_mass: array<f32>;
-@group(0) @binding(5) var<storage, read_write> grid_mass_atomic: array<atomic<f32>>;
-@group(0) @binding(6) var<storage, read_write> grid_momentum_atomic: array<atomic<f32>>; // Combined u, v
 
-override WG_SIZE_1D: u32 = 1u;
-@compute @workgroup_size(WG_SIZE_1D, 1, 1)
-fn p2g(@builtin(global_invocation_id) id: vec3u) {
-    if id.x >= sim_info.number_particles {
-        return;
-    }
-    if sim_info.flags >= SIM_INFO_STOPPED {
-        return;
-    }
-    let cell = position_to_cell(particles_position[id.x]);
-    if cell.x < 1 || cell.x >= (sim_settings.grid_shape.x - 1) || cell.y < 1 || cell.y >= (sim_settings.grid_shape.y - 1) {
-        return;
-    }
+@group(0) @binding(1) var<storage, read_write> particles_position: array<vec2<f32>>;
+@group(0) @binding(2) var<storage, read_write> particles_velocity: array<vec2<f32>>;
+@group(0) @binding(3) var<storage> particles_mass: array<f32>;
+@group(0) @binding(4) var<storage, read_write> grid_mass_atomic: array<atomic<f32>>;
+@group(0) @binding(5) var<storage, read_write> grid_momentum_atomic: array<atomic<f32>>;
+@group(0) @binding(6) var<storage, read_write> grid_velocity: array<vec2<f32>>;
+@group(0) @binding(7) var<storage, read_write> test_results: array<f32>;
 
-    transfer_p2g(id.x);
+@compute @workgroup_size(1)
+fn test_transfer(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= 1u) {
+        return;
+    }
+    let idx = position_to_idx(particles_position[0]);
+    let idx_y_minus = position_to_idx(particles_position[0] - vec2<f32>(0.0, sim_settings.cell_size));
+    let idx_y_plus = position_to_idx(particles_position[0] + vec2<f32>(0.0, sim_settings.cell_size));
+    transfer_p2g(0u);
+
+    for (var i: u32 = 0; i < sim_settings.grid_shape.x * sim_settings.grid_shape.y; i++) {
+        // let mass = f32(atomicLoad(&grid_mass_atomic[i])) * INV_MASS_FACTOR;
+        // let u = f32(atomicLoad(&grid_momentum_atomic[i * 2])) * INV_MOMENTUM_FACTOR / (mass + 1e-6);
+        // let v = f32(atomicLoad(&grid_momentum_atomic[i * 2 + 1])) * INV_MOMENTUM_FACTOR / (mass + 1e-6);
+        let mass = atomicLoad(&grid_mass_atomic[i]);
+        let u = atomicLoad(&grid_momentum_atomic[i * 2]) / (mass + 1e-6);
+        let v = atomicLoad(&grid_momentum_atomic[i * 2 + 1]) / (mass + 1e-6);
+        grid_velocity[i] = vec2f(u, v);
+    }
+    // let mass = f32(atomicLoad(&grid_mass_atomic[idx])) * INV_MASS_FACTOR;
+    // var u = f32(atomicLoad(&grid_momentum_atomic[idx * 2])) * INV_MOMENTUM_FACTOR / (mass + 1e-6);
+    // var v = f32(atomicLoad(&grid_momentum_atomic[idx * 2 + 1])) * INV_MOMENTUM_FACTOR / (mass + 1e-6);
+    let mass = atomicLoad(&grid_mass_atomic[idx]);
+    var u = atomicLoad(&grid_momentum_atomic[idx * 2]) / (mass + 1e-6);
+    var v = atomicLoad(&grid_momentum_atomic[idx * 2 + 1]) / (mass + 1e-6);
+
+    let interpolated_velocity = transfer_g2p(0u);
+
+
+
+    test_results[0] = particles_position[0].x;
+    test_results[1] = particles_position[0].y;
+    test_results[2] = particles_velocity[0].x;
+    test_results[3] = particles_velocity[0].y;
+    test_results[4] = particles_mass[0];
+    test_results[5] = f32(atomicLoad(&grid_mass_atomic[32u]));
+    test_results[6] = f32(atomicLoad(&grid_mass_atomic[33u]));
+    test_results[7] = f32(atomicLoad(&grid_mass_atomic[34u]));
+
+    test_results[8] = f32(atomicLoad(&grid_mass_atomic[42u]));
+    test_results[9] = f32(atomicLoad(&grid_mass_atomic[43u]));
+    test_results[10] = f32(atomicLoad(&grid_mass_atomic[44u]));
+
+    test_results[11] = f32(atomicLoad(&grid_mass_atomic[52u]));
+    test_results[12] = f32(atomicLoad(&grid_mass_atomic[53u]));
+    test_results[13] = f32(atomicLoad(&grid_mass_atomic[54u]));
+
+    test_results[14] = f32(atomicLoad(&grid_mass_atomic[41u]));
+    test_results[15] = f32(atomicLoad(&grid_mass_atomic[51u]));
+
+    let grid_pos = particles_position[0] / sim_settings.cell_size - vec2f(0.5);
+    let base_node = vec2u(floor(grid_pos - vec2f(0.5)));
+    test_results[16] = f32(base_node.x);
+    test_results[17] = f32(base_node.y);
+    test_results[18] = interpolated_velocity.x;
+    test_results[19] = interpolated_velocity.y;
+
+    
+    test_results[20] = f32(atomicLoad(&grid_momentum_atomic[64u]));
+    test_results[21] = f32(atomicLoad(&grid_momentum_atomic[66u]));
+    test_results[22] = f32(atomicLoad(&grid_momentum_atomic[68u]));
+
+    test_results[23] = f32(atomicLoad(&grid_momentum_atomic[84u]));
+    test_results[24] = f32(atomicLoad(&grid_momentum_atomic[86u]));
+    test_results[25] = f32(atomicLoad(&grid_momentum_atomic[88u]));
+
+    test_results[26] = f32(atomicLoad(&grid_momentum_atomic[104u]));
+    test_results[27] = f32(atomicLoad(&grid_momentum_atomic[106u]));
+    test_results[28] = f32(atomicLoad(&grid_momentum_atomic[108u]));
+
+    test_results[30] = f32(atomicLoad(&grid_momentum_atomic[65u]));
+    test_results[31] = f32(atomicLoad(&grid_momentum_atomic[67u]));
+    test_results[32] = f32(atomicLoad(&grid_momentum_atomic[69u]));
+
+    test_results[33] = f32(atomicLoad(&grid_momentum_atomic[85u]));
+    test_results[34] = f32(atomicLoad(&grid_momentum_atomic[87u]));
+    test_results[35] = f32(atomicLoad(&grid_momentum_atomic[89u]));
+
+    test_results[36] = f32(atomicLoad(&grid_momentum_atomic[105u]));
+    test_results[37] = f32(atomicLoad(&grid_momentum_atomic[107u]));
+    test_results[38] = f32(atomicLoad(&grid_momentum_atomic[109u]));
+
+    
+    test_results[40] = f32(idx);
 }
 
 // import transfer_p2g.wgsl;
@@ -50,7 +121,27 @@ fn transfer_p2g(p_idx: u32) {
     }
 }
 // END transfer_p2g.wgsl
+// import transfer_g2p.wgsl;
+// BEGIN transfer_g2p.wgsl
+fn transfer_g2p(p_idx: u32) -> vec2f {
+    let grid_pos = particles_position[p_idx] / sim_settings.cell_size - vec2f(0.5);
+    let base_node = vec2u(floor(grid_pos - vec2f(0.5)));
+    
+    var interpolated_velocity = vec2f(0.0);
 
+    for (var i: u32 = 0; i < 3; i++) {
+        for (var j: u32 = 0; j < 3; j++) {
+            let node_coords = base_node + vec2u(i, j);
+            let weight = calculate_weight(grid_pos, node_coords);
+            let idx = xy_to_idx(node_coords);
+            
+            interpolated_velocity += weight * grid_velocity[idx];
+        }
+    }
+    return interpolated_velocity;
+}
+
+// END transfer_g2p.wgsl
 // import utils.wgsl;
 // BEGIN utils.wgsl
 const WG_SIZE_2D: u32 = 16u;

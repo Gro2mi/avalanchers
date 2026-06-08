@@ -797,7 +797,7 @@ pub fn read_geo_tiff(path: &str) -> Result<GeoTiff, Box<dyn std::error::Error>> 
         .get_tag_f64_vec(Tag::Unknown(33550))
         .unwrap_or_default();
 
-    if pixel_scales.len() <= 2 {
+    if pixel_scales.len() < 2 {
         return Err("Missing pixel scale metadata (Tag 33550)".into());
     }
     if pixel_scales[0] != pixel_scales[1] {
@@ -812,13 +812,13 @@ pub fn read_geo_tiff(path: &str) -> Result<GeoTiff, Box<dyn std::error::Error>> 
         .get_tag_f64_vec(Tag::Unknown(42113)) // Try to get the tag
         .ok() // If it fails (missing or wrong type), return None
         .and_then(|v| v.first().copied());
-    if tie_points[0] != 0.0 || tie_points[1] != 0.0 || tie_points[2] != 0.0 {
-        return Err(
-            "Unsupported GeoTIFF: Only a single tie point at the origin is supported.".into(),
-        );
-    }
 
     let metadata = if tie_points.len() >= 6 {
+        if tie_points[0] != 0.0 || tie_points[1] != 0.0 || tie_points[2] != 0.0 {
+            return Err(
+                "Unsupported GeoTIFF: Only a single tie point at the origin is supported.".into(),
+            );
+        }
         let origin_x = tie_points[3];
         let origin_y = tie_points[4];
         let bounds = Bounds {
@@ -2128,7 +2128,7 @@ NODATA_value  -1
         assert_eq!(parsed_grid.get(1, 1), Some(5.0));
     }
 
-    #[test]
+    #[test_log::test]
     fn test_esri_header_missing_origin_errors() {
         // Header missing both xllcorner and xllcenter should error during parsing
         let bad_header = "\
@@ -2143,10 +2143,6 @@ NODATA_value  -999
         let cursor = Cursor::new(bad_header);
         let res = EsriGrid::from_reader(cursor);
         assert!(res.is_err());
-        let err = res.unwrap_err();
-        assert!(
-            err.contains("Missing X origin") || err.contains("Missing Y origin") || err.len() > 0
-        );
     }
 
     #[test]
@@ -2249,7 +2245,7 @@ NODATA_value  -999
         assert_eq!(
             dem.data1d[1701 * 500 + 500],
             1686.6079,
-            "Elevation value at index 12345 should be 1234.0"
+            "Elevation value in the middle of the texture should be 1686.6m"
         );
     }
 

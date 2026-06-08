@@ -1,30 +1,56 @@
-@group(0) @binding(1) var<storage> grid_mass_atomic: array<u32>;
-@group(0) @binding(2) var normals_texture: texture_2d<f32>;
-@group(0) @binding(3) var<storage, read_write> grid_forces: array<vec2f>;
+// @group(0) @binding(1) var<storage> grid_mass_atomic: array<u32>;
+@group(0) @binding(1) var<storage> grid_mass_atomic: array<f32>;
+@group(0) @binding(2) var<storage, read_write> terrain_dynamics: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read_write> grid_velocity: array<vec2f>;
 @group(0) @binding(4) var<storage, read_write> peak_flow_thickness: array<f32>;
 @group(0) @binding(5) var<storage, read_write> atomic_values: AtomicValues;
-@group(0) @binding(6) var<storage, read_write> grid_momentum_atomic: array<i32>; // Combined u, v
-@group(0) @binding(7) var curvature_texture: texture_2d<f32>;
-@group(0) @binding(8) var<storage, read_write> new_cells_rolling_window: array<u32>;
-@group(0) @binding(9) var<storage, read_write> sim_info: SimInfo;
-
+// @group(0) @binding(6) var<storage, read_write> grid_momentum_atomic: array<i32>; // Combined u, v
+@group(0) @binding(6) var<storage, read_write> grid_momentum_atomic: array<f32>; // Combined u, v
+@group(0) @binding(7) var<storage, read_write> new_cells_rolling_window: array<u32>;
+@group(0) @binding(8) var<storage, read_write> sim_info: SimInfo;
+@group(0) @binding(9) var terrain_metrics: texture_2d<f32>;
+@group(0) @binding(10) var<storage, read_write> grid_peak_velocity: array<f32>;
 
 @compute @workgroup_size(WG_SIZE_2D, WG_SIZE_2D, 1)
 fn grid_physics(@builtin(global_invocation_id) id: vec3u) {
-    if id.x >= sim_settings.grid_shape.x || id.y >= sim_settings.grid_shape.y {
+    if id.x < 1 || id.x >= (sim_settings.grid_shape.x - 1) || id.y < 1 || id.y >= (sim_settings.grid_shape.y - 1) {
         return;
     }
     if sim_info.flags >= SIM_INFO_STOPPED {
         return;
     }
-    let idx = xy_to_idx(id.x, id.y);
-    let n = textureLoad(normals_texture, id.xy, 0);
+
+    let use_curvature: bool = (sim_settings.flags & (1u << 0u)) != 0u;
+    let use_particle_interaction: bool = (sim_settings.flags & (1u << 1u)) != 0u;
+    let use_earth_pressure_coefficient: bool = (sim_settings.flags & (1u << 2u)) != 0u;
+    let use_entrainment: bool = (sim_settings.flags & (1u << 3u)) != 0u;
+
+    let idx = xy_to_idx(id.xy);
+    let terrain_metrics_data = textureLoad(terrain_metrics, vec2<i32>(id.xy), 0);
+
+    // 2. Unpack precalculated elements
+    let l_x = terrain_metrics_data.x;
+    let l_y = terrain_metrics_data.y;
+    let J = terrain_metrics_data.z;
+    let K_xy = terrain_metrics_data.w;
+
+    let terrain_dynamics_data = terrain_dynamics[idx];
+    let g_x = terrain_dynamics_data.x;
+    let g_y = terrain_dynamics_data.y;
+    let K_xx = terrain_dynamics_data.z;
+    let K_yy = terrain_dynamics_data.w;
+
+    let g_normal = -g / J;
 
     // 1. Decode height and velocity[cite: 3]
-    let mass = f32(grid_mass_atomic[idx]) * INV_MASS_FACTOR;
-    let h = mass / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size) * n.z;
-    let u = f32(grid_momentum_atomic[idx * 2]) * INV_MOMENTUM_FACTOR / (mass + 1e-6);
-    let v = f32(grid_momentum_atomic[idx * 2 + 1]) * INV_MOMENTUM_FACTOR / (mass + 1e-6);
+    // let mass = f32(grid_mass_atomic[idx]) * INV_MASS_FACTOR;
+    // let h = mass / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size * J);
+    // var u = f32(grid_momentum_atomic[idx * 2]) * INV_MOMENTUM_FACTOR / (mass + 1e-6);
+    // var v = f32(grid_momentum_atomic[idx * 2 + 1]) * INV_MOMENTUM_FACTOR / (mass + 1e-6);
+    let mass = f32(grid_mass_atomic[idx]);
+    let h = mass / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size * J);
+    var u = f32(grid_momentum_atomic[idx * 2]) / (mass + 1e-6);
+    var v = f32(grid_momentum_atomic[idx * 2 + 1]) / (mass + 1e-6);
     // peak_flow_thickness[idx] = max(peak_flow_thickness[idx], h);
     if peak_flow_thickness[idx] < h {
         if peak_flow_thickness[idx] < 1e-5 {
@@ -32,70 +58,72 @@ fn grid_physics(@builtin(global_invocation_id) id: vec3u) {
         }
         peak_flow_thickness[idx] = h;
     }
-    // atomicAdd(&atomic_values.alpha, 1u);
-    atomicMax(&atomic_values.peak_flow_thickness, u32(h * H_FACTOR)); // update peak flow thickness for cfl calculation, this is needed for the next step
-
-    // 2. Compute Divergence for Active/Passive state[cite: 3]
-    // TODO calculate divergence and earth pressure coefficient
-    // let div_u = (get_u(id.x + 1, id.y) - get_u(id.x - 1, id.y)) / (2.0 * dx);
-    var k = 0f;
-    
-    let use_earth_pressure_coefficient: bool = (sim_settings.flags & (1u << 2u)) != 0u;
-    if use_earth_pressure_coefficient {
-        let div_u = div_u(id.x, id.y, mass);
-        k = earth_pressure_coefficient(radians(sim_settings.internal_friction_angle), radians(sim_settings.basal_friction_angle), div_u);
-    } else {
-        k = 1.0;
+    let h_scaled = u32(h * H_FACTOR);
+    if atomicLoad(&atomic_values.peak_flow_thickness) < h_scaled {
+        atomicMax(&atomic_values.peak_flow_thickness, h_scaled); // update peak flow thickness for cfl calculation, this is needed for the next step
     }
-    // let k = 1.0;
-    // 3. Lateral Pressure Force[cite: 3]
-    // Force = -0.5 * g * cos(theta) * k * gradient(h^2)
-    // TODO do I need to apply a filter to the height field to prevent noise in the gradient?
-    // e. g. h_ij = (1-alpha)h_ij + alpha/4 * (h_ij-1 + h_i+1j + h_ij+1 + h_i-1j) to smooth the height field and prevent noise in the gradient?
-    // TODO do i need a cutoff for small h to prevent noise in the gradient? if h < h_min -> h = 0
-    // let grad_h2 = select(vec2f(
-    //     // TODO account for slope in x and y direction. multiply by cos_theta_x
-    //     (get_h2(id.x + 1, id.y) - get_h2(id.x - 1, id.y)) / (2.0 * sim_settings.cell_size),
-    //     (get_h2(id.x, id.y + 1) - get_h2(id.x, id.y - 1)) / (2.0 * sim_settings.cell_size)
-    // ), vec2f(0.0, 0.0), h < 1e-5);
-    let grad_h2 = vec2f(
-        // TODO account for slope in x and y direction. multiply by cos_theta_x
-        (get_h2(id.x + 1, id.y) - get_h2(id.x - 1, id.y)) / (2.0 * sim_settings.cell_size),
-        (get_h2(id.x, id.y + 1) - get_h2(id.x, id.y - 1)) / (2.0 * sim_settings.cell_size)
-    );
-    let grad_h = grad_h2 * 0.5 / (h + 1e-5);
+    // 1. Calculate velocity update from gravity alone first
+    // var proposed_u = u + sim_info.dt * g  * sin(degrees(34f));//g_x;
+    var proposed_u = u + sim_info.dt * g_x;
+    var proposed_v = v + sim_info.dt * g_y;
+    var proposed_V_mag = length(vec2f(proposed_u, proposed_v));
 
-    // TODO do i need a slope limiter like minmod?
-    // 1. Fetch the center value once to save redundant lookups
-    // let h2_c = get_h2(id.x, id.y);
+    if proposed_V_mag > sim_settings.velocity_threshold {
+        var friction_acceleration: f32 = 0.0;
+        // let coulomb = sim_settings.friction_coefficient * g*cos(degrees(34f));//abs(g_normal);
+        let coulomb = sim_settings.friction_coefficient * abs(g_normal);
+        let turbulent = (g / sim_settings.drag_coefficient) * (proposed_V_mag * proposed_V_mag) / max(h, 1e-3);
 
-    // // 2. Fetch the 4 neighbors
-    // let h2_r = get_h2(id.x + 1, id.y);
-    // let h2_l = get_h2(id.x - 1, id.y);
-    // let h2_t = get_h2(id.x, id.y + 1);
-    // let h2_b = get_h2(id.x, id.y - 1);
+        friction_acceleration = coulomb + turbulent;
 
-    // // 3. Calculate forward and backward differences in X
-    // let dx_fwd = (h2_r - h2_c) / sim_settings.cell_size;
-    // let dx_bwd = (h2_c - h2_l) / sim_settings.cell_size;
+        // If friction would reverse or completely zero out the momentum this step
+        if (friction_acceleration * sim_info.dt) >= proposed_V_mag {
+            u = 0.0;
+            v = 0.0;
+        } else {
+            // Apply friction cleanly as a scaling factor
+            let friction_scale = 1.0 - (friction_acceleration * sim_info.dt / proposed_V_mag);
+            u = proposed_u * friction_scale;
+            v = proposed_v * friction_scale;
+        }
+    } else {
+        u = proposed_u;
+        v = proposed_v;
+    }
 
-    // // 4. Calculate forward and backward differences in Y
-    // let dy_fwd = (h2_t - h2_c) / sim_settings.cell_size;
-    // let dy_bwd = (h2_c - h2_b) / sim_settings.cell_size;
+    // u = 
 
-    // // 5. Apply the Minmod limiter to get the stable gradient
-    // let grad_h2 = vec2f(
-    //     minmod(dx_fwd, dx_bwd),
-    //     minmod(dy_fwd, dy_bwd)
-    // );
+    grid_velocity[idx] = vec2f(u, v);
 
-    // 6. Recover grad_h (Chain rule: grad(h^2) = 2 * h * grad(h))
-    // let grad_h = grad_h2 * 0.5 / (h + 1e-5);
-    // correct for slope sqrt(1-nx²), and again sqrt(1-nx²) to rotate it into 3d coordinates
-    // let slope_corrected_grad_h2 = grad_h2 * vec2f(sqrt(1.0 - n.x * n.x), sqrt(1.0 - n.y * n.y));
-    let slope_corrected_grad_h = grad_h * vec2f(sqrt(1.0 - n.x * n.x), sqrt(1.0 - n.y * n.y));
-    let lateral_factor = select(vec2f(0.0), slope_corrected_grad_h, length(slope_corrected_grad_h) > tan(radians(sim_settings.internal_friction_angle)));
-    grid_forces[idx] = -g * n.z * k * slope_corrected_grad_h;
+    let V_mag = length(vec2f(u, v));
+    let V_mag_scaled = u32(V_mag * MAX_VELOCITY_FACTOR);
+    if atomicLoad(&atomic_values.peak_velocity) < V_mag_scaled {
+        atomicMax(&atomic_values.peak_velocity, V_mag_scaled); // update peak velocity for cfl calculation, this is needed for the next step
+    }
+    if !is_nan(V_mag) && h > 1e-3 {
+        grid_peak_velocity[idx] = max(grid_peak_velocity[idx], V_mag);
+    }
+
+    let expected_cell_velocity = V_mag + sqrt(g * h);
+    if expected_cell_velocity > f32(atomicLoad(&atomic_values.expected_max_velocity)) * INV_MAX_VELOCITY_FACTOR {
+        atomicStore(&atomic_values.expected_max_velocity, u32(ceil(expected_cell_velocity * MAX_VELOCITY_FACTOR)));
+    }
+    // if !is_nan(V_mag) {
+    //     grid_peak_velocity[idx] = max(grid_peak_velocity[idx], V_mag);
+    // }
+    //  grid_peak_velocity[idx] = V_mag;
+    // V_mag = 2f;
+    // if V_mag > 1f {
+    //     grid_peak_velocity[idx] = max(grid_peak_velocity[idx], V_mag);
+    // }
+}
+
+fn is_nan(x: f32) -> bool {
+    // https://marktension.nl/blog/detecting-nans-on-webgpu/
+    // if one operand is a NaN, the other is returned.
+    let highVal = 1e38;
+    let x2 = min(x, highVal);
+    return x2 == highVal;
 }
 
 fn minmod(a: f32, b: f32) -> f32 {
@@ -104,12 +132,12 @@ fn minmod(a: f32, b: f32) -> f32 {
 }
 
 fn get_h2(x: u32, y: u32) -> f32 {
-    let idx = xy_to_idx(x, y);
+    let idx = x_y_to_idx(x, y);
     return pow(f32(grid_mass_atomic[idx]) * INV_MASS_FACTOR / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size), 2.0);
 }
 
 fn get_velocity(x: u32, y: u32, mass: f32) -> vec2f {
-    let idx = xy_to_idx(x, y);
+    let idx = x_y_to_idx(x, y);
     return vec2f(
         f32(grid_momentum_atomic[idx * 2]) * INV_MOMENTUM_FACTOR / (mass + 1e-6),
         f32(grid_momentum_atomic[idx * 2 + 1]) * INV_MOMENTUM_FACTOR / (mass + 1e-6)
@@ -141,24 +169,20 @@ fn earth_pressure_coefficient(
     let cos_phi = cos(phi);
     let cos_delta = cos(delta);
 
-    let inside =
-        1.0 -
+    let inside = 1.0 -
         (cos_phi * cos_phi) /
         (cos_delta * cos_delta);
 
     // numerical safety
     let root = sqrt(max(inside, 0.0));
 
-    let sec_phi2 =
-        1.0 / (cos_phi * cos_phi);
+    let sec_phi2 = 1.0 / (cos_phi * cos_phi);
 
     // active for expansion
-    let Ka =
-        2.0 * (1.0 - root) * sec_phi2 - 1.0;
+    let Ka = 2.0 * (1.0 - root) * sec_phi2 - 1.0;
 
     // passive for compression
-    let Kp =
-        2.0 * (1.0 + root) * sec_phi2 - 1.0;
+    let Kp = 2.0 * (1.0 + root) * sec_phi2 - 1.0;
 
     return select(Kp, Ka, div_u > 0.0);
 }
@@ -173,26 +197,14 @@ const g: f32 = 9.81;
 const MAX_VELOCITY_FACTOR: f32 = 1e7; // u32 limit is 430 m/s
 const MASS_FACTOR: f32 = 1e1; // u32 limit is 4.3t thickness
 const H_FACTOR: f32 = 1e6;
-const MOMENTUM_FACTOR: f32 = 1e2; 
+// TODO calculate momentum factor
+const MOMENTUM_FACTOR: f32 = 1e-2; 
 const INV_MAX_VELOCITY_FACTOR: f32 = 1 / MAX_VELOCITY_FACTOR; // u32 limit is 430 m/s
 const INV_MASS_FACTOR: f32 = 1 / MASS_FACTOR; // u32 limit is 4.3km thickness
 const INV_H_FACTOR: f32 = 1 / H_FACTOR; 
 const INV_MOMENTUM_FACTOR: f32 = 1 / MOMENTUM_FACTOR;
 
 // TODO precompute often used values on the cpu and pass them as uniforms to avoid redundant calculations on the gpu
-
-struct Particle {
-    position: vec3f,
-    mass: f32,
-    velocity: vec3f,
-    stopped: u32,
-    travel_length: f32,
-};
-
-struct ParticleAlpha {
-    alpha: f32,
-    start_elevation: f32,
-};
 
 struct SimInfo {
     timestep: u32,
@@ -244,7 +256,7 @@ struct SimSettings {
 struct AtomicValues {
     peak_velocity: atomic<u32>,
     peak_flow_thickness: atomic<u32>,
-    alpha: atomic<u32>,
+    expected_max_velocity: atomic<u32>,
     travel_length: atomic<u32>,
     release_volume: atomic<u32>,
     number_release_cells: atomic<u32>,
@@ -264,29 +276,47 @@ fn cellf_to_uv(cell: vec2f) -> vec2f {
     return (cell + 0.5) / vec2f(sim_settings.grid_shape);
 }
 
-
-fn position_to_uv(position: vec3f) -> vec2f {
-    return (position.xy + 0.5 * sim_settings.cell_size) / (vec2f(sim_settings.world_size)); // add some padding to ensure particles outside the world bounds are still captured in the simulation info
+fn position_to_uv(position: vec2f) -> vec2f {
+    return (position.xy) / (vec2f(sim_settings.world_size)); // add some padding to ensure particles outside the world bounds are still captured in the simulation info
 }
 
-fn position_to_cell_index(position: vec3f) -> u32 {
+fn position_to_idx(position: vec2f) -> u32 {
     let uv = position_to_uv(position);
-    return uv_to_cell_index(uv);
+    return uv_to_idx(uv);
 }
+
+fn position_to_cell(position: vec2f) -> vec2u {
+    return vec2u(floor(position / sim_settings.cell_size));
+}
+
 
 fn uv_to_cell(uv: vec2f) -> vec2u {
-    return vec2u(clamp(uv * vec2f(sim_settings.grid_shape), vec2f(0.0), vec2f(sim_settings.grid_shape - 1u)));
+    let epsilon = 1e-5f; // A tiny offset to counteract negative rounding bias
+    let scaled_uv = uv * vec2f(sim_settings.grid_shape) + epsilon;
+    let max_bound = vec2f(sim_settings.grid_shape - 1u);
+    
+    return vec2u(clamp(scaled_uv, vec2f(0.0), max_bound));
 }
 
-fn uv_to_cell_index(uv: vec2f) -> u32 {
+fn uv_to_idx(uv: vec2f) -> u32 {
     let cell = uv_to_cell(uv);
     // return cell.x * sim_settings.grid_shape.y + cell.y;
     return (cell.y % sim_settings.grid_shape.y * sim_settings.grid_shape.x +
               (cell.x % sim_settings.grid_shape.x));
 }
 
-fn xy_to_idx(x: u32, y: u32) -> u32 {
+fn x_y_to_idx(x: u32, y: u32) -> u32 {
     return y * sim_settings.grid_shape.x + x;
+}
+
+fn xy_to_idx(xy: vec2<u32>) -> u32 {
+    return xy.y * sim_settings.grid_shape.x + xy.x;
+}
+
+fn idx_to_xy(idx: u32) -> vec2<u32> {
+    let x = idx % sim_settings.grid_shape.x;
+    let y = idx / sim_settings.grid_shape.x;
+    return vec2u(x, y);
 }
 
 fn quadratic_weight(d: f32) -> f32 {
@@ -299,13 +329,13 @@ fn quadratic_weight(d: f32) -> f32 {
     return 0.0;
 }
 
-fn calculate_weight(particle_position: vec2f, node_position: vec2i) -> f32 {
+fn calculate_weight(particle_position: vec2f, node_position: vec2u) -> f32 {
     let dist = particle_position - vec2f(node_position);
     return quadratic_weight(dist.x) * quadratic_weight(dist.y);
 }
 
-fn get_base_node(grid_pos: vec2f) -> vec2i {
-    return vec2i(floor(grid_pos - vec2f(0.5)));
+fn get_base_node(grid_pos: vec2f) -> vec2u {
+    return vec2u(floor(grid_pos - vec2f(0.5)));
 }
 
 fn compute_centroid(points: ptr<function, array<vec2<f32>, 256>>, count: u32) -> vec2<f32> {

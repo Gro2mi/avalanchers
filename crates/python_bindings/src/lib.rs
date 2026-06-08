@@ -37,32 +37,8 @@ impl PyTimestepData {
     }
 
     #[getter]
-    fn get_acceleration_normal<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<f32>> {
-        to_2d_numpy(py, &self.inner.acceleration_normal)
-    }
-    #[getter]
-    fn get_acceleration_tangential<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<f32>> {
-        to_2d_numpy(py, &self.inner.acceleration_tangential)
-    }
-    #[getter]
-    fn get_normal<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<f32>> {
-        to_2d_numpy(py, &self.inner.normal)
-    }
-
-    #[getter]
     fn get_dt<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f32>> {
         self.inner.dt.to_pyarray(py)
-    }
-    #[getter]
-    fn get_acceleration_friction_magnitude<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> Bound<'py, PyArray1<f32>> {
-        self.inner.acceleration_friction_magnitude.to_pyarray(py)
-    }
-    #[getter]
-    fn get_elevation<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f32>> {
-        self.inner.elevation.to_pyarray(py)
     }
 }
 
@@ -331,32 +307,35 @@ impl PySimulation {
     }
 
     #[getter]
-    pub fn get_cell_count<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<u32>>> {
-        let data = self
+    pub fn get_terrain_l_x<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        let terrain = self.inner.get_terrain_l_x().block_on().map_runtime_err()?;
+        self.get_layer_f32(py, terrain.to_vec())
+    }
+
+    #[getter]
+    pub fn get_terrain_l_y<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        let terrain = self.inner.get_terrain_l_y().block_on().map_runtime_err()?;
+        self.get_layer_f32(py, terrain.to_vec())
+    }
+
+    #[getter]
+    pub fn get_gravity_x<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        let (gravity_x, _) = self
             .inner
-            .fetch_cell_count()
+            .get_slope_gravity()
             .block_on()
-            .map_runtime_err()?
-            .to_vec();
-        self.get_layer_u32(py, data)
+            .map_runtime_err()?;
+        self.get_layer_f32(py, gravity_x.to_vec())
     }
 
     #[getter]
-    pub fn get_normals_x<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f32>>> {
-        let normals = self.inner.get_normals_x().block_on().map_runtime_err()?;
-        self.get_layer_f32(py, normals.to_vec())
-    }
-
-    #[getter]
-    pub fn get_normals_y<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f32>>> {
-        let normals = self.inner.get_normals_y().block_on().map_runtime_err()?;
-        self.get_layer_f32(py, normals.to_vec())
-    }
-
-    #[getter]
-    pub fn get_normals_z<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f32>>> {
-        let normals = self.inner.get_normals_z().block_on().map_runtime_err()?;
-        self.get_layer_f32(py, normals.to_vec())
+    pub fn get_gravity_y<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        let (_, gravity_y) = self
+            .inner
+            .get_slope_gravity()
+            .block_on()
+            .map_runtime_err()?;
+        self.get_layer_f32(py, gravity_y.to_vec())
     }
 
     #[getter]
@@ -408,26 +387,68 @@ impl PySimulation {
     }
 
     #[getter]
-    fn get_positions<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f32>>> {
-        let particles = self.inner.fetch_particles().block_on().map_runtime_err()?;
-        let mut flat_positions: Vec<f32> = Vec::with_capacity(particles.len() * 3);
-
-        for p in particles {
-            flat_positions.extend_from_slice(&p.position);
+    fn get_particles_position<'py>(
+        &mut self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        let positions = self
+            .inner
+            .fetch_particles_position()
+            .block_on()
+            .map_runtime_err()?;
+        let mut flat_positions: Vec<f32> = Vec::with_capacity(positions.len() * 2);
+        for [x, y] in positions {
+            flat_positions.push(*x);
+            flat_positions.push(*y);
         }
 
-        // Convert the flat Vec into an Nx3 NumPy Array
-        flat_positions.to_pyarray(py).reshape([particles.len(), 3])
+        // Convert the flat Vec into an Nx2 NumPy Array
+        flat_positions.to_pyarray(py).reshape([positions.len(), 2])
+    }
+
+    #[getter]
+    fn get_particles_velocity<'py>(
+        &mut self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        let velocities = self
+            .inner
+            .fetch_particles_velocity()
+            .block_on()
+            .map_runtime_err()?;
+        let mut flat_velocities: Vec<f32> = Vec::with_capacity(velocities.len() * 2);
+        for [x, y] in velocities {
+            flat_velocities.push(*x);
+            flat_velocities.push(*y);
+        }
+
+        // Convert the flat Vec into an Nx2 NumPy Array
+        flat_velocities
+            .to_pyarray(py)
+            .reshape([velocities.len(), 2])
+    }
+
+    #[getter]
+    fn get_particles_elevation<'py>(
+        &mut self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyArray1<f32>>> {
+        let stopped = self
+            .inner
+            .fetch_particles_elevation()
+            .block_on()
+            .map_runtime_err()?;
+        Ok(stopped.to_pyarray(py))
     }
 
     #[getter]
     fn get_stopped<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<u32>>> {
-        let particles = self.inner.fetch_particles().block_on().map_runtime_err()?;
-        Ok(particles
-            .iter()
-            .map(|p| p.stopped)
-            .collect::<Vec<u32>>()
-            .to_pyarray(py))
+        let stopped = self
+            .inner
+            .fetch_particles_stopped()
+            .block_on()
+            .map_runtime_err()?;
+        Ok(stopped.to_pyarray(py))
     }
 
     fn convert_rgba_texture<'py>(
