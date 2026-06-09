@@ -1,7 +1,6 @@
 use crate::buffers::{
     AtomicValues, BufferName, GpuResources, TextureName, create_buffers_and_texture_descriptions,
 };
-use crate::settings::SimFlags;
 use crate::shaders::{ComputeShaderConfig, ShaderName, generate_shader_report};
 use crate::utils::timer_checkpoint;
 use anyhow::{Ok, Result, anyhow};
@@ -851,29 +850,27 @@ impl ComputeOrchestrator {
                     });
 
                 for _i in 0..steps_to_run {
-                    if SimFlags::from_u32(sim_settings.flags).is_particle_interaction_enabled() {
-                        // --- resetGrid ---
-                        compute_pass.set_pipeline(&reset_grid_config.pipeline);
-                        compute_pass.set_bind_group(0, &reset_grid_bind_group, &[]);
-                        compute_pass.dispatch_workgroups(
-                            self.dispatch_number_workgroups_x_2d,
-                            self.dispatch_number_workgroups_y_2d,
-                            1,
-                        );
-                        // --- P2G ---
-                        compute_pass.set_pipeline(&p2g_config.pipeline);
-                        compute_pass.set_bind_group(0, &p2g_bindgroup, &[]);
-                        compute_pass.dispatch_workgroups(self.dispatch_number_workgroups_1d, 1, 1);
+                    // --- resetGrid ---
+                    compute_pass.set_pipeline(&reset_grid_config.pipeline);
+                    compute_pass.set_bind_group(0, &reset_grid_bind_group, &[]);
+                    compute_pass.dispatch_workgroups(
+                        self.dispatch_number_workgroups_x_2d,
+                        self.dispatch_number_workgroups_y_2d,
+                        1,
+                    );
+                    // --- P2G ---
+                    compute_pass.set_pipeline(&p2g_config.pipeline);
+                    compute_pass.set_bind_group(0, &p2g_bindgroup, &[]);
+                    compute_pass.dispatch_workgroups(self.dispatch_number_workgroups_1d, 1, 1);
 
-                        // --- Grid Physics ---
-                        compute_pass.set_pipeline(&grid_physics_config.pipeline);
-                        compute_pass.set_bind_group(0, &grid_physics_bindgroup, &[]);
-                        compute_pass.dispatch_workgroups(
-                            self.dispatch_number_workgroups_x_2d,
-                            self.dispatch_number_workgroups_y_2d,
-                            1,
-                        );
-                    }
+                    // --- Grid Physics ---
+                    compute_pass.set_pipeline(&grid_physics_config.pipeline);
+                    compute_pass.set_bind_group(0, &grid_physics_bindgroup, &[]);
+                    compute_pass.dispatch_workgroups(
+                        self.dispatch_number_workgroups_x_2d,
+                        self.dispatch_number_workgroups_y_2d,
+                        1,
+                    );
 
                     // --- computeParticles ---
                     compute_pass.set_pipeline(&compute_particles_config.pipeline);
