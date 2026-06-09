@@ -50,6 +50,13 @@ function plotDem(sim) {
 
         const layout = {
             template: plotly_dark,
+            margin: {
+                t: 0,
+                b: 0,
+                l: 0,
+                r: 0
+            },
+            autosize: true,
             scene: {
                 aspectmode: 'data',
             }
@@ -135,7 +142,7 @@ async function updatePlots(sim, selectedVariable) {
         traceHist.x = cellCountLog.filter(val => val > 0);
     } else if (selectedVariable === 'peak_velocity') {
         traceHist.x = traceHist.x.filter(val => val > 1e-5)
-    }else if (selectedVariable === 'peak_flow_thickness') {
+    } else if (selectedVariable === 'peak_flow_thickness') {
         traceHist.x = traceHist.x.filter(val => val > 1e-5)
     }
     Plotly.restyle(demPlot, plotOptions, [0]);
@@ -199,7 +206,7 @@ async function plotTrajectory(timestepData) {
 }
 
 async function plotTimestepData(timestepData) {
-    
+
     let x = new Float32Array(timestepData.time);
     let n = timestepData.time.length;
     const friction = {

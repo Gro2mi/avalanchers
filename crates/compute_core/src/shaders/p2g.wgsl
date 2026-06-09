@@ -12,6 +12,11 @@ fn p2g(@builtin(global_invocation_id) id: vec3u) {
     if sim_info.flags >= SIM_INFO_STOPPED {
         return;
     }
+    
+    let use_particle_interaction: bool = (sim_settings.flags & (1u << 1u)) != 0u;
+    if !use_particle_interaction {
+        return;
+    }
     let p = particles[id.x];
 
     let grid_pos = p.position.xy / sim_settings.cell_size;

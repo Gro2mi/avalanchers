@@ -17,6 +17,12 @@ fn grid_physics(@builtin(global_invocation_id) id: vec3u) {
     if sim_info.flags >= SIM_INFO_STOPPED {
         return;
     }
+    
+    let use_particle_interaction: bool = (sim_settings.flags & (1u << 1u)) != 0u;
+    if !use_particle_interaction {
+        new_cells_rolling_window[sim_info.timestep % 40u] = new_cells_rolling_window[sim_info.timestep % 40u] + 1u; // update new cell count for diagnostics
+        return;
+    }
     let idx = xy_to_idx(id.x, id.y);
     let n = textureLoad(normals_texture, id.xy, 0);
 

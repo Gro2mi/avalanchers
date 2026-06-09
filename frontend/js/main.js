@@ -224,6 +224,7 @@ function getSettings() {
         released_particles_per_cell: parseInt(releasedParticlesPerCellSlider.value),
         enable_curvature: document.getElementById('enable_curvature').checked,
         enable_particle_interaction: document.getElementById('enable_particle_interaction').checked,
+        enable_earth_pressure_coefficient: document.getElementById('enable_earth_pressure_coefficient').checked,
         internal_friction_angle: parseFloat(internalFrictionAngleSlider.value),
     };
     return simSettings;
