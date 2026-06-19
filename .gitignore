@@ -25,6 +25,7 @@ data/wind/
 data/snow/
 frontend/data/gpx
 .qlty/
+dtm_cache/
 shader_report.html
 
 

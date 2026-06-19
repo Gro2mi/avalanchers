@@ -16,6 +16,7 @@ use wgpu::{
 // use log::{debug, info, warn, error};
 pub mod buffers;
 pub mod dem;
+pub mod evaluation;
 pub mod settings;
 pub mod shaders;
 pub mod utils;
