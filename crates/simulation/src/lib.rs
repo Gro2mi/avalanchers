@@ -6,6 +6,7 @@ use compute_core::{
     settings::{Settings, SimSettings},
     utils::*,
 };
+pub mod polygons;
 use std::sync::Once;
 use web_time::Instant;
 static INIT: Once = Once::new();

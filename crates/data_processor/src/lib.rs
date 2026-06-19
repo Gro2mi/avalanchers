@@ -21,6 +21,9 @@ use xz2::{read::XzDecoder, write::XzEncoder};
 #[cfg(not(target_arch = "wasm32"))]
 use zstd::stream::{decode_all, encode_all};
 
+#[cfg(not(target_arch = "wasm32"))]
+pub mod tile_manager;
+
 use image::{GenericImageView, ImageReader};
 
 #[allow(unused_imports)]
