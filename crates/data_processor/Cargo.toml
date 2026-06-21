@@ -17,6 +17,7 @@ tracing = { workspace = true}
 lz4_flex = { workspace = true }
 reqwest = { workspace = true }
 tiff = { workspace = true }
+shapefile = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 xz2 = "0.1"
@@ -25,6 +26,7 @@ zstd = "0.13"
 bytemuck = { workspace = true }
 zarrs = { workspace = true }
 zarrs_filesystem = { workspace = true }
+zarrs_plugin = { workspace = true }
 reqwest = { workspace = true }
 futures = { workspace = true }
 ndarray = { workspace = true }

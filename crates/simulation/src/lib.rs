@@ -6,7 +6,6 @@ use compute_core::{
     settings::{Settings, SimSettings},
     utils::*,
 };
-pub mod polygons;
 use std::sync::Once;
 use web_time::Instant;
 static INIT: Once = Once::new();
@@ -92,8 +91,8 @@ impl Simulation {
 
     pub async fn create(&mut self, settings: Settings) -> Result<()> {
         timer_checkpoint("Start create");
-        let (settings_result, dem_result) =
-            data_processor::create_sim_settings_and_dem(&settings).await;
+        let (settings_result, dem_result, _outline) =
+            data_processor::create_sim_settings_and_dem(&settings).await?;
         self.settings = settings_result;
         if let Some(batch_steps) = settings.batch_compute_steps {
             self.orchestrator.batch_compute_steps = batch_steps;
@@ -1294,9 +1293,10 @@ mod tests {
         }
         let mut orchestrator =
             block_on(ComputeOrchestrator::new()).expect("Failed to create ComputeOrchestrator");
-        let (sim_settings, dem) = block_on(data_processor::create_sim_settings_and_dem_from_path(
-            INCLINED_PLANE_PATH,
-        ));
+        let (sim_settings, dem, _outline) = block_on(
+            data_processor::create_sim_settings_and_dem_from_path(INCLINED_PLANE_PATH),
+        )
+        .unwrap();
         block_on(orchestrator.run_analyze_terrain(&sim_settings, &dem))
             .expect("Failed to run normals shader");
 
@@ -1306,12 +1306,6 @@ mod tests {
         let (normal_x, normal_y, normal_z, profile_curvature) =
             block_on(orchestrator.read_texture::<f32>(TextureName::Normals))
                 .expect("Failed to get normals texture");
-        data_processor::save_grid(&dem, "slope_aspect.bin", slope_aspect.clone())
-            .expect("Failed to save slope_aspect");
-        data_processor::save_grid(&dem, "slope_angle.bin", slope_angle.clone())
-            .expect("Failed to save slope_angle");
-        data_processor::save_grid(&dem, "profile_curvature.bin", profile_curvature.clone())
-            .expect("Failed to save profile_curvature");
         // println!("{}", slope_texture[5].to_f32());
         let debug_buffer: Vec<f32> = block_on(orchestrator.resources.read_buffer(
             &orchestrator.device,
@@ -1338,9 +1332,10 @@ mod tests {
     fn test_load_release_areas() {
         let mut orchestrator: ComputeOrchestrator =
             block_on(ComputeOrchestrator::new()).expect("Failed to create ComputeOrchestrator");
-        let (sim_settings, _dem) = block_on(data_processor::create_sim_settings_and_dem_from_path(
-            INCLINED_PLANE_PATH,
-        ));
+        let (sim_settings, _dem, _outline) = block_on(
+            data_processor::create_sim_settings_and_dem_from_path(INCLINED_PLANE_PATH),
+        )
+        .unwrap();
         let data = block_on(data_processor::load_release_areas(RELEASE_TEXTURE_PATH))
             .expect("Failed to read release areas");
         info!("Max: {:?}", data.max_value().unwrap());
@@ -1373,9 +1368,10 @@ mod tests {
     fn test_load_release_areas_gar() {
         let mut orchestrator =
             block_on(ComputeOrchestrator::new()).expect("Failed to create ComputeOrchestrator");
-        let (sim_settings, _dem) = block_on(data_processor::create_sim_settings_and_dem_from_path(
-            GAR_PATH,
-        ));
+        let (sim_settings, _dem, _outline) = block_on(
+            data_processor::create_sim_settings_and_dem_from_path(GAR_PATH),
+        )
+        .unwrap();
         let data = block_on(data_processor::load_release_areas(GAR_RELEASE_TEXTURE_PATH))
             .expect("Failed to read PNG");
         info!("Max: {:?}", data.max_value().unwrap());
@@ -1409,9 +1405,10 @@ mod tests {
     fn test_initialize_particles() {
         let mut orchestrator =
             block_on(ComputeOrchestrator::new()).expect("Failed to create ComputeOrchestrator");
-        let (mut sim_settings, dem) = block_on(
+        let (mut sim_settings, dem, _outline) = block_on(
             data_processor::create_sim_settings_and_dem_from_path(INCLINED_PLANE_PATH),
-        );
+        )
+        .unwrap();
         sim_settings.released_particles_per_cell = 10;
         info!("Sim settings: {:?}", sim_settings);
         block_on(orchestrator.run_analyze_terrain(&sim_settings, &dem))

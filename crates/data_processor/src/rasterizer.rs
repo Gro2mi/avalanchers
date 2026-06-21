@@ -1,3 +1,13 @@
+#[derive(thiserror::Error, Debug)]
+pub enum RasterizerError {
+    #[error("Padding must be positive")]
+    PaddingMustBePositive,
+    #[error("Padding is too small")]
+    PaddingIsTooSmall,
+    #[error("Raster grid is empty")]
+    RasterGridIsEmpty,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Point2D {
     pub x: f64,
@@ -67,14 +77,16 @@ impl RasterGrid {
 
         let data = vec![0; width * height];
 
-        Self {
+        let mut grid = Self {
             origin_x,
             origin_y,
             cell_size,
             width,
             height,
             data,
-        }
+        };
+        grid.rasterize(polygon);
+        grid
     }
 
     #[inline(always)]
@@ -178,21 +190,79 @@ impl RasterGrid {
             }
         }
     }
-    pub fn debug_print(&self) {
-        for row in self.data.chunks(self.width) {
-            let line: String = row
-                .iter()
-                .map(|&val| if val == 1 { "██" } else { "xx" })
-                .collect();
-            println!("{}", line);
+
+    /// Adds a zero-filled padding around the current raster data in meters.
+    /// The padding is converted to discrete cells based on the cell size.
+    pub fn add_padding(&mut self, padding_meters: f64) -> Result<(), RasterizerError> {
+        if padding_meters <= 0.0 {
+            return Err(RasterizerError::PaddingMustBePositive);
         }
+        if self.width == 0 || self.height == 0 {
+            return Err(RasterizerError::RasterGridIsEmpty);
+        }
+        let padding_cells = (padding_meters / self.cell_size).ceil() as usize;
+        if padding_cells == 0 {
+            return Err(RasterizerError::PaddingIsTooSmall);
+        }
+        let new_width = self.width + 2 * padding_cells;
+        let new_height = self.height + 2 * padding_cells;
+        let mut new_data = vec![0; new_width * new_height];
+        for y in 0..self.height {
+            let old_start = y * self.width;
+            let old_end = old_start + self.width;
+            let new_start = (y + padding_cells) * new_width + padding_cells;
+            new_data[new_start..new_start + self.width]
+                .copy_from_slice(&self.data[old_start..old_end]);
+        }
+
+        self.origin_x -= padding_cells as f64 * self.cell_size;
+        self.origin_y -= padding_cells as f64 * self.cell_size;
+        self.width = new_width;
+        self.height = new_height;
+        self.data = new_data;
+        Ok(())
+    }
+
+    pub fn print(&self) {
+        println!(
+            "Grid: {}x{} cells, {}x{} m, {} m² avalanche area",
+            self.width,
+            self.height,
+            self.width as f64 * self.cell_size,
+            self.height as f64 * self.cell_size,
+            self.cell_size * self.cell_size * self.data.iter().filter(|&&v| v == 1).count() as f64
+        );
+        println!("Origin: {}, {}", self.origin_x, self.origin_y);
+        println!("Cell Size: {}", self.cell_size);
+        print_grid(&self.data, self.width);
+    }
+}
+
+impl Default for RasterGrid {
+    fn default() -> Self {
+        Self {
+            origin_x: 0.0,
+            origin_y: 0.0,
+            cell_size: 5.0,
+            width: 0,
+            height: 0,
+            data: Vec::new(),
+        }
+    }
+}
+
+pub fn print_grid(data: &[u8], width: usize) {
+    for row in data.chunks(width) {
+        let line: String = row
+            .iter()
+            .map(|&val| if val == 1 { "██" } else { "xx" })
+            .collect();
+        println!("{}", line);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::polygons;
-
     use super::*;
 
     /// Helper to create a basic square polygon
@@ -243,7 +313,7 @@ mod tests {
         // grid.debug_print();
         let raster_area = grid.data.iter().filter(|&&v| v == 1).count();
         let polygon_area = l * l / 2.0;
-        grid.debug_print();
+        grid.print();
         println!(
             "Area filled: {}, Area polygon: {}, Relative Error: {}",
             raster_area,
@@ -262,7 +332,7 @@ mod tests {
         // grid.debug_print();
         let raster_area = grid.data.iter().filter(|&&v| v == 1).count();
         let polygon_area = l * l / 2.0;
-        grid.debug_print();
+        grid.print();
         println!(
             "Area filled: {}, Area polygon: {}, Relative Error: {}",
             raster_area,
@@ -278,7 +348,7 @@ mod tests {
         let poly = create_square_poly(0.0, 0.0, l, l);
         let mut grid = RasterGrid::from_polygon(&poly, 5.0);
         grid.rasterize(&poly);
-        grid.debug_print();
+        grid.print();
         let raster_area = grid.data.iter().filter(|&&v| v == 1).count() * 25; // Each cell is 5m x 5m = 25 m²
         let polygon_area = l * l;
         println!(
@@ -454,5 +524,49 @@ mod tests {
         // Tile column 0 (world_x=1.0) is empty. Tile column 1 (world_x=3.0) intersects the polygon!
         assert_eq!(padded[2], 0); // (x=0, y=1)
         assert_eq!(padded[3], 1); // (x=1, y=1)
+    }
+
+    #[test]
+    fn test_add_padding() {
+        let poly = create_square_poly(2.0, 2.0, 6.0, 6.0); // 4x4 meters
+        let mut grid = RasterGrid::from_polygon(&poly, 2.0); // origin: 2.0, 2.0. size: 2x2 cells
+        grid.rasterize(&poly);
+
+        // Grid data is originally:
+        // [1, 1,
+        //  1, 1]
+        assert_eq!(grid.data, vec![1, 1, 1, 1]);
+
+        // Add a padding of 2.0 meters (which is 1 cell)
+        grid.add_padding(2.0).expect("Failed to add padding");
+
+        // New dimensions: width + 2*1 = 4, height + 2*1 = 4
+        // Padded data should be:
+        // [0, 0, 0, 0,
+        //  0, 1, 1, 0,
+        //  0, 1, 1, 0,
+        //  0, 0, 0, 0]
+        assert_eq!(
+            grid.data,
+            vec![0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0,]
+        );
+    }
+
+    #[test]
+    fn test_add_padding_zero() {
+        let poly = create_square_poly(2.0, 2.0, 6.0, 6.0); // 4x4 meters
+        let mut grid = RasterGrid::from_polygon(&poly, 2.0); // origin: 2.0, 2.0. size: 2x2 cells
+        grid.rasterize(&poly);
+
+        // Grid data is originally:
+        // [1, 1,
+        //  1, 1]
+        assert_eq!(grid.data, vec![1, 1, 1, 1]);
+
+        // Add a padding of 0.0 should return PaddingMustBePositive error
+        let res = grid.add_padding(0.0);
+        assert!(matches!(res, Err(RasterizerError::PaddingMustBePositive)));
+
+        assert_eq!(grid.data, vec![1, 1, 1, 1]);
     }
 }
