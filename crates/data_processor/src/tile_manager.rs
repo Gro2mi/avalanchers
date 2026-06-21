@@ -16,27 +16,49 @@ use zarrs::array::{
     },
 };
 use zarrs::group::GroupBuilder;
+use zarrs::storage::StorageError;
 use zarrs_filesystem::FilesystemStore;
 
+use compute_core::dem::{Bounds, Dem};
+use compute_core::utils::{linspace, to_2d};
+
 #[derive(thiserror::Error, Debug)]
-pub enum TileError {
+pub enum TileManagerError {
     #[error("Network error: {0}")]
     Network(#[from] reqwest::Error),
+
     #[error("TIFF decoding error: {0}")]
     Tiff(#[from] tiff::TiffError),
+
     #[error("Zarr storage error: {0}")]
     Zarr(#[from] zarrs::array::ArrayError),
-    // Add this line to handle the builder errors:
+
     #[error("Zarr creation error: {0}")]
     ZarrCreate(#[from] zarrs::array::ArrayCreateError),
+
     #[error("Missing or invalid data")]
     InvalidData,
+
     #[error("HTTP error: {0}")]
     Http(String),
+
     #[error("Invalid tile shape: got {0:?}")]
     InvalidShape((usize, usize)),
+
     #[error(transparent)]
     ZarrDimensionality(#[from] zarrs::array::IncompatibleDimensionalityError),
+
+    #[error(transparent)]
+    Store(#[from] StorageError),
+
+    #[error(transparent)]
+    GroupCreate(#[from] zarrs::group::GroupCreateError),
+
+    #[error(transparent)]
+    PluginCreate(#[from] zarrs_plugin::PluginCreateError),
+
+    #[error(transparent)]
+    FilesystemStoreCreate(#[from] zarrs::filesystem::FilesystemStoreCreateError),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -63,7 +85,7 @@ pub struct TileManager {
 
 impl TileManager {
     /// Initializes the Tile Manager with a local Zarr filesystem store
-    pub fn new(cache_dir: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(cache_dir: &str) -> Result<Self, TileManagerError> {
         // for switzerland
         let min_easting_km: u64 = 2480;
         let max_easting: u64 = 2840;
@@ -78,8 +100,7 @@ impl TileManager {
         ];
         let chunk_shape = [tile_size, tile_size];
 
-        let store =
-            Arc::new(FilesystemStore::new(cache_dir).expect("Failed to create filesystem store"));
+        let store = Arc::new(FilesystemStore::new(cache_dir)?);
         let mut root_group = GroupBuilder::new().build(store.clone(), "/")?;
         let global_attrs = json!({
             "title": "SwissALTI3D DTM Resampled to 5m",
@@ -245,7 +266,7 @@ impl TileManager {
     }
 
     /// Fetches the TIFF from geo.admin.ch and decodes it into a 500x500 f32 array
-    async fn fetch_and_parse_tif(&self, id: TileId) -> Result<Array2<f32>, TileError> {
+    async fn fetch_and_parse_tif(&self, id: TileId) -> Result<Array2<f32>, TileManagerError> {
         let url = format!(
             "https://data.geo.admin.ch/ch.swisstopo.swissalti3d/swissalti3d_2019_{}-{}/swissalti3d_2019_{}-{}_2_2056_5728.tif",
             id.easting, id.northing, id.easting, id.northing,
@@ -262,7 +283,7 @@ impl TileManager {
             .to_string();
 
         if !status.is_success() {
-            return Err(TileError::Http(format!(
+            return Err(TileManagerError::Http(format!(
                 "tile {:?}: HTTP {} ({})",
                 id, status, url
             )));
@@ -271,7 +292,7 @@ impl TileManager {
         let bytes = response.bytes().await?;
 
         if bytes.len() < 8 {
-            return Err(TileError::InvalidData);
+            return Err(TileManagerError::InvalidData);
         }
 
         let cursor = Cursor::new(bytes.clone());
@@ -293,13 +314,13 @@ impl TileManager {
         match decoder.read_image() {
             Ok(DecodingResult::F32(mut vec)) => {
                 if vec.len() != (width * height) as usize {
-                    return Err(TileError::InvalidData);
+                    return Err(TileManagerError::InvalidData);
                 }
 
                 compute_core::utils::flip_rows_flat_vec(&mut vec, width, height);
 
                 Array2::from_shape_vec((height as usize, width as usize), vec)
-                    .map_err(|_| TileError::InvalidData)
+                    .map_err(|_| TileManagerError::InvalidData)
             }
 
             Ok(other) => {
@@ -308,7 +329,7 @@ impl TileManager {
                     id,
                     std::mem::discriminant(&other)
                 );
-                Err(TileError::InvalidData)
+                Err(TileManagerError::InvalidData)
             }
 
             Err(e) => {
@@ -393,7 +414,7 @@ impl TileManager {
         output
     }
 
-    pub async fn get_bbox(&self, bbox: &BBox) -> Result<(Vec<f32>, usize, usize), TileError> {
+    pub async fn get_dem(&self, bbox: &BBox) -> Result<Dem, TileManagerError> {
         // snap to 5 m grid
         let min_e = (bbox.min_easting / 5) * 5;
         let max_e = bbox.max_easting.div_ceil(5) * 5;
@@ -415,13 +436,13 @@ impl TileManager {
         let chunks = self
             .dtm
             .chunks_in_array_subset(&subset)?
-            .ok_or(TileError::InvalidData)?;
+            .ok_or(TileManagerError::InvalidData)?;
 
         for chunk_indices in chunks.indices() {
             if self
                 .dtm
                 .retrieve_encoded_chunk(&chunk_indices)
-                .map_err(|e| TileError::Http(e.to_string()))?
+                .map_err(|e| TileManagerError::Http(e.to_string()))?
                 .is_none()
             {
                 let tile = TileId {
@@ -447,7 +468,26 @@ impl TileManager {
         let rows = (row1 - row0) as usize;
         let cols = (col1 - col0) as usize;
 
-        Ok((data, rows, cols))
+        let mut dem = Dem {
+            width: rows,
+            height: cols,
+            data1d: data,
+            data: Vec::new(),
+            x: linspace(min_e as f32, max_e as f32, rows),
+            y: linspace(min_n as f32, max_n as f32, cols),
+            cell_size: 5.0,
+            bounds: Bounds {
+                xmin: min_e as f32,
+                xmax: max_e as f32,
+                ymin: min_n as f32,
+                ymax: max_n as f32,
+            },
+            map_factor: 1.0,
+            minimum_elevation: f32::INFINITY, // Will be calculated later
+        };
+        dem.data = to_2d(&dem.data1d, dem.width, dem.height);
+
+        Ok(dem)
     }
 }
 use std::fs::File;
@@ -510,11 +550,14 @@ mod tests {
         };
 
         println!("Fetching, caching, and stitching tiles...");
-        let (data, width, height) = manager.get_bbox(&bbox).await.expect("msg");
-        assert_eq!(10, width);
-        assert_eq!(10, height);
-        println!("width {}, height {}, data: {:?}", width, height, data);
-        let expected_data = vec![
+        let dem = manager.get_dem(&bbox).await.expect("msg");
+        assert_eq!(10, dem.width);
+        assert_eq!(10, dem.height);
+        println!(
+            "width {}, height {}, data: {:?}",
+            dem.width, dem.height, dem.data1d
+        );
+        let expected_data: Vec<f32> = vec![
             2193.765, 2194.0151, 2193.748, 2193.6294, 2193.561, 2193.7139, 2194.2805, 2194.536,
             2194.9507, 2195.626, 2191.5327, 2191.4226, 2191.3772, 2191.008, 2191.0254, 2191.234,
             2191.4453, 2191.792, 2192.5737, 2193.5688, 2189.028, 2188.6758, 2188.5618, 2188.2568,
@@ -529,7 +572,7 @@ mod tests {
             2174.9087, 2176.5313, 2171.9233, 2171.021, 2170.148, 2169.5645, 2169.3586, 2169.3037,
             2170.0542, 2170.9807, 2172.953, 2174.6018,
         ];
-        assert_eq!(data, expected_data);
+        assert_eq!(dem.data1d, expected_data);
     }
 
     /// 1. Test the Zarr Cache Initialization
@@ -689,13 +732,13 @@ mod tests {
     /// 6. Test TileError Formatting
     #[test]
     fn test_tile_error_formatting() {
-        let err_invalid = TileError::InvalidData;
+        let err_invalid = TileManagerError::InvalidData;
         assert_eq!(err_invalid.to_string(), "Missing or invalid data");
 
-        let err_http = TileError::Http("404 Not Found".to_string());
+        let err_http = TileManagerError::Http("404 Not Found".to_string());
         assert_eq!(err_http.to_string(), "HTTP error: 404 Not Found");
 
-        let err_shape = TileError::InvalidShape((100, 100));
+        let err_shape = TileManagerError::InvalidShape((100, 100));
         assert_eq!(err_shape.to_string(), "Invalid tile shape: got (100, 100)");
     }
 

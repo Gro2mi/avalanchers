@@ -277,6 +277,8 @@ impl FrictionModel {
 
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
 pub struct Settings {
+    pub outlines_path: Option<String>,
+    pub outlines_padding: Option<f32>,
     pub dem_path: Option<String>,
     pub release_areas_path: Option<String>,
     pub max_steps: Option<u32>,
@@ -403,6 +405,8 @@ mod tests {
     #[test_log::test]
     fn test_simsettings_from_json_patch() {
         let mut patch = Settings {
+            outlines_path: Some("path/to/outlines".to_string()),
+            outlines_padding: Some(10.0),
             max_steps: Some(42),
             sim_model: Some(1),
             friction_model: Some(2),

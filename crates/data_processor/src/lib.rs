@@ -7,27 +7,112 @@ use std::vec::Vec;
 use tiff::decoder::{Decoder, DecodingResult};
 use tiff::tags::Tag;
 
-use bincode::{Decode, Encode, config};
-use std::io::Read;
-
 use compute_core::dem::{Bounds, Dem, GeoMetadata, GeoTiff, TiffData};
 use compute_core::settings::{Settings, SimSettings};
 use compute_core::utils::*;
 
-use lz4_flex::{compress_prepend_size, decompress_size_prepended};
-#[cfg(not(target_arch = "wasm32"))]
-use xz2::{read::XzDecoder, write::XzEncoder};
-
-#[cfg(not(target_arch = "wasm32"))]
-use zstd::stream::{decode_all, encode_all};
-
 #[cfg(not(target_arch = "wasm32"))]
 pub mod tile_manager;
+
+pub mod output;
+pub mod rasterizer;
+pub mod shapefile_reader;
+use rasterizer::RasterGrid;
+use tile_manager::TileManager;
 
 use image::{GenericImageView, ImageReader};
 
 #[allow(unused_imports)]
 use tracing::{debug, error, info, trace, warn};
+
+#[derive(thiserror::Error, Debug)]
+pub enum DataProcessorError {
+    #[error(transparent)]
+    IO(#[from] std::io::Error),
+    #[error("Failed to read shapefile: {0}")]
+    ShapefileError(#[from] crate::shapefile_reader::ShapeError),
+    #[error("Failed to rasterize: {0}")]
+    RasterError(#[from] crate::rasterizer::RasterizerError),
+    #[error("Failed to read DEM: {0}")]
+    DemError(String),
+    #[error("Failed to create sim settings: {0}")]
+    SimSettingsError(String),
+    #[error("No outlines padding provided")]
+    NoneOutlinesPadding,
+    #[error("No outlines path provided")]
+    NoneOutlinesPath,
+    #[error("Failed to create tile manager")]
+    TileManagerError(#[from] crate::tile_manager::TileManagerError),
+    #[error("Unsupported DEM format: {0}")]
+    UnsupportedDemFormat(String),
+    #[error("No DEM provided")]
+    NoneDem,
+    #[error("No avalanche path provided")]
+    NoneAvalanchePath,
+    #[error(transparent)]
+    EsriGrid(#[from] EsriGridError),
+    #[error(transparent)]
+    GeoTiff(#[from] GeoTiffError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum EsriGridError {
+    #[error("Error reading header line: {0}")]
+    HeaderRead(std::io::Error),
+
+    #[error("Unexpected end of file while parsing header")]
+    UnexpectedEof,
+
+    #[error("Invalid header line: '{0}'")]
+    InvalidHeaderLine(String),
+
+    #[error("Unknown header key: {0}")]
+    UnknownHeaderKey(String),
+
+    #[error("Invalid ncols value")]
+    InvalidNcols,
+
+    #[error("Invalid nrows value")]
+    InvalidNrows,
+
+    #[error("Invalid xllcorner value")]
+    InvalidXllCorner,
+
+    #[error("Invalid yllcorner value")]
+    InvalidYllCorner,
+
+    #[error("Invalid xllcenter value")]
+    InvalidXllCenter,
+
+    #[error("Invalid yllcenter value")]
+    InvalidYllCenter,
+
+    #[error("Invalid cellsize value")]
+    InvalidCellsize,
+
+    #[error("Invalid nodata_value")]
+    InvalidNodataValue,
+
+    #[error("Missing X origin coordinate (xllcorner or xllcenter)")]
+    MissingXOrigin,
+
+    #[error("Missing Y origin coordinate (yllcorner or yllcenter)")]
+    MissingYOrigin,
+
+    #[error("Error reading data line: {0}")]
+    DataRead(std::io::Error),
+
+    #[error("Failed to parse data token: '{0}'")]
+    InvalidDataToken(String),
+
+    #[error("Data size mismatch. Expected {expected} values ({ncols}x{nrows}), but found {found}")]
+    DataSizeMismatch {
+        expected: usize,
+        ncols: usize,
+        nrows: usize,
+        found: usize,
+    },
+}
 
 #[derive(Debug, Clone)]
 pub struct EsriGridHeader {
@@ -98,14 +183,14 @@ pub struct EsriGrid {
 
 impl EsriGrid {
     /// Parses an ESRI ASCII grid file from a given path.
-    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, String> {
-        let file = File::open(path).map_err(|e| format!("Failed to open file: {}", e))?;
+    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, DataProcessorError> {
+        let file = File::open(path)?;
         let reader = BufReader::new(file);
-        Self::from_reader(reader)
+        Ok(Self::from_reader(reader)?)
     }
 
     /// Parses the grid from any type implementing `BufRead`.
-    pub fn from_reader<R: BufRead>(mut reader: R) -> Result<Self, String> {
+    pub fn from_reader<R: BufRead>(mut reader: R) -> Result<Self, EsriGridError> {
         let mut ncols = 0;
         let mut nrows = 0;
         let mut xllcorner = None;
@@ -121,45 +206,51 @@ impl EsriGrid {
         for _ in 0..6 {
             let line = match lines_iter.next() {
                 Some(Ok(l)) => l,
-                Some(Err(e)) => return Err(format!("Error reading header line: {}", e)),
-                None => return Err("Unexpected end of file while parsing header".to_string()),
+                Some(Err(e)) => return Err(EsriGridError::HeaderRead(e)),
+                None => return Err(EsriGridError::UnexpectedEof),
             };
 
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() < 2 {
-                return Err(format!("Invalid header line: '{}'", line));
+                return Err(EsriGridError::InvalidHeaderLine(line));
             }
-
             let key = parts[0].to_lowercase();
             let value = parts[1];
 
             match key.as_str() {
-                "ncols" => ncols = value.parse().map_err(|_| "Invalid ncols value")?,
-                "nrows" => nrows = value.parse().map_err(|_| "Invalid nrows value")?,
+                "ncols" => ncols = value.parse().map_err(|_| EsriGridError::InvalidNcols)?,
+                "nrows" => nrows = value.parse().map_err(|_| EsriGridError::InvalidNrows)?,
                 "xllcorner" => {
-                    xllcorner = Some(value.parse().map_err(|_| "Invalid xllcorner value")?)
+                    xllcorner = Some(value.parse().map_err(|_| EsriGridError::InvalidXllCorner)?)
                 }
                 "yllcorner" => {
-                    yllcorner = Some(value.parse().map_err(|_| "Invalid yllcorner value")?)
+                    yllcorner = Some(value.parse().map_err(|_| EsriGridError::InvalidYllCorner)?)
                 }
                 "xllcenter" => {
-                    xllcenter = Some(value.parse().map_err(|_| "Invalid xllcenter value")?)
+                    xllcenter = Some(value.parse().map_err(|_| EsriGridError::InvalidXllCenter)?)
                 }
                 "yllcenter" => {
-                    yllcenter = Some(value.parse().map_err(|_| "Invalid yllcenter value")?)
+                    yllcenter = Some(value.parse().map_err(|_| EsriGridError::InvalidYllCenter)?)
                 }
-                "cellsize" => cellsize = value.parse().map_err(|_| "Invalid cellsize value")?,
+                "cellsize" => {
+                    cellsize = value.parse().map_err(|_| EsriGridError::InvalidCellsize)?
+                }
                 "nodata_value" => {
-                    nodata_value = Some(value.parse().map_err(|_| "Invalid nodata_value")?)
+                    nodata_value = Some(
+                        value
+                            .parse()
+                            .map_err(|_| EsriGridError::InvalidNodataValue)?,
+                    )
                 }
-                _ => return Err(format!("Unknown header key: {}", parts[0])),
+                _ => return Err(EsriGridError::UnknownHeaderKey(parts[0].to_owned())),
             }
         }
         if xllcorner.is_none() && xllcenter.is_none() {
-            return Err("Missing X origin coordinate (xllcorner or xllcenter)".to_string());
+            return Err(EsriGridError::MissingXOrigin);
         }
+
         if yllcorner.is_none() && yllcenter.is_none() {
-            return Err("Missing Y origin coordinate (yllcorner or yllcenter)".to_string());
+            return Err(EsriGridError::MissingYOrigin);
         }
 
         let header = EsriGridHeader {
@@ -178,7 +269,7 @@ impl EsriGrid {
         let mut data: Vec<f32> = Vec::with_capacity(header.ncols * header.nrows);
 
         for line_result in lines_iter {
-            let line = line_result.map_err(|e| format!("Error reading data line: {}", e))?;
+            let line = line_result.map_err(EsriGridError::DataRead)?;
 
             // Skip purely empty lines
             if line.trim().is_empty() {
@@ -189,7 +280,7 @@ impl EsriGrid {
             for token in line.split_whitespace() {
                 let val: f32 = token
                     .parse()
-                    .map_err(|_| format!("Failed to parse data token: '{}'", token))?;
+                    .map_err(|_| EsriGridError::InvalidDataToken(token.to_owned()))?;
                 data.push(val);
             }
         }
@@ -197,13 +288,12 @@ impl EsriGrid {
         // 3. Validation Check
         let expected_size = header.ncols * header.nrows;
         if data.len() != expected_size {
-            return Err(format!(
-                "Data size mismatch. Expected {} values ({}x{}), but found {}.",
-                expected_size,
-                header.ncols,
-                header.nrows,
-                data.len()
-            ));
+            return Err(EsriGridError::DataSizeMismatch {
+                expected: expected_size,
+                ncols: header.ncols,
+                nrows: header.nrows,
+                found: data.len(),
+            });
         }
 
         Ok(EsriGrid { header, data })
@@ -297,427 +387,6 @@ impl EsriGrid {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
-pub enum DataType {
-    F16,
-    F32,
-    F64,
-}
-
-impl DataType {
-    pub fn from_int(value: u8) -> Option<Self> {
-        match value {
-            16 => Some(DataType::F16),
-            32 => Some(DataType::F32),
-            64 => Some(DataType::F64),
-            _ => None,
-        }
-    }
-
-    pub fn as_int(&self) -> u8 {
-        match self {
-            DataType::F16 => 16,
-            DataType::F32 => 32,
-            DataType::F64 => 64,
-        }
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            DataType::F16 => "f16",
-            DataType::F32 => "f32",
-            DataType::F64 => "f64",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
-pub enum Unit {
-    MetersPerSecond,
-    Degree,
-    Kilogram,
-    Dimensionless,
-}
-
-impl Unit {
-    pub fn from_int(value: u8) -> Option<Self> {
-        match value {
-            0 => Some(Unit::MetersPerSecond),
-            1 => Some(Unit::Degree),
-            2 => Some(Unit::Kilogram),
-            _ => Some(Unit::Dimensionless),
-        }
-    }
-    pub fn as_int(&self) -> u8 {
-        match self {
-            Unit::MetersPerSecond => 0,
-            Unit::Degree => 1,
-            Unit::Kilogram => 2,
-            Unit::Dimensionless => 255,
-        }
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Unit::MetersPerSecond => "m/s",
-            Unit::Degree => "°",
-            Unit::Kilogram => "kg",
-            Unit::Dimensionless => "-",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
-pub enum Variable {
-    Velocity,
-    SlopeAngle,
-    Curvature,
-    SlopeAspect,
-    NormalX,
-    NormalY,
-    NormalZ,
-    Mass,
-    Undefined,
-}
-impl Variable {
-    pub fn from_int(value: u8) -> Option<Self> {
-        match value {
-            0 => Some(Variable::Velocity),
-            1 => Some(Variable::SlopeAngle),
-            2 => Some(Variable::Curvature),
-            3 => Some(Variable::SlopeAspect),
-            4 => Some(Variable::NormalX),
-            5 => Some(Variable::NormalY),
-            6 => Some(Variable::NormalZ),
-            7 => Some(Variable::Mass),
-            _ => Some(Variable::Undefined),
-        }
-    }
-    pub fn as_int(&self) -> u8 {
-        match self {
-            Variable::Velocity => 0,
-            Variable::SlopeAngle => 1,
-            Variable::Curvature => 2,
-            Variable::SlopeAspect => 3,
-            Variable::NormalX => 4,
-            Variable::NormalY => 5,
-            Variable::NormalZ => 6,
-            Variable::Mass => 7,
-            Variable::Undefined => 255,
-        }
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Variable::Velocity => "velocity",
-            Variable::SlopeAngle => "slope_angle",
-            Variable::Curvature => "curvature",
-            Variable::SlopeAspect => "slope_aspect",
-            Variable::NormalX => "normal_x",
-            Variable::NormalY => "normal_y",
-            Variable::NormalZ => "normal_z",
-            Variable::Mass => "mass",
-            Variable::Undefined => "undefined",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FileFormat {
-    Binary,
-    Lz4,
-    Png,
-}
-impl FileFormat {
-    pub fn from_fileformat_str(value: &str) -> Option<Self> {
-        match value.to_lowercase().as_str() {
-            "binary" => Some(FileFormat::Binary),
-            "compressedbinary" => Some(FileFormat::Lz4),
-            "png" => Some(FileFormat::Png),
-            _ => None,
-        }
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            FileFormat::Binary => "binary",
-            FileFormat::Lz4 => "compressedbinary",
-            FileFormat::Png => "png",
-        }
-    }
-    pub fn as_extension(&self) -> &'static str {
-        match self {
-            FileFormat::Binary => "bin",
-            FileFormat::Lz4 => "lz4",
-            FileFormat::Png => "png",
-        }
-    }
-    pub fn from_extension(ext: &str) -> Option<Self> {
-        match ext.to_lowercase().as_str() {
-            "bin" => Some(FileFormat::Binary),
-            "lz4" => Some(FileFormat::Lz4),
-            "png" => Some(FileFormat::Png),
-            _ => None,
-        }
-    }
-}
-
-pub struct MetaGridParams {
-    pub width: u32,
-    pub height: u32,
-    pub cell_size: f32,
-    pub map_factor: f32,
-    pub epsg_code: u16,
-    pub top: f32,
-    pub left: f32,
-    pub data_type: DataType,
-    pub variable: Variable,
-    pub unit: Unit,
-}
-
-#[derive(Encode, Decode, PartialEq, Debug, Clone)]
-pub struct MetaGrid {
-    magic_bytes: u32,
-    pub version: u8,
-    pub width: u32,
-    pub height: u32,
-    pub cell_size: f32,
-    pub map_factor: f32,
-    pub epsg_code: u16,
-    pub top: f32,
-    pub left: f32,
-    pub data_type: DataType,
-    pub variable: Variable,
-    pub unit: Unit,
-}
-
-impl MetaGrid {
-    /// Creates a new MetaGrid with the given parameters.
-    pub fn new(params: &MetaGridParams) -> Self {
-        MetaGrid {
-            magic_bytes: u32::from_le_bytes(*b"AVAG"),
-            version: 1,
-            width: params.width,
-            height: params.height,
-            cell_size: params.cell_size,
-            map_factor: params.map_factor,
-            epsg_code: params.epsg_code,
-            top: params.top,
-            left: params.left,
-            data_type: params.data_type,
-            variable: params.variable,
-            unit: params.unit,
-        }
-    }
-
-    #[allow(dead_code)]
-    fn print(&self) -> String {
-        format!(
-            "Metadata(magic_bytes='{}', version={}, width={}, height={}, data_type={})",
-            std::str::from_utf8(&self.magic_bytes.to_le_bytes()).unwrap_or("????"),
-            self.version,
-            self.width,
-            self.height,
-            self.data_type.as_str()
-        )
-    }
-
-    #[allow(dead_code)]
-    fn equals(&self, other: &MetaGrid) -> bool {
-        self.magic_bytes == other.magic_bytes
-            && self.version == other.version
-            && self.width == other.width
-            && self.height == other.height
-            && self.data_type == other.data_type
-    }
-}
-
-#[derive(Encode, Decode, PartialEq, Debug, Clone)]
-pub struct MetaParticle {
-    magic_bytes: u32,
-    pub version: u8,
-    pub length: u32,
-    pub data_type: u8,
-}
-
-impl MetaParticle {
-    /// Creates a new MetaParticle with the given length and data type.
-    pub fn new(length: u32, data_type: DataType) -> Self {
-        MetaParticle {
-            magic_bytes: u32::from_le_bytes(*b"AVAP"),
-            version: 1,
-            length,
-            data_type: data_type.as_int(),
-        }
-    }
-
-    // A simple representation for Python's `repr()`
-    fn __repr__(&self) -> String {
-        format!(
-            "MetadataParticle(magic_bytes='{}', version={}, length={}, data_type={})",
-            std::str::from_utf8(&self.magic_bytes.to_le_bytes()).unwrap_or("????"),
-            self.version,
-            self.length,
-            DataType::from_int(self.data_type).unwrap().as_str()
-        )
-    }
-    fn __str__(&self) -> String {
-        self.__repr__()
-    }
-    fn __eq__(&self, other: &MetaParticle) -> bool {
-        self.magic_bytes == other.magic_bytes
-            && self.version == other.version
-            && self.length == other.length
-            && self.data_type == other.data_type
-    }
-}
-
-#[derive(Encode, Decode, PartialEq, Debug)]
-pub struct F32Data {
-    pub metadata: MetaGrid,
-    pub data: Vec<f32>,
-}
-
-impl F32Data {
-    /// Creates a new F32Data instance with the given metadata and data.
-    pub fn new(metadata: &MetaGrid, data: Vec<f32>) -> Self {
-        assert_eq!(
-            metadata.width * metadata.height,
-            data.len() as u32,
-            "Data width does not match metadata dimensions"
-        );
-        F32Data {
-            metadata: metadata.clone(),
-            data,
-        }
-    }
-
-    #[allow(dead_code)]
-    fn print(&self) -> String {
-        format!(
-            "F32Data(metadata={}, data_len={})",
-            self.metadata.print(),
-            self.data.len()
-        )
-    }
-
-    pub fn save(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let path = Path::new(path);
-        let encoded_bytes = bincode::encode_to_vec(self, config::standard())
-            .map_err(|e| format!("Bincode serialization failed: {}", e))?;
-        write_bin(path, &encoded_bytes);
-        Ok(())
-    }
-
-    pub fn load(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let buffer = read_bin(&PathBuf::from(path))?;
-        let (data, _): (F32Data, _) = bincode::decode_from_slice(&buffer, config::standard())
-            .map_err(|e| format!("Bincode deserialization failed: {}", e))?;
-        assert_eq!(
-            data.metadata.magic_bytes,
-            u32::from_le_bytes(*b"AVAG"),
-            "Invalid magic bytes"
-        );
-        Ok(data)
-    }
-}
-pub fn read_bin(path: &PathBuf) -> io::Result<Vec<u8>> {
-    let mut file = File::open(path)?;
-    let mut buffer = Vec::new();
-    file.read_to_end(&mut buffer)?;
-    Ok(buffer)
-}
-
-pub fn write_bin(path: &Path, buffer: &[u8]) {
-    let file = File::create(path.with_extension("bin")).expect("Failed to create file");
-    let mut writer = BufWriter::with_capacity(16 * 1024 * 1024, file); // 16 MB buffer
-    writer.write_all(buffer).expect("Failed to write data");
-}
-
-pub fn write_lz4_bin(path: &Path, buffer: &[u8]) {
-    let file = File::create(path.with_extension("lz4")).expect("Failed to create file");
-    let compressed_data = compress_prepend_size(buffer);
-    let mut writer = BufWriter::with_capacity(16 * 1024 * 1024, file); // 16 MB buffer
-    writer
-        .write_all(&compressed_data)
-        .expect("Failed to write data");
-}
-
-pub fn read_lz4(path: &Path) -> io::Result<Vec<u8>> {
-    read_bin(&path.with_extension("lz4")).and_then(|buffer| {
-        decompress_size_prepended(&buffer)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
-    })
-}
-
-#[allow(unused_variables)]
-pub fn write_zstd(path: &Path, buffer: &Vec<u8>) {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let file = File::create(path.with_extension("zst")).expect("Failed to create file");
-        let compressed_data = encode_all(Cursor::new(buffer), 22).expect("Failed to compress data");
-        let mut writer = BufWriter::with_capacity(16 * 1024 * 1024, file); // 16 MB buffer
-        writer
-            .write_all(&compressed_data)
-            .expect("Failed to write data");
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    {
-        panic!("Zstd compression is not supported on this platform");
-    }
-}
-
-#[allow(unused_variables)]
-pub fn read_zstd_bin(path: &Path) -> io::Result<Vec<u8>> {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        read_bin(&path.with_extension("zst"))
-            .and_then(|buffer| decode_all(Cursor::new(&buffer[..])))
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    {
-        panic!("Zstd compression is not supported on this platform");
-    }
-}
-
-#[allow(unused_variables)]
-pub fn write_xz(path: &Path, buffer: &Vec<u8>) {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let mut encoder = XzEncoder::new(
-            BufWriter::new(File::create(path.with_extension("xz")).expect("Failed to create file")),
-            6,
-        ); // level 0-9
-
-        std::io::copy(&mut BufReader::new(Cursor::new(buffer)), &mut encoder)
-            .expect("Failed to write data");
-        encoder.finish().expect("Failed to finish encoding");
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        panic!("XZ compression is not supported on this platform");
-    }
-}
-
-#[allow(unused_variables)]
-pub fn read_xz(path: &Path) -> io::Result<Vec<u8>> {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let compressed = File::open(path.with_extension("xz")).expect("Failed to open file");
-        let mut decoder = XzDecoder::new(BufReader::new(compressed));
-        let mut decompressed = Vec::new();
-
-        std::io::copy(&mut decoder, &mut decompressed)?;
-        Ok(decompressed)
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        panic!("XZ compression is not supported on this platform");
-    }
-}
-
 pub fn write_png(
     path: &Path,
     data: &[u8],
@@ -788,7 +457,30 @@ pub async fn fetch_from_url(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Er
     Ok(bytes.to_vec())
 }
 
-pub fn read_geo_tiff(path: &str) -> Result<GeoTiff, Box<dyn std::error::Error>> {
+#[derive(Debug, thiserror::Error)]
+pub enum GeoTiffError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+
+    #[error(transparent)]
+    Tiff(#[from] tiff::TiffError),
+
+    #[error("Missing pixel scale metadata (Tag 33550)")]
+    MissingPixelScale,
+
+    #[error("Non-uniform grid detected: X and Y scales must match for square cells")]
+    NonUniformGrid,
+
+    #[error("TIFF missing GeoTIFF tie point metadata (Tag 33922)")]
+    MissingTiePoints,
+
+    #[error("Unsupported GeoTIFF: Only a single tie point at the origin is supported")]
+    UnsupportedTiePoint,
+
+    #[error("Unsupported TIFF data type")]
+    UnsupportedDataType,
+}
+pub fn read_geo_tiff(path: &str) -> Result<GeoTiff, GeoTiffError> {
     let file = File::open(path)?;
     let mut decoder = Decoder::new(BufReader::new(file))?;
 
@@ -801,24 +493,22 @@ pub fn read_geo_tiff(path: &str) -> Result<GeoTiff, Box<dyn std::error::Error>> 
         .unwrap_or_default();
 
     if pixel_scales.len() <= 2 {
-        return Err("Missing pixel scale metadata (Tag 33550)".into());
+        return Err(GeoTiffError::MissingPixelScale);
     }
     if pixel_scales[0] != pixel_scales[1] {
-        return Err(
-            "Non-uniform grid detected: X and Y scales must match for square cells.".into(),
-        );
+        return Err(GeoTiffError::NonUniformGrid);
     }
 
     // Tag 33922: ModelTiepointTag
-    let tie_points = decoder.get_tag_f64_vec(Tag::Unknown(33922))?;
+    let tie_points = decoder
+        .get_tag_f64_vec(Tag::Unknown(33922))
+        .map_err(|_| GeoTiffError::MissingTiePoints)?;
     let nodata = decoder
         .get_tag_f64_vec(Tag::Unknown(42113)) // Try to get the tag
         .ok() // If it fails (missing or wrong type), return None
         .and_then(|v| v.first().copied());
     if tie_points[0] != 0.0 || tie_points[1] != 0.0 || tie_points[2] != 0.0 {
-        return Err(
-            "Unsupported GeoTIFF: Only a single tie point at the origin is supported.".into(),
-        );
+        return Err(GeoTiffError::UnsupportedTiePoint);
     }
 
     let metadata = if tie_points.len() >= 6 {
@@ -848,7 +538,7 @@ pub fn read_geo_tiff(path: &str) -> Result<GeoTiff, Box<dyn std::error::Error>> 
             nodata,
         }
     } else {
-        return Err("TIFF missing GeoTIFF tie point metadata (Tag 33922).".into());
+        return Err(GeoTiffError::MissingTiePoints);
     };
 
     // --- Image Data Extraction ---
@@ -857,7 +547,7 @@ pub fn read_geo_tiff(path: &str) -> Result<GeoTiff, Box<dyn std::error::Error>> 
         DecodingResult::U8(data) => TiffData::U8(data),
         DecodingResult::U16(data) => TiffData::U16(data),
         DecodingResult::F32(data) => TiffData::F32(data),
-        _ => return Err("Unsupported TIFF data type".into()),
+        _ => return Err(GeoTiffError::UnsupportedDataType),
     };
     info!(
         "Loaded GeoTIFF: {}x{} cells at {}m resolution",
@@ -867,7 +557,7 @@ pub fn read_geo_tiff(path: &str) -> Result<GeoTiff, Box<dyn std::error::Error>> 
     Ok(GeoTiff { metadata, data })
 }
 
-async fn load_png_as_dem(path: &str) -> Result<Dem, Box<dyn std::error::Error>> {
+async fn load_png_as_dem(path: &str) -> Result<Dem, DataProcessorError> {
     let (rgba, width, height) = read_png(path).await.expect("Failed to load PNG");
     let mut bounds: Bounds = load_bounds(path).await.expect("Failed to load bounds");
     debug!("Loaded PNG {}: {} x {}", path, width, height);
@@ -893,7 +583,7 @@ async fn load_png_as_dem(path: &str) -> Result<Dem, Box<dyn std::error::Error>> 
     Ok(dem)
 }
 
-fn load_asc_as_dem(path: &str) -> Result<Dem, Box<dyn std::error::Error>> {
+fn load_asc_as_dem(path: &str) -> Result<Dem, DataProcessorError> {
     let mut grid = EsriGrid::from_file(path)?;
     flip_rows_flat_vec(
         &mut grid.data,
@@ -922,7 +612,7 @@ fn load_asc_as_dem(path: &str) -> Result<Dem, Box<dyn std::error::Error>> {
     Ok(dem)
 }
 
-fn load_tiff_as_dem(path: &str) -> Result<Dem, Box<dyn std::error::Error>> {
+fn load_tiff_as_dem(path: &str) -> Result<Dem, DataProcessorError> {
     let mut tiff: GeoTiff = read_geo_tiff(path)?;
     tiff.flip_y();
     let mut dem = Dem {
@@ -947,25 +637,6 @@ fn load_tiff_as_dem(path: &str) -> Result<Dem, Box<dyn std::error::Error>> {
     };
     dem.data = to_2d(&dem.data1d, dem.width, dem.height);
     Ok(dem)
-}
-
-pub fn save_grid(dem: &Dem, path: &str, data: Vec<f32>) -> Result<(), std::io::Error> {
-    let params = MetaGridParams {
-        width: dem.width as u32,
-        height: dem.height as u32,
-        cell_size: dem.cell_size,
-        map_factor: dem.map_factor,
-        epsg_code: 0,
-        top: 0.0,
-        left: 0.0,
-        data_type: DataType::F32,
-        variable: Variable::Undefined,
-        unit: Unit::Dimensionless,
-    };
-    F32Data::new(&MetaGrid::new(&params), data)
-        .save(path.as_ref())
-        .unwrap_or_else(|_| panic!("Failed to save grid {}", path));
-    Ok(())
 }
 
 pub async fn load_release_areas(path: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
@@ -997,7 +668,7 @@ pub async fn load_release_areas(path: &str) -> Result<Vec<f32>, Box<dyn std::err
     Ok(data)
 }
 
-pub async fn load_dem(path: &str) -> Result<Dem, Box<dyn std::error::Error>> {
+pub async fn load_dem(path: &str) -> Result<Dem, DataProcessorError> {
     let ext = std::path::Path::new(path)
         .extension()
         .and_then(|s| s.to_str())
@@ -1007,7 +678,7 @@ pub async fn load_dem(path: &str) -> Result<Dem, Box<dyn std::error::Error>> {
         "asc" => load_asc_as_dem(path)?,
         "png" => load_png_as_dem(path).await?,
         "tif" | "tiff" => load_tiff_as_dem(path)?,
-        _ => return Err(format!("Unsupported DEM format: {}", ext).into()),
+        _ => return Err(DataProcessorError::UnsupportedDemFormat(ext.to_string())),
     };
 
     dem.minimum_elevation = Dem::calculate_minimum_elevation(&dem.data1d);
@@ -1050,22 +721,82 @@ async fn load_bounds(path: &str) -> Result<Bounds, String> {
     Dem::parse_bounds_lines(lines).ok_or_else(|| "Failed to parse bounds from file".to_string())
 }
 
-pub async fn create_sim_settings_and_dem_from_path(file_path: &str) -> (SimSettings, Dem) {
+fn load_outline(path: &str, padding: f32) -> Result<RasterGrid, DataProcessorError> {
+    let geo_poly = shapefile_reader::read_shapefile_nth_polygon(path, 0)?;
+    let mut outline = RasterGrid::from_polygon(&geo_poly, 5.0);
+    outline.add_padding(padding as f64)?;
+    Ok(outline)
+}
+
+pub async fn create_sim_settings_and_dem_from_path(
+    file_path: &str,
+) -> Result<(SimSettings, Dem, RasterGrid), DataProcessorError> {
     let settings = Settings {
         dem_path: Some(file_path.to_string()),
         ..Default::default()
     };
     create_sim_settings_and_dem(&settings).await
 }
-pub async fn create_sim_settings_and_dem(settings: &Settings) -> (SimSettings, Dem) {
-    let dem: Dem = match &settings.dem_path {
-        Some(path) => load_dem(path.as_ref())
-            .await
-            .expect("Failed to load DEM from path"),
-        None => Dem::default(),
+pub async fn create_sim_settings_and_dem(
+    settings: &Settings,
+) -> Result<(SimSettings, Dem, RasterGrid), DataProcessorError> {
+    let (outline, dem) = match (&settings.outlines_path, &settings.dem_path) {
+        // 1. Outline only -> build outline and DEM from tile manager
+        (Some(outline_path), None) => {
+            let padding = settings
+                .outlines_padding
+                .ok_or(DataProcessorError::NoneOutlinesPadding)?;
+            let outline = load_outline(outline_path, padding)?;
+
+            let tile_manager = TileManager::new("dtm_cache")?;
+
+            let bbox = tile_manager::BBox {
+                min_northing: outline.origin_y as u32,
+                max_northing: (outline.origin_y + outline.height as f64 * outline.cell_size) as u32,
+                min_easting: outline.origin_x as u32,
+                max_easting: (outline.origin_x + outline.width as f64 * outline.cell_size) as u32,
+            };
+
+            let dem = tile_manager.get_dem(&bbox).await?;
+
+            (outline, dem)
+        }
+
+        // 2. DEM only -> load DEM and create an all-ones outline
+        (None, Some(dem_path)) => {
+            let dem = load_dem(dem_path).await?;
+
+            let outline = RasterGrid {
+                width: dem.width,
+                height: dem.height,
+                cell_size: dem.cell_size as f64,
+                origin_x: dem.bounds.xmin as f64,
+                origin_y: dem.bounds.ymin as f64,
+                data: vec![1u8; dem.width * dem.height],
+            };
+
+            (outline, dem)
+        }
+
+        // 3. Both provided -> load outline and DEM from file
+        (Some(outline_path), Some(dem_path)) => {
+            let padding = settings
+                .outlines_padding
+                .ok_or(DataProcessorError::NoneOutlinesPadding)?;
+            let outline = load_outline(outline_path, padding)?;
+
+            let dem = load_dem(dem_path).await?;
+
+            (outline, dem)
+        }
+
+        // Neither provided
+        (None, None) => (RasterGrid::default(), Dem::default()),
     };
+
     let sim_settings = SimSettings::from_settings(settings, &dem);
-    (sim_settings, dem)
+
+    Ok((sim_settings, dem, outline))
 }
 
 pub fn settings_to_json_file(settings: &Settings, path: &str) -> io::Result<()> {
@@ -1081,75 +812,26 @@ pub fn settings_from_json_file(path: &str) -> io::Result<Settings> {
     Ok(settings)
 }
 
-pub async fn sim_settings_and_dem_from_json_file(file_path: &str) -> (SimSettings, Dem) {
+pub async fn sim_settings_and_dem_from_json_file(
+    file_path: &str,
+) -> (SimSettings, Dem, RasterGrid) {
     let data = std::fs::read_to_string(file_path).expect("Failed to read json file");
     let settings = Settings::loads(&data).expect("Failed to load settings from JSON file");
-    create_sim_settings_and_dem(&settings).await
+    create_sim_settings_and_dem(&settings)
+        .await
+        .expect("Failed to create sim settings and dem")
 }
-
-// pub fn load_asc(path: PathBuf) -> Self {
-//     let file = File::open(path).map_err(|e| e.to_string())?;
-//     let reader = BufReader::new(file);
-//     let mut width = 0;
-//     let mut height = 0;
-//     let mut xll = 0.0;
-//     let mut yll = 0.0;
-//     let mut cell_size = 1.0;
-//     let mut nodata_value = -9999.0;
-//     let mut data: Vec<f32> = Vec::new();
-//     let mut header_lines = 0;
-//     for line in reader.lines() {
-//         let line = line.map_err(|e| e.to_string())?;
-//         let line = line.trim();
-//         if line.is_empty() {
-//             continue;
-//         }
-//         if header_lines < 6 {
-//             let parts: Vec<&str> = line.split_whitespace().collect();
-//             match parts[0].to_lowercase().as_str() {
-//                 "ncols" => width = parts[1].parse().map_err(|e| e.to_string())?,
-//                 "nrows" => height = parts[1].parse().map_err(|e| e.to_string())?,
-//                 "xllcenter" => xll = parts[1].parse().map_err(|e| e.to_string())?,
-//                 "yllcenter" => yll = parts[1].parse().map_err(|e| e.to_string())?,
-//                 "cellsize" => cell_size = parts[1].parse().map_err(|e| e.to_string())?,
-//                 "nodata_value" => nodata_value = parts[1].parse().map_err(|e| e.to_string())?,
-//                 _ => return Err(format!("Unknown header: {}", parts[0])),
-//             }
-//             header_lines += 1;
-//         } else {
-//             for v in line.split_whitespace() {
-//                 let val: f32 = v.parse().map_err(|e| e.to_string())?;
-//                 data.push(val);
-//             }
-//         }
-//     }
-//     let mut dem = Dem {
-//         width: width,
-//         height: height,
-//         data1d: data1d,
-//         data: Vec::new(),
-//         x: linspace(bounds.xmin, bounds.xmax, width),
-//         y: linspace(bounds.ymin, bounds.ymax, height),
-//         cell_size: (bounds.xmax - bounds.xmin) / (width - 1) as f32,
-//         bounds: bounds,
-//         map_factor: 1.0,
-//     };
-//     dem.data = to_2d(&dem.data1d, width, height);
-//     dem
-// }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use half::f16;
     use pollster::block_on;
-    use std::env;
     use std::f32::consts::PI;
     use std::fs;
     use std::fs::File;
     use std::io::Cursor;
     use std::io::Write;
-    use std::time::Instant;
     use tempfile::NamedTempFile;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1287,6 +969,8 @@ mod tests {
     #[test_log::test]
     fn test_settings_to_json_and_from_json() {
         let settings = Settings {
+            outlines_path: Some(String::from("outline.shp")),
+            outlines_padding: Some(5.0),
             dem_path: Some(String::from("dem.png")),
             release_areas_path: Some(String::from("release_areas.png")),
             max_steps: Some(100),
@@ -1430,206 +1114,6 @@ mod tests {
         println!("f32 min: {:.4e}, max: {:.4e}", f32::MIN_POSITIVE, f32::MAX);
         println!("f64 min: {:.4e}, max: {:.4e}", f64::MIN_POSITIVE, f64::MAX);
     }
-    #[test_log::test]
-    fn test_metadata_new_grid() {
-        let params = MetaGridParams {
-            width: 128,
-            height: 256,
-            cell_size: 5.0,
-            map_factor: 1.0,
-            epsg_code: 4326,
-            top: 0.0,
-            left: 0.0,
-            data_type: DataType::F32,
-            variable: Variable::Undefined,
-            unit: Unit::Dimensionless,
-        };
-        let metadata = MetaGrid::new(&params);
-        assert_eq!(metadata.width, params.width);
-        assert_eq!(metadata.height, params.height);
-        assert_eq!(metadata.data_type, DataType::F32);
-        assert_eq!(metadata.version, 1);
-        assert_eq!(metadata.magic_bytes, u32::from_le_bytes(*b"AVAG"));
-    }
-
-    #[test_log::test]
-    fn test_data_type_from_and_as_int() {
-        assert_eq!(DataType::from_int(16), Some(DataType::F16));
-        assert_eq!(DataType::from_int(32), Some(DataType::F32));
-        assert_eq!(DataType::from_int(64), Some(DataType::F64));
-        assert_eq!(DataType::from_int(8), None);
-
-        assert_eq!(DataType::F16.as_int(), 16);
-        assert_eq!(DataType::F32.as_int(), 32);
-        assert_eq!(DataType::F64.as_int(), 64);
-    }
-
-    #[test_log::test]
-    fn test_data_type_as_str() {
-        assert_eq!(DataType::F16.as_str(), "f16");
-        assert_eq!(DataType::F32.as_str(), "f32");
-        assert_eq!(DataType::F64.as_str(), "f64");
-    }
-
-    #[test_log::test]
-    fn test_f32data_new_and_repr() {
-        let params = MetaGridParams {
-            width: 1,
-            height: 3,
-            cell_size: 5.0,
-            map_factor: 1.0,
-            epsg_code: 4326,
-            top: 0.0,
-            left: 0.0,
-            data_type: DataType::F32,
-            variable: Variable::Undefined,
-            unit: Unit::Dimensionless,
-        };
-        let metadata = MetaGrid::new(&params);
-
-        let data = vec![1.0f32, 2.0, 3.0];
-        let f32data = F32Data::new(&metadata, data.clone());
-        assert_eq!(f32data.metadata, metadata);
-        assert_eq!(f32data.data, data);
-        let repr = f32data.print();
-        assert!(repr.contains("F32Data(metadata="));
-        assert!(repr.contains("data_len=3"));
-    }
-
-    #[test_log::test]
-    fn test_metadata_repr() {
-        let params = MetaGridParams {
-            width: 5,
-            height: 6,
-            cell_size: 5.0,
-            map_factor: 1.0,
-            epsg_code: 4326,
-            top: 0.0,
-            left: 0.0,
-            data_type: DataType::F32,
-            variable: Variable::Undefined,
-            unit: Unit::Dimensionless,
-        };
-        let metadata = MetaGrid::new(&params);
-        let repr = metadata.print();
-        assert!(repr.contains("Metadata(magic_bytes='AVAG'"));
-        assert!(repr.contains("version=1"));
-        assert!(repr.contains("width=5"));
-        assert!(repr.contains("height=6"));
-        assert!(repr.contains("data_type=f32"));
-    }
-
-    #[test_log::test]
-    fn test_write_and_read_bin() {
-        let tmp_dir = env::temp_dir();
-        let file_path = tmp_dir.join("test_write_and_read_bin");
-        let data = vec![1u8, 2, 3, 4, 5];
-        write_bin(&file_path, &data);
-        let read = read_bin(&file_path.with_extension("bin")).unwrap();
-        assert_eq!(read, data);
-        let _ = fs::remove_file(file_path.with_extension("bin"));
-    }
-
-    #[test_log::test]
-    fn test_f32data_save_and_load() {
-        let tmp_dir = env::temp_dir();
-        let file_path = tmp_dir.join("test_f32data_save_and_load.bin");
-
-        let params = MetaGridParams {
-            width: 2,
-            height: 2,
-            cell_size: 5.0,
-            map_factor: 1.0,
-            epsg_code: 4326,
-            top: 0.0,
-            left: 0.0,
-            data_type: DataType::F32,
-            variable: Variable::Undefined,
-            unit: Unit::Dimensionless,
-        };
-        let metadata = MetaGrid::new(&params);
-        let data = vec![0.1, 0.2, 0.3, 0.4];
-        let f32data = F32Data::new(&metadata, data.clone());
-        f32data.save(file_path.to_str().unwrap()).unwrap();
-
-        let loaded = F32Data::load(file_path.to_str().unwrap()).unwrap();
-        assert_eq!(loaded.metadata, metadata);
-        assert_eq!(loaded.data, data);
-
-        let _ = fs::remove_file(file_path);
-    }
-
-    #[test_log::test]
-    fn test_dimension_mismatch() {
-        let params = MetaGridParams {
-            width: 2,
-            height: 2,
-            cell_size: 5.0,
-            map_factor: 1.0,
-            epsg_code: 4326,
-            top: 0.0,
-            left: 0.0,
-            data_type: DataType::F32,
-            variable: Variable::Undefined,
-            unit: Unit::Dimensionless,
-        };
-        let metadata = MetaGrid::new(&params);
-        let data = vec![0.1, 0.2]; // Incorrect length
-        let result = std::panic::catch_unwind(|| F32Data::new(&metadata, data));
-        assert!(result.is_err(), "Expected panic due to dimension mismatch");
-    }
-    #[test_log::test]
-    fn test_file_format_from_str_and_as_str() {
-        assert_eq!(
-            FileFormat::from_fileformat_str("binary"),
-            Some(FileFormat::Binary)
-        );
-        assert_eq!(
-            FileFormat::from_fileformat_str("compressedbinary"),
-            Some(FileFormat::Lz4)
-        );
-        assert_eq!(
-            FileFormat::from_fileformat_str("png"),
-            Some(FileFormat::Png)
-        );
-        assert_eq!(FileFormat::from_fileformat_str("unknown"), None);
-
-        assert_eq!(FileFormat::Binary.as_str(), "binary");
-        assert_eq!(FileFormat::Lz4.as_str(), "compressedbinary");
-        assert_eq!(FileFormat::Png.as_str(), "png");
-    }
-
-    #[test_log::test]
-    fn test_file_format_from_and_as_extension() {
-        assert_eq!(FileFormat::from_extension("bin"), Some(FileFormat::Binary));
-        assert_eq!(FileFormat::from_extension("lz4"), Some(FileFormat::Lz4));
-        assert_eq!(FileFormat::from_extension("png"), Some(FileFormat::Png));
-        assert_eq!(FileFormat::from_extension("txt"), None);
-
-        assert_eq!(FileFormat::Binary.as_extension(), "bin");
-        assert_eq!(FileFormat::Lz4.as_extension(), "lz4");
-        assert_eq!(FileFormat::Png.as_extension(), "png");
-    }
-    #[test_log::test]
-    fn test_write_and_read_lz4_bin() {
-        let tmp_dir = env::temp_dir();
-        let file_path = tmp_dir.join("test_write_and_read_lz4_bin");
-        let data = vec![10u8, 20, 30, 40, 50, 60, 70, 80];
-        write_lz4_bin(&file_path, &data);
-        let decompressed = read_lz4(&file_path.with_extension("lz4")).unwrap();
-        assert_eq!(decompressed, data);
-        let _ = fs::remove_file(file_path.with_extension("lz4"));
-    }
-
-    #[test_log::test]
-    fn test_read_compressed_bin_invalid_data() {
-        let tmp_dir = env::temp_dir();
-        let file_path = tmp_dir.join("test_invalid_compressed.lz4");
-        write_bin(&file_path, &vec![1, 2, 3, 4]); // Not actually compressed
-        let result = read_lz4(&file_path.with_extension("bin"));
-        assert!(result.is_err());
-        let _ = fs::remove_file(file_path.with_extension("bin"));
-    }
 
     #[test_log::test]
     fn test_rgba_bytes_to_f32() {
@@ -1642,150 +1126,6 @@ mod tests {
         assert_eq!(result, floats);
         let f32_bytes = f32_to_rgba_bytes(&result);
         assert_eq!(f32_bytes, bytes)
-    }
-
-    #[tokio::test]
-    // #[ignore]
-    async fn test_write_and_read_file_size_bin() {
-        // For avaMal.png
-        // Start PNG:      744017 bytes
-        // Format  WriteTime   FileSize         ReadTime
-        // LZ4:    18.3895ms    1127904 bytes    12.0114ms
-        // ZST:   2.8399438s     902141 bytes    26.5853ms
-        // BIN:     1.4439ms    1779504 bytes    10.7315ms
-        // PNG:   237.1214ms     868965 bytes     97.231ms
-        // XZ :   566.5664ms     621664 bytes    87.8251ms
-
-        // For avaArzlerUni.png
-        // Start PNG:     2463733 bytes
-        // Format  WriteTime   FileSize           ReadTime
-        // LZ4:        9.1ms    3775084 bytes    14.7216ms
-        // ZST:   2.3181056s    2994253 bytes    71.6658ms
-        // BIN:     3.0754ms    3763260 bytes    10.6038ms
-        // PNG:   550.2348ms    2860167 bytes   214.7707ms
-        // XZ :   1.9335498s    2158308 bytes   243.1962ms
-        let tmp_dir = env::temp_dir();
-        let file_path = tmp_dir.join("test_write_file");
-        let png_path = "../../data/avaframe/avaArzlerUni.png";
-        print!("Start PNG: ");
-        print_file_size(Path::new(png_path));
-        println!();
-        let (data, width, height) = read_png(png_path).await.expect("Failed to load PNG");
-        println!("Format  WriteTime   FileSize           ReadTime");
-
-        let mut start = Instant::now();
-        write_lz4_bin(&file_path, &data);
-        let mut duration = start.elapsed();
-        print!("LZ4: {:>12?}", duration);
-        print_file_size(&file_path.with_extension("lz4"));
-
-        start = Instant::now();
-        let decompressed = read_lz4(&file_path.with_extension("lz4")).unwrap();
-        duration = start.elapsed();
-        println!(" {:>12?}", duration);
-        assert_eq!(decompressed, data);
-
-        start = Instant::now();
-        write_zstd(&file_path, &data);
-        duration = start.elapsed();
-        print!("ZST: {:>12?}", duration);
-        print_file_size(&file_path.with_extension("zst"));
-
-        start = Instant::now();
-        let decompressed_zstd = read_zstd_bin(&file_path.with_extension("zst")).unwrap();
-        duration = start.elapsed();
-        println!(" {:>12?}", duration);
-        assert_eq!(decompressed_zstd, data);
-
-        start = Instant::now();
-        write_bin(&file_path, &data);
-        duration = start.elapsed();
-        print!("BIN: {:>12?}", duration);
-        print_file_size(&file_path.with_extension("bin"));
-
-        start = Instant::now();
-        let decompressed_bin = read_bin(&file_path.with_extension("bin")).unwrap();
-        duration = start.elapsed();
-        println!(" {:>12?}", duration);
-        assert_eq!(decompressed_bin, data);
-
-        start = Instant::now();
-        let _ = write_png(&file_path, &data, width, height);
-        duration = start.elapsed();
-        print!("PNG: {:>12?}", duration);
-        print_file_size(&file_path.with_extension("png"));
-
-        start = Instant::now();
-        let decompressed_png = read_png(file_path.with_extension("png").to_str().unwrap())
-            .await
-            .unwrap()
-            .0;
-        duration = start.elapsed();
-        println!(" {:>12?}", duration);
-        assert_eq!(decompressed_png, data);
-
-        start = Instant::now();
-        let _ = write_xz(&file_path, &data);
-        duration = start.elapsed();
-        print!("XZ : {:>12?}", duration);
-        print_file_size(&file_path.with_extension("xz"));
-
-        start = Instant::now();
-        let decompressed_xz = read_xz(&file_path.with_extension("xz")).unwrap();
-        duration = start.elapsed();
-        println!(" {:>12?}", duration);
-        assert_eq!(decompressed_xz, data);
-        // let _ = fs::remove_file(file_path.with_extension("lz4"));
-    }
-
-    // fn file_format_performance(fwrite: impl Fn(&Path, &Vec<u8>), fread: impl Fn(&Path) -> Vec<u8>, format: &str, data: &Vec<u8>) {
-    //     let mut start = Instant::now();
-    //     fwrite(&file_path, &data);
-    //     let mut duration = start.elapsed();
-    //     println!("File format performance took: {:?}", duration);
-    //     print_file_size(&file_path.with_extension(format), format!("{}  File", format));
-
-    //     start = Instant::now();
-    //     let decompressed_bin = fread(&file_path.with_extension(format)).unwrap();
-    //     duration = start.elapsed();
-    //     println!("Decompression took: {:?}\n", duration);
-    //     assert_eq!(decompressed_bin, data);
-    // }
-
-    fn print_file_size(path: &Path) {
-        let file_size = std::fs::metadata(path)
-            .expect("Failed to get file metadata")
-            .len();
-        print!(" {:>10} bytes", file_size);
-    }
-
-    #[test_log::test]
-    fn test_unit_and_variable_conversions_cover_fallbacks() {
-        assert_eq!(Unit::from_int(0), Some(Unit::MetersPerSecond));
-        assert_eq!(Unit::from_int(1), Some(Unit::Degree));
-        assert_eq!(Unit::from_int(2), Some(Unit::Kilogram));
-        assert_eq!(Unit::from_int(99), Some(Unit::Dimensionless));
-        assert_eq!(Unit::Dimensionless.as_int(), 255);
-        assert_eq!(Unit::Degree.as_str(), "°");
-
-        assert_eq!(Variable::from_int(0), Some(Variable::Velocity));
-        assert_eq!(Variable::from_int(1), Some(Variable::SlopeAngle));
-        assert_eq!(Variable::from_int(2), Some(Variable::Curvature));
-        assert_eq!(Variable::from_int(3), Some(Variable::SlopeAspect));
-        assert_eq!(Variable::from_int(4), Some(Variable::NormalX));
-        assert_eq!(Variable::from_int(5), Some(Variable::NormalY));
-        assert_eq!(Variable::from_int(6), Some(Variable::NormalZ));
-        assert_eq!(Variable::from_int(7), Some(Variable::Mass));
-        assert_eq!(Variable::from_int(99), Some(Variable::Undefined));
-        assert_eq!(Variable::Velocity.as_int(), 0);
-        assert_eq!(Variable::SlopeAngle.as_int(), 1);
-        assert_eq!(Variable::Curvature.as_int(), 2);
-        assert_eq!(Variable::SlopeAspect.as_int(), 3);
-        assert_eq!(Variable::NormalX.as_int(), 4);
-        assert_eq!(Variable::NormalY.as_int(), 5);
-        assert_eq!(Variable::NormalZ.as_int(), 6);
-        assert_eq!(Variable::Mass.as_int(), 7);
-        assert_eq!(Variable::Undefined.as_str(), "undefined");
     }
 
     #[tokio::test]
@@ -1836,12 +1176,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_sim_settings_helpers_load_dem_and_apply_overrides() {
-        let (sim_settings, dem) = create_sim_settings_and_dem_from_path(PARABOLA_PATH).await;
+        let (sim_settings, dem, outline) = create_sim_settings_and_dem_from_path(PARABOLA_PATH)
+            .await
+            .expect("Failed to create sim settings and dem");
         assert_eq!(dem.width, 1001);
         assert_eq!(dem.height, 401);
         assert_eq!(sim_settings.grid_shape_x, dem.width as u32);
         assert_eq!(sim_settings.grid_shape_y, dem.height as u32);
         assert_eq!(sim_settings.cell_size, dem.cell_size);
+        assert_eq!(outline.cell_size, dem.cell_size as f64);
+        assert_eq!(outline.origin_x, dem.bounds.xmin as f64);
+        assert_eq!(outline.origin_y, dem.bounds.ymin as f64);
 
         let settings = Settings {
             dem_path: Some(PARABOLA_PATH.to_string()),
@@ -1852,7 +1197,7 @@ mod tests {
         let settings_file = NamedTempFile::new().unwrap();
         fs::write(settings_file.path(), settings.dumps().unwrap()).unwrap();
 
-        let (json_sim_settings, json_dem) =
+        let (json_sim_settings, json_dem, json_outline) =
             sim_settings_and_dem_from_json_file(settings_file.path().to_str().unwrap()).await;
 
         assert_eq!(json_dem.width, dem.width);
@@ -1861,39 +1206,9 @@ mod tests {
         assert_eq!(json_sim_settings.density, 321.0);
         assert_eq!(json_sim_settings.grid_shape_x, dem.width as u32);
         assert_eq!(json_sim_settings.grid_shape_y, dem.height as u32);
-    }
-
-    #[test_log::test]
-    fn test_save_grid_writes_round_trippable_metadata_and_data() {
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let file_path = tmp_dir.path().join("saved_grid.bin");
-        let dem = Dem {
-            width: 2,
-            height: 2,
-            bounds: Bounds {
-                xmin: 10.0,
-                xmax: 20.0,
-                ymin: 30.0,
-                ymax: 40.0,
-            },
-            data1d: vec![1.0, 2.0, 3.0, 4.0],
-            data: vec![vec![1.0, 2.0], vec![3.0, 4.0]],
-            x: vec![10.0, 20.0],
-            y: vec![30.0, 40.0],
-            cell_size: 5.0,
-            map_factor: 0.75,
-            minimum_elevation: 1.0,
-        };
-        let values = vec![9.0, 8.0, 7.0, 6.0];
-
-        save_grid(&dem, file_path.to_str().unwrap(), values.clone()).unwrap();
-
-        let stored = F32Data::load(file_path.to_str().unwrap()).unwrap();
-        assert_eq!(stored.metadata.width, 2);
-        assert_eq!(stored.metadata.height, 2);
-        assert_eq!(stored.metadata.cell_size, 5.0);
-        assert_eq!(stored.metadata.map_factor, 0.75);
-        assert_eq!(stored.data, values);
+        assert_eq!(json_outline.cell_size, dem.cell_size as f64);
+        assert_eq!(json_outline.origin_x, dem.bounds.xmin as f64);
+        assert_eq!(json_outline.origin_y, dem.bounds.ymin as f64);
     }
 
     #[test]
@@ -1972,12 +1287,15 @@ NODATA_value  -999
         let result = EsriGrid::from_reader(cursor);
 
         assert!(result.is_err());
-        let err_msg = result.unwrap_err();
-        assert!(
-            err_msg.contains("Data size mismatch"),
-            "Expected dimension mismatch error, got: {}",
-            err_msg
-        );
+        assert!(matches!(
+            result.unwrap_err(),
+            EsriGridError::DataSizeMismatch {
+                expected: 6,
+                ncols: 3,
+                nrows: 2,
+                found: 5
+            }
+        ));
     }
 
     #[test]
@@ -1995,7 +1313,10 @@ NODATA_value  -999
         let result = EsriGrid::from_reader(cursor);
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Unknown header key"));
+        assert!(matches!(
+            result.unwrap_err(),
+            EsriGridError::UnknownHeaderKey(_)
+        ));
     }
 
     #[test]
@@ -2013,7 +1334,10 @@ NODATA_value  -999
         let result = EsriGrid::from_reader(cursor);
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Failed to parse data token"));
+        assert!(matches!(
+            result.unwrap_err(),
+            EsriGridError::DataRead(e) if e.to_string().contains("Failed to parse data token")
+        ));
     }
     #[test_log::test]
     fn test_dem_png_asc_equality() {
@@ -2146,10 +1470,10 @@ NODATA_value  -999
         let cursor = Cursor::new(bad_header);
         let res = EsriGrid::from_reader(cursor);
         assert!(res.is_err());
-        let err = res.unwrap_err();
-        assert!(
-            err.contains("Missing X origin") || err.contains("Missing Y origin") || err.len() > 0
-        );
+        assert!(matches!(
+            res.unwrap_err(),
+            EsriGridError::InvalidHeaderLine(_)
+        ));
     }
 
     #[test]
