@@ -748,7 +748,7 @@ pub async fn create_sim_settings_and_dem(
                 .ok_or(DataProcessorError::NoneOutlinesPadding)?;
             let outline = load_outline(outline_path, padding)?;
 
-            let tile_manager = TileManager::new("dtm_cache")?;
+            let tile_manager = TileManager::new("dtm_cache.zarr")?;
 
             let bbox = tile_manager::BBox {
                 min_northing: outline.origin_y as u32,
