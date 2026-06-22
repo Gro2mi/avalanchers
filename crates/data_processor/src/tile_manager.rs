@@ -5,7 +5,6 @@ use std::io::Cursor;
 use std::sync::Arc;
 use tiff::decoder::{Decoder, DecodingResult};
 
-// zarrs 0.23+ specific imports
 #[allow(unused_imports)]
 use tracing::{debug, error, info, trace, warn};
 use zarrs::array::ArraySubset;
@@ -86,6 +85,9 @@ pub struct TileManager {
 impl TileManager {
     /// Initializes the Tile Manager with a local Zarr filesystem store
     pub fn new(cache_dir: &str) -> Result<Self, TileManagerError> {
+        let store = Arc::new(FilesystemStore::new(cache_dir)?);
+
+        let array_path = "/dtm";
         // for switzerland
         let min_easting_km: u64 = 2480;
         let max_easting: u64 = 2840;
@@ -100,7 +102,6 @@ impl TileManager {
         ];
         let chunk_shape = [tile_size, tile_size];
 
-        let store = Arc::new(FilesystemStore::new(cache_dir)?);
         let mut root_group = GroupBuilder::new().build(store.clone(), "/")?;
         let global_attrs = json!({
             "title": "SwissALTI3D DTM Resampled to 5m",
@@ -122,7 +123,6 @@ impl TileManager {
             BloscShuffleMode::BitShuffle,
             Some(4), // f32 = 4 bytes
         )?);
-        let array_path = "/dtm";
         let mut dtm = zarrs::array::ArrayBuilder::new(
             overall_shape, // array shape
             chunk_shape,   // regular chunk shape
@@ -131,8 +131,7 @@ impl TileManager {
         )
         .bytes_to_bytes_codecs(vec![blosc.clone()])
         .dimension_names(["y", "x"].into())
-        .build(store.clone(), array_path)
-        .expect("Failed to create array");
+        .build(store.clone(), array_path)?;
 
         let x_data = Array1::from_iter(
             (0..overall_shape[1])
@@ -147,8 +146,7 @@ impl TileManager {
         )
         .bytes_to_bytes_codecs(vec![blosc.clone()])
         .dimension_names(["x"].into())
-        .build(store.clone(), "/x")
-        .expect("Failed to create array");
+        .build(store.clone(), "/x")?;
         x.attributes_mut().extend(
             json!({
                 "standard_name": "x",
@@ -162,8 +160,7 @@ impl TileManager {
         );
         x.store_metadata()?;
         #[allow(clippy::single_range_in_vec_init)]
-        x.store_chunks(&[0..1], x_data)
-            .expect("Failed to store chunks");
+        x.store_chunks(&[0..1], x_data)?;
 
         let y_data = Array1::from_iter(
             (0..overall_shape[0])
@@ -177,11 +174,9 @@ impl TileManager {
         )
         .bytes_to_bytes_codecs(vec![blosc.clone()])
         .dimension_names(["y"].into())
-        .build(store.clone(), "/y")
-        .expect("Failed to create array");
+        .build(store.clone(), "/y")?;
         #[allow(clippy::single_range_in_vec_init)]
-        y.store_chunks(&[0..1], y_data)
-            .expect("Failed to store chunks");
+        y.store_chunks(&[0..1], y_data)?;
         y.attributes_mut().extend(
             json!({
                 "standard_name": "y",
@@ -208,16 +203,14 @@ impl TileManager {
             .unwrap()
             .clone(),
         );
-        dtm.store_metadata()
-            .expect("Failed to store dtm array metadata");
+        dtm.store_metadata()?;
         let mut spatial_ref = ArrayBuilder::new(
             vec![],                           // Shape: 0D
             Vec::<u64>::new(),                // Chunk Grid for 0D
             zarrs::array::data_type::int32(), // Data Type
             FillValue::from(0i32),            // Fill Value
         )
-        .build(store.clone(), "/spatial_ref")
-        .expect("Failed to create spatial_ref");
+        .build(store.clone(), "/spatial_ref")?;
 
         spatial_ref.attributes_mut().extend(
             json!({
@@ -252,9 +245,7 @@ impl TileManager {
             .unwrap()
             .clone(),
         );
-        spatial_ref
-            .store_metadata()
-            .expect("Failed to store metadata");
+        spatial_ref.store_metadata()?;
         Ok(Self {
             client: Client::new(),
             // zarr_storage: store,
