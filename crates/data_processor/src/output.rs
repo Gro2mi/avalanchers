@@ -38,8 +38,8 @@ pub enum OutputError {
     #[error("Zarr creation error: {0}")]
     ZarrCreate(#[from] zarrs::array::ArrayCreateError),
 
-    #[error("Missing or invalid data")]
-    InvalidData,
+    #[error("Missing or invalid data: {0}")]
+    InvalidData(String),
 
     #[error("HTTP error: {0}")]
     Http(String),
@@ -121,8 +121,27 @@ impl Output {
         y_coords.reverse();
         let ylen = y_coords.len() as u64;
         let xlen = x_coords.len() as u64;
-        let scenario = Scenario::new(ylen, xlen, number_runs)?;
-        self.scenarios.insert(scenario_name.to_string(), scenario);
+        let size = xlen * ylen;
+
+        if dem.len() > 0 {
+            if dem.len() != size as usize {
+                return Err(OutputError::InvalidData(format!(
+                    "DEM has incorrect size: expected {}, got {}",
+                    size,
+                    dem.len()
+                )));
+            }
+        }
+
+        if release_area.len() > 0 {
+            if release_area.len() != size as usize {
+                return Err(OutputError::InvalidData(format!(
+                    "Release area has incorrect size: expected {}, got {}",
+                    size,
+                    release_area.len()
+                )));
+            }
+        }
 
         let avalanche_group_path = format!("/{}", scenario_name);
         let mut avalanche_group =
@@ -500,6 +519,9 @@ impl Output {
         let release_area_f16: Vec<f16> = release_area.iter().map(|x| f16::from_f32(*x)).collect();
         release_area_array.store_array_subset(&subset, &release_area_f16)?;
 
+        let scenario =
+            Scenario::connect_existing(self.store.clone(), scenario_name, xlen, ylen, number_runs)?;
+        self.scenarios.insert(scenario_name.to_string(), scenario);
         Ok(())
     }
 
@@ -526,45 +548,35 @@ impl Output {
             return Err(OutputError::InvalidRunID(run_id, scenario.number_of_runs));
         }
         self.write_array_f16(
-            scenario_name,
-            "peak_flow_velocity",
+            &scenario.peak_flow_velocity,
+            scenario.width,
+            scenario.height,
             run_id,
             peak_flow_velocity_data,
         )?;
         self.write_array_f16(
-            scenario_name,
-            "peak_flow_thickness",
+            &scenario.peak_flow_thickness,
+            scenario.width,
+            scenario.height,
             run_id,
             peak_flow_thickness_data,
         )?;
-        self.write_scalar(scenario_name, "travel_length", run_id, travel_length_data)?;
-        self.write_scalar(scenario_name, "travel_angle", run_id, travel_angle_data)?;
-        self.write_scalar(scenario_name, "mu", run_id, mu)?;
-        self.write_scalar(scenario_name, "xsi", run_id, xsi)?;
-        self.write_com(
-            scenario_name,
-            "center_of_mass_x",
-            run_id,
-            center_of_mass_x_data,
-        )?;
-        self.write_com(
-            scenario_name,
-            "center_of_mass_y",
-            run_id,
-            center_of_mass_y_data,
-        )?;
+        self.write_scalar(&scenario.travel_length, run_id, travel_length_data)?;
+        self.write_scalar(&scenario.travel_angle, run_id, travel_angle_data)?;
+        self.write_scalar(&scenario.mu, run_id, mu)?;
+        self.write_scalar(&scenario.xsi, run_id, xsi)?;
+        self.write_com(&scenario.center_of_mass_x, run_id, center_of_mass_x_data)?;
+        self.write_com(&scenario.center_of_mass_y, run_id, center_of_mass_y_data)?;
 
         Ok(())
     }
 
     fn write_scalar(
         &self,
-        scenario_name: &str,
-        name: &str,
+        array: &Array<FilesystemStore>,
         run_id: u64,
         data: f32,
     ) -> Result<(), OutputError> {
-        let array = Array::open(self.store.clone(), &format!("/{}/{}", scenario_name, name))?;
         let subset = ArraySubset::new_with_start_shape(
             vec![run_id], // Coordinate start [run, y, x]
             vec![1],      // Shape of the chunk slice
@@ -575,19 +587,15 @@ impl Output {
 
     fn write_array_f16(
         &self,
-        scenario_name: &str,
-        name: &str,
+        array: &Array<FilesystemStore>,
+        width: u64,
+        height: u64,
         run_id: u64,
         data: &[f32],
     ) -> Result<(), OutputError> {
-        let scenario = self
-            .scenarios
-            .get(scenario_name)
-            .ok_or_else(|| OutputError::ScenarioNotFound(scenario_name.to_string()))?;
-        let array = Array::open(self.store.clone(), &format!("/{}/{}", scenario_name, name))?;
         let subset = ArraySubset::new_with_start_shape(
-            vec![run_id, 0, 0],                       // Coordinate start [run, y, x]
-            vec![1, scenario.width, scenario.height], // Shape of the chunk slice
+            vec![run_id, 0, 0],     // Coordinate start [run, y, x]
+            vec![1, height, width], // Shape of the chunk slice
         )?;
         let pfv_f16: Vec<f16> = data.iter().map(|x| f16::from_f32(*x)).collect();
         array.store_array_subset(&subset, &pfv_f16)?;
@@ -596,12 +604,10 @@ impl Output {
 
     fn write_com(
         &self,
-        scenario_name: &str,
-        name: &str,
+        array: &Array<FilesystemStore>,
         run_id: u64,
         data: &[f32],
     ) -> Result<(), OutputError> {
-        let array = Array::open(self.store.clone(), &format!("/{}/{}", scenario_name, name))?;
         let subset = ArraySubset::new_with_start_shape(
             vec![run_id, 0],            // Coordinate start [run, y, x]
             vec![1, data.len() as u64], // Shape of the chunk slice
@@ -634,14 +640,41 @@ struct Scenario {
     width: u64,
     height: u64,
     number_of_runs: u64,
+
+    pub peak_flow_velocity: Array<FilesystemStore>,
+    pub peak_flow_thickness: Array<FilesystemStore>,
+    pub travel_length: Array<FilesystemStore>,
+    pub travel_angle: Array<FilesystemStore>,
+    pub mu: Array<FilesystemStore>,
+    pub xsi: Array<FilesystemStore>,
+    pub center_of_mass_x: Array<FilesystemStore>,
+    pub center_of_mass_y: Array<FilesystemStore>,
 }
 
 impl Scenario {
-    pub fn new(width: u64, height: u64, number_of_runs: u64) -> Result<Self, OutputError> {
+    pub fn connect_existing(
+        store: Arc<FilesystemStore>,
+        scenario_name: &str,
+        width: u64,
+        height: u64,
+        number_of_runs: u64,
+    ) -> Result<Self, OutputError> {
+        let base = format!("/{scenario_name}");
         Ok(Self {
             width,
             height,
             number_of_runs,
+            peak_flow_velocity: Array::open(store.clone(), &format!("{base}/peak_flow_velocity"))?,
+            peak_flow_thickness: Array::open(
+                store.clone(),
+                &format!("{base}/peak_flow_thickness"),
+            )?,
+            travel_length: Array::open(store.clone(), &format!("{base}/travel_length"))?,
+            travel_angle: Array::open(store.clone(), &format!("{base}/travel_angle"))?,
+            mu: Array::open(store.clone(), &format!("{base}/mu"))?,
+            xsi: Array::open(store.clone(), &format!("{base}/xsi"))?,
+            center_of_mass_x: Array::open(store.clone(), &format!("{base}/center_of_mass_x"))?,
+            center_of_mass_y: Array::open(store.clone(), &format!("{base}/center_of_mass_y"))?,
         })
     }
 }
@@ -649,7 +682,7 @@ impl Scenario {
 #[cfg(test)]
 mod tests {
     use super::*;
-
+    use tempfile::TempDir;
     #[test]
     fn test() {
         let mut output = Output::new("test.zarr").expect("Failed to create Output struct");
@@ -684,5 +717,84 @@ mod tests {
                 2000.0,
             )
             .expect("Failed to add new run");
+    }
+    use std::path::PathBuf;
+    #[test]
+    fn test_cached_handles_workflow() {
+        // Create an isolated temporary directory
+        let tmp_dir = TempDir::new().unwrap();
+        let zarr_path = tmp_dir.path().join("avalanche_model.zarr");
+        // let zarr_path = PathBuf::from("avalanche_model.zarr");
+
+        // 1. Initialize Output Engine
+        let mut engine = Output::new(zarr_path.to_str().unwrap()).unwrap();
+
+        // Dummy dimensions and properties
+        let y_coords = vec![1000.0, 950.0, 900.0]; // height = 3
+        let x_coords = vec![500.0, 550.0, 600.0, 650.0]; // width = 4
+        let dem = vec![2100.0; 12]; // 3x4
+        let release_area = vec![1.5; 12];
+
+        let max_timesteps = 50;
+        let number_runs = 5;
+
+        // 2. Register and provision structural groups and descriptors
+        engine
+            .add_new_scenario(
+                "Chamonix_Valley_A",
+                number_runs,
+                max_timesteps,
+                y_coords,
+                x_coords,
+                &dem,
+                &release_area,
+                32.5,
+                15000.0,
+            )
+            .unwrap();
+
+        // Assert structural configuration details mapped correctly
+        {
+            let cached_scen = engine.scenarios.get("Chamonix_Valley_A").unwrap();
+            assert_eq!(cached_scen.height, 3);
+            assert_eq!(cached_scen.width, 4);
+            assert_eq!(cached_scen.number_of_runs, 5);
+        }
+
+        // 3. Populate simulation runs (using immutable reference access)
+        let simulated_cells = 3 * 4; // height * width
+        let velocity_mock = vec![12.4f32; simulated_cells];
+        let thickness_mock = vec![2.1f32; simulated_cells];
+        let com_x_mock = vec![520.0f32; max_timesteps as usize];
+        let com_y_mock = vec![940.0f32; max_timesteps as usize];
+
+        // Call run insertion—notice no disk metadata re-parsing happens inside
+        engine
+            .add_new_run(
+                "Chamonix_Valley_A",
+                0, // run_id
+                &velocity_mock,
+                &thickness_mock,
+                &com_x_mock,
+                &com_y_mock,
+                1200.5,
+                28.2,
+                0.15,
+                0.22,
+            )
+            .unwrap();
+
+        // 4. Verify structural targets are populated correctly on disk
+        let velocity_chunk_file = zarr_path.join("Chamonix_Valley_A/peak_flow_velocity/c/0/0/0");
+        assert!(zarr_path.join("Chamonix_Valley_A/zarr.json").exists());
+        assert!(
+            zarr_path
+                .join("Chamonix_Valley_A/peak_flow_velocity/zarr.json")
+                .exists()
+        );
+        assert!(
+            velocity_chunk_file.exists(),
+            "Data chunk wasn't written to the expected location."
+        );
     }
 }
