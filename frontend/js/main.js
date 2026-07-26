@@ -91,7 +91,7 @@ function changeFrictionModel() {
         frictionCoefficientSlider.value = 0.4663;
         frictionCoefficientValue.textContent = frictionCoefficientSlider.value;
     } else {
-        frictionCoefficientSlider.value = 0.155;
+        frictionCoefficientSlider.value = 0.2;
         frictionCoefficientValue.textContent = frictionCoefficientSlider.value;
     }
     updateFrictionControlsFromModel();

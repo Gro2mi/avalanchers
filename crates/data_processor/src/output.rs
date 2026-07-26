@@ -123,24 +123,20 @@ impl Output {
         let xlen = x_coords.len() as u64;
         let size = xlen * ylen;
 
-        if dem.len() > 0 {
-            if dem.len() != size as usize {
-                return Err(OutputError::InvalidData(format!(
-                    "DEM has incorrect size: expected {}, got {}",
-                    size,
-                    dem.len()
-                )));
-            }
+        if !dem.is_empty() && dem.len() != size as usize {
+            return Err(OutputError::InvalidData(format!(
+                "DEM has incorrect size: expected {}, got {}",
+                size,
+                dem.len()
+            )));
         }
 
-        if release_area.len() > 0 {
-            if release_area.len() != size as usize {
-                return Err(OutputError::InvalidData(format!(
-                    "Release area has incorrect size: expected {}, got {}",
-                    size,
-                    release_area.len()
-                )));
-            }
+        if !release_area.is_empty() && release_area.len() != size as usize {
+            return Err(OutputError::InvalidData(format!(
+                "Release area has incorrect size: expected {}, got {}",
+                size,
+                release_area.len()
+            )));
         }
 
         let avalanche_group_path = format!("/{}", scenario_name);
@@ -718,7 +714,6 @@ mod tests {
             )
             .expect("Failed to add new run");
     }
-    use std::path::PathBuf;
     #[test]
     fn test_cached_handles_workflow() {
         // Create an isolated temporary directory
