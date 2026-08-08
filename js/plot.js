@@ -96,6 +96,13 @@ function createRandomMatrix2D(width, height) {
     return matrix;
 }
 
+function percentileForLegend(percentile, variable) {
+    const values = [...new Float32Array(sim[variable])].filter(v => v !== 0);
+    const p = [...values]
+        .sort((a, b) => a - b)[Math.floor(percentile * (values.length - 1))];
+    return Math.round(p);
+}
+
 async function updatePlots(sim, selectedVariable) {
     // await sim.fetch_cell_count();
     // await sim.fetch_peak_flow_thickness();
@@ -125,12 +132,23 @@ async function updatePlots(sim, selectedVariable) {
         template: plotly_dark,
     };
 
+    var cmax = null;
+    var cmin = null;
+    if (selectedVariable === 'peak_velocity') {
+        cmax = percentileForLegend(0.99, selectedVariable);
+        cmin = 0;
+    }
+    if (selectedVariable === 'peak_flow_thickness') {
+        cmax = percentileForLegend(0.999, selectedVariable);
+        cmin = 0;
+    }
+
     var plotOptions = {
         surfacecolor: [to2D(new Float32Array(sim[selectedVariable]), sim.width, sim.height)],
         showscale: true,
         colorscale: ['Portland'],
-        cmin: [null],
-        cmax: [null],
+        cmin: [cmin],
+        cmax: [cmax],
         colorbar: {
             title: selectedVariable,
         },
