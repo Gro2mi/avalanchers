@@ -97,7 +97,7 @@ function createRandomMatrix2D(width, height) {
 }
 
 function percentileForLegend(percentile, variable) {
-    const values = new Float32Array(sim[variable]);
+    const values = [...new Float32Array(sim[variable])].filter(v => v !== 0);
     const p = [...values]
         .sort((a, b) => a - b)[Math.floor(percentile * (values.length - 1))];
     return Math.round(p);

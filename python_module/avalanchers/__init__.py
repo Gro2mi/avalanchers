@@ -1,7 +1,9 @@
-import numpy as np
 import importlib.util
 
-from ._avalanchers import * # noqa: F403
+import numpy as np
+
+from ._avalanchers import *
+
 
 def create_mesh(sim):
     dem = sim.dem
@@ -94,9 +96,9 @@ def plot_dem(sim, ax, dark=True):
 def import_plt():
     global plt, make_axes_locatable, ListedColormap, mpltPath
     try:
+        import matplotlib.path as _mpltPath
         import matplotlib.pyplot as _plt
         from mpl_toolkits.axes_grid1 import make_axes_locatable as _make_axes_locatable
-        import matplotlib.path as _mpltPath
         # from matplotlib.colors
         plt = _plt
         make_axes_locatable = _make_axes_locatable
@@ -150,7 +152,7 @@ def plot_overview(sim, threshold_value=1e-3, particle_threshold=0):
         ax.set_aspect('equal')
         
         # 1. Plot DEM in the background
-        x, y, dem, dem_mask = plot_dem(sim, ax, dark=False)
+        x, y, _dem, dem_mask = plot_dem(sim, ax, dark=False)
         
         # 2. Prepare Data
         data = getattr(sim, param).astype(np.float32)
@@ -214,7 +216,7 @@ def plot_comparison_binary(sim, parameter, reference_array, threshold_value=1, p
     import_plt()
     data = getattr(sim, parameter).astype(np.float32)
     fig, ax = plt.subplots(figsize=(10, 8))
-    x, y, dem, dem_mask = plot_dem(sim, ax, dark=False)
+    x, y, _dem, dem_mask = plot_dem(sim, ax, dark=False)
     data[dem_mask] = np.nan
     data[data < threshold_value] = np.nan
     data[sim.cell_count < particle_threshold * sim.released_particles_per_cell] = np.nan
@@ -246,7 +248,7 @@ def plot_comparison(sim, parameter, reference_array, particle_threshold=0, title
     import_plt()
     data = getattr(sim, parameter).astype(np.float32)
     fig, ax = plt.subplots(figsize=(10, 8))
-    x, y, dem, dem_mask = plot_dem(sim, ax, dark=False)
+    x, y, _dem, dem_mask = plot_dem(sim, ax, dark=False)
     data[dem_mask] = np.nan
     data[sim.cell_count < particle_threshold * sim.released_particles_per_cell] = np.nan
     diff = reference_array - data
@@ -285,7 +287,7 @@ async def setup_jupyter_3d():
             await launch_server().ready
         except ImportError:
             print("Warning: pyvista or trame not installed. Visualization may be limited.")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             print(f"Failed to start Trame server: {e}")
     else:
         print("Standard environment detected: Skipping Jupyter server launch.")
