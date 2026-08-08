@@ -1,3 +1,4 @@
+use image::{GenericImageView, ImageReader};
 use std::fs::File;
 use std::io::Cursor;
 use std::io::{self, BufWriter, Write};
@@ -11,16 +12,17 @@ use compute_core::dem::{Bounds, Dem, GeoMetadata, GeoTiff, TiffData};
 use compute_core::settings::{Settings, SimSettings};
 use compute_core::utils::*;
 
-#[cfg(not(target_arch = "wasm32"))]
-pub mod tile_manager;
-
-pub mod output;
+pub mod caaml_parser;
 pub mod rasterizer;
 pub mod shapefile_reader;
 use rasterizer::RasterGrid;
-use tile_manager::TileManager;
 
-use image::{GenericImageView, ImageReader};
+#[cfg(not(target_arch = "wasm32"))]
+use tile_manager::TileManager;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod output;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod tile_manager;
 
 #[allow(unused_imports)]
 use tracing::{debug, error, info, trace, warn};
@@ -41,6 +43,7 @@ pub enum DataProcessorError {
     NoneOutlinesPadding,
     #[error("No outlines path provided")]
     NoneOutlinesPath,
+    #[cfg(not(target_arch = "wasm32"))]
     #[error("Failed to create tile manager")]
     TileManagerError(#[from] crate::tile_manager::TileManagerError),
     #[error("Unsupported DEM format: {0}")]
@@ -742,6 +745,11 @@ pub async fn create_sim_settings_and_dem(
 ) -> Result<(SimSettings, Dem, RasterGrid), DataProcessorError> {
     let (outline, dem) = match (&settings.outlines_path, &settings.dem_path) {
         // 1. Outline only -> build outline and DEM from tile manager
+        #[cfg(target_arch = "wasm32")]
+        (Some(_outline_path), None) => {
+            todo!("Tile manager is not supported in WASM. Please provide a DEM path.");
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         (Some(outline_path), None) => {
             let padding = settings
                 .outlines_padding
@@ -1336,7 +1344,7 @@ NODATA_value  -999
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            EsriGridError::DataRead(e) if e.to_string().contains("Failed to parse data token")
+            EsriGridError::InvalidDataToken(e) if e.contains("corrupt_data")
         ));
     }
     #[test_log::test]
@@ -1472,7 +1480,7 @@ NODATA_value  -999
         assert!(res.is_err());
         assert!(matches!(
             res.unwrap_err(),
-            EsriGridError::InvalidHeaderLine(_)
+            EsriGridError::UnknownHeaderKey(e) if e.contains("1.0")
         ));
     }
 

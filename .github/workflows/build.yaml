@@ -121,6 +121,7 @@ jobs:
           | wget -qi -
           tar -xzf cargo-tarpaulin-*.tar.gz
           mv cargo-tarpaulin ~/.cargo/bin/
+          cargo tarpaulin --version
 
       - name: Coverage
         if: matrix.os == 'ubuntu-latest' 
@@ -133,6 +134,7 @@ jobs:
         run: |
           sudo apt-get install -y python3-dev
           cargo tarpaulin \
+            --engine llvm \
             --out html --out lcov --out xml \
             --output-dir coverage_report \
             --run-types Tests \

@@ -41,7 +41,7 @@ shapefile = "0.8"
 
 data_processor = { path = "crates/data_processor" }
 bytes = "1.0"
-thiserror = "1.0"
+thiserror = "2.0"
 zarrs = "0.23"
 zarrs_filesystem = "0.3"
 zarrs_plugin = "0.4"

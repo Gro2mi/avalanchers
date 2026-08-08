@@ -290,7 +290,7 @@ impl GpuResources {
     ) -> Result<Vec<T>> {
         let src_buffer = self
             .get_buffer(&buffer_name)
-            .ok_or_else(|| anyhow!("Buffer '{}' not found", &buffer_name))?;
+            .ok_or_else(|| anyhow!("Buffer '{}' not found", buffer_name))?;
         let size = src_buffer.size();
         let staging_buffer = device.create_buffer(&BufferDescriptor {
             label: Some("Staging Buffer"),
@@ -483,7 +483,7 @@ impl GpuResources {
     ) -> Result<Vec<T>> {
         let texture = self
             .get_texture(&texture_name)
-            .ok_or_else(|| anyhow!("Texture '{}' not found", &texture_name))?;
+            .ok_or_else(|| anyhow!("Texture '{}' not found", texture_name))?;
 
         let size = texture.size();
         let format = texture.format();

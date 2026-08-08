@@ -1,0 +1,663 @@
+{
+  "bulletins" : [ {
+    "publicationTime" : "2025-01-05T07:39:11Z",
+    "validTime" : {
+      "startTime" : "2025-01-04T16:00:00Z",
+      "endTime" : "2025-01-05T16:00:00Z"
+    },
+    "unscheduled" : true,
+    "weatherForecast" : { },
+    "avalancheActivity" : {
+      "highlights" : "Frischen Triebschnee kritisch beurteilen. Gleitschneelawinen sind weiterhin möglich.",
+      "comment" : "Die frischen und älteren Triebschneeansammlungen bilden die Hauptgefahr. Der warme Neuschnee und insbesondere die vielen, meist kleinen Triebschneeansammlungen können v.a. an steilen Schattenhängen oberhalb der Waldgrenze von einzelnen Wintersportlern ausgelöst werden. Mit starkem bis stürmischem Wind aus westlichen Richtungen entstehen vor allem in Rinnen, Mulden und hinter Geländekanten störanfällige Triebschneeansammlungen. Vorsicht vor allem an steilen Schattenhängen im Bereich der Waldgrenze und oberhalb der Waldgrenze. Die Gefahrenstellen sind für Geübte gut zu erkennen. Besonders ungünstig sind Stellen, wo Oberflächenreif eingeschneit wurde. <br/> <br/> Mit dem Regen sind vereinzelt kleine spontane nasse Lawinen möglich. An steilen Grashängen sind vereinzelt kleine und mittlere Gleitschneelawinen möglich. Zonen mit Gleitschneerissen sollten gemieden werden. <br/> <br/> Zudem können sehr vereinzelt Lawinen im schwachen Altschnee ausgelöst werden. Diese Gefahrenstellen liegen besonders an sehr steilen Schattenhängen oberhalb von rund 2400 m, Vorsicht vor allem an Übergängen von wenig zu viel Schnee. Lawinen können mittlere Größe erreichen."
+    },
+    "snowpackStructure" : {
+      "comment" : "In der Nacht fällt etwas Schnee. Es fiel mehr Schnee als erwartet. Bisher fielen vor allem im Westen 10 bis 20 cm Schnee. Der Westwind verfrachtet den Neuschnee. Ab dem Vormittag fällt gebietsweise etwas Regen, besonders unterhalb von rund 2000 m. <br/> <br/> Schattenhänge: Die Altschneedecke ist aufbauend umgewandelt, mit einer lockeren Oberfläche. Die frischen Triebschneeansammlungen liegen auf weichen Schichten. <br/> <br/> Steile Sonnenhänge: Die Altschneedecke ist abbauend umgewandelt, mit einer oft tragfähigen Schmelzharschkruste an der Oberfläche."
+    },
+    "travelAdvisory" : { },
+    "tendency" : [ {
+      "highlights" : "Frischen Triebschnee kritisch beurteilen.",
+      "tendencyType" : "steady",
+      "validTime" : {
+        "startTime" : "2025-01-05T16:00:00Z",
+        "endTime" : "2025-01-06T16:00:00Z"
+      }
+    } ],
+    "customData" : {
+      "ALBINA" : {
+        "mainDate" : "2025-01-05"
+      },
+      "LWD_Tyrol" : {
+        "dangerPatterns" : [ "DP6" ]
+      }
+    },
+    "avalancheProblems" : [ {
+      "problemType" : "wind_slab",
+      "elevation" : {
+        "lowerBound" : "treeline"
+      },
+      "validTimePeriod" : "all_day",
+      "snowpackStability" : "poor",
+      "frequency" : "some",
+      "avalancheSize" : 2,
+      "customData" : {
+        "ALBINA" : {
+          "avalancheType" : "slab"
+        }
+      },
+      "aspects" : [ "E", "NW", "NE", "N" ]
+    }, {
+      "problemType" : "gliding_snow",
+      "elevation" : { },
+      "validTimePeriod" : "all_day",
+      "snowpackStability" : "very_poor",
+      "frequency" : "few",
+      "avalancheSize" : 2,
+      "customData" : {
+        "ALBINA" : {
+          "avalancheType" : "glide"
+        }
+      },
+      "aspects" : [ "E", "S", "SW", "W", "SE" ]
+    } ],
+    "bulletinID" : "6c5deae8-7da5-4373-891a-0262cc640a15",
+    "dangerRatings" : [ {
+      "mainValue" : "low",
+      "elevation" : {
+        "upperBound" : "treeline"
+      },
+      "validTimePeriod" : "all_day"
+    }, {
+      "mainValue" : "considerable",
+      "elevation" : {
+        "lowerBound" : "treeline"
+      },
+      "validTimePeriod" : "all_day"
+    } ],
+    "lang" : "de",
+    "regions" : [ {
+      "name" : "Westliche Lechtaler Alpen",
+      "regionID" : "AT-07-07"
+    }, {
+      "name" : "Allgäuer Alpen",
+      "regionID" : "AT-07-01"
+    } ]
+  }, {
+    "publicationTime" : "2025-01-05T07:39:11Z",
+    "validTime" : {
+      "startTime" : "2025-01-04T16:00:00Z",
+      "endTime" : "2025-01-05T16:00:00Z"
+    },
+    "unscheduled" : true,
+    "weatherForecast" : { },
+    "avalancheActivity" : {
+      "highlights" : "Frischen Triebschnee kritisch beurteilen.",
+      "comment" : "Mit Neuschnee und teils starkem Wind aus westlichen Richtungen entstanden in den letzten Tagen vor allem in Rinnen, Mulden und hinter Geländekanten kleine Triebschneeansammlungen. Die frischen Triebschneeansammlungen sind störanfällig. Lawinen können teilweise mittlere Größe erreichen. Vorsicht vor allem an steilen Schattenhängen im Bereich der Waldgrenze und oberhalb der Waldgrenze. Besonders ungünstig sind Stellen, wo Oberflächenreif eingeschneit wurde. <br/> <br/> An steilen Grashängen sind weiterhin Gleitschneelawinen möglich, auch mittelgroße. Vorsicht in Hängen mit Gleitschneerissen. <br/> <br/> Zudem können sehr vereinzelt Lawinen im schwachen Altschnee ausgelöst werden. Diese Gefahrenstellen liegen besonders an sehr steilen Schattenhängen oberhalb von rund 2400 m, Vorsicht vor allem an eher schneearmen Stellen sowie an Übergängen von wenig zu viel Schnee."
+    },
+    "snowpackStructure" : {
+      "comment" : "Bisher fiel etwas Schnee. Es fällt gebietsweise Regen bis auf 1700 m. Der Westwind verfrachtet den Neuschnee. <br/> <br/> Schattenhänge: Die Altschneedecke ist aufbauend umgewandelt, mit einer lockeren Oberfläche. Die frischen Triebschneeansammlungen liegen auf weichen Schichten. <br/> <br/> Steile Sonnenhänge: Die Altschneedecke ist abbauend umgewandelt, mit einer oft tragfähigen Schmelzharschkruste an der Oberfläche."
+    },
+    "travelAdvisory" : { },
+    "tendency" : [ {
+      "highlights" : "Frischen Triebschnee kritisch beurteilen.",
+      "tendencyType" : "steady",
+      "validTime" : {
+        "startTime" : "2025-01-05T16:00:00Z",
+        "endTime" : "2025-01-06T16:00:00Z"
+      }
+    } ],
+    "customData" : {
+      "ALBINA" : {
+        "mainDate" : "2025-01-05"
+      },
+      "LWD_Tyrol" : {
+        "dangerPatterns" : [ "DP6" ]
+      }
+    },
+    "avalancheProblems" : [ {
+      "problemType" : "wind_slab",
+      "elevation" : {
+        "lowerBound" : "treeline"
+      },
+      "validTimePeriod" : "all_day",
+      "snowpackStability" : "poor",
+      "frequency" : "some",
+      "avalancheSize" : 2,
+      "customData" : {
+        "ALBINA" : {
+          "avalancheType" : "slab"
+        }
+      },
+      "aspects" : [ "NW", "NE", "N", "E" ]
+    } ],
+    "bulletinID" : "130f27f2-c237-41a8-ad33-606c968b4755",
+    "dangerRatings" : [ {
+      "mainValue" : "low",
+      "elevation" : {
+        "upperBound" : "treeline"
+      },
+      "validTimePeriod" : "all_day"
+    }, {
+      "mainValue" : "moderate",
+      "elevation" : {
+        "lowerBound" : "treeline"
+      },
+      "validTimePeriod" : "all_day"
+    } ],
+    "lang" : "de",
+    "regions" : [ {
+      "name" : "Westliche Tuxer Alpen",
+      "regionID" : "AT-07-15"
+    }, {
+      "name" : "Östliche Tuxer Alpen",
+      "regionID" : "AT-07-16"
+    }, {
+      "name" : "Kalkkögel",
+      "regionID" : "AT-07-14-04"
+    }, {
+      "name" : "Serleskamm",
+      "regionID" : "AT-07-14-05"
+    }, {
+      "name" : "Grieskogelgruppe",
+      "regionID" : "AT-07-09"
+    }, {
+      "name" : "Kühtai - Geigenkamm",
+      "regionID" : "AT-07-14-02"
+    }, {
+      "name" : "Sellrain - Alpeiner Berge",
+      "regionID" : "AT-07-14-03"
+    }, {
+      "name" : "Kaunergrat",
+      "regionID" : "AT-07-14-01"
+    }, {
+      "name" : "Westliche Kitzbüheler Alpen",
+      "regionID" : "AT-07-17-01"
+    }, {
+      "name" : "Silvretta",
+      "regionID" : "AT-07-12"
+    }, {
+      "name" : "Samnaungruppe",
+      "regionID" : "AT-07-13"
+    } ]
+  }, {
+    "publicationTime" : "2025-01-05T07:39:11Z",
+    "validTime" : {
+      "startTime" : "2025-01-04T16:00:00Z",
+      "endTime" : "2025-01-05T16:00:00Z"
+    },
+    "unscheduled" : true,
+    "weatherForecast" : { },
+    "avalancheActivity" : {
+      "highlights" : "Frischen Triebschnee beachten.",
+      "comment" : "Mit Neuschnee und teils starkem Wind aus westlichen Richtungen entstanden in den letzten Tagen vor allem in Rinnen, Mulden und hinter Geländekanten kleine Triebschneeansammlungen. Vorsicht vor allem an steilen Schattenhängen im Bereich der Waldgrenze und oberhalb der Waldgrenze. Die frischen Triebschneeansammlungen sind teilweise leicht auslösbar. <br/> <br/> Zudem können sehr vereinzelt Lawinen im schwachen Altschnee ausgelöst werden. Diese Gefahrenstellen liegen besonders an sehr steilen Schattenhängen oberhalb von rund 2400 m, Vorsicht vor allem an eher schneearmen Stellen sowie an Übergängen von wenig zu viel Schnee. Lawinen können mittlere Größe erreichen."
+    },
+    "snowpackStructure" : {
+      "comment" : "Es fällt etwas Schnee. In den letzten Tagen fielen gebietsweise bis zu 10 cm Schnee. Der Wind bläst mäßig bis stark. Der Wind verfrachtet den Neuschnee. <br/> <br/> Schattenhänge: Die Altschneedecke ist aufbauend umgewandelt, mit einer lockeren Oberfläche. <br/> <br/> Steile Sonnenhänge: Die Altschneedecke ist aufbauend umgewandelt, mit einer oft tragfähigen Schmelzharschkruste an der Oberfläche."
+    },
+    "travelAdvisory" : { },
+    "tendency" : [ {
+      "highlights" : "Es fällt lokal etwas Schnee. Der teilweise stürmische Wind verfrachtet den Neuschnee. <br/> Frischen Triebschnee kritisch beurteilen.",
+      "tendencyType" : "increasing",
+      "validTime" : {
+        "startTime" : "2025-01-05T16:00:00Z",
+        "endTime" : "2025-01-06T16:00:00Z"
+      }
+    } ],
+    "customData" : {
+      "ALBINA" : {
+        "mainDate" : "2025-01-05"
+      },
+      "LWD_Tyrol" : {
+        "dangerPatterns" : [ "DP6" ]
+      }
+    },
+    "avalancheProblems" : [ {
+      "problemType" : "wind_slab",
+      "elevation" : {
+        "lowerBound" : "treeline"
+      },
+      "validTimePeriod" : "all_day",
+      "snowpackStability" : "poor",
+      "frequency" : "some",
+      "avalancheSize" : 1,
+      "customData" : {
+        "ALBINA" : {
+          "avalancheType" : "slab"
+        }
+      },
+      "aspects" : [ "NW", "NE", "N" ]
+    } ],
+    "bulletinID" : "37256d6f-26d1-413f-88d7-7dd816d8a5f3",
+    "dangerRatings" : [ {
+      "mainValue" : "low",
+      "elevation" : {
+        "upperBound" : "treeline"
+      },
+      "validTimePeriod" : "all_day"
+    }, {
+      "mainValue" : "moderate",
+      "elevation" : {
+        "lowerBound" : "treeline"
+      },
+      "validTimePeriod" : "all_day"
+    } ],
+    "lang" : "de",
+    "regions" : [ {
+      "name" : "Glocknergruppe",
+      "regionID" : "AT-07-26"
+    }, {
+      "name" : "Glockturmgruppe",
+      "regionID" : "AT-07-19"
+    }, {
+      "name" : "Weißkugelgruppe",
+      "regionID" : "AT-07-20"
+    }, {
+      "name" : "Gurgler Gruppe",
+      "regionID" : "AT-07-21"
+    }, {
+      "name" : "Zentrale Stubaier Alpen",
+      "regionID" : "AT-07-22"
+    }, {
+      "name" : "Nördliche Zillertaler Alpen",
+      "regionID" : "AT-07-23"
+    }, {
+      "name" : "Venedigergruppe",
+      "regionID" : "AT-07-24"
+    }, {
+      "name" : "Hinteres Passeiertal",
+      "regionID" : "IT-32-BZ-07-01"
+    }, {
+      "name" : "Langtaufers",
+      "regionID" : "IT-32-BZ-02-01"
+    }, {
+      "name" : "Hinteres Ahrntal",
+      "regionID" : "IT-32-BZ-05-03"
+    }, {
+      "name" : "Südliche Stubaier Alpen",
+      "regionID" : "IT-32-BZ-04-01"
+    }, {
+      "name" : "Südliche Zillertaler Alpen",
+      "regionID" : "IT-32-BZ-05-02"
+    }, {
+      "name" : "Pfitsch",
+      "regionID" : "IT-32-BZ-05-01"
+    }, {
+      "name" : "Schnalser Kamm",
+      "regionID" : "IT-32-BZ-03"
+    }, {
+      "name" : "Südliche Sesvenna Gruppe",
+      "regionID" : "IT-32-BZ-01-02"
+    }, {
+      "name" : "Ortlergruppe",
+      "regionID" : "IT-32-BZ-14"
+    }, {
+      "name" : "Nördliche Sesvenna Gruppe",
+      "regionID" : "IT-32-BZ-01-01"
+    } ]
+  }, {
+    "publicationTime" : "2025-01-05T07:39:11Z",
+    "validTime" : {
+      "startTime" : "2025-01-04T16:00:00Z",
+      "endTime" : "2025-01-05T16:00:00Z"
+    },
+    "unscheduled" : true,
+    "weatherForecast" : { },
+    "avalancheActivity" : {
+      "highlights" : "Frischen Triebschnee kritisch beurteilen. Gleitschneelawinen sind weiterhin möglich.",
+      "comment" : "Die frischen und älteren Triebschneeansammlungen bilden die Hauptgefahr. Mit starkem bis stürmischem Wind aus westlichen Richtungen entstehen vor allem in Rinnen, Mulden und hinter Geländekanten störanfällige Triebschneeansammlungen. Der wenige Neuschnee und insbesondere die vielen, meist kleinen Triebschneeansammlungen können v.a. an steilen Schattenhängen oberhalb der Waldgrenze von einzelnen Wintersportlern ausgelöst werden. Vorsicht vor allem an steilen Schattenhängen im Bereich der Waldgrenze und oberhalb der Waldgrenze. Die Gefahrenstellen sind für Geübte gut zu erkennen. Besonders ungünstig sind Stellen, wo Oberflächenreif eingeschneit wurde. <br/> <br/> Mit dem Regen sind vereinzelt kleine spontane nasse Lawinen möglich. An steilen Grashängen sind vereinzelt kleine und mittlere Gleitschneelawinen möglich. Zonen mit Gleitschneerissen sollten gemieden werden. <br/> <br/> Zudem können sehr vereinzelt Lawinen im schwachen Altschnee ausgelöst werden. Diese Gefahrenstellen liegen besonders an sehr steilen Schattenhängen oberhalb von rund 2400 m, Vorsicht vor allem an Übergängen von wenig zu viel Schnee. Lawinen können mittlere Größe erreichen."
+    },
+    "snowpackStructure" : {
+      "comment" : "Bisher fiel etwas Schnee. Es fielen vor allem im Westen bis zu 10 cm Schnee, lokal auch mehr. Der Westwind verfrachtet den Neuschnee. Ab dem Vormittag fällt gebietsweise etwas Regen, besonders unterhalb von rund 1700 m. <br/> <br/> Schattenhänge: Die Altschneedecke ist aufbauend umgewandelt, mit einer lockeren Oberfläche. Die frischen Triebschneeansammlungen liegen auf weichen Schichten. <br/> <br/> Steile Sonnenhänge: Die Altschneedecke ist abbauend umgewandelt, mit einer oft tragfähigen Schmelzharschkruste an der Oberfläche."
+    },
+    "travelAdvisory" : { },
+    "tendency" : [ {
+      "highlights" : "Frischen Triebschnee kritisch beurteilen.",
+      "tendencyType" : "steady",
+      "validTime" : {
+        "startTime" : "2025-01-05T16:00:00Z",
+        "endTime" : "2025-01-06T16:00:00Z"
+      }
+    } ],
+    "customData" : {
+      "ALBINA" : {
+        "mainDate" : "2025-01-05"
+      },
+      "LWD_Tyrol" : {
+        "dangerPatterns" : [ "DP6" ]
+      }
+    },
+    "avalancheProblems" : [ {
+      "problemType" : "wind_slab",
+      "elevation" : {
+        "lowerBound" : "treeline"
+      },
+      "validTimePeriod" : "all_day",
+      "snowpackStability" : "poor",
+      "frequency" : "some",
+      "avalancheSize" : 2,
+      "customData" : {
+        "ALBINA" : {
+          "avalancheType" : "slab"
+        }
+      },
+      "aspects" : [ "E", "NW", "NE", "N" ]
+    }, {
+      "problemType" : "gliding_snow",
+      "elevation" : { },
+      "validTimePeriod" : "all_day",
+      "snowpackStability" : "very_poor",
+      "frequency" : "few",
+      "avalancheSize" : 2,
+      "customData" : {
+        "ALBINA" : {
+          "avalancheType" : "glide"
+        }
+      },
+      "aspects" : [ "E", "S", "SW", "W", "SE" ]
+    } ],
+    "bulletinID" : "855562fe-9307-4b92-a15b-a04117f582cb",
+    "dangerRatings" : [ {
+      "mainValue" : "low",
+      "elevation" : {
+        "upperBound" : "treeline"
+      },
+      "validTimePeriod" : "all_day"
+    }, {
+      "mainValue" : "moderate",
+      "elevation" : {
+        "lowerBound" : "treeline"
+      },
+      "validTimePeriod" : "all_day"
+    } ],
+    "lang" : "de",
+    "regions" : [ {
+      "name" : "Zentrale Lechtaler Alpen",
+      "regionID" : "AT-07-08"
+    }, {
+      "name" : "Östliche Lechtaler Alpen",
+      "regionID" : "AT-07-02-02"
+    }, {
+      "name" : "Ammergauer Alpen",
+      "regionID" : "AT-07-02-01"
+    }, {
+      "name" : "Westliches Karwendel",
+      "regionID" : "AT-07-04-01"
+    }, {
+      "name" : "Westliche Verwallgruppe",
+      "regionID" : "AT-07-10"
+    }, {
+      "name" : "Östliche Verwallgruppe",
+      "regionID" : "AT-07-11"
+    }, {
+      "name" : "Mieminger Gebirge",
+      "regionID" : "AT-07-03"
+    } ]
+  }, {
+    "publicationTime" : "2025-01-05T07:39:11Z",
+    "validTime" : {
+      "startTime" : "2025-01-04T16:00:00Z",
+      "endTime" : "2025-01-05T16:00:00Z"
+    },
+    "unscheduled" : true,
+    "weatherForecast" : { },
+    "avalancheActivity" : {
+      "highlights" : "Es liegt für Schneesport meist zu wenig Schnee. Die Gefahrenstellen sind selten.",
+      "comment" : "Lawinen können sehr vereinzelt ausgelöst werden, vor allem an sehr steilen Schattenhängen in der Höhe. Solche Gefahrenstellen liegen vor allem in Rinnen, Mulden und hinter Geländekanten. Lawinen sind meist nur klein. Nebst der Verschüttungsgefahr sollte auch die Mitreiß- und Absturzgefahr beachtet werden."
+    },
+    "snowpackStructure" : {
+      "comment" : "Schattenhänge: Die Schneedecke ist aufbauend umgewandelt. Harte Triebschneeansammlungen liegen in der Höhe auf weichen Schichten. <br/> Mit mäßigem bis starkem Nordwestwind entstanden vereinzelt kleine Triebschneeansammlungen. Die Schneedecke ist allgemein kleinräumig sehr unterschiedlich."
+    },
+    "travelAdvisory" : { },
+    "tendency" : [ {
+      "highlights" : "Die Gefahrenstellen sind selten. Die harten Triebschneeansammlungen können vereinzelt ausgelöst werden.",
+      "tendencyType" : "steady",
+      "validTime" : {
+        "startTime" : "2025-01-05T16:00:00Z",
+        "endTime" : "2025-01-06T16:00:00Z"
+      }
+    } ],
+    "customData" : {
+      "ALBINA" : {
+        "mainDate" : "2025-01-05"
+      },
+      "LWD_Tyrol" : {
+        "dangerPatterns" : [ ]
+      }
+    },
+    "avalancheProblems" : [ ],
+    "bulletinID" : "72259c68-a91b-40ec-9534-d9e4a1d475ef",
+    "dangerRatings" : [ {
+      "mainValue" : "low",
+      "validTimePeriod" : "all_day"
+    } ],
+    "lang" : "de",
+    "regions" : [ {
+      "name" : "Latemar",
+      "regionID" : "IT-32-TN-09"
+    }, {
+      "name" : "Südlicher Adamello",
+      "regionID" : "IT-32-TN-02"
+    }, {
+      "name" : "Primiero - Pale di S. Martino",
+      "regionID" : "IT-32-TN-13"
+    }, {
+      "name" : "Adamello - Presanella",
+      "regionID" : "IT-32-TN-01"
+    }, {
+      "name" : "Prealpi",
+      "regionID" : "IT-32-TN-12"
+    }, {
+      "name" : "Nördliche Brenta - Peller",
+      "regionID" : "IT-32-TN-04"
+    }, {
+      "name" : "Cimberntal",
+      "regionID" : "IT-32-TN-15"
+    }, {
+      "name" : "Bondone und Stivo",
+      "regionID" : "IT-32-TN-03"
+    }, {
+      "name" : "Vallarse",
+      "regionID" : "IT-32-TN-14"
+    }, {
+      "name" : "Westliche Nonsberger Alpen",
+      "regionID" : "IT-32-TN-17"
+    }, {
+      "name" : "Folgaria - Lavarone",
+      "regionID" : "IT-32-TN-06"
+    }, {
+      "name" : "Südliche Brenta",
+      "regionID" : "IT-32-TN-05"
+    }, {
+      "name" : "Fassatal",
+      "regionID" : "IT-32-TN-16"
+    }, {
+      "name" : "Sole, Pejo und Rabbi",
+      "regionID" : "IT-32-TN-19"
+    }, {
+      "name" : "Südliche Lagorai",
+      "regionID" : "IT-32-TN-08"
+    }, {
+      "name" : "Ledrotal",
+      "regionID" : "IT-32-TN-18"
+    }, {
+      "name" : "Nördliche Lagorai",
+      "regionID" : "IT-32-TN-07"
+    }, {
+      "name" : "Maddalene",
+      "regionID" : "IT-32-TN-20"
+    }, {
+      "name" : "Paganella",
+      "regionID" : "IT-32-TN-11"
+    }, {
+      "name" : "Marzola - Valsugana",
+      "regionID" : "IT-32-TN-10"
+    }, {
+      "name" : "Pine' - Fersental",
+      "regionID" : "IT-32-TN-21"
+    } ]
+  }, {
+    "publicationTime" : "2025-01-05T07:39:11Z",
+    "validTime" : {
+      "startTime" : "2025-01-04T16:00:00Z",
+      "endTime" : "2025-01-05T16:00:00Z"
+    },
+    "unscheduled" : true,
+    "weatherForecast" : { },
+    "avalancheActivity" : {
+      "highlights" : "Frischen Triebschnee beachten. Gleitschneelawinen sind vereinzelt möglich.",
+      "comment" : "Mit Neuschnee und teils starkem Wind aus westlichen Richtungen entstanden in den letzten Tagen vor allem in Rinnen, Mulden und hinter Geländekanten kleine Triebschneeansammlungen. Vorsicht vor allem an steilen Schattenhängen im Bereich der Waldgrenze und oberhalb der Waldgrenze. Die frischen Triebschneeansammlungen sind leicht auslösbar. <br/> <br/> An steilen Grashängen sind weiterhin Gleitschneelawinen möglich, auch mittelgroße. Vorsicht in Hängen mit Gleitschneerissen."
+    },
+    "snowpackStructure" : {
+      "comment" : "In der Nacht fällt etwas Schnee. Der Wind bläst mäßig bis stark. <br/> <br/> Schattenhänge: Die Altschneedecke ist aufbauend umgewandelt, mit einer lockeren Oberfläche. Die frischen Triebschneeansammlungen liegen auf weichen Schichten. <br/> <br/> Steile Sonnenhänge: Die Altschneedecke ist aufbauend umgewandelt, mit einer oft tragfähigen Schmelzharschkruste an der Oberfläche."
+    },
+    "travelAdvisory" : { },
+    "tendency" : [ {
+      "highlights" : "Frischen Triebschnee beachten.",
+      "tendencyType" : "steady",
+      "validTime" : {
+        "startTime" : "2025-01-05T16:00:00Z",
+        "endTime" : "2025-01-06T16:00:00Z"
+      }
+    } ],
+    "customData" : {
+      "ALBINA" : {
+        "mainDate" : "2025-01-05"
+      },
+      "LWD_Tyrol" : {
+        "dangerPatterns" : [ ]
+      }
+    },
+    "avalancheProblems" : [ ],
+    "bulletinID" : "0c21acc7-f356-4387-9d3a-47efdf5957af",
+    "dangerRatings" : [ {
+      "mainValue" : "low",
+      "validTimePeriod" : "all_day"
+    } ],
+    "lang" : "de",
+    "regions" : [ {
+      "name" : "Brandenberger Alpen",
+      "regionID" : "AT-07-05"
+    }, {
+      "name" : "Wilder Kaiser - Waidringer Alpen",
+      "regionID" : "AT-07-06"
+    }, {
+      "name" : "Östliche Kitzbüheler Alpen",
+      "regionID" : "AT-07-18"
+    }, {
+      "name" : "Östliches Karwendel",
+      "regionID" : "AT-07-04-02"
+    }, {
+      "name" : "Zentrale Kitzbüheler Alpen",
+      "regionID" : "AT-07-17-02"
+    } ]
+  }, {
+    "publicationTime" : "2025-01-05T07:39:11Z",
+    "validTime" : {
+      "startTime" : "2025-01-04T16:00:00Z",
+      "endTime" : "2025-01-05T16:00:00Z"
+    },
+    "unscheduled" : true,
+    "weatherForecast" : { },
+    "avalancheActivity" : {
+      "highlights" : "Es liegt für Schneesport meist zu wenig Schnee. Die Gefahrenstellen sind selten.",
+      "comment" : "Lawinen können sehr vereinzelt ausgelöst werden, vor allem an sehr steilen Schattenhängen in der Höhe. Solche Gefahrenstellen liegen vor allem in Rinnen, Mulden und hinter Geländekanten. Lawinen sind meist nur klein. Nebst der Verschüttungsgefahr sollte auch die Mitreiß- und Absturzgefahr beachtet werden."
+    },
+    "snowpackStructure" : {
+      "comment" : "Schattenhänge: Die Schneedecke ist aufbauend umgewandelt. Harte Triebschneeansammlungen liegen in der Höhe auf weichen Schichten. <br/> Steile Sonnenhänge: Die Schneedecke ist aufbauend umgewandelt, mit einer oft tragfähigen Schmelzharschkruste an der Oberfläche. <br/> Mit mäßigem bis starkem Wind aus westlichen Richtungen entstanden in den letzten Tagen vereinzelt kleine Triebschneeansammlungen. Die Schneedecke ist allgemein kleinräumig sehr unterschiedlich."
+    },
+    "travelAdvisory" : { },
+    "tendency" : [ {
+      "highlights" : "Es fällt lokal etwas Schnee. Der teilweise stürmische Wind verfrachtet den Neuschnee.",
+      "tendencyType" : "increasing",
+      "validTime" : {
+        "startTime" : "2025-01-05T16:00:00Z",
+        "endTime" : "2025-01-06T16:00:00Z"
+      }
+    } ],
+    "customData" : {
+      "ALBINA" : {
+        "mainDate" : "2025-01-05"
+      },
+      "LWD_Tyrol" : {
+        "dangerPatterns" : [ ]
+      }
+    },
+    "avalancheProblems" : [ ],
+    "bulletinID" : "6beecc8e-d1ba-46d1-a7d2-78115b74c3a8",
+    "dangerRatings" : [ {
+      "mainValue" : "low",
+      "validTimePeriod" : "all_day"
+    } ],
+    "lang" : "de",
+    "regions" : [ {
+      "name" : "Östliche Deferegger Alpen",
+      "regionID" : "AT-07-27"
+    }, {
+      "name" : "Schobergruppe",
+      "regionID" : "AT-07-28"
+    }, {
+      "name" : "Lienzer Dolomiten",
+      "regionID" : "AT-07-29"
+    }, {
+      "name" : "Lasörling Gruppe",
+      "regionID" : "AT-07-25"
+    }, {
+      "name" : "Grödner Dolomiten",
+      "regionID" : "IT-32-BZ-18-02"
+    }, {
+      "name" : "Lüsner Berge",
+      "regionID" : "IT-32-BZ-18-01"
+    }, {
+      "name" : "Sextner Dolomiten",
+      "regionID" : "IT-32-BZ-20"
+    }, {
+      "name" : "Östliche Pfunderer Berge",
+      "regionID" : "IT-32-BZ-10"
+    }, {
+      "name" : "Ratschings",
+      "regionID" : "IT-32-BZ-04-02"
+    }, {
+      "name" : "Durreckgruppe",
+      "regionID" : "IT-32-BZ-11"
+    }, {
+      "name" : "Rieserfernergruppe",
+      "regionID" : "IT-32-BZ-12"
+    }, {
+      "name" : "Westliche Deferegger Alpen",
+      "regionID" : "IT-32-BZ-13"
+    }, {
+      "name" : "Ultental",
+      "regionID" : "IT-32-BZ-15"
+    }, {
+      "name" : "Östliche Nonsberger Alpen",
+      "regionID" : "IT-32-BZ-16"
+    }, {
+      "name" : "Planeilerberge",
+      "regionID" : "IT-32-BZ-02-02"
+    }, {
+      "name" : "Saldurn-Mastaun Kamm",
+      "regionID" : "IT-32-BZ-06"
+    }, {
+      "name" : "Nördliche Fleimstaler Alpen",
+      "regionID" : "IT-32-BZ-17"
+    }, {
+      "name" : "Hirzergruppe",
+      "regionID" : "IT-32-BZ-08-01"
+    }, {
+      "name" : "Pragser Dolomiten",
+      "regionID" : "IT-32-BZ-19"
+    }, {
+      "name" : "Westliche Pfunderer Berge",
+      "regionID" : "IT-32-BZ-09"
+    }, {
+      "name" : "Jakobspitzegruppe",
+      "regionID" : "IT-32-BZ-08-02"
+    }, {
+      "name" : "Südliche Sarntaler Alpen",
+      "regionID" : "IT-32-BZ-08-03"
+    }, {
+      "name" : "Texelgruppe",
+      "regionID" : "IT-32-BZ-07-02"
+    } ]
+  } ]
+}
