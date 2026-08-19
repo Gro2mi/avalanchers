@@ -1,0 +1,101 @@
+{
+ "bail_taxonomy": {
+  "note": "Three distinct reasons an eval can bail before scoring. Only the two that involve the drainage clip carry registration information about the DEM and are folded into the 'all_cases' clip-fraction view; the third never reached the clip at all and is excluded rather than assigned a fraction.",
+  "empty_release_area": "No cell ever passed the elevation/slope/thickness release filters -- there was no release polygon for the drainage clip to act on. Carries zero clip-registration information (nothing was clipped, because nothing was there to clip). Excluded entirely from clip-fraction statistics, not folded in at any fraction. Observed once in this batch: t1_structure_2018hold's aval_6866.",
+  "clip_floor_refusal": "A release band existed and the drainage clip trimmed it, but the surviving cell count fell below the refusal floor (20 cells) -- e.g. '82% removed, 18 cells left' or '96% removed, 9 cells left'. This is a genuine (if extreme) clip-fraction observation and is folded into 'all_cases' at its parsed fraction. Observed twice: t1_structure_1999's aval_8653 (0.96) and t1_structure_campaign's aval_8124 (0.82, the same real case seen refused in every prior campaign stage).",
+  "total_clip_loss": "The drainage clip removes the release band completely (100% removed, 0 cells survive) -- distinct from clip_floor_refusal only in degree (it is the floor case pushed to its limit) and distinct from empty_release_area in kind (a release band existed before the clip acted on it). Would be folded in at frac=1.0 if observed, same treatment as clip_floor_refusal. Not observed in any of the four t1 panels in this batch."
+ },
+ "t1_structure_2018hold": {
+  "scored": {
+   "n": 99,
+   "mean": 0.03916443570367375,
+   "median": 0.0,
+   "max": 0.695906432748538,
+   "gt5": 2,
+   "gt3": 3
+  },
+  "all_cases": {
+   "n": 99,
+   "mean": 0.03916443570367375,
+   "median": 0.0,
+   "gt5": 2,
+   "gt3": 3,
+   "note": "identical to 'scored': aval_6866 is excluded (empty_release_area, zero registration information), not folded in. Corrected 2026-07-29 -- an earlier version of this file inferred frac=1.0 for aval_6866 and folded it in, which the design agent flagged as a reporting artifact (it inflated the mean from 0.0392 to 0.0488). That was wrong: an empty release area was never clipped, so it has no clip fraction to contribute."
+  },
+  "refused_case": {
+   "name": "aval_6866",
+   "frac": null,
+   "bail_type": "empty_release_area",
+   "note": "err text: \"empty release area\" -- no release cells ever formed, so the drainage clip never acted on this case. Excluded from clip-fraction stats rather than assigned frac=1.0 (see note above)."
+  }
+ },
+ "t1_structure_2019": {
+  "scored": {
+   "n": 100,
+   "mean": 0.038309796835413606,
+   "median": 0.0,
+   "max": 0.8949343339587242,
+   "gt5": 1,
+   "gt3": 5
+  },
+  "all_cases": {
+   "n": 100,
+   "mean": 0.038309796835413606,
+   "median": 0.0,
+   "gt5": 1,
+   "gt3": 5
+  },
+  "refused_case": {
+   "name": null,
+   "frac": null,
+   "bail_type": null,
+   "note": "no refused case"
+  }
+ },
+ "t1_structure_1999": {
+  "scored": {
+   "n": 99,
+   "mean": 0.018250391473554343,
+   "median": 0.0,
+   "max": 0.4115942028985507,
+   "gt5": 0,
+   "gt3": 1
+  },
+  "all_cases": {
+   "n": 100,
+   "mean": 0.0276678875588188,
+   "median": 0.0,
+   "gt5": 1,
+   "gt3": 2
+  },
+  "refused_case": {
+   "name": "aval_8653",
+   "frac": 0.96,
+   "bail_type": "clip_floor_refusal",
+   "note": "parsed from err text: 96% removed, 9 cells left (floor is 20) -- a genuine clip-fraction observation, folded into all_cases."
+  }
+ },
+ "t1_structure_campaign": {
+  "scored": {
+   "n": 101,
+   "mean": 0.0362321019296206,
+   "median": 0.0,
+   "max": 0.8222222222222222,
+   "gt5": 4,
+   "gt3": 4
+  },
+  "all_cases": {
+   "n": 102,
+   "mean": 0.04391610093031059,
+   "median": 0.0,
+   "gt5": 5,
+   "gt3": 5
+  },
+  "refused_case": {
+   "name": "aval_8124",
+   "frac": 0.82,
+   "bail_type": "clip_floor_refusal",
+   "note": "parsed from err text: 82% removed, 18 cells left (floor is 20) -- same real case refused in every prior campaign stage (s1/s3/s4/t0). A genuine clip-fraction observation, folded into all_cases."
+  }
+ }
+}

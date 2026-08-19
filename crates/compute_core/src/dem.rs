@@ -1,3 +1,4 @@
+//! `Dem`, `Bounds`, `GeoTiff`/`GeoMetadata`/`TiffData` — the elevation grid type and GeoTIFF value accessors.
 use crate::utils::*;
 
 #[derive(Default, Debug, PartialEq)]

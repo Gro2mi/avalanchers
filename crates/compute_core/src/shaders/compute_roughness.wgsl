@@ -1,3 +1,4 @@
+// @atlas: 3×3 vector-ruggedness (VRM) stencil on the normals, plus forest flag passthrough.
 @group(0) @binding(1) var normals_texture: texture_2d<f32>;
 @group(0) @binding(2) var forest_texture: texture_2d<u32>;
 @group(0) @binding(3) var roughness_texture: texture_storage_2d<rgba32float, write>;
@@ -44,6 +45,7 @@ fn compute_roughness(@builtin(global_invocation_id) id: vec3<u32>) {
 
 // import utils.wgsl;
 // BEGIN utils.wgsl
+// @atlas: Shared prelude: constants, `Particle`/`SimInfo`/`SimSettings`/`AtomicValues` structs, quantisation factors, cell↔uv↔index helpers, MPM quadratic weights.
 const WG_SIZE_2D: u32 = 16u;
 
 const g: f32 = 9.81;

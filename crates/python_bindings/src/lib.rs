@@ -1,3 +1,4 @@
+//! PyO3 wrapper: `PySimulation`, numpy in/out.
 use compute_core::{TimestepData, settings::Settings};
 use data_processor::{settings_from_json_file, settings_to_json_file};
 use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray2, ToPyArray};

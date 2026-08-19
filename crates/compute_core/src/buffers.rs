@@ -1,3 +1,4 @@
+//! `GpuResources`: named buffer/texture registry (`BufferName`, `TextureName`), allocation, upload, and readback with row-alignment handling.
 use crate::settings::SimSettings;
 use anyhow::{Result, anyhow};
 use bytemuck::{Pod, Zeroable};

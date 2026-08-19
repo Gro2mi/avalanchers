@@ -1,3 +1,4 @@
+// @atlas: Single-thread pass: advances the timestep, recomputes `dt` from peak velocity, sets the STOPPED / NO_NEW_CELLS termination flags.
 
 @group(0) @binding(1) var<storage, read_write> sim_info: SimInfo;
 @group(0) @binding(2) var<storage, read_write> atomic_values: AtomicValues;
@@ -34,6 +35,7 @@ fn update_sim_info(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
 // import utils.wgsl;
 // BEGIN utils.wgsl
+// @atlas: Shared prelude: constants, `Particle`/`SimInfo`/`SimSettings`/`AtomicValues` structs, quantisation factors, cell↔uv↔index helpers, MPM quadratic weights.
 const WG_SIZE_2D: u32 = 16u;
 
 const g: f32 = 9.81;

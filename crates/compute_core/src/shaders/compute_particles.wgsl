@@ -1,3 +1,4 @@
+// @atlas: The main step: tangent-plane projection, gravity + curvature + G2P lateral force, then the friction closures (`acceleration_by_normal_friction` / `..._drag_friction` — Coulomb / Voellmy / VoellmyMinShear / samosAT / µ(I)). Position update, out-of-bounds and NaN handling.
 struct TimestepDataArray {
     trajectories: array<TimestepData, 3>,
 };
@@ -36,7 +37,6 @@ struct TimestepData {
 @group(0) @binding(13) var<storage, read> grid_forces: array<vec2f>;
 // @group(0) @binding(11) var<storage, read_write> atomicBuffer: AtomicData;
 
-const density: f32 = 200.0;
 override WG_SIZE_1D: u32 = 1u;
 @compute @workgroup_size(WG_SIZE_1D, 1, 1)
 fn compute_particles(
@@ -268,7 +268,9 @@ fn acceleration_by_normal_friction(effective_acceleration_normal: vec3f, particl
     // samosAT friction model
     else if model == 3 {
         let rs0 = 0.222;
-        let rs = density * velocity_magnitude * velocity_magnitude / (normal_stress + 0.001);
+        // Rs = rho u^2 / sigma_b with the SAME density as normal_stress, so the
+        // ratio is density-free (Froude-like) per the AvaFrame samosAT reference.
+        let rs = sim_settings.snow_density * velocity_magnitude * velocity_magnitude / (normal_stress + 0.001);
         shear_stress = normal_stress * friction_coefficient * (1.0 + rs0 / (rs0 + rs));
     }
     // check https://ramms.ch/ramms-avalanche/friction-parameters/
@@ -346,6 +348,7 @@ fn get_curvature(uv: vec2f) -> vec3f {
 
 // import utils.wgsl;
 // BEGIN utils.wgsl
+// @atlas: Shared prelude: constants, `Particle`/`SimInfo`/`SimSettings`/`AtomicValues` structs, quantisation factors, cell↔uv↔index helpers, MPM quadratic weights.
 const WG_SIZE_2D: u32 = 16u;
 
 const g: f32 = 9.81;

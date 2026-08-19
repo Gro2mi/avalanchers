@@ -1,3 +1,4 @@
+// @atlas: Particle-to-grid scatter of mass and momentum into integer atomics (rounds rather than truncates — local fix).
 @group(0) @binding(1) var<storage, read> particles: array<Particle>;
 @group(0) @binding(2) var<storage, read_write> grid_mass_atomic: array<atomic<u32>>;
 @group(0) @binding(3) var<storage, read_write> grid_momentum_atomic: array<atomic<i32>>; // Combined u, v
@@ -40,18 +41,22 @@ fn p2g(@builtin(global_invocation_id) id: vec3u) {
             let idx = u32(node_coords.y) * sim_settings.grid_shape.x +
                 u32(node_coords.x);
 
+            // Round instead of truncating: `u32()`/`i32()` truncate toward zero,
+            // which loses on average half a quantum on *every* scatter and so
+            // systematically removes mass and momentum from the grid.
             atomicAdd(
                 &grid_mass_atomic[idx],
-                u32(p.mass * weight * MASS_FACTOR)
+                u32(round(p.mass * weight * MASS_FACTOR))
             );
-            atomicAdd(&grid_momentum_atomic[idx * 2], i32(p.mass * p.velocity.x * weight * MOMENTUM_FACTOR));
-            atomicAdd(&grid_momentum_atomic[idx * 2 + 1], i32(p.mass * p.velocity.y * weight * MOMENTUM_FACTOR));
+            atomicAdd(&grid_momentum_atomic[idx * 2], i32(round(p.mass * p.velocity.x * weight * MOMENTUM_FACTOR)));
+            atomicAdd(&grid_momentum_atomic[idx * 2 + 1], i32(round(p.mass * p.velocity.y * weight * MOMENTUM_FACTOR)));
         }
     }
 }
 
 // import utils.wgsl;
 // BEGIN utils.wgsl
+// @atlas: Shared prelude: constants, `Particle`/`SimInfo`/`SimSettings`/`AtomicValues` structs, quantisation factors, cell↔uv↔index helpers, MPM quadratic weights.
 const WG_SIZE_2D: u32 = 16u;
 
 const g: f32 = 9.81;

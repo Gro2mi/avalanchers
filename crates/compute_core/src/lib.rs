@@ -1,3 +1,4 @@
+//! `ComputeOrchestrator`: wgpu adapter/device setup (`new_with_gpu_index` pins an adapter), buffer+texture creation, and the per-step shader dispatch loop (`reset_grid → p2g → grid_physics → compute_particles → update_sim_info`, batched 200 steps per submit). Defines `Particle`, `SimInfo`, `TimestepData`, `SimInfoFlags`.
 use crate::buffers::{
     AtomicValues, BufferName, GpuResources, TextureName, create_buffers_and_texture_descriptions,
 };
@@ -8,7 +9,7 @@ use std::cmp::min;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use wgpu::{
-    Adapter, BufferUsages, CommandEncoderDescriptor, ComputePassDescriptor, Device,
+    Adapter, Backends, BufferUsages, CommandEncoderDescriptor, ComputePassDescriptor, Device,
     DeviceDescriptor, Extent3d, Features, Instance, InstanceDescriptor, Limits, PowerPreference,
     Queue, RequestAdapterOptions, TextureFormat, TextureUsages,
 };
@@ -302,38 +303,89 @@ pub struct ComputeOrchestrator {
 
 impl ComputeOrchestrator {
     pub async fn new() -> Result<Self> {
-        let instance = Instance::new(InstanceDescriptor::new_without_display_handle());
-        let mut adapter = instance
-            .request_adapter(&RequestAdapterOptions {
-                power_preference: PowerPreference::HighPerformance,
-                compatible_surface: None,
-                force_fallback_adapter: false,
-            })
-            .await;
+        Self::new_with_gpu_index(None).await
+    }
 
-        if adapter.is_err() {
-            warn!("High-performance GPU not found, falling back to LowPower/Software.");
-            adapter = instance
+    /// Like [`Self::new`], but when `gpu_index` is `Some`, pins to the
+    /// `index`-th *hardware* adapter instead of letting wgpu pick one. Lets N
+    /// concurrent processes each claim a distinct physical GPU/Vulkan device.
+    ///
+    /// The raw `enumerate_adapters(Backends::all())` list is NOT usable
+    /// positionally: on Linux boxes it interleaves software adapters (llvmpipe,
+    /// the CPU Vulkan rasterizer — measured at index 1 on two separate 4-GPU
+    /// hosts) and OpenGL duplicates of cards already listed via Vulkan. A bare
+    /// `.nth(index)` would silently pin a shard to the CPU rasterizer. So:
+    /// drop `DeviceType::Cpu` adapters, drop the GL backend (every GL entry is
+    /// a duplicate of a primary-backend entry), and index into what survives —
+    /// dense 0..n over real GPUs on Vulkan/Metal/DX12. Integrated GPUs are
+    /// kept: on Apple silicon the only real GPU is `IntegratedGpu`.
+    pub async fn new_with_gpu_index(gpu_index: Option<usize>) -> Result<Self> {
+        let instance = Instance::new(InstanceDescriptor::new_without_display_handle());
+
+        let adapter = if let Some(index) = gpu_index {
+            let adapters = instance.enumerate_adapters(Backends::all()).await;
+            if adapters.is_empty() {
+                return Err(anyhow!("no GPU adapters found (Backends::all())"));
+            }
+            let hardware: Vec<_> = adapters
+                .into_iter()
+                .filter(|a| {
+                    let info = a.get_info();
+                    info.device_type != wgpu::DeviceType::Cpu && info.backend != wgpu::Backend::Gl
+                })
+                .collect();
+            let n = hardware.len();
+            if n == 0 {
+                return Err(anyhow!(
+                    "no hardware GPU adapters found (only software/GL adapters enumerated); \
+                     refusing to run a pinned shard on a CPU rasterizer"
+                ));
+            }
+            for (i, a) in hardware.iter().enumerate() {
+                let info = a.get_info();
+                tracing::info!(
+                    "hardware adapter [{i}]: {} ({:?}, {:?})",
+                    info.name,
+                    info.device_type,
+                    info.backend
+                );
+            }
+            hardware.into_iter().nth(index).ok_or_else(|| {
+                anyhow!("--gpu-index {index} out of range: only {n} hardware adapter(s)")
+            })?
+        } else {
+            let mut adapter = instance
                 .request_adapter(&RequestAdapterOptions {
-                    power_preference: PowerPreference::LowPower,
+                    power_preference: PowerPreference::HighPerformance,
                     compatible_surface: None,
                     force_fallback_adapter: false,
                 })
                 .await;
-        }
 
-        if adapter.is_err() {
-            warn!("Low-performance GPU not found, falling back to Software.");
-            adapter = instance
-                .request_adapter(&RequestAdapterOptions {
-                    power_preference: PowerPreference::LowPower,
-                    compatible_surface: None,
-                    force_fallback_adapter: true,
-                })
-                .await;
-        }
+            if adapter.is_err() {
+                warn!("High-performance GPU not found, falling back to LowPower/Software.");
+                adapter = instance
+                    .request_adapter(&RequestAdapterOptions {
+                        power_preference: PowerPreference::LowPower,
+                        compatible_surface: None,
+                        force_fallback_adapter: false,
+                    })
+                    .await;
+            }
 
-        let adapter = adapter.expect("Failed to find any suitable GPU adapter");
+            if adapter.is_err() {
+                warn!("Low-performance GPU not found, falling back to Software.");
+                adapter = instance
+                    .request_adapter(&RequestAdapterOptions {
+                        power_preference: PowerPreference::LowPower,
+                        compatible_surface: None,
+                        force_fallback_adapter: true,
+                    })
+                    .await;
+            }
+
+            adapter.expect("Failed to find any suitable GPU adapter")
+        };
         timer_checkpoint("Get GPU adapter");
 
         let info = adapter.get_info();

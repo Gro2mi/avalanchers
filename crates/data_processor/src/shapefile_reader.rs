@@ -1,3 +1,4 @@
+//! Shapefile → `GeoPolygon`; `read_shapefile_nth_polygon` is what the harness calls per case.
 use crate::rasterizer::{GeoPolygon, Point2D};
 use shapefile::{PolygonRing, Shape, ShapeReader};
 use std::path::Path;

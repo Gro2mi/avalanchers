@@ -1,3 +1,4 @@
+// @atlas: Web-Mercator tile maths and small array helpers.
 function to2D(flatArray, width, height) {
     const matrix = [];
     for (let i = 0; i < height; i++) {

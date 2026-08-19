@@ -1,3 +1,4 @@
+//! `Simulation`: the stateful façade over the orchestrator. `SimulationState` ordering enforces normals → release areas → particles → run; `set_dem_with_bounds` / `set_release_areas` are the array-based entry points the calibration harness uses; `fetch_*` methods read back through `GpuCache`. `init_logging()` lives here.
 use anyhow::{Result, bail};
 use compute_core::{
     ComputeOrchestrator, GpuCache, Particle, SimInfo, TextureRgba, TimestepData,
@@ -62,8 +63,15 @@ pub struct Simulation {
 
 impl Simulation {
     pub async fn new() -> Result<Self> {
+        Self::new_with_gpu_index(None).await
+    }
+
+    /// Like [`Self::new`], but when `gpu_index` is `Some`, pins to that
+    /// adapter index (see [`ComputeOrchestrator::new_with_gpu_index`]) so
+    /// multiple concurrent processes can each claim a distinct GPU.
+    pub async fn new_with_gpu_index(gpu_index: Option<usize>) -> Result<Self> {
         timer_new();
-        let orchestrator = ComputeOrchestrator::new().await?;
+        let orchestrator = ComputeOrchestrator::new_with_gpu_index(gpu_index).await?;
         Ok(Self {
             orchestrator,
             settings: SimSettings::default(),
@@ -370,7 +378,11 @@ impl Simulation {
                         let mut interleaved_data: Vec<f32> = Vec::with_capacity(array.len() * 4);
                         let mut counter: u32 = 0;
                         for r in array.iter() {
-                            if *r > 0.1 {
+                            // must match the cutoff in initialize_particles.wgsl:
+                            // that kernel releases from every cell above 0.01,
+                            // and this counter sizes the particle buffer. A
+                            // stricter test here silently truncates the release.
+                            if *r > 0.01 {
                                 counter += 1;
                             }
                             interleaved_data.push(*r); // R
@@ -715,6 +727,7 @@ impl Simulation {
 mod tests {
     use super::*;
     use compute_core::buffers::AtomicValues;
+    use compute_core::settings::FrictionModel;
     use pollster::block_on;
     use std::collections::HashSet;
     use std::hash::Hash;
@@ -1180,6 +1193,20 @@ mod tests {
             ),
             cfl: Some(0.3),
             max_steps: Some(6000),
+            // Pinned to Voellmy, deliberately, even though the repo default is
+            // now samosAT. Every numeric bound in this test is a Voellmy
+            // measurement -- the 6000-step budget, peak velocity 42-90 m/s,
+            // and the tracked-particle "vel_x > 30 after step 500" below. Under
+            // samosAT the same case is simply slower: peak velocity 30.2 m/s
+            // rather than 47.3, and the last particle arrests at step 7354
+            // rather than 4240 (confirmed by running it out to 20000 steps --
+            // everything stops, nothing is stuck). So samosAT would trip all
+            // three bounds while behaving correctly.
+            //
+            // Retuning them to samosAT would not preserve what they test, it
+            // would just move the numbers. A samosAT regression case is worth
+            // adding, but as its own test with its own measured bounds.
+            friction_model: Some(FrictionModel::Voellmy.as_int()),
             ..Default::default()
         };
         block_on(sim.create(settings)).expect("Failed to create simulation");
@@ -1225,13 +1252,14 @@ mod tests {
                 .max_value()
                 .unwrap()
         );
-        // TODO fix this test
-        // assert_eq!(particles.iter().filter(|&&x| x.stopped > 4900).count(), 0);
-        // println!(
-        //     "Particles stopped at step 0: {}",
-        //     particles.iter().filter(|&&x| x.stopped == 0).count()
-        // );
-        // assert!(particles.iter().filter(|&&x| x.stopped == 0).count() < 20);
+        // No particle may still be moving near the step cap.
+        assert_eq!(particles.iter().filter(|&&x| x.stopped > 4900).count(), 0);
+        // The companion assertion `stopped == 0` count < 20 stays disabled: it is
+        // not off by a little, it is off by three orders of magnitude. Measured on
+        // this example, 13,130 of 25,960 particles carry `stopped == 0`, so the
+        // field is not "the step at which this particle stopped" for roughly half
+        // the population — 0 reads as a sentinel, not a step index. Re-enabling it
+        // needs the semantics of `stopped` pinned down first, not a bigger bound.
 
         let max_velocity = block_on(sim.fetch_peak_velocity()).expect("Failed to get max velocity");
 

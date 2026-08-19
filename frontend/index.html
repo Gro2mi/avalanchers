@@ -16,149 +16,171 @@
     <script src="js/plotly_dark.js" defer></script>
     <script src="js/plot.js" defer></script>
     <script src="js/main.js" type="module" defer></script>
+    <style>
+        .ctrl-row label { font-size: 0.85rem; }
+        .ctrl-row .form-range { max-width: none; }
+        #demPlot { width: 100%; height: 56vh; border: 1px solid grey; }
+        .sub-plot { width: 100%; height: 300px; border: 1px solid grey; }
+        #sidebar { max-height: 90vh; overflow-y: auto; }
+    </style>
 </head>
 <body>
-    <div id="ui">
-        <h1>Avalanche Simulation</h1>
-        <p>Status: <span id="status">Loading WASM...</span></p>
-    </div>
-    <a href="https://github.com/Gro2mi/avalanchers" class="btn btn-secondary mb-3" target="_blank">View on
-        GitHub</a>
+    <div class="container-fluid my-3">
+        <div id="ui" class="d-flex align-items-center justify-content-between flex-wrap mb-2">
+            <h1 class="h4 mb-0">Avalanche Simulation</h1>
+            <div class="d-flex align-items-center gap-2">
+                <span class="small">Status: <span id="status">Loading WASM...</span></span>
+                <a href="https://gro2mi.github.io/avalanchers/" class="btn btn-secondary btn-sm" target="_blank">View on
+                    GitHub</a>
+            </div>
+        </div>
 
-    <div class="container my-4" id="simSettingsDiv">
-        <!-- <button id="setExportDirectory" class="btn btn-primary" onclick="setExportDirectory()">Set Export Directory</button> -->
-        <div class="mb-3 d-flex align-items-center">
-            <label for="gpxfile">Upload GPX file</label>
-            <input type="file" id="gpxfile" accept=".gpx" text="Upload GPX File" class="form-control me-2"
-                style="max-width: 300px;">
-        </div>
-        <div class="mb-3 d-flex align-items-center">
-            <label for="zoomLevelSlider" class="me-2 mb-0" style="min-width: 140px;">DEM Zoom Level:</label>
-            <input type="range" id="zoomLevelSlider" min="12" max="18" value="16" step="1" class="form-range w-auto"
-                style="max-width:200px;">
-            <span id="zoomLevelValue" class="ms-2">16</span>
-        </div>
-        <div class="mb-3 d-flex align-items-center">
-            <label for="demDropdown" class="me-2 mb-0" style="min-width: 140px;">Select DEM File:</label>
-            <select id="demDropdown" class="form-select w-auto">
-                <option value="avaAlr">avaAlr</option>
-                <option value="avaArzlerUni">avaArzlerUni</option>
-                <option value="avaBowl">avaBowl</option>
-                <option value="avaDamBreak">avaDamBreak</option>
-                <option value="avaFlatPlane">avaFlatPlane</option>
-                <option value="avaFlowPy">avaFlowPy</option>
-                <option value="avaFPtest">avaFPtest</option>
-                <option value="avaGar" selected>avaGar</option>
-                <option value="avaHelix">avaHelix</option>
-                <option value="avaHelixChannel">avaHelixChannel</option>
-                <option value="avaHit">avaHit</option>
-                <option value="avaHockeyChannel">avaHockeyChannel</option>
-                <option value="avaHockeySmall">avaHockeySmall</option>
-                <option value="avaHof">avaHof</option>
-                <option value="avaInclinedPlane">avaInclinedPlane</option>
-                <option value="avaKot">avaKot</option>
-                <option value="avaMal">avaMal</option>
-                <option value="avaParabola">avaParabola</option>
-                <option value="avaPfa">avaPfa</option>
-                <option value="avaPyramid">avaPyramid</option>
-                <option value="avaPyramid45">avaPyramid45</option>
-                <option value="avaSimilaritySol">avaSimilaritySol</option>
-                <option value="avaSlide">avaSlide</option>
-                <option value="avaTripleBowl">avaTripleBowl</option>
-                <option value="avaWog">avaWog</option>
-            </select>
-        </div>
-        <div class="mb-3 d-flex align-items-center">
-            <label for="enable_curvature" class="me-2 mb-0" style="min-width: 140px;">Curvature:</label>
-            <input type="checkbox" id="enable_curvature" class="form-check-input" checked>
-        </div>
-        <div class="mb-3 d-flex align-items-center">
-            <label for="enable_particle_interaction" class="me-2 mb-0" style="min-width: 140px;">Particle Interaction:</label>
-            <input type="checkbox" id="enable_particle_interaction" class="form-check-input" checked>
-        </div>
-        <div class="mb-3 d-flex align-items-center">
-            <label for="enable_earth_pressure_coefficient" class="me-2 mb-0" style="min-width: 140px;">Earth Pressure Coefficient:</label>
-            <input type="checkbox" id="enable_earth_pressure_coefficient" class="form-check-input" checked>
-        </div>
-        
-        <div class="mb-3 d-flex align-items-center">
-            <label for="frictionModelDropdown" class="me-2 mb-0" style="min-width: 140px;">Friction Model:</label>
-            <select id="frictionModelDropdown" class="form-select w-auto">
-                <option value="coulomb">Coulomb</option>
-                <option value="voellmy" selected>Voellmy</option>
-                <option value="voellmyminshear">Voellmy Min Shear</option>
-                <option value="samosat">samosAT</option>
-            </select>
-        </div>
-        <div class="mb-3 d-flex align-items-center">
-            <label for="stepSlider" class="me-2 mb-0" style="min-width: 140px;">Max Steps:</label>
-            <input type="range" id="stepSlider" min="1" max="10000" value="4000" class="form-range w-auto"
-                style="max-width:200px;">
-            <span id="stepSliderValue" class="ms-2">4000</span>
-        </div>
-        <div class="mb-3 d-flex align-items-center">
-            <label for="cflSlider" class="me-2 mb-0" style="min-width: 140px;">CFL:</label>
-            <input type="range" id="cflSlider" min="0.1" max="1" value="0.5" step="0.05" class="form-range w-auto"
-                style="max-width:200px;">
-            <span id="cflSliderValue" class="ms-2">0.5</span>
-        </div>
-        <div class="mb-3 d-flex align-items-center">
-            <label for="frictionCoefficientSlider" class="me-2 mb-0" style="min-width: 140px;">Friction
-                Coefficient:</label>
-            <input type="range" id="frictionCoefficientSlider" min="0.05" max="1" value="0.4663" step="0.005"
-                class="form-range w-auto" style="max-width:200px;">
-            <span id="frictionCoefficientValue" class="ms-2">0.4663</span>
-        </div>
-        <div class="mb-3 d-flex align-items-center">
-            <label for="dragCoefficientSlider" class="me-2 mb-0" style="min-width: 140px;">Drag Coefficient:</label>
-            <input type="range" id="dragCoefficientSlider" min="50" max="10000" value="2000" step="50"
-                class="form-range w-auto" style="max-width:200px;">
-            <span id="dragCoefficientValue" class="ms-2">2000</span>
-        </div>
-        <div class="mb-3 d-flex align-items-center">
-            <label for="releasedParticlesPerCellSlider" class="me-2 mb-0" style="min-width: 140px;">Released particles
-                per cell:</label>
-            <input type="range" id="releasedParticlesPerCellSlider" min="1" max="256" value="4" step="1"
-                class="form-range w-auto" style="max-width:200px;">
-            <span id="releasedParticlesPerCellValue" class="ms-2">4</span>
-        </div>
-        <div class="mb-3 d-flex align-items-center">
-            <label for="internalFrictionAngleSlider" class="me-2 mb-0" style="min-width: 140px;">Internal Friction Angle (°):</label>
-            <input type="range" id="internalFrictionAngleSlider" min="0" max="60" value="35" step="0.1"
-                class="form-range w-auto" style="max-width:200px;">
-            <span id="internalFrictionAngleValue" class="ms-2">35</span>
-        </div>
-    </div>
+        <div class="row g-3">
+            <!-- Settings sidebar -->
+            <div class="col-lg-4">
+                <div class="border rounded p-2" id="sidebar">
+                    <div class="container-fluid" id="simSettingsDiv">
+                        <!-- <button id="setExportDirectory" class="btn btn-primary" onclick="setExportDirectory()">Set Export Directory</button> -->
+                        <div class="row g-2 ctrl-row">
+                            <div class="col-12">
+                                <label for="gpxfile" class="form-label mb-0">Upload GPX file</label>
+                                <input type="file" id="gpxfile" accept=".gpx" text="Upload GPX File" class="form-control form-control-sm">
+                            </div>
+                            <div class="col-12">
+                                <label for="demDropdown" class="form-label mb-0">Select DEM File:</label>
+                                <select id="demDropdown" class="form-select form-select-sm">
+                                    <option value="avaAlr">avaAlr</option>
+                                    <option value="avaArzlerUni">avaArzlerUni</option>
+                                    <option value="avaBowl">avaBowl</option>
+                                    <option value="avaDamBreak">avaDamBreak</option>
+                                    <option value="avaFlatPlane">avaFlatPlane</option>
+                                    <option value="avaFlowPy">avaFlowPy</option>
+                                    <option value="avaFPtest">avaFPtest</option>
+                                    <option value="avaGar" selected>avaGar</option>
+                                    <option value="avaHelix">avaHelix</option>
+                                    <option value="avaHelixChannel">avaHelixChannel</option>
+                                    <option value="avaHit">avaHit</option>
+                                    <option value="avaHockeyChannel">avaHockeyChannel</option>
+                                    <option value="avaHockeySmall">avaHockeySmall</option>
+                                    <option value="avaHof">avaHof</option>
+                                    <option value="avaInclinedPlane">avaInclinedPlane</option>
+                                    <option value="avaKot">avaKot</option>
+                                    <option value="avaMal">avaMal</option>
+                                    <option value="avaParabola">avaParabola</option>
+                                    <option value="avaPfa">avaPfa</option>
+                                    <option value="avaPyramid">avaPyramid</option>
+                                    <option value="avaPyramid45">avaPyramid45</option>
+                                    <option value="avaSimilaritySol">avaSimilaritySol</option>
+                                    <option value="avaSlide">avaSlide</option>
+                                    <option value="avaTripleBowl">avaTripleBowl</option>
+                                    <option value="avaWog">avaWog</option>
+                                </select>
+                            </div>
+                            <div class="col-6">
+                                <label for="zoomLevelSlider" class="form-label mb-0">DEM Zoom Level: <span id="zoomLevelValue">16</span></label>
+                                <input type="range" id="zoomLevelSlider" min="12" max="18" value="16" step="1" class="form-range">
+                            </div>
+                            <div class="col-6">
+                                <label for="frictionModelDropdown" class="form-label mb-0">Friction Model:</label>
+                                <select id="frictionModelDropdown" class="form-select form-select-sm">
+                                    <option value="coulomb">Coulomb</option>
+                                    <option value="voellmy" selected>Voellmy</option>
+                                    <option value="voellmyminshear">Voellmy Min Shear</option>
+                                    <option value="samosat">samosAT</option>
+                                </select>
+                            </div>
 
-    <button id="prepareSimulation" class="btn btn-primary">Prepare Simulation</button>
-    <button id="runSimulation" class="btn btn-primary">Run Simulation</button>
-    <!-- <label>
-        <input type="checkbox" id="exportResults">
-        Export Results
-    </label> -->
-    <div>
-        <div class="mb-3 d-flex align-items-center">
-            <label for="plotVariable" class="me-2 mb-0" style="min-width: 140px;">Plot Variable: </label>
-            <select id="plotVariable" class="form-select w-auto">
-                <option value="peak_flow_thickness">Peak Flow Thickness</option>
-                <option value="peak_velocity">Peak Flow Velocity</option>
-                <option value="cell_count">Cell Count</option>
-                <option value="release_areas">Release Area</option>
-                <option value="roughness">Roughness</option>
-                <option value="slope_angle">Slope Angle</option>
-                <option value="slope_aspect">Slope Aspect</option>
-                <option value="elevation">Elevation</option>
-            </select>
-        </div>
-    </div>
-    <div id="demPlot" style="width: 100%; height: 80vh; border: 1px solid grey;"></div>
-    <div id="histogramPlot" style="width: 100%; height: 600px; border: 1px solid grey;"></div>
-    <div id="outputPlot" style="width: 100%; height: 600px; border: 1px solid grey;"></div>
-    <h5>Computation Timer</h5>
-    <div id="timerPlot" style="width: 100%; height: 600px; border: 1px solid grey;"></div>
-    <div id="debugPlot" style="width: 100%; height: 600px; border: 1px solid grey;"></div>
+                            <div class="col-6 form-check">
+                                <input type="checkbox" id="enable_curvature" class="form-check-input" checked>
+                                <label for="enable_curvature" class="form-check-label">Curvature</label>
+                            </div>
+                            <div class="col-6 form-check">
+                                <input type="checkbox" id="enable_particle_interaction" class="form-check-input" checked>
+                                <label for="enable_particle_interaction" class="form-check-label">Particle Interaction</label>
+                            </div>
+                            <div class="col-6 form-check">
+                                <input type="checkbox" id="enable_earth_pressure_coefficient" class="form-check-input" checked>
+                                <label for="enable_earth_pressure_coefficient" class="form-check-label">Earth Pressure Coeff.</label>
+                            </div>
 
-    <h5>Data Sources:</h5>
+                            <div class="col-6">
+                                <label for="stepSlider" class="form-label mb-0">Max Steps: <span id="stepSliderValue">4000</span></label>
+                                <input type="range" id="stepSlider" min="1" max="10000" value="4000" class="form-range">
+                            </div>
+                            <div class="col-6">
+                                <label for="cflSlider" class="form-label mb-0">CFL: <span id="cflSliderValue">0.5</span></label>
+                                <input type="range" id="cflSlider" min="0.1" max="1" value="0.5" step="0.05" class="form-range">
+                            </div>
+                            <div class="col-6">
+                                <label for="frictionCoefficientSlider" class="form-label mb-0">Friction Coeff.: <span id="frictionCoefficientValue">0.4663</span></label>
+                                <input type="range" id="frictionCoefficientSlider" min="0.05" max="1" value="0.4663" step="0.001"
+                                    class="form-range">
+                            </div>
+                            <div class="col-6">
+                                <label for="dragCoefficientSlider" class="form-label mb-0">Drag Coeff.: <span id="dragCoefficientValue">4000</span></label>
+                                <input type="range" id="dragCoefficientSlider" min="1" max="10000" value="4000" step="5"
+                                    class="form-range">
+                            </div>
+                            <div class="col-6">
+                                <label for="releasedParticlesPerCellSlider" class="form-label mb-0">Particles/cell: <span id="releasedParticlesPerCellValue">4</span></label>
+                                <input type="range" id="releasedParticlesPerCellSlider" min="1" max="256" value="4" step="1"
+                                    class="form-range">
+                            </div>
+                            <div class="col-6">
+                                <label for="internalFrictionAngleSlider" class="form-label mb-0">Int. Friction Angle (°): <span id="internalFrictionAngleValue">35</span></label>
+                                <input type="range" id="internalFrictionAngleSlider" min="0" max="60" value="35" step="0.1"
+                                    class="form-range">
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="d-flex gap-2 mt-3">
+                        <button id="prepareSimulation" class="btn btn-primary btn-sm">Prepare Simulation</button>
+                        <button id="runSimulation" class="btn btn-primary btn-sm">Run Simulation</button>
+                    </div>
+                    <!-- <label>
+                        <input type="checkbox" id="exportResults">
+                        Export Results
+                    </label> -->
+                </div>
+            </div>
+
+            <!-- Plot area -->
+            <div class="col-lg-8">
+                <div class="mb-2" style="max-width: 300px;">
+                    <label for="plotVariable" class="form-label mb-0">Plot Variable:</label>
+                    <select id="plotVariable" class="form-select form-select-sm">
+                        <option value="peak_flow_thickness">Peak Flow Thickness</option>
+                        <option value="peak_velocity">Peak Flow Velocity</option>
+                        <option value="cell_count">Cell Count</option>
+                        <option value="release_areas">Release Area</option>
+                        <option value="roughness">Roughness</option>
+                        <option value="slope_angle">Slope Angle</option>
+                        <option value="slope_aspect">Slope Aspect</option>
+                        <option value="elevation">Elevation</option>
+                    </select>
+                </div>
+                <div id="demPlot"></div>
+
+                <div class="row g-2 mt-1">
+                    <div class="col-md-6">
+                        <div id="histogramPlot" class="sub-plot"></div>
+                    </div>
+                    <div class="col-md-6">
+                        <div id="outputPlot" class="sub-plot"></div>
+                    </div>
+                    <div class="col-md-6">
+                        <h6 class="mb-1">Computation Timer</h6>
+                        <div id="timerPlot" class="sub-plot"></div>
+                    </div>
+                    <div class="col-md-6">
+                        <div id="debugPlot" class="sub-plot"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+    <h5 class="mt-4">Data Sources:</h5>
     <ul>
         <li>
             The source of the elevation data is <a href="https://www.basemap.at/" target="_blank">basemap.at</a>
@@ -178,6 +200,7 @@
                 href="https://land.copernicus.eu/en/products/clc-backbone/clcplus-backbone-2023-raster-10-m-europe-2-yearly"
                 target="_blank">CLCplus Backbone 2023</a> which is free to use for any individual.
     </ul>
+    </div>
 
     <!-- <script type="module" src="js/main.js"></script> -->
 </body>

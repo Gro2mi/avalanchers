@@ -1,3 +1,4 @@
+// @atlas: Standalone single-point trajectory tracer: integrates up to 3 point trajectories from an input point, recording per-step velocity/acceleration/position and scattering trajectory + velocity textures. Defines its own private `SimSettings` layout and is not referenced by `shaders.rs` — orphaned.
 struct SimSettings {
   num_steps: u32,
   model_type: u32,

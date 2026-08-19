@@ -1,3 +1,4 @@
+//! `RasterGrid`: polygon → binary grid by scanline fill with a cell-centre rule, `add_padding`, and `to_padded_tile` for reprojecting onto a DEM's exact frame.
 #[derive(thiserror::Error, Debug)]
 pub enum RasterizerError {
     #[error("Padding must be positive")]

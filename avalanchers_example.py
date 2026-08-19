@@ -1,3 +1,4 @@
+# @atlas: Minimal usage example against an AvaFrame case.
 import time
 import avalanchers
 

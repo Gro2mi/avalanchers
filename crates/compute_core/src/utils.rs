@@ -1,3 +1,4 @@
+//! Odds and ends: `Point`, `linspace`, `to_2d`, `bilinear_interpolate`, `flip_rows_flat_vec`, the `MaxValue` trait, and the checkpoint timer.
 use rand::RngExt;
 use std::cmp::Ordering;
 use std::sync::{LazyLock, Mutex};

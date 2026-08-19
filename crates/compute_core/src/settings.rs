@@ -1,3 +1,4 @@
+//! `SimSettings` (the `#[repr(C)]` struct uploaded verbatim as a shader uniform) and `Settings` (the optional-field JSON patch). Repo defaults live in `SimSettings::new()`. `FrictionModel` enum.
 use bytemuck::{Pod, Zeroable}; // Ensure bytemuck has the "derive" feature enabled in Cargo.toml
 use serde::{Deserialize, Serialize};
 use std::io::{self, Write};
@@ -93,34 +94,83 @@ impl Default for SimSettings {
 }
 
 impl SimSettings {
+    /// Repo defaults. The physics-bearing entries below are **frozen vector v1**,
+    /// measured against 101 mapped SPOT6 avalanche outlines from 24 Jan 2018
+    /// (see `campaign/GLOBAL_CALIBRATION_PLAN.md` and
+    /// `campaign/results_2026-07-28/`). Where a value is a campaign result the
+    /// comment says what was measured; where it is untested that is said too.
+    ///
+    /// Read Ω_T against the ground-truth reproducibility ceiling of ≈ +0.28 at
+    /// this imagery resolution, not against 1.0: two expert mappers agree with
+    /// each other only that well.
     pub fn new() -> Self {
         Self {
+            // Frozen numerics (tier 0): cheapest configuration above the
+            // resolution floor. cfl 0.9 and ppc 2 are measurably too coarse;
+            // finer settings buy +0.0167 [+0.0092, +0.0258] at several times
+            // the cost, and Ω_T is non-monotone in resolution, so "finer is
+            // safer" does not hold here. These were already the repo defaults.
             max_steps: 3000,
             sim_model: 0,
-            friction_model: FrictionModel::Voellmy.as_int(),
+            // Frozen structure (tier 1, confirmed at stage 4): samosAT beats
+            // the previous Voellmy default by +0.0207 mean Ω_T
+            // [+0.0107, +0.0313], p = 6.6e-5, n = 101, with calibration and
+            // validation subgroups agreeing in sign (+0.0271 / +0.0104).
+            friction_model: FrictionModel::SamosAT.as_int(),
             released_particles_per_cell: 8,
             grid_shape_x: 1,
             grid_shape_y: 1,
             world_size_x: 1.0,
             world_size_y: 1.0,
+            // Inert under samosAT and kept only as a unit-bearing constant:
+            // samosAT's R_s is density-free by construction (rho cancels
+            // against sigma_b), so this value does not move the footprint.
+            // Confirmed empirically at 150/200/300.
             density: 200.0,
             slab_thickness: 1.0,
 
+            // NOT frozen by the campaign. mu is condition-dependent and is
+            // fitted per event; this is a usable starting value, not a
+            // calibrated constant.
             friction_coefficient: 0.155,
+            // Read only by Voellmy and VoellmyMinShear. samosAT uses a fixed
+            // log profile, so xi does not enter the frozen model at all --
+            // it exited the parameter set rather than being tuned.
             drag_coefficient: 4000.0,
             n0: 70.0,
             i0: 0.29,
             mu0: 0.38,
             mu2: 0.65,
             grain_diameter: 0.002,
+            // Frozen (tier 2). ifa is a validity edge rather than a smooth
+            // optimum: the profile is a peaked plateau and anything in 35-45
+            // is equivalent, so 40 is chosen for sitting comfortably inside
+            // the valid region. The optimum is 40 at every density tested,
+            // so it is not compensating for the density above.
             internal_friction_angle: 40.0,
+            // WARNING: never swept. This is not exposed in the calibration
+            // harness's parameter set, so no stage of the campaign varied it;
+            // it sat at this value throughout. It co-determines the
+            // earth-pressure coefficient *and* the valid range of ifa above,
+            // and at ifa <= basal_friction_angle the earth-pressure term
+            // degenerates silently. Treat as untested, not as chosen.
             basal_friction_angle: 25.0,
 
             cfl: 0.5,
             cell_size: 1.0,
+            // Measured inert on the full panel: the two live read sites that
+            // see it raw are dominated by other stopping criteria, and the
+            // third floors it at 1e-3 regardless.
             velocity_threshold: 1e-6,
+            // Measured inert: no discrimination at any resolution tested.
             roughness_threshold: 0.01,
-            flags: SimFlags::new(true, true, true, true).mask,
+            // Frozen structure: curvature ON, particle interaction ON, earth
+            // pressure ON, entrainment OFF. Entrainment is off because its
+            // twin candidates were bit-identical to the entrainment-free ones
+            // on 101/101 cases -- it does no work in this configuration.
+            // Earth pressure is on and earns it: the arm with it disabled is
+            // the one that flips sign between calibration and validation.
+            flags: SimFlags::new(true, true, true, false).mask,
 
             min_slope_angle: 28.0,
             max_slope_angle: 60.0,
@@ -363,7 +413,7 @@ mod tests {
         let settings = SimSettings::new();
         assert_eq!(settings.max_steps, 3000);
         assert_eq!(settings.sim_model, 0);
-        assert_eq!(settings.friction_model, FrictionModel::Voellmy.as_int());
+        assert_eq!(settings.friction_model, FrictionModel::SamosAT.as_int());
         assert_eq!(settings.released_particles_per_cell, 8);
         assert_eq!(settings.grid_shape_x, 1);
         assert_eq!(settings.grid_shape_y, 1);
@@ -380,6 +430,11 @@ mod tests {
         assert_eq!(settings.release_min_elevation, 1500.0);
         assert_eq!(settings.velocity_threshold, 1e-6);
         assert_eq!(settings.roughness_threshold, 0.01);
+        assert_eq!(settings.internal_friction_angle, 40.0);
+        assert_eq!(settings.basal_friction_angle, 25.0);
+        // Frozen structure: curvature, particle interaction and earth pressure
+        // on; entrainment off.
+        assert_eq!(settings.flags, SimFlags::new(true, true, true, false).mask);
     }
 
     #[test_log::test]

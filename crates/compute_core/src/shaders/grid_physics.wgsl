@@ -1,3 +1,4 @@
+// @atlas: Grid solve: recovers flow thickness, earth-pressure coefficient from velocity divergence, lateral pressure force ∝ ∇(h²). Tracks newly-conquered cells for the stop criterion.
 @group(0) @binding(1) var<storage> grid_mass_atomic: array<u32>;
 @group(0) @binding(2) var normals_texture: texture_2d<f32>;
 @group(0) @binding(3) var<storage, read_write> grid_forces: array<vec2f>;
@@ -171,6 +172,7 @@ fn earth_pressure_coefficient(
 
 // import utils.wgsl;
 // BEGIN utils.wgsl
+// @atlas: Shared prelude: constants, `Particle`/`SimInfo`/`SimSettings`/`AtomicValues` structs, quantisation factors, cell↔uv↔index helpers, MPM quadratic weights.
 const WG_SIZE_2D: u32 = 16u;
 
 const g: f32 = 9.81;

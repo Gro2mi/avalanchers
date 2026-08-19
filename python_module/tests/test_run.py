@@ -1,3 +1,4 @@
+# @atlas: Pytest smoke tests for the PyO3 bindings: end-to-end runs from settings JSON and the packaged example, plus numpy DEM / release-area roundtrips.
 import avalanchers
 import numpy as np
 

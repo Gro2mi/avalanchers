@@ -1,3 +1,4 @@
+//! `WasmSimulation` for the browser build.
 use compute_core::{TimestepData, settings::Settings};
 use js_sys::{Float32Array, Uint32Array};
 use serde_wasm_bindgen::from_value;

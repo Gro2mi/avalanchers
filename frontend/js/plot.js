@@ -1,3 +1,4 @@
+// @atlas: Plotly 2-D/3-D result rendering, the dark theme, and percentile-clamped colour limits for velocity and flow thickness.
 const outputPlot = document.getElementById('outputPlot');
 const demPlot = document.getElementById('demPlot');
 const histogramPlot = document.getElementById('histogramPlot');

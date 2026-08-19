@@ -1,3 +1,4 @@
+// @atlas: Trivial shader used by the shader-report test.
 @group(0) @binding(0) var outputTex: texture_storage_2d<rgba32float, write>;
 
 @compute @workgroup_size(8,8)

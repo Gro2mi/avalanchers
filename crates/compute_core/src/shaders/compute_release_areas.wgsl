@@ -1,3 +1,4 @@
+// @atlas: Gates each cell on slope band, minimum elevation, roughness threshold and forest; writes `slab_thickness` into the release texture. Holds the unused `predictor` slot.
 // @group(0) @binding(0) var<uniform> sim_settings: sim_settings;
 @group(0) @binding(1) var dem_texture: texture_2d<f32>;
 @group(0) @binding(2) var slope_texture: texture_2d<f32>;
@@ -60,6 +61,7 @@ fn compute_release_areas(@builtin(global_invocation_id) id: vec3<u32>) {
 
 // import utils.wgsl;
 // BEGIN utils.wgsl
+// @atlas: Shared prelude: constants, `Particle`/`SimInfo`/`SimSettings`/`AtomicValues` structs, quantisation factors, cell↔uv↔index helpers, MPM quadratic weights.
 const WG_SIZE_2D: u32 = 16u;
 
 const g: f32 = 9.81;

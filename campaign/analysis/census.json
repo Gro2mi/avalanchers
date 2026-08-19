@@ -1,0 +1,472 @@
+{
+ "n_total": 18737,
+ "by_size": [
+  {
+   "value": "1",
+   "n": 100,
+   "pct": 0.53370336766825
+  },
+  {
+   "value": "2",
+   "n": 5626,
+   "pct": 30.026151465015744
+  },
+  {
+   "value": "3",
+   "n": 9979,
+   "pct": 53.258259059614666
+  },
+  {
+   "value": "4",
+   "n": 2875,
+   "pct": 15.343971820462187
+  },
+  {
+   "value": "5",
+   "n": 157,
+   "pct": 0.8379142872391525
+  }
+ ],
+ "by_type": [
+  {
+   "value": "FULL_DEPTH",
+   "n": 2011,
+   "pct": 10.732774723808507
+  },
+  {
+   "value": "LOOSE_SNOW",
+   "n": 612,
+   "pct": 3.26626461012969
+  },
+  {
+   "value": "SLAB",
+   "n": 13492,
+   "pct": 72.00725836580028
+  },
+  {
+   "value": "UNKNOWN",
+   "n": 2622,
+   "pct": 13.993702300261514
+  }
+ ],
+ "by_trigger": [
+  {
+   "value": "EXPLOSIVE",
+   "n": 94,
+   "pct": 0.501681165608155
+  },
+  {
+   "value": "NATURAL",
+   "n": 17666,
+   "pct": 94.28403693227304
+  },
+  {
+   "value": "UNKNOWN",
+   "n": 977,
+   "pct": 5.2142819021188025
+  }
+ ],
+ "by_quality": [
+  {
+   "value": "1",
+   "n": 6117,
+   "pct": 32.646635000266855
+  },
+  {
+   "value": "2",
+   "n": 10871,
+   "pct": 58.018893099215454
+  },
+  {
+   "value": "3",
+   "n": 1749,
+   "pct": 9.334471900517693
+  }
+ ],
+ "by_human": [
+  {
+   "value": "UNKNOWN",
+   "n": 18737,
+   "pct": 100.0
+  }
+ ],
+ "size_by_quality": {
+  "1": {
+   "1": 90,
+   "2": 10,
+   "3": 0
+  },
+  "2": {
+   "1": 3288,
+   "2": 2153,
+   "3": 185
+  },
+  "3": {
+   "1": 2263,
+   "2": 6508,
+   "3": 1208
+  },
+  "4": {
+   "1": 442,
+   "2": 2082,
+   "3": 351
+  },
+  "5": {
+   "1": 34,
+   "2": 118,
+   "3": 5
+  }
+ },
+ "size_resolution": {
+  "1": {
+   "n": 100,
+   "area_ha": [
+    0.022529374999999997,
+    0.04094375,
+    0.048529062500000004
+   ],
+   "cells_5m": [
+    9.01175,
+    16.3775,
+    19.411625
+   ],
+   "side_m": [
+    15.009620416231387,
+    20.234353359130168,
+    22.02930579363423
+   ],
+   "cells_across": [
+    3.0019240832462772,
+    4.046870671826033,
+    4.405861158726847
+   ],
+   "npts": [
+    80.9,
+    108.5,
+    131.10000000000002
+   ],
+   "vertex_spacing_m": 0.7222189232785867,
+   "drop_m": [
+    16.573000000000093,
+    30.25,
+    62.773000000000025
+   ],
+   "frac_under_100_cells": 1.0,
+   "frac_under_20_across": 1.0,
+   "frac_drop_under_150": 0.99
+  },
+  "2": {
+   "n": 5626,
+   "area_ha": [
+    0.123978125,
+    0.4450203125,
+    0.874096875
+   ],
+   "cells_5m": [
+    49.59125,
+    178.008125,
+    349.63874999999996
+   ],
+   "side_m": [
+    35.210527408018265,
+    66.70984266357517,
+    93.49314814092921
+   ],
+   "cells_across": [
+    7.042105481603652,
+    13.341968532715036,
+    18.69862962818584
+   ],
+   "npts": [
+    165.0,
+    301.0,
+    463.0
+   ],
+   "vertex_spacing_m": 0.8481187128425469,
+   "drop_m": [
+    54.63499999999999,
+    109.81899999999996,
+    205.3850000000001
+   ],
+   "frac_under_100_cells": 0.2708851759687167,
+   "frac_under_20_across": 1.0,
+   "frac_drop_under_150": 0.7406683256309989
+  },
+  "3": {
+   "n": 9979,
+   "area_ha": [
+    1.253895,
+    2.713275,
+    6.148130000000001
+   ],
+   "cells_5m": [
+    501.558,
+    1085.31,
+    2459.252000000001
+   ],
+   "side_m": [
+    111.97745305561342,
+    164.72021733837045,
+    247.95422923401958
+   ],
+   "cells_across": [
+    22.395490611122685,
+    32.94404346767409,
+    49.590845846803916
+   ],
+   "npts": [
+    436.0,
+    706.0,
+    1271.0
+   ],
+   "vertex_spacing_m": 0.9294152518144503,
+   "drop_m": [
+    128.12800000000007,
+    249.9300000000003,
+    513.4380000000001
+   ],
+   "frac_under_100_cells": 0.0001002104419280489,
+   "frac_under_20_across": 0.0002004208838560978,
+   "frac_drop_under_150": 0.16284196813307947
+  },
+  "4": {
+   "n": 2875,
+   "area_ha": [
+    8.74607,
+    13.5334,
+    29.47621999999999
+   ],
+   "cells_5m": [
+    3498.428,
+    5413.36,
+    11790.487999999996
+   ],
+   "side_m": [
+    295.7375525662899,
+    367.877697067925,
+    542.9198274705722
+   ],
+   "cells_across": [
+    59.14751051325797,
+    73.575539413585,
+    108.58396549411442
+   ],
+   "npts": [
+    1120.4,
+    1930.0,
+    3656.2
+   ],
+   "vertex_spacing_m": 0.7801780943996635,
+   "drop_m": [
+    314.012,
+    581.4299999999998,
+    1000.586
+   ],
+   "frac_under_100_cells": 0.0,
+   "frac_under_20_across": 0.0,
+   "frac_drop_under_150": 0.0006956521739130435
+  },
+  "5": {
+   "n": 157,
+   "area_ha": [
+    51.65996,
+    64.3807,
+    102.50008000000001
+   ],
+   "cells_5m": [
+    20663.984,
+    25752.28,
+    41000.03200000001
+   ],
+   "side_m": [
+    718.7486330590148,
+    802.3758470941159,
+    1012.410433223399
+   ],
+   "cells_across": [
+    143.74972661180294,
+    160.47516941882319,
+    202.48208664467978
+   ],
+   "npts": [
+    3454.2,
+    5605.0,
+    9228.6
+   ],
+   "vertex_spacing_m": 0.5725942544443141,
+   "drop_m": [
+    702.1879999999999,
+    1116.5299999999997,
+    1692.3948
+   ],
+   "frac_under_100_cells": 0.0,
+   "frac_under_20_across": 0.0,
+   "frac_drop_under_150": 0.0
+  }
+ },
+ "funnel": [
+  {
+   "stage": "all mapped polygons",
+   "remaining": 18737,
+   "removed": 0,
+   "removed_pct_of_prev": 0.0,
+   "would_remove_alone": 0
+  },
+  {
+   "stage": "typ = SLAB",
+   "remaining": 13492,
+   "removed": 5245,
+   "removed_pct_of_prev": 27.99274163419971,
+   "would_remove_alone": 5245
+  },
+  {
+   "stage": "trg_typ = NATURAL",
+   "remaining": 12616,
+   "removed": 876,
+   "removed_pct_of_prev": 6.4927364364067595,
+   "would_remove_alone": 1071
+  },
+  {
+   "stage": "single ring (nparts = 1)",
+   "remaining": 12500,
+   "removed": 116,
+   "removed_pct_of_prev": 0.9194673430564363,
+   "would_remove_alone": 135
+  },
+  {
+   "stage": "size class 2-5",
+   "remaining": 12497,
+   "removed": 3,
+   "removed_pct_of_prev": 0.024,
+   "would_remove_alone": 100
+  },
+  {
+   "stage": "area 2-60 ha",
+   "remaining": 7265,
+   "removed": 5232,
+   "removed_pct_of_prev": 41.86604785148435,
+   "would_remove_alone": 9181
+  },
+  {
+   "stage": "bbox <= 2000 m",
+   "remaining": 7211,
+   "removed": 54,
+   "removed_pct_of_prev": 0.7432897453544391,
+   "would_remove_alone": 126
+  },
+  {
+   "stage": "drop >= 150 m",
+   "remaining": 6762,
+   "removed": 449,
+   "removed_pct_of_prev": 6.2265982526695325,
+   "would_remove_alone": 5893
+  },
+  {
+   "stage": "start zone >= 1550 m",
+   "remaining": 6741,
+   "removed": 21,
+   "removed_pct_of_prev": 0.3105590062111801,
+   "would_remove_alone": 569
+  },
+  {
+   "stage": "no neighbour within 25 m",
+   "remaining": 602,
+   "removed": 6139,
+   "removed_pct_of_prev": 91.06957424714435,
+   "would_remove_alone": 16546
+  }
+ ],
+ "n_pool": 602,
+ "pool_by_size": [
+  {
+   "value": "1",
+   "n": 0
+  },
+  {
+   "value": "2",
+   "n": 0
+  },
+  {
+   "value": "3",
+   "n": 471
+  },
+  {
+   "value": "4",
+   "n": 130
+  },
+  {
+   "value": "5",
+   "n": 1
+  }
+ ],
+ "pool_by_quality": [
+  {
+   "value": "1",
+   "n": 150
+  },
+  {
+   "value": "2",
+   "n": 428
+  },
+  {
+   "value": "3",
+   "n": 24
+  }
+ ],
+ "counterfactual": {
+  "pool as built (size 2-5)": 602,
+  "include size 1": 602,
+  "include size 1, drop min area to 0.5 ha": 760,
+  "include size 1, no area or drop floor": 1475,
+  "size 3-4 only": 601,
+  "size 5 only": 1
+ },
+ "natural_slab_by_size": {
+  "1": {
+   "n": 3,
+   "median_area_ha": 0.046103125,
+   "pass_area_floor": 0,
+   "pass_drop_floor": 0,
+   "pass_both": 0
+  },
+  "2": {
+   "n": 2725,
+   "median_area_ha": 0.574125,
+   "pass_area_floor": 0,
+   "pass_drop_floor": 566,
+   "pass_both": 0
+  },
+  "3": {
+   "n": 7431,
+   "median_area_ha": 2.7754,
+   "pass_area_floor": 4989,
+   "pass_drop_floor": 6044,
+   "pass_both": 4540
+  },
+  "4": {
+   "n": 2311,
+   "median_area_ha": 13.8761,
+   "pass_area_floor": 2311,
+   "pass_drop_floor": 2311,
+   "pass_both": 2311
+  },
+  "5": {
+   "n": 146,
+   "median_area_ha": 64.385225,
+   "pass_area_floor": 146,
+   "pass_drop_floor": 146,
+   "pass_both": 146
+  }
+ },
+ "n_sample": 105,
+ "sample_by_size": {
+  "4": 46,
+  "3": 58,
+  "5": 1
+ },
+ "sample_by_quality": {
+  "2": 40,
+  "1": 52,
+  "3": 13
+ }
+}

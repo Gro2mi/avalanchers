@@ -1,3 +1,4 @@
+//! Shader loading and pipeline construction: `include_str!`s each WGSL file, splices `utils.wgsl`/`random.wgsl` in at `// import` lines, builds bind group layouts per `ShaderName`.
 use crate::buffers::AtomicValues;
 use crate::buffers::{BufferName, GpuResources, TextureName};
 use anyhow::Result;

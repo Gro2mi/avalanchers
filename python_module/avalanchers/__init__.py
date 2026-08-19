@@ -1,3 +1,4 @@
+# @atlas: Python-side helpers: `create_mesh`, `plot2d`, `plot3d` (the `[viz]` extra).
 import importlib.util
 
 import numpy as np

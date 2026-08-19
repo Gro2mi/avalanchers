@@ -1,3 +1,4 @@
+//! File-format I/O: PNG/GeoTIFF/ESRI-ASCII DEM loading, release-texture loading, settings JSON helpers, `create_sim_settings_and_dem`.
 use image::{GenericImageView, ImageReader};
 use std::fs::File;
 use std::io::Cursor;

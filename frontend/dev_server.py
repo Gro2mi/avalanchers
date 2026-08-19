@@ -1,3 +1,4 @@
+# @atlas: HTTPS dev server with self-signed certs (WebGPU needs a secure context).
 import http.server
 import ssl
 import socket

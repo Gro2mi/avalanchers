@@ -1,3 +1,4 @@
+//! Tests for the CAAML bulletin parser, against `tests/fixtures/caaml_sample.json`.
 use data_processor::caaml_parser::*;
 
 #[test_log::test]

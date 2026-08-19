@@ -1,3 +1,4 @@
+//! Writes simulation results out as Zarr arrays with CF-style metadata.
 use half::f16;
 use serde_json::json;
 use std::collections::HashMap;

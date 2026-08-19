@@ -1,3 +1,4 @@
+// @atlas: Web-Mercator tile maths and small array helpers.
 function latLonToWebMercator(lat, lon) {
     const RADIUS = 6378137.0; // Earth's radius in meters (WGS84)
 

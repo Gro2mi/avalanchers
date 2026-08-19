@@ -1,3 +1,4 @@
+//! Criterion benchmark over the AvaFrame `avaMal` example.
 use compute_core::settings::Settings;
 use criterion::{Criterion, criterion_group, criterion_main};
 use pollster::block_on;

@@ -1,0 +1,104 @@
+{
+ "dataset": "2019",
+ "n_total": 6041,
+ "dead_fields": {
+  "aspect": 0.0,
+  "start_zone": 0.0,
+  "dpo_alt": 0.0,
+  "trg_typ": 0.0
+ },
+ "funnel": [
+  {
+   "stage": "all mapped polygons",
+   "remaining": 6041,
+   "removed": 0,
+   "removed_pct_of_prev": 0.0,
+   "would_remove_alone": 0
+  },
+  {
+   "stage": "geometry valid/repairable & non-degenerate",
+   "remaining": 6041,
+   "removed": 0,
+   "removed_pct_of_prev": 0.0,
+   "would_remove_alone": 0
+  },
+  {
+   "stage": "typ = SLAB",
+   "remaining": 3040,
+   "removed": 3001,
+   "removed_pct_of_prev": 49.67720576063566,
+   "would_remove_alone": 3001
+  },
+  {
+   "stage": "trg_typ = NATURAL",
+   "remaining": 2818,
+   "removed": 222,
+   "removed_pct_of_prev": 7.302631578947368,
+   "would_remove_alone": 241
+  },
+  {
+   "stage": "single ring (nparts = 1)",
+   "remaining": 2791,
+   "removed": 27,
+   "removed_pct_of_prev": 0.9581263307310149,
+   "would_remove_alone": 34
+  },
+  {
+   "stage": "size class 2-5",
+   "remaining": 2789,
+   "removed": 2,
+   "removed_pct_of_prev": 0.07165890361877464,
+   "would_remove_alone": 51
+  },
+  {
+   "stage": "area 2-60 ha",
+   "remaining": 2205,
+   "removed": 584,
+   "removed_pct_of_prev": 20.939404804589458,
+   "would_remove_alone": 3038
+  },
+  {
+   "stage": "bbox <= 2000 m",
+   "remaining": 2184,
+   "removed": 21,
+   "removed_pct_of_prev": 0.9523809523809523,
+   "would_remove_alone": 36
+  },
+  {
+   "stage": "drop >= 150 m",
+   "remaining": 2059,
+   "removed": 125,
+   "removed_pct_of_prev": 5.7234432234432235,
+   "would_remove_alone": 2163
+  },
+  {
+   "stage": "start zone >= 1550 m",
+   "remaining": 2044,
+   "removed": 15,
+   "removed_pct_of_prev": 0.7285089849441476,
+   "would_remove_alone": 591
+  },
+  {
+   "stage": "no neighbour within 25 m",
+   "remaining": 443,
+   "removed": 1601,
+   "removed_pct_of_prev": 78.32681017612525,
+   "would_remove_alone": 4740
+  }
+ ],
+ "n_pool": 443,
+ "pool_by_size": [
+  {
+   "value": "3",
+   "n": 293
+  },
+  {
+   "value": "4",
+   "n": 147
+  },
+  {
+   "value": "5",
+   "n": 3
+  }
+ ]
+}
