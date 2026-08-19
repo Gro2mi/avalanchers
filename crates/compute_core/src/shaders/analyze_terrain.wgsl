@@ -1,3 +1,4 @@
+// @atlas: DEM → normals, profile curvature, slope angle, aspect. Also copies the wind-shelter index into the slope texture's B channel.
 @group(0) @binding(1) var dem_texture: texture_2d<f32>;
 @group(0) @binding(2) var wind_shelter_texture: texture_2d<f32>;
 
@@ -88,6 +89,7 @@ fn analyze_terrain(@builtin(global_invocation_id) cell: vec3<u32>) {
 
 // import utils.wgsl;
 // BEGIN utils.wgsl
+// @atlas: Shared prelude: constants, `Particle`/`SimInfo`/`SimSettings`/`AtomicValues` structs, quantisation factors, cell↔uv↔index helpers, MPM quadratic weights.
 const WG_SIZE_2D: u32 = 16u;
 
 const g: f32 = 9.81;

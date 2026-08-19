@@ -1,3 +1,4 @@
+// @atlas: Seeds `released_particles_per_cell` particles per release cell with jittered positions and mass = cell volume × density.
 @group(0) @binding(1) var<storage, read_write> sim_info: SimInfo;
 @group(0) @binding(2) var dem_texture: texture_2d<f32>;
 @group(0) @binding(3) var normals: texture_2d<f32>;
@@ -54,6 +55,7 @@ fn initialize_particles(@builtin(global_invocation_id) cell: vec3<u32>) {
 
 // import utils.wgsl;
 // BEGIN utils.wgsl
+// @atlas: Shared prelude: constants, `Particle`/`SimInfo`/`SimSettings`/`AtomicValues` structs, quantisation factors, cell↔uv↔index helpers, MPM quadratic weights.
 const WG_SIZE_2D: u32 = 16u;
 
 const g: f32 = 9.81;
@@ -225,6 +227,7 @@ fn compute_centroid(points: ptr<function, array<vec2<f32>, 256>>, count: u32) ->
 
 // import random.wgsl;
 // BEGIN random.wgsl
+// @atlas: PCG hash + `rand1..4`, used to jitter particle positions within a cell.
 // A high-quality 32-bit hash (PCG)
 fn pcg_hash(input: u32) -> u32 {
     var state = input * 747796405u + 2891336453u;

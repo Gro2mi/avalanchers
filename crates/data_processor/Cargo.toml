@@ -24,6 +24,7 @@ thiserror = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 xz2 = "0.1"
+weezl = { workspace = true }   # LZW fallback decoder in tile_manager (native only)
 [target.'cfg(not(all(target_os = "unknown", target_arch = "wasm32")))'.dependencies]
 zstd = "0.13"
 bytemuck = { workspace = true }

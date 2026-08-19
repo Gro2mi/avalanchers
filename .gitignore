@@ -1,5 +1,4 @@
 avalancheSim.code-workspace
-cole_considerations/
 test.html
 js/test.js
 wgsl/test.wgsl
@@ -29,6 +28,7 @@ frontend/data/gpx
 dtm_cache/
 shader_report.html
 data/avalanche_outlines_switzerland_2018/
+data/outlines/
 data/single_avalanche_outlines_switzerland_2018/
 test.zarr/
 
@@ -228,6 +228,7 @@ poetry.toml
 pyrightconfig.json
 
 # End of https://www.toptal.com/developers/gitignore/api/python
+
 data/stubai/10DTM_pilotStubai.tif
 data/stubai/avaScen_HochwinterDry5_WorstCase_20260508135932.gpkg
 data/stubai/avaScen_HochwinterDry5_WorstCase.geojson
@@ -235,3 +236,8 @@ settings_stubai.json
 stubai_release_areas.png
 stubai.qgz
 frontend/data/
+.DS_Store
+
+# Cole's working notes and process — personal, never upstream
+TODO.md
+PROJECT_STATE.md

@@ -1,3 +1,4 @@
+// @atlas: PCG hash + `rand1..4`, used to jitter particle positions within a cell.
 // A high-quality 32-bit hash (PCG)
 fn pcg_hash(input: u32) -> u32 {
     var state = input * 747796405u + 2891336453u;

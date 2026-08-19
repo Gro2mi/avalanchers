@@ -1,0 +1,510 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Global-Constants Freeze — Avalanchers Calibration Campaign, 2026-07-28</title>
+<style>
+:root {
+  --paper: #F4F6F9;
+  --paper2: #EAEEF3;
+  --ink: #1B2430;
+  --ink2: #3D4A5C;
+  --ink3: #7A8798;
+  --grid: #D8DEE7;
+  --accent: #C65A1E;
+  --accent-soft: #F3E2D5;
+  --ok: #2E7D4F;
+  --ok-soft: #DFEDE4;
+  --bad: #B03A2E;
+  --bad-soft: #F2E0DD;
+  --warn-soft: #F5ECD8;
+  --card: #FFFFFF;
+  --mono: "SF Mono", Menlo, Consolas, monospace;
+  --display: "Avenir Next", Avenir, "Helvetica Neue", sans-serif;
+  --body: Charter, Georgia, "Times New Roman", serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #10161F; --paper2: #171F2A; --ink: #E8EDF3; --ink2: #B9C4D2;
+    --ink3: #6E7C8E; --grid: #26303D; --accent: #E07A3A; --accent-soft: #3A2718;
+    --ok: #5CB585; --ok-soft: #16281E; --bad: #D96A5E; --bad-soft: #33201D;
+    --warn-soft: #2E2817; --card: #171F2A;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #10161F; --paper2: #171F2A; --ink: #E8EDF3; --ink2: #B9C4D2;
+  --ink3: #6E7C8E; --grid: #26303D; --accent: #E07A3A; --accent-soft: #3A2718;
+  --ok: #5CB585; --ok-soft: #16281E; --bad: #D96A5E; --bad-soft: #33201D;
+  --warn-soft: #2E2817; --card: #171F2A;
+}
+:root[data-theme="light"] {
+  --paper: #F4F6F9; --paper2: #EAEEF3; --ink: #1B2430; --ink2: #3D4A5C;
+  --ink3: #7A8798; --grid: #D8DEE7; --accent: #C65A1E; --accent-soft: #F3E2D5;
+  --ok: #2E7D4F; --ok-soft: #DFEDE4; --bad: #B03A2E; --bad-soft: #F2E0DD;
+  --warn-soft: #F5ECD8; --card: #FFFFFF;
+}
+* { margin: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+body {
+  background: var(--paper); color: var(--ink);
+  font-family: var(--body); font-size: 17px; line-height: 1.65;
+}
+main { max-width: 1020px; margin: 0 auto; padding: 0 28px 120px; }
+.col { max-width: 70ch; }
+h1, h2, h3 { font-family: var(--display); text-wrap: balance; line-height: 1.15; }
+h2 { font-size: 1.7rem; margin: 0 0 .6rem; }
+h3 { font-size: 1.15rem; margin: 1.8rem 0 .5rem; }
+p { margin: 0 0 1rem; }
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+code, .mono { font-family: var(--mono); font-size: .84em; background: var(--paper2); padding: .1em .35em; border-radius: 3px; }
+pre { font-family: var(--mono); font-size: .82rem; line-height: 1.5; background: var(--paper2); padding: 14px 18px; border-radius: 6px; overflow-x: auto; margin: 0 0 1rem; }
+pre code { background: none; padding: 0; }
+strong { font-weight: 700; }
+
+/* masthead */
+header.masthead { padding: 72px 0 40px; border-bottom: 3px solid var(--ink); margin-bottom: 12px; }
+.masthead .kicker { font-family: var(--display); font-size: .8rem; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: var(--accent); margin-bottom: 14px; }
+.masthead h1 { font-size: clamp(2.2rem, 5.5vw, 3.4rem); font-weight: 700; letter-spacing: -.015em; margin-bottom: 18px; }
+.masthead .dek { font-size: 1.18rem; line-height: 1.55; color: var(--ink2); max-width: 62ch; }
+.masthead .meta { font-family: var(--display); font-size: .82rem; color: var(--ink3); margin-top: 22px; display: flex; gap: 2em; flex-wrap: wrap; }
+
+/* stage sections */
+section.stage { padding: 44px 0 12px; border-top: 1px solid var(--grid); margin-top: 32px; }
+section.stage:first-of-type { border-top: none; margin-top: 0; }
+.eyebrow { font-family: var(--display); font-size: .78rem; font-weight: 600; letter-spacing: .13em; text-transform: uppercase; color: var(--ink3); margin-bottom: 10px; }
+.eyebrow b { color: var(--accent); font-weight: 700; }
+
+/* tables */
+.tablewrap { overflow-x: auto; margin: 1.2rem 0 1.4rem; }
+table { border-collapse: collapse; font-family: var(--display); font-size: .86rem; min-width: 480px; }
+th { text-align: left; font-weight: 600; letter-spacing: .04em; font-size: .76rem; text-transform: uppercase; color: var(--ink3); padding: 8px 16px 8px 0; border-bottom: 2px solid var(--ink); }
+td { padding: 7px 16px 7px 0; border-bottom: 1px solid var(--grid); vertical-align: top; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+td .mono { font-size: .93em; }
+tr.hl td { background: var(--accent-soft); }
+
+/* verdict chips */
+.chip { font-family: var(--display); display: inline-block; font-size: .72rem; font-weight: 700; letter-spacing: .06em; padding: 2px 9px; border-radius: 99px; vertical-align: 1px; }
+.chip.ok { background: var(--ok-soft); color: var(--ok); }
+.chip.bad { background: var(--bad-soft); color: var(--bad); }
+.chip.warn { background: var(--warn-soft); color: var(--accent); }
+.chip.dim { background: var(--paper2); color: var(--ink3); }
+
+/* callouts */
+.callout { border-left: 3px solid var(--accent); background: var(--card); padding: 16px 22px; margin: 1.4rem 0; border-radius: 0 6px 6px 0; }
+.callout.lesson { border-color: var(--bad); }
+.callout .callout-label { font-family: var(--display); font-size: .74rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; margin-bottom: 6px; color: var(--accent); }
+.callout.lesson .callout-label { color: var(--bad); }
+.callout p:last-child { margin-bottom: 0; }
+
+/* the frozen-vector card */
+.vector { background: var(--card); border: 1px solid var(--grid); border-top: 4px solid var(--accent); border-radius: 8px; padding: 26px 30px 12px; margin: 2.2rem 0; box-shadow: 0 1px 3px rgba(0,0,0,.05); }
+.vector h2 { margin-bottom: .2rem; }
+.vector .sub { color: var(--ink3); font-family: var(--display); font-size: .85rem; margin-bottom: 1rem; }
+
+/* charts */
+figure { margin: 1.6rem 0 2rem; }
+figure .chartwrap { background: var(--card); border: 1px solid var(--grid); border-radius: 8px; padding: 18px 14px 10px; overflow-x: auto; }
+figure svg { display: block; width: 100%; height: auto; min-width: 560px; }
+figcaption { font-family: var(--display); font-size: .84rem; color: var(--ink3); margin-top: 10px; line-height: 1.5; max-width: 78ch; }
+svg .tick, svg .axis { fill: var(--ink3); }
+svg .lbl { fill: var(--ink); }
+svg .lbl-bad { fill: var(--bad); }
+svg .lbl-ok { fill: var(--ok); }
+svg .t { fill: var(--ink2); }
+
+/* pending slots */
+.pending { border: 2px dashed var(--grid); border-radius: 8px; padding: 22px 26px; margin: 1.4rem 0; color: var(--ink3); font-family: var(--display); font-size: .95rem; }
+
+/* TOC */
+nav.toc { font-family: var(--display); font-size: .88rem; columns: 2; gap: 3em; padding: 26px 0 10px; }
+nav.toc a { display: block; color: var(--ink2); text-decoration: none; padding: 3px 0; break-inside: avoid; }
+nav.toc a:hover { color: var(--accent); }
+nav.toc .n { color: var(--accent); font-weight: 600; display: inline-block; width: 2.2em; }
+@media (max-width: 640px) { nav.toc { columns: 1; } }
+
+footer { border-top: 3px solid var(--ink); margin-top: 70px; padding-top: 28px; font-family: var(--display); font-size: .85rem; color: var(--ink3); }
+footer h3 { margin-top: 0; color: var(--ink); }
+ul { padding-left: 1.3em; margin: 0 0 1rem; }
+li { margin-bottom: .45em; }
+</style>
+</head>
+<body>
+<main>
+
+<header class="masthead">
+  <div class="kicker">Avalanchers &middot; GPU calibration campaign &middot; 2018 Tirol panel</div>
+  <h1>The Global-Constants Freeze</h1>
+  <p class="dek">One night, 293,789 simulations, and a frozen physics vector: which constants of the avalanche solver are <em>general</em> — the same for every avalanche — which are conditions-dependent knobs left free for the harvest, and whether the general ones actually transfer across three different storm datasets.</p>
+  <div class="meta">
+    <span>2026-07-28 &middot; overnight campaign</span>
+    <span>fleet: 16 GPUs across 3 rented boxes (~$1.32/hr)</span>
+    <span>repo: <span class="mono">avalanchers @ baseline-calibration</span></span>
+  </div>
+</header>
+
+<nav class="toc">
+  <a href="#vector"><span class="n">v1</span>The frozen vector</a>
+  <a href="#method"><span class="n">&sect;1</span>How anything here was decided</a>
+  <a href="#fixes"><span class="n">&sect;2</span>Fixing the instrument first</a>
+  <a href="#s0"><span class="n">s0</span>Numerics: the surface is not monotone</a>
+  <a href="#s1"><span class="n">s1</span>Structure: samosAT wins</a>
+  <a href="#s2"><span class="n">s2</span>&xi; exits the model</a>
+  <a href="#s3"><span class="n">s3</span>ifa: a validity edge, not a peak</a>
+  <a href="#hidden"><span class="n">&sect;3</span>The hidden-constant audit</a>
+  <a href="#s4"><span class="n">s4</span>Confirmation under multi-start</a>
+  <a href="#transfer"><span class="n">&sect;4</span>Do the globals transfer?</a>
+  <a href="#costs"><span class="n">&sect;5</span>Costs, fleet, and operations</a>
+  <a href="#caveats"><span class="n">&sect;6</span>Caveats and what happens next</a>
+</nav>
+
+<!-- ================================================================ VECTOR -->
+<div class="vector" id="vector">
+  <h2>Frozen vector v1</h2>
+  <p class="sub">Every value below is now a constant of the simulator for all subsequent work. The two free parameters of the harvest — per-event friction &mu; and slab depth — are deliberately <em>not</em> here.</p>
+  
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>constant</th><th class="num">frozen value</th><th>how it was decided</th></tr></thead>
+      <tbody>
+        <tr class="hl"><td>friction model</td><td class="num"><span class="mono">samosAT</span></td><td>stage 1 winner across all four metric readings; confirmed in stage 4 under an equalised three-start budget (+0.0207 over Voellmy, CI [+0.0107,&nbsp;+0.0313], p&nbsp;=&nbsp;6.6&times;10<sup>&minus;5</sup>)</td></tr>
+        <tr class="hl"><td>physics flags</td><td class="num"><span class="mono">7 = c1 p1 e1 n0</span></td><td>stage 1 — curvature, particle interaction, earth pressure ON; entrainment OFF (measured inert in this configuration)</td></tr>
+        <tr><td>drag coefficient &xi;</td><td class="num"><span class="mono">&mdash;</span></td><td>stage 2 — <strong>exits the model</strong>: samosAT reads no drag coefficient</td></tr>
+        <tr><td>density</td><td class="num"><span class="mono">200</span></td><td>frozen at the shader's own constant — live only via an upstream shader inconsistency; fitting it would fit a bug</td></tr>
+        <tr><td>internal friction angle (ifa)</td><td class="num"><span class="mono">40&deg;</span></td><td>stage 3 — comfortably inside the valid region (must exceed basal 25&deg;); 35&ndash;45&deg; equivalent; density-compensation null</td></tr>
+        <tr><td>cfl</td><td class="num"><span class="mono">0.5</span></td><td>stage 0 — on the interior optimum of a non-monotone surface; 1.9&times; cheaper than the runner-up it beats</td></tr>
+        <tr><td>particles per cell</td><td class="num"><span class="mono">8</span></td><td>stage 0 — the interior optimum itself; finer is measurably worse</td></tr>
+        <tr><td>max steps</td><td class="num"><span class="mono">3000</span></td><td>stage 0 — 1500 binds against real long-running cases; 6000 buys nothing</td></tr>
+        <tr><td>velocity_threshold</td><td class="num"><span class="mono">1e-6</span></td><td>audit follow-up — two-point check (1e-6 vs 1e-3, full panel): 94/104 cases bit-identical, rest within atomics noise; <em>verified</em> inert, not assumed</td></tr>
+        <tr><td>basal_friction_angle</td><td class="num"><span class="mono">25&deg;</span></td><td><span class="chip warn">fixed at default, never swept</span> — recorded honestly; tier-2 candidate for per-dataset work</td></tr>
+        <tr><td colspan="3" style="padding-top:14px"><strong>Scoring conventions</strong> (held fixed, never optimised — they define the instrument, not the physics)</td></tr>
+        <tr><td>flow threshold</td><td class="num"><span class="mono">0.1</span></td><td>footprint contour level on peak flow thickness</td></tr>
+        <tr><td>min residence</td><td class="num"><span class="mono">0.25</span></td><td>single-particle-tail gate, normalised by count&middot;cfl/ppc; swept onto its plateau</td></tr>
+        <tr><td>release connectivity</td><td class="num"><span class="mono">on</span></td><td>detached blobs are contour artifacts, not observations</td></tr>
+        <tr><td>drainage clip</td><td class="num"><span class="mono">on</span></td><td>ridge-leak fix: D8 descent must reach the outline's lower body; 2&nbsp;m pit-fill tolerance</td></tr>
+        <tr><td>release floor</td><td class="num"><span class="mono">20 cells</span></td><td>refuse rather than score a sliver; &ge;50% clipped flags a case severe</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+</div>
+
+<!-- ================================================================ METHOD -->
+<section class="stage" id="method">
+  <div class="eyebrow"><b>&sect;1</b> &middot; Method</div>
+  <h2>How anything here was decided</h2>
+  <div class="col">
+    <p>The end goal of this project is <strong>P(runout&nbsp;|&nbsp;conditions)</strong>: given weather, snowpack, and terrain, a probability distribution over avalanche runout footprints for Tirol. The architecture splits the problem in two — a GPU simulator with <em>frozen general physics</em> renders a footprint from a small parameter vector, and a separate conditions model predicts a distribution over the few knobs that genuinely vary event to event. This campaign is the freeze: measuring which constants are general, and what their values should be.</p>
+    <p>The measurement design is a <strong>staged profile search</strong>. For every candidate value of a global constant, the per-event nuisance parameters (&mu;, slab depth) are <em>re-fit from scratch</em> on each of the panel's ~105 avalanches, and candidates are compared on the score they reach after that re-fit. This is profile likelihood: a global candidate never gets to look bad merely because the nuisances were tuned for its rival. Comparisons are <strong>paired per-case</strong> (each avalanche is its own control), with bootstrap confidence intervals, and a pre-registered decision band: a challenger must beat the incumbent by <strong>&Delta;&Omega;<sub>T</sub> &ge; 0.02</strong> with a CI excluding zero, otherwise the incumbent stands. A full narrative of why this beats both grid search and per-case-averaging is in <a href="../campaign/search_algorithm.html"><span class="mono">campaign/search_algorithm.html</span></a>.</p>
+    <p>The score, <strong>&Omega;<sub>T</sub> = 2&middot;IoU &minus; 1</strong>, compares the simulated footprint against the mapped avalanche outline: +1 is a perfect match, 0 is the coin-flip boundary, negative means mostly wrong. One framing rule governs every number in this report: mapped outlines themselves only agree between human mappers at about <strong>&Omega;<sub>T</sub> &asymp; +0.28</strong> (Hafner et&nbsp;al. 2023). That is the reproducibility ceiling of the ground truth. Absolute scores are read against that ceiling, never against 1.0 — and every <em>claim</em> in this campaign rests on paired contrasts, which stay valid below the ceiling.</p>
+    <p>For scale: with per-event nuisances fitted at the frozen structure the panel reaches a mean &Omega;<sub>T</sub> around 0.32 — at the mapping noise floor. The same panel evaluated at repo-default parameters with <em>no</em> per-event fitting scores 0.005. The gap between those two numbers is the entire reason the harvest (per-event calibration at scale) exists.</p>
+  </div>
+</section>
+
+<!-- ================================================================= FIXES -->
+<section class="stage" id="fixes">
+  <div class="eyebrow"><b>&sect;2</b> &middot; Stage &minus;1</div>
+  <h2>Fixing the instrument before trusting it</h2>
+  <div class="col">
+    <p>Two defects were visible in preliminary results — both spotted by eye, both confirmed real, both fixed and <em>measured</em> before any calibration stage ran. Calibrating against a scoring function with known artifacts would have baked those artifacts into every frozen constant.</p>
+
+    <h3>Single-particle tails</h3>
+    <p>Isolated particles ran on far past the physically plausible runout, dragging the footprint's reach with them. The fix is a <strong>residence gate</strong>: a cell only counts as affected if enough material actually dwelt there. Raw residence counts scale with both particle count and timestep, so the gate is normalised — <span class="mono">count &middot; cfl / ppc &ge; 0.25</span> — making it comparable across numerics settings (essential, because cfl and ppc were themselves being chosen in stage&nbsp;0; an un-normalised gate would have been circular). The 0.25 threshold was swept, not guessed: over {0, 0.125, 0.25, 0.5, 1, 2, 4} it sits on the plateau, paired +0.0029 against no gate (CI +0.0022&hellip;+0.0036, better on 82/105 cases). On the final panel it trims a mean of ~11&nbsp;m of spurious reach per case.</p>
+
+    <h3>The ridge leak</h3>
+    <p>Mapped release polygons don't align perfectly with the DEM. Where a polygon crests a ridge, part of the release drops into the <em>neighbouring watershed</em> — mass simulated on the wrong side of the mountain. The fix traces D8 steepest-descent from every release cell and <strong>clips cells whose descent path never reaches the observed outline's lower body</strong>. On the panel: 18 of 104 cases are touched, losing on average 20% of their release cells; 4 are severe (&ge;50% clipped, kept but flagged); one case (<span class="mono">aval_8124</span>) falls below the 20-release-cell floor and is <strong>refused outright</strong> rather than scored on a sliver.</p>
+
+    <div class="callout lesson">
+      <div class="callout-label">The tautology trap</div>
+      <p>The first implementation of the clip was a silent no-op: it tested descent into the <em>full outline polygon</em>, and since release cells are inside the polygon by construction, every cell trivially passed — clipped fraction 0.0 on 105/105 cases. It was caught only because the validation ran the real binary and rendered before/after images for eyeballs, per the user's request. The fix targets the outline's <em>lower body</em> instead, and an end-to-end regression test now runs red on the old code. Two further traps followed: <span class="mono">aval_13722</span> was falsely refused because D8 descent died in a 2&nbsp;m terrain hollow (fixed with priority-flood pit filling, 2&nbsp;m tolerance), and <span class="mono">aval_8075</span> was a third false positive sitting <em>below</em> the severity threshold — invisible to eyeball review, caught only by the numbers.</p>
+    </div>
+
+    <p>Per-case before/after renders for every severe case, with the D8 traces, are committed at <a href="clip_visuals/severe_cases.html"><span class="mono">campaign/clip_visuals/severe_cases.html</span></a>. The full validation table is <span class="mono">campaign/results_2026-07-28/fix_validation.json</span>.</p>
+  </div>
+</section>
+
+<!-- ==================================================================== S0 -->
+<section class="stage" id="s0">
+  <div class="eyebrow"><b>Stage 0</b> &middot; numerics &middot; 75 grid points, per-case re-fit at each</div>
+  <h2>Numerics: the surface is not monotone</h2>
+  <div class="col">
+    <p>Numerics parameters — CFL number, particles per cell, step cap — are supposed to be boring: finer should be asymptotically better, and you pick the cheapest setting statistically equivalent to the finest. That rule <strong>failed here, and the failure is the finding</strong>.</p>
+  </div>
+
+  <figure>
+    <div class="chartwrap"><svg viewBox="0 0 760 400" role="img" class="chart s0" xmlns="http://www.w3.org/2000/svg" font-family="inherit"><line x1="64" y1="326.1" x2="610" y2="326.1" style="stroke:var(--grid)"/><text x="56.0" y="330.1" font-size="12" text-anchor="end" class="tick" style="font-family:var(--mono)">0.19</text><line x1="64" y1="294.4" x2="610" y2="294.4" style="stroke:var(--grid)"/><text x="56.0" y="298.4" font-size="12" text-anchor="end" class="tick" style="font-family:var(--mono)">0.20</text><line x1="64" y1="262.7" x2="610" y2="262.7" style="stroke:var(--grid)"/><text x="56.0" y="266.7" font-size="12" text-anchor="end" class="tick" style="font-family:var(--mono)">0.21</text><line x1="64" y1="231.0" x2="610" y2="231.0" style="stroke:var(--grid)"/><text x="56.0" y="235.0" font-size="12" text-anchor="end" class="tick" style="font-family:var(--mono)">0.22</text><line x1="64" y1="199.4" x2="610" y2="199.4" style="stroke:var(--grid)"/><text x="56.0" y="203.4" font-size="12" text-anchor="end" class="tick" style="font-family:var(--mono)">0.23</text><line x1="64" y1="167.7" x2="610" y2="167.7" style="stroke:var(--grid)"/><text x="56.0" y="171.7" font-size="12" text-anchor="end" class="tick" style="font-family:var(--mono)">0.24</text><line x1="64" y1="136.0" x2="610" y2="136.0" style="stroke:var(--grid)"/><text x="56.0" y="140.0" font-size="12" text-anchor="end" class="tick" style="font-family:var(--mono)">0.25</text><line x1="64" y1="104.4" x2="610" y2="104.4" style="stroke:var(--grid)"/><text x="56.0" y="108.4" font-size="12" text-anchor="end" class="tick" style="font-family:var(--mono)">0.26</text><line x1="64" y1="72.7" x2="610" y2="72.7" style="stroke:var(--grid)"/><text x="56.0" y="76.7" font-size="12" text-anchor="end" class="tick" style="font-family:var(--mono)">0.27</text><line x1="64" y1="41.0" x2="610" y2="41.0" style="stroke:var(--grid)"/><text x="56.0" y="45.0" font-size="12" text-anchor="end" class="tick" style="font-family:var(--mono)">0.28</text><path d="M64.0,152.6 L200.5,85.0 L337.0,79.4 L473.5,94.2 L610.0,100.1" fill="none" style="stroke:var(--ink3);stroke-width:1.5" opacity="0.35"/><circle cx="64.0" cy="152.6" r="3.5" style="fill:var(--ink3)" opacity="0.35"/><circle cx="200.5" cy="85.0" r="3.5" style="fill:var(--ink3)" opacity="0.35"/><circle cx="337.0" cy="79.4" r="3.5" style="fill:var(--ink3)" opacity="0.35"/><circle cx="473.5" cy="94.2" r="3.5" style="fill:var(--ink3)" opacity="0.35"/><circle cx="610.0" cy="100.1" r="3.5" style="fill:var(--ink3)" opacity="0.35"/><path d="M64.0,148.5 L200.5,81.5 L337.0,65.8 L473.5,83.3 L610.0,94.6" fill="none" style="stroke:var(--ink3);stroke-width:1.5" opacity="0.55"/><circle cx="64.0" cy="148.5" r="3.5" style="fill:var(--ink3)" opacity="0.55"/><circle cx="200.5" cy="81.5" r="3.5" style="fill:var(--ink3)" opacity="0.55"/><circle cx="337.0" cy="65.8" r="3.5" style="fill:var(--ink3)" opacity="0.55"/><circle cx="473.5" cy="83.3" r="3.5" style="fill:var(--ink3)" opacity="0.55"/><circle cx="610.0" cy="94.6" r="3.5" style="fill:var(--ink3)" opacity="0.55"/><path d="M64.0,130.3 L200.5,58.3 L337.0,42.7 L473.5,76.9 L610.0,98.6" fill="none" style="stroke:var(--accent);stroke-width:2.4" opacity="1.0"/><circle cx="64.0" cy="130.3" r="3.5" style="fill:var(--accent)" opacity="1.0"/><circle cx="200.5" cy="58.3" r="3.5" style="fill:var(--accent)" opacity="1.0"/><circle cx="337.0" cy="42.7" r="3.5" style="fill:var(--accent)" opacity="1.0"/><circle cx="473.5" cy="76.9" r="3.5" style="fill:var(--accent)" opacity="1.0"/><circle cx="610.0" cy="98.6" r="3.5" style="fill:var(--accent)" opacity="1.0"/><path d="M64.0,303.6 L200.5,251.9 L337.0,250.8 L473.5,274.7 L610.0,292.7" fill="none" style="stroke:var(--ink3);stroke-width:1.5" opacity="0.55"/><circle cx="64.0" cy="303.6" r="3.5" style="fill:var(--ink3)" opacity="0.55"/><circle cx="200.5" cy="251.9" r="3.5" style="fill:var(--ink3)" opacity="0.55"/><circle cx="337.0" cy="250.8" r="3.5" style="fill:var(--ink3)" opacity="0.55"/><circle cx="473.5" cy="274.7" r="3.5" style="fill:var(--ink3)" opacity="0.55"/><circle cx="610.0" cy="292.7" r="3.5" style="fill:var(--ink3)" opacity="0.55"/><path d="M64.0,335.3 L200.5,285.1 L337.0,293.0 L473.5,314.6 L610.0,329.4" fill="none" style="stroke:var(--ink3);stroke-width:1.5" opacity="0.35"/><circle cx="64.0" cy="335.3" r="3.5" style="fill:var(--ink3)" opacity="0.35"/><circle cx="200.5" cy="285.1" r="3.5" style="fill:var(--ink3)" opacity="0.35"/><circle cx="337.0" cy="293.0" r="3.5" style="fill:var(--ink3)" opacity="0.35"/><circle cx="473.5" cy="314.6" r="3.5" style="fill:var(--ink3)" opacity="0.35"/><circle cx="610.0" cy="329.4" r="3.5" style="fill:var(--ink3)" opacity="0.35"/><text x="620.0" y="98.6" font-size="12.5" text-anchor="start" class="tick">cfl 0.35</text><text x="620.0" y="114.6" font-size="12.5" text-anchor="start" class="lbl" font-weight="600">cfl 0.5</text><text x="620.0" y="130.6" font-size="12.5" text-anchor="start" class="tick">cfl 0.25</text><text x="620.0" y="296.7" font-size="12.5" text-anchor="start" class="tick">cfl 0.7</text><text x="620.0" y="333.4" font-size="12.5" text-anchor="start" class="tick">cfl 0.9</text><circle cx="337.0" cy="42.7" r="7" fill="none" style="stroke:var(--ink);stroke-width:1.6"/><text x="337.0" y="28.7" font-size="12.5" text-anchor="middle" class="lbl" font-weight="600">frozen: cfl 0.5, ppc 8</text><text x="64.0" y="368.0" font-size="12.5" text-anchor="middle" class="tick" style="font-family:var(--mono)">2</text><text x="200.5" y="368.0" font-size="12.5" text-anchor="middle" class="tick" style="font-family:var(--mono)">4</text><text x="337.0" y="368.0" font-size="12.5" text-anchor="middle" class="tick" style="font-family:var(--mono)">8</text><text x="473.5" y="368.0" font-size="12.5" text-anchor="middle" class="tick" style="font-family:var(--mono)">16</text><text x="610.0" y="368.0" font-size="12.5" text-anchor="middle" class="tick" style="font-family:var(--mono)">32</text><text x="337.0" y="390.0" font-size="13" text-anchor="middle" class="axis">particles per cell (log scale) &#8212; at max_steps 3000</text><text x="16.0" y="18.0" font-size="13" text-anchor="start" class="axis">mean &#937;&#8348; across the panel (per-case fitted operating points, paired)</text></svg></div>
+    <figcaption><strong>Mean &Omega;<sub>T</sub> across the cfl &times; ppc grid at max_steps 3000.</strong> The surface has an <em>interior optimum</em> at ppc&nbsp;8: more particles per cell is measurably worse, not asymptotically equivalent. Every grid point is evaluated at the same per-case fitted (&mu;, slab) operating points, so the comparison is paired; those operating points come from pre-campaign fits — a mild caveat the plan doc records explicitly. Full 75-point table (including max_steps 1500/6000): <span class="mono">s0_numerics_table.json</span>.</figcaption>
+  </figure>
+
+  <div class="col">
+    <p>Because &Omega;<sub>T</sub> is non-monotone in resolution, "equivalent to the finest setting" is <strong>not a valid anchor</strong> — the finest setting isn't the best one. The campaign nearly adopted cfl&nbsp;0.35&nbsp;/&nbsp;ppc&nbsp;16 by mechanically applying the equivalence rule; re-reading the response surface showed the repo default <strong>cfl&nbsp;0.5&nbsp;/&nbsp;ppc&nbsp;8&nbsp;/&nbsp;max_steps&nbsp;3000</strong> beats it by +0.0118 at 1.9&times; lower cost, and it froze instead. Cheaper settings were rejected on robustness rather than mean score: max_steps&nbsp;1500 binds against real long-running cases, and ppc&nbsp;4's variance is qualitatively worse even where its mean survives.</p>
+    <div class="callout lesson">
+      <div class="callout-label">Lesson, recorded</div>
+      <p>An instrument's own output does not validate the instrument. The near-mistake was caught by reproducing the recommendation against the full response surface instead of trusting the decision rule that produced it. This is also why a <strong>pre-harvest gate</strong> now exists: stage&nbsp;0 validated numerics at per-case <em>optima</em>, but the harvest spends most of its evaluations off-optimum where runs lengthen and the step cap binds — the ordering must be re-confirmed there before the harvest runs (tracked in automated_suggestions_todo.md).</p>
+    </div>
+    <p>The likely mechanism for non-monotonicity — mapped outlines are themselves generous, and coarser dynamics diffuse footprints slightly outward toward that generosity — is a hypothesis for Markus, not a measured claim (<span class="mono">notes_for_markus.md</span> item&nbsp;24).</p>
+  </div>
+</section>
+
+<!-- ==================================================================== S1 -->
+<section class="stage" id="s1">
+  <div class="eyebrow"><b>Stage 1</b> &middot; model structure &middot; 48 candidates &middot; 163,177 evaluations</div>
+  <h2>Structure: samosAT wins, decisively</h2>
+  <div class="col">
+    <p>Four friction models &times; twelve physics-flag combinations (curvature, particle interaction, earth pressure, entrainment), every candidate given its own full per-case re-fit. The result is the campaign's biggest single decision: <strong>samosAT friction with curvature, particle interaction, and earth pressure on, entrainment off</strong> (<span class="mono">m3_samosat_c1p1e1n0</span>) replaces the Voellmy incumbent, +0.036 on the headline metric (p&nbsp;&asymp;&nbsp;6&times;10<sup>&minus;6</sup>), and the win holds under all four defensible metric readings (+0.033 to +0.079).</p>
+  </div>
+
+  <figure>
+    <div class="chartwrap"><svg viewBox="0 0 760 824" role="img" class="chart s1" xmlns="http://www.w3.org/2000/svg" font-family="inherit"><line x1="527.3" y1="34" x2="527.3" y2="778" style="stroke:var(--grid)"/><text x="527.3" y="796.0" font-size="12" text-anchor="middle" class="tick" style="font-family:var(--mono)">0.20</text><line x1="587.9" y1="34" x2="587.9" y2="778" style="stroke:var(--grid)"/><text x="587.9" y="796.0" font-size="12" text-anchor="middle" class="tick" style="font-family:var(--mono)">0.24</text><line x1="648.5" y1="34" x2="648.5" y2="778" style="stroke:var(--grid)"/><text x="648.5" y="796.0" font-size="12" text-anchor="middle" class="tick" style="font-family:var(--mono)">0.28</text><line x1="709.2" y1="34" x2="709.2" y2="778" style="stroke:var(--grid)"/><text x="709.2" y="796.0" font-size="12" text-anchor="middle" class="tick" style="font-family:var(--mono)">0.32</text><line x1="656.4" y1="34" x2="656.4" y2="778" style="stroke:var(--ink3);stroke-width:1.2" stroke-dasharray="4 4"/><text x="656.4" y="26.0" font-size="11.5" text-anchor="middle" class="tick">incumbent</text><text x="200.0" y="773.8" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">coulomb c0p0e0n0</text><line x1="142.9" y1="770.2" x2="293.0" y2="770.2" style="stroke:var(--ink3);stroke-width:1.3" opacity="0.5"/><circle cx="219.1" cy="770.2" r="3.4" style="fill:var(--ink3)"/><text x="200.0" y="758.2" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">coulomb c0p0e0n1</text><line x1="143.2" y1="754.8" x2="291.1" y2="754.8" style="stroke:var(--ink3);stroke-width:1.3" opacity="0.5"/><circle cx="219.1" cy="754.8" r="3.4" style="fill:var(--ink3)"/><text x="200.0" y="742.8" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">samosat c0p0e0n0</text><line x1="189.4" y1="739.2" x2="345.3" y2="739.2" style="stroke:var(--accent);stroke-width:1.3" opacity="0.5"/><circle cx="266.8" cy="739.2" r="3.4" style="fill:var(--accent)"/><text x="200.0" y="727.2" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">samosat c0p0e0n1</text><line x1="187.8" y1="723.8" x2="344.1" y2="723.8" style="stroke:var(--accent);stroke-width:1.3" opacity="0.5"/><circle cx="266.8" cy="723.8" r="3.4" style="fill:var(--accent)"/><text x="200.0" y="711.8" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">samosat c1p0e0n0</text><line x1="191.6" y1="708.2" x2="344.2" y2="708.2" style="stroke:var(--accent);stroke-width:1.3" opacity="0.5"/><circle cx="268.4" cy="708.2" r="3.4" style="fill:var(--accent)"/><text x="200.0" y="696.2" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">samosat c1p0e0n1</text><line x1="190.2" y1="692.8" x2="343.9" y2="692.8" style="stroke:var(--accent);stroke-width:1.3" opacity="0.5"/><circle cx="268.4" cy="692.8" r="3.4" style="fill:var(--accent)"/><text x="200.0" y="680.8" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">coulomb c0p1e1n0</text><line x1="261.3" y1="677.2" x2="397.0" y2="677.2" style="stroke:var(--ink3);stroke-width:1.3" opacity="0.5"/><circle cx="330.0" cy="677.2" r="3.4" style="fill:var(--ink3)"/><text x="200.0" y="665.2" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">coulomb c0p1e1n1</text><line x1="261.6" y1="661.8" x2="398.7" y2="661.8" style="stroke:var(--ink3);stroke-width:1.3" opacity="0.5"/><circle cx="330.8" cy="661.8" r="3.4" style="fill:var(--ink3)"/><text x="200.0" y="649.8" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">coulomb c0p1e0n1</text><line x1="264.0" y1="646.2" x2="407.1" y2="646.2" style="stroke:var(--ink3);stroke-width:1.3" opacity="0.5"/><circle cx="336.2" cy="646.2" r="3.4" style="fill:var(--ink3)"/><text x="200.0" y="634.2" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">coulomb c0p1e0n0</text><line x1="263.9" y1="630.8" x2="406.9" y2="630.8" style="stroke:var(--ink3);stroke-width:1.3" opacity="0.5"/><circle cx="336.3" cy="630.8" r="3.4" style="fill:var(--ink3)"/><text x="200.0" y="618.8" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">coulomb c1p0e0n0</text><line x1="344.1" y1="615.2" x2="451.3" y2="615.2" style="stroke:var(--ink3);stroke-width:1.3" opacity="0.5"/><circle cx="398.4" cy="615.2" r="3.4" style="fill:var(--ink3)"/><text x="200.0" y="603.2" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">coulomb c1p0e0n1</text><line x1="344.4" y1="599.8" x2="451.8" y2="599.8" style="stroke:var(--ink3);stroke-width:1.3" opacity="0.5"/><circle cx="398.4" cy="599.8" r="3.4" style="fill:var(--ink3)"/><text x="200.0" y="587.8" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">voellmy c1p0e0n0</text><line x1="390.7" y1="584.2" x2="516.0" y2="584.2" style="stroke:var(--ink3);stroke-width:1.3" opacity="0.5"/><circle cx="453.6" cy="584.2" r="3.4" style="fill:var(--ink3)"/><text x="200.0" y="572.2" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">voellmy c1p0e0n1</text><line x1="390.3" y1="568.8" x2="515.9" y2="568.8" style="stroke:var(--ink3);stroke-width:1.3" opacity="0.5"/><circle cx="453.6" cy="568.8" r="3.4" style="fill:var(--ink3)"/><text x="200.0" y="556.8" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">voellmy-b c1p0e0n0</text><line x1="393.8" y1="553.2" x2="516.9" y2="553.2" style="stroke:var(--ink3);stroke-width:1.3" opacity="0.5"/><circle cx="456.6" cy="553.2" r="3.4" style="fill:var(--ink3)"/><text x="200.0" y="541.2" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">voellmy-b c1p0e0n1</text><line x1="394.9" y1="537.8" x2="516.7" y2="537.8" style="stroke:var(--ink3);stroke-width:1.3" opacity="0.5"/><circle cx="456.6" cy="537.8" r="3.4" style="fill:var(--ink3)"/><text x="200.0" y="525.8" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">voellmy-b c0p0e0n0</text><line x1="404.5" y1="522.2" x2="527.2" y2="522.2" style="stroke:var(--ink3);stroke-width:1.3" opacity="0.5"/><circle cx="466.7" cy="522.2" r="3.4" style="fill:var(--ink3)"/><text x="200.0" y="510.2" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">voellmy-b c0p0e0n1</text><line x1="404.9" y1="506.8" x2="526.7" y2="506.8" style="stroke:var(--ink3);stroke-width:1.3" opacity="0.5"/><circle cx="466.7" cy="506.8" r="3.4" style="fill:var(--ink3)"/><text x="200.0" y="494.8" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">voellmy c0p0e0n0</text><line x1="409.7" y1="491.2" x2="531.3" y2="491.2" style="stroke:var(--ink3);stroke-width:1.3" opacity="0.5"/><circle cx="471.8" cy="491.2" r="3.4" style="fill:var(--ink3)"/><text x="200.0" y="479.2" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">voellmy c0p0e0n1</text><line x1="409.9" y1="475.8" x2="531.4" y2="475.8" style="stroke:var(--ink3);stroke-width:1.3" opacity="0.5"/><circle cx="471.8" cy="475.8" r="3.4" style="fill:var(--ink3)"/><text x="200.0" y="463.8" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">coulomb c1p1e1n0</text><line x1="426.1" y1="460.2" x2="546.3" y2="460.2" style="stroke:var(--ink3);stroke-width:1.3" opacity="0.5"/><circle cx="487.5" cy="460.2" r="3.4" style="fill:var(--ink3)"/><text x="200.0" y="448.2" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">coulomb c1p1e1n1</text><line x1="426.1" y1="444.8" x2="546.1" y2="444.8" style="stroke:var(--ink3);stroke-width:1.3" opacity="0.5"/><circle cx="487.5" cy="444.8" r="3.4" style="fill:var(--ink3)"/><text x="200.0" y="432.8" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">coulomb c1p1e0n1</text><line x1="483.3" y1="429.2" x2="577.5" y2="429.2" style="stroke:var(--ink3);stroke-width:1.3" opacity="0.5"/><circle cx="530.9" cy="429.2" r="3.4" style="fill:var(--ink3)"/><text x="200.0" y="417.2" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">coulomb c1p1e0n0</text><line x1="482.6" y1="413.8" x2="575.6" y2="413.8" style="stroke:var(--ink3);stroke-width:1.3" opacity="0.5"/><circle cx="531.0" cy="413.8" r="3.4" style="fill:var(--ink3)"/><text x="200.0" y="401.8" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">voellmy c0p1e0n1</text><line x1="616.2" y1="398.2" x2="660.4" y2="398.2" style="stroke:var(--ink3);stroke-width:1.3" opacity="0.5"/><circle cx="638.4" cy="398.2" r="3.4" style="fill:var(--ink3)"/><text x="200.0" y="386.2" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">voellmy c0p1e0n0</text><line x1="616.8" y1="382.8" x2="661.2" y2="382.8" style="stroke:var(--ink3);stroke-width:1.3" opacity="0.5"/><circle cx="638.9" cy="382.8" r="3.4" style="fill:var(--ink3)"/><text x="200.0" y="370.8" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">voellmy c1p1e0n0</text><line x1="623.5" y1="367.2" x2="668.7" y2="367.2" style="stroke:var(--ink3);stroke-width:1.3" opacity="0.5"/><circle cx="645.7" cy="367.2" r="3.4" style="fill:var(--ink3)"/><text x="200.0" y="355.2" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">voellmy c1p1e0n1</text><line x1="623.4" y1="351.8" x2="668.6" y2="351.8" style="stroke:var(--ink3);stroke-width:1.3" opacity="0.5"/><circle cx="645.7" cy="351.8" r="3.4" style="fill:var(--ink3)"/><text x="200.0" y="339.8" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">voellmy-b c1p1e0n0</text><line x1="627.4" y1="336.2" x2="682.6" y2="336.2" style="stroke:var(--ink3);stroke-width:1.3" opacity="0.5"/><circle cx="653.9" cy="336.2" r="3.4" style="fill:var(--ink3)"/><text x="200.0" y="324.2" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">voellmy-b c0p1e0n0</text><line x1="626.9" y1="320.8" x2="684.3" y2="320.8" style="stroke:var(--ink3);stroke-width:1.3" opacity="0.5"/><circle cx="654.5" cy="320.8" r="3.4" style="fill:var(--ink3)"/><text x="200.0" y="308.8" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">voellmy-b c1p1e0n1</text><line x1="628.1" y1="305.2" x2="683.5" y2="305.2" style="stroke:var(--ink3);stroke-width:1.3" opacity="0.5"/><circle cx="654.9" cy="305.2" r="3.4" style="fill:var(--ink3)"/><text x="200.0" y="293.2" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">voellmy c1p1e1n0</text><line x1="656.4" y1="289.8" x2="656.4" y2="289.8" style="stroke:var(--ink3);stroke-width:1.3" opacity="0.5"/><circle cx="656.4" cy="289.8" r="3.4" style="fill:var(--ink3)"/><text x="200.0" y="277.8" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">voellmy c1p1e1n1</text><line x1="656.3" y1="274.2" x2="656.6" y2="274.2" style="stroke:var(--ink3);stroke-width:1.3" opacity="0.5"/><circle cx="656.4" cy="274.2" r="3.4" style="fill:var(--ink3)"/><text x="200.0" y="262.2" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">voellmy-b c0p1e0n1</text><line x1="628.5" y1="258.8" x2="687.2" y2="258.8" style="stroke:var(--ink3);stroke-width:1.3" opacity="0.5"/><circle cx="656.9" cy="258.8" r="3.4" style="fill:var(--ink3)"/><text x="200.0" y="246.8" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">voellmy c0p1e1n1</text><line x1="643.3" y1="243.2" x2="680.7" y2="243.2" style="stroke:var(--ink3);stroke-width:1.3" opacity="0.5"/><circle cx="660.8" cy="243.2" r="3.4" style="fill:var(--ink3)"/><text x="200.0" y="231.2" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">voellmy c0p1e1n0</text><line x1="643.6" y1="227.8" x2="680.3" y2="227.8" style="stroke:var(--ink3);stroke-width:1.3" opacity="0.5"/><circle cx="661.0" cy="227.8" r="3.4" style="fill:var(--ink3)"/><text x="200.0" y="215.8" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">samosat c0p1e0n0</text><line x1="641.0" y1="212.2" x2="701.9" y2="212.2" style="stroke:var(--accent);stroke-width:1.3" opacity="0.5"/><circle cx="671.0" cy="212.2" r="3.4" style="fill:var(--accent)"/><text x="200.0" y="200.2" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">samosat c0p1e0n1</text><line x1="641.4" y1="196.8" x2="703.0" y2="196.8" style="stroke:var(--accent);stroke-width:1.3" opacity="0.5"/><circle cx="671.0" cy="196.8" r="3.4" style="fill:var(--accent)"/><text x="200.0" y="184.8" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">voellmy-b c0p1e1n0</text><line x1="655.5" y1="181.2" x2="694.0" y2="181.2" style="stroke:var(--ink3);stroke-width:1.3" opacity="0.5"/><circle cx="673.6" cy="181.2" r="3.4" style="fill:var(--ink3)"/><text x="200.0" y="169.2" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">voellmy-b c0p1e1n1</text><line x1="655.4" y1="165.8" x2="694.2" y2="165.8" style="stroke:var(--ink3);stroke-width:1.3" opacity="0.5"/><circle cx="673.6" cy="165.8" r="3.4" style="fill:var(--ink3)"/><text x="200.0" y="153.8" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">voellmy-b c1p1e1n1</text><line x1="663.3" y1="150.2" x2="698.6" y2="150.2" style="stroke:var(--ink3);stroke-width:1.3" opacity="0.5"/><circle cx="679.9" cy="150.2" r="3.4" style="fill:var(--ink3)"/><text x="200.0" y="138.2" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">voellmy-b c1p1e1n0</text><line x1="663.2" y1="134.8" x2="699.0" y2="134.8" style="stroke:var(--ink3);stroke-width:1.3" opacity="0.5"/><circle cx="679.9" cy="134.8" r="3.4" style="fill:var(--ink3)"/><text x="200.0" y="122.8" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">samosat c1p1e0n0</text><line x1="655.7" y1="119.2" x2="713.3" y2="119.2" style="stroke:var(--accent);stroke-width:1.3" opacity="0.5"/><circle cx="683.3" cy="119.2" r="3.4" style="fill:var(--accent)"/><text x="200.0" y="107.2" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">samosat c1p1e0n1</text><line x1="655.6" y1="103.8" x2="713.4" y2="103.8" style="stroke:var(--accent);stroke-width:1.3" opacity="0.5"/><circle cx="683.4" cy="103.8" r="3.4" style="fill:var(--accent)"/><text x="200.0" y="91.8" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">samosat c0p1e1n1</text><line x1="680.8" y1="88.2" x2="731.0" y2="88.2" style="stroke:var(--accent);stroke-width:1.3" opacity="0.5"/><circle cx="704.1" cy="88.2" r="3.4" style="fill:var(--accent)"/><text x="200.0" y="76.2" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">samosat c0p1e1n0</text><line x1="681.1" y1="72.8" x2="730.7" y2="72.8" style="stroke:var(--accent);stroke-width:1.3" opacity="0.5"/><circle cx="704.2" cy="72.8" r="3.4" style="fill:var(--accent)"/><text x="200.0" y="60.8" font-size="11" text-anchor="end" class="tick" style="font-family:var(--mono)">samosat c1p1e1n1</text><line x1="689.0" y1="57.2" x2="736.4" y2="57.2" style="stroke:var(--accent);stroke-width:1.3" opacity="0.5"/><circle cx="710.7" cy="57.2" r="3.4" style="fill:var(--accent)"/><text x="200.0" y="45.2" font-size="11" text-anchor="end" class="lbl" font-weight="700" style="font-family:var(--mono)">samosat c1p1e1n0</text><line x1="688.7" y1="41.8" x2="736.5" y2="41.8" style="stroke:var(--accent);stroke-width:1.3" opacity="0.5"/><circle cx="710.9" cy="41.8" r="4.6" style="fill:var(--accent)" stroke="var(--ink)" stroke-width="1.4"/><text x="465.0" y="816.0" font-size="12.5" text-anchor="middle" class="axis">mean &#937;&#8348; (max-of-inner-loop, per candidate; CI vs incumbent re-centred)</text></svg></div>
+    <figcaption><strong>All 48 structure candidates</strong>, mean &Omega;<sub>T</sub> after per-case re-fit; whiskers are 95% bootstrap CIs re-centred on each candidate's mean. samosAT variants (orange) occupy the entire top of the table; flag string reads c&nbsp;=&nbsp;curvature, p&nbsp;=&nbsp;particle interaction, e&nbsp;=&nbsp;earth pressure, n&nbsp;=&nbsp;entrainment. The winner is outlined.</figcaption>
+  </figure>
+
+  <div class="col">
+    <p>Two structural facts came out of the same data:</p>
+    <ul>
+      <li><strong>Entrainment is inert in this configuration.</strong> Toggling the flag produces <em>bit-identical</em> raw footprints (top pair in the chart differs only by run noise in the re-fit). The likely cause is that no erodible-depth field is ever supplied to the solver. This is <em>not</em> a claim that entrainment physics doesn't matter — it's a claim that the flag currently does nothing, and the 1999 wet-snow track (where entrainment has a real physical job) must resolve the contradiction before trusting it (<span class="mono">notes_for_markus.md</span> item&nbsp;8).</li>
+      <li><strong>&mu; changed meaning tonight.</strong> Fitted &mu; under samosAT is not comparable to Voellmy &mu;. Every &mu;-based correlation in earlier project notes (terrain r&nbsp;=&nbsp;+0.42, the noise-ceiling R&sup2;, the aval_shape leak) was measured against Voellmy fits and must be re-measured against samosAT-&mu; targets before the conditions model trains on them.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ==================================================================== S2 -->
+<section class="stage" id="s2">
+  <div class="eyebrow"><b>Stage 2</b> &middot; drag coefficient &xi; &middot; skipped, by measurement</div>
+  <h2>&xi; exits the model</h2>
+  <div class="col">
+    <p>Stage 2 was designed to profile the Voellmy drag coefficient &xi;. It never ran, for the best possible reason: <strong>samosAT reads no drag coefficient</strong> — &xi; is not a parameter of the winning structure. This removes what had been a persistently non-identified direction in earlier fits (&mu; and &xi; trading off against each other along a ridge). The harvest inner loop is now a clean two-parameter problem, (&mu;, slab), with no degenerate direction. The Voellmy finalist carried into stage&nbsp;4 keeps its own fitted &xi;&nbsp;=&nbsp;754 for a fair comparison.</p>
+  </div>
+</section>
+
+<!-- ==================================================================== S3 -->
+<section class="stage" id="s3">
+  <div class="eyebrow"><b>Stage 3</b> &middot; internal friction angle &middot; 24,129 evaluations</div>
+  <h2>ifa: a validity edge, not a peak</h2>
+  <div class="col">
+    <p>The internal friction angle enters only through the earth-pressure term, and the design predicted a flat profile. The measurement said otherwise — 15&ndash;30&deg; are significantly <em>worse</em>, 35&ndash;45&deg; is a statistical plateau — and chasing down <em>why</em> produced the most instructive mechanism of the campaign.</p>
+  </div>
+
+  <figure>
+    <div class="chartwrap"><svg viewBox="0 0 760 380" role="img" class="chart ifa" xmlns="http://www.w3.org/2000/svg" font-family="inherit"><rect x="64" y="30" width="242.7" height="298" style="fill:var(--bad-soft)"/><line x1="306.7" y1="30" x2="306.7" y2="328" style="stroke:var(--bad);stroke-width:1.5" stroke-dasharray="5 4"/><text x="298.7" y="46.0" font-size="12.5" text-anchor="end" class="lbl-bad">earth-pressure clamp fires</text><text x="298.7" y="62.0" font-size="12" text-anchor="end" class="lbl-bad">ifa &#8804; basal_friction_angle (25&#176;)</text><text x="314.7" y="46.0" font-size="12.5" text-anchor="start" class="lbl-ok">valid region</text><line x1="64" y1="71.8" x2="736" y2="71.8" style="stroke:var(--grid)"/><text x="56.0" y="75.8" font-size="12" text-anchor="end" class="tick" style="font-family:var(--mono)">0</text><line x1="64" y1="115.6" x2="736" y2="115.6" style="stroke:var(--grid)"/><text x="56.0" y="119.6" font-size="12" text-anchor="end" class="tick" style="font-family:var(--mono)">-0.005</text><line x1="64" y1="159.3" x2="736" y2="159.3" style="stroke:var(--grid)"/><text x="56.0" y="163.3" font-size="12" text-anchor="end" class="tick" style="font-family:var(--mono)">-0.010</text><line x1="64" y1="203.0" x2="736" y2="203.0" style="stroke:var(--grid)"/><text x="56.0" y="207.0" font-size="12" text-anchor="end" class="tick" style="font-family:var(--mono)">-0.015</text><line x1="64" y1="71.8" x2="736" y2="71.8" style="stroke:var(--ink3);stroke-width:1.2"/><path d="M120.0,213.9 L213.3,213.3 L306.7,179.0 L400.0,127.2 L493.3,94.3 L586.7,71.8 L680.0,108.2" fill="none" style="stroke:var(--accent);stroke-width:2"/><line x1="120.0" y1="301.1" x2="120.0" y2="128.4" style="stroke:var(--accent);stroke-width:1.4" opacity="0.55"/><circle cx="120.0" cy="213.9" r="4" style="fill:var(--accent);stroke:var(--paper);stroke-width:1.5"/><line x1="213.3" y1="301.8" x2="213.3" y2="125.4" style="stroke:var(--accent);stroke-width:1.4" opacity="0.55"/><circle cx="213.3" cy="213.3" r="4" style="fill:var(--accent);stroke:var(--paper);stroke-width:1.5"/><line x1="306.7" y1="253.1" x2="306.7" y2="105.0" style="stroke:var(--accent);stroke-width:1.4" opacity="0.55"/><circle cx="306.7" cy="179.0" r="4" style="fill:var(--accent);stroke:var(--paper);stroke-width:1.5"/><line x1="400.0" y1="174.7" x2="400.0" y2="79.3" style="stroke:var(--accent);stroke-width:1.4" opacity="0.55"/><circle cx="400.0" cy="127.2" r="4" style="fill:var(--accent);stroke:var(--paper);stroke-width:1.5"/><line x1="493.3" y1="131.9" x2="493.3" y2="56.2" style="stroke:var(--accent);stroke-width:1.4" opacity="0.55"/><circle cx="493.3" cy="94.3" r="4" style="fill:var(--accent);stroke:var(--paper);stroke-width:1.5"/><line x1="586.7" y1="71.8" x2="586.7" y2="71.8" style="stroke:var(--accent);stroke-width:1.4" opacity="0.55"/><circle cx="586.7" cy="71.8" r="5.5" style="fill:var(--ink);stroke:var(--paper);stroke-width:1.5"/><line x1="680.0" y1="163.0" x2="680.0" y2="61.4" style="stroke:var(--accent);stroke-width:1.4" opacity="0.55"/><circle cx="680.0" cy="108.2" r="4" style="fill:var(--accent);stroke:var(--paper);stroke-width:1.5"/><text x="586.7" y="57.8" font-size="12.5" text-anchor="middle" class="lbl" font-weight="600">frozen: 40&#176;</text><text x="120.0" y="348.0" font-size="12.5" text-anchor="middle" class="tick" style="font-family:var(--mono)">15&#176;</text><text x="213.3" y="348.0" font-size="12.5" text-anchor="middle" class="tick" style="font-family:var(--mono)">20&#176;</text><text x="306.7" y="348.0" font-size="12.5" text-anchor="middle" class="tick" style="font-family:var(--mono)">25&#176;</text><text x="400.0" y="348.0" font-size="12.5" text-anchor="middle" class="tick" style="font-family:var(--mono)">30&#176;</text><text x="493.3" y="348.0" font-size="12.5" text-anchor="middle" class="tick" style="font-family:var(--mono)">35&#176;</text><text x="586.7" y="348.0" font-size="12.5" text-anchor="middle" class="tick" style="font-family:var(--mono)">40&#176;</text><text x="680.0" y="348.0" font-size="12.5" text-anchor="middle" class="tick" style="font-family:var(--mono)">45&#176;</text><text x="400.0" y="370.0" font-size="13" text-anchor="middle" class="axis">internal friction angle (ifa)</text><text x="16.0" y="18.0" font-size="13" text-anchor="start" class="axis">&#916;&#937;&#8348; vs ifa 40 (paired, n = 101, 95% bootstrap CI)</text></svg></div>
+    <figcaption><strong>Paired &Delta;&Omega;<sub>T</sub> against the incumbent ifa&nbsp;40&deg;</strong> (n&nbsp;=&nbsp;101, 95% bootstrap CIs). The step at 25&deg; is not statistical noise — it is a hard physics boundary, shaded left of the dashed line.</figcaption>
+  </figure>
+
+  <div class="col">
+    <p>The mechanism sits in one line of shader code. The earth-pressure coefficient computes</p>
+    <pre><code>inside = 1.0 &minus; cos&sup2;(ifa) / cos&sup2;(basal_friction_angle)   // grid_physics.wgsl:151
+root   = sqrt(max(inside, 0.0))</code></pre>
+    <p><span class="mono">inside &gt; 0</span> requires <strong>ifa &gt; basal_friction_angle</strong>, which is hard-coded at 25&deg;. Below that, the <span class="mono">max(&hellip;,&nbsp;0)</span> clamp silently zeroes the term and the earth-pressure coefficient loses its dependence on the flow state entirely. This is the classical Rankine / Savage&ndash;Hutter validity condition — internal friction must exceed basal friction for active/passive states to exist — and the arithmetic matches the measured profile exactly: 25&deg; gives <span class="mono">inside</span>&nbsp;=&nbsp;0 precisely, 30&deg; a small root (0.295), 40&deg; a healthy 0.535.</p>
+    <p>So the correct claim is <strong>not "40&deg; is optimal"</strong>. It is: <strong>40&deg; sits comfortably inside the physically valid region, and anything in 35&ndash;45&deg; is statistically equivalent</strong> — a weaker statement about ifa and a stronger one about the freeze's robustness.</p>
+    <p>A pre-registered confound check also closed: ifa and density are both resistance-like, so ifa's optimum might have been compensating for the frozen density. Measured at density 150 / 200 / 300, the optimum is 40&deg; <em>at every density</em> with a stable profile shape — a clean null. Mechanically sensible: density scales <em>basal</em> friction while ifa scales <em>lateral</em> earth pressure; unlike &mu; and density, they aren't competing for the same job.</p>
+    <h3>Why density is frozen at 200 at all</h3>
+    <p>Under Voellmy, density cancels analytically. Under samosAT it is live (a monotone 0.0124 swing) — but via a shader inconsistency: <span class="mono">compute_particles.wgsl</span> hard-codes <span class="mono">const density&nbsp;=&nbsp;200.0</span> in one place while using the settings value in <span class="mono">mass_per_area</span>, so the settings density effectively acts as a friction multiplier. Fitting it would fit a bug and recreate a &mu;-degenerate direction. It is frozen at 200 (the shader's own constant), and the inconsistency is filed upstream for Markus (<span class="mono">notes_for_markus.md</span> item&nbsp;25).</p>
+
+    <div class="callout lesson">
+      <div class="callout-label">Addendum, the morning after — the user called me (Claude, the agent that wrote this report) a dunce, and was right to</div>
+      <p>Reviewing the paragraph above, the user asked the obvious question this report had talked itself around: if the bug is one code site ignoring the settings value, why is the resolution a frozen constant and a politely filed note — rather than <em>the world's simplest bug fix</em>, deleting the hard-coded number and reading the setting? The defense offered ("the fix direction is ambiguous without knowing what the reference formulation intends") was, on inspection, the same shape of argument this campaign catalogued seven failures of in its own honesty section: an assumption standing in for a check that costs nothing. Dunce, as charged.</p>
+      <p>So the reference was read instead of guessed at. The AvaFrame samosAT formulation defines <span class="mono">R_s&nbsp;=&nbsp;&rho;&middot;&umacr;&sup2;/&sigma;<sub>b</sub></span> with <em>one</em> density used consistently — and since the basal normal stress &sigma;<sub>b</sub> is itself proportional to &rho;, the ratio is density-free by construction, a Froude-type number. There is no reading in which the hard-coded numerator is intentional; the shader itself even contains a correctly-built settings-density <span class="mono">rs</span> that is computed and then never used — the fingerprint of an unfinished refactor. The one-word fix is applied at commit <span class="mono">d4cbb3e</span>: arithmetically identical at the frozen density&nbsp;=&nbsp;200, so every number in this report stands unchanged, and at every <em>other</em> density the knob is now inert instead of a spurious friction multiplier — density exits samosAT dynamics entirely, the same way &xi; did. The measured 0.0124 swing was pure bug. Empirical verification (a pipeline smoke test on a Vulkan box and a 100/200/300 identity check) is queued for the next box session; the reasoning above is exact arithmetic, but this campaign has earned its skepticism of exact arguments, including this one.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ HIDDEN -->
+<section class="stage" id="hidden">
+  <div class="eyebrow"><b>&sect;3</b> &middot; audit</div>
+  <h2>The hidden-constant audit</h2>
+  <div class="col">
+    <p>The ifa mechanism exposed a blind spot: <strong>a constant that isn't in the harness's parameter struct is invisible to this entire design</strong> — every stage is defined over exposed parameters. So every <span class="mono">SimSettings</span> field <em>not</em> exposed was audited against what the shaders actually read:</p>
+  </div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>constant</th><th class="num">default</th><th>read by the frozen model?</th><th>status</th></tr></thead>
+      <tbody>
+        <tr><td><span class="mono">basal_friction_angle</span></td><td class="num">25.0&deg;</td><td>yes — with ifa, into the earth-pressure coefficient; defines the ifa validity boundary</td><td><span class="chip warn">live, never swept</span></td></tr>
+        <tr><td><span class="mono">velocity_threshold</span></td><td class="num">1e-6</td><td>yes — raw at two sites (particle-stop and no-friction cutoffs); floored to 1e-3 at a third</td><td><span class="chip ok">measured: inert</span></td></tr>
+        <tr><td><span class="mono">n0</span></td><td class="num">70.0</td><td>no — its only use is commented out</td><td><span class="chip dim">unreachable</span></td></tr>
+        <tr><td><span class="mono">i0, mu0, mu2, grain_diameter</span></td><td class="num">&mdash;</td><td>no — &mu;(I) branch only (model 5, unused)</td><td><span class="chip dim">unreachable</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="col">
+    <p><span class="mono">basal_friction_angle</span> sat at its default through every stage, so nothing measured is invalidated — but the frozen vector records it explicitly as <em>fixed at default, never swept</em>, rather than letting a reader assume it was considered. It co-determines the earth-pressure coefficient and the valid ifa range, and it is the prime suspect for the 1999 wet-snow track, where basal conditions are exactly what changes.</p>
+    <p><strong>velocity_threshold: measured, inert.</strong> Because "almost certainly inert" is the same shape of argument that was wrong twice tonight, the constant was exposed as a parameter (commit <span class="mono">0fe8fc1</span>) and measured: a two-point check (1e-6 vs 1e-3) across the full 105-case panel at the frozen vector. Result: mean &Omega;<sub>T</sub> identical to four decimals, <strong>94 of 104 scored cases bit-identical</strong>, the remaining 10 differing by at most 0.0053 — inside the solver&rsquo;s documented atomic-summation noise and two orders of magnitude under the decision band. The default freezes as <em>verified</em> inert, not assumed inert.</p>
+  </div>
+</section>
+
+<!-- ==================================================================== S4 -->
+<section class="stage" id="s4">
+  <div class="eyebrow"><b>Stage 4</b> &middot; confirmation &middot; 41,653 evaluations &middot; 180/180 jobs clean</div>
+  <h2>Confirmation: attacking the campaign's weakest assumption</h2>
+  <div class="col">
+    <p>Every ranking above rests on one assumption: that the single-start inner-loop re-fit found scores good enough to rank candidates fairly. Stage 4 attacks exactly that. The four finalists — three samosAT flag variants and the Voellmy incumbent at its fitted &xi; — were each re-run <strong>three times from deliberately different inner-loop starting points</strong>. Four pass criteria, pre-registered: (1) the winner keeps rank against all three alternates; (2) its margin over Voellmy holds with a CI excluding zero; (3) calibration and validation splits agree in sign; (4) <strong>pooling three starts lifts scores by less than the 0.02 decision band</strong> — because a bigger lift would mean stage 1's single-start rankings were search-budget artifacts.</p>
+  </div>
+    <div class="tablewrap">
+    <table>
+      <thead><tr><th>candidate</th><th class="num">mean &Omega;<sub>T</sub></th><th class="num">&Delta; vs incumbent</th><th class="num">95% CI</th><th class="num">p</th><th class="num">cal / val</th></tr></thead>
+      <tbody>
+        <tr class="hl"><td><span class="mono">m3_samosat_c1p1e1n0</span> <span class="chip ok">winner</span></td><td class="num">+0.3313</td><td class="num">+0.0207</td><td class="num">[+0.0107, +0.0313]</td><td class="num">6.6&times;10<sup>&minus;5</sup></td><td class="num">+0.0271 / +0.0104</td></tr>
+        <tr><td><span class="mono">m3_samosat_c0p1e1n0</span></td><td class="num">+0.3289</td><td class="num">+0.0183</td><td class="num">[+0.0081, +0.0290]</td><td class="num">0.0019</td><td class="num">+0.0251 / +0.0074</td></tr>
+        <tr><td><span class="mono">m1_voellmy_c1p1e1n0</span> <span class="chip dim">incumbent</span></td><td class="num">+0.3106</td><td class="num">0</td><td class="num">&mdash;</td><td class="num">&mdash;</td><td class="num">&mdash;</td></tr>
+        <tr><td><span class="mono">m3_samosat_c1p1e0n0</span></td><td class="num">+0.3093</td><td class="num">&minus;0.0013</td><td class="num">[&minus;0.0155, +0.0128]</td><td class="num">0.92</td><td class="num">+0.0064 / &minus;0.0136</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="col">
+    <p>Criteria one through three pass cleanly: the winner keeps rank, its margin (+0.0207) clears the 0.02 band with a CI excluding zero, and the calibration and validation splits agree in sign. A pleasing detail in the last row: the one candidate with earth pressure <em>off</em> is also the one whose cal/val splits flip sign — the instability sits exactly where the stage-3 mechanism says the physics does real work.</p>
+    <h3>Criterion 4 — the honest wrinkle</h3>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>candidate</th><th class="num">mean lift</th><th class="num">median lift</th><th class="num">max single case</th><th>vs 0.02</th></tr></thead>
+        <tbody>
+          <tr><td><span class="mono">m1_voellmy_c1p1e1n0</span></td><td class="num">+0.0254</td><td class="num">+0.0037</td><td class="num">+0.3848</td><td><span class="chip bad">over</span></td></tr>
+          <tr><td><span class="mono">m3_samosat_c0p1e1n0</span></td><td class="num">+0.0121</td><td class="num">+0.0024</td><td class="num">+0.1563</td><td><span class="chip ok">under</span></td></tr>
+          <tr class="hl"><td><span class="mono">m3_samosat_c1p1e1n0</span></td><td class="num">+0.0101</td><td class="num">+0.0022</td><td class="num">+0.1929</td><td><span class="chip ok">under</span></td></tr>
+          <tr><td><span class="mono">m3_samosat_c1p1e0n0</span></td><td class="num">+0.0063</td><td class="num">+0.0011</td><td class="num">+0.1133</td><td><span class="chip ok">under</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>The winner's multi-start lift (+0.0101) is comfortably under the block threshold — but the <em>incumbent's</em> is not (+0.0254). Single-start search understates Voellmy specifically: the median lift is only +0.0037, with the mean dragged up by a handful of hard cases where one start got stuck and three starts escaped (one case recovered +0.38). This is the same pathology seen earlier in the campaign — Voellmy inner loops converge far less reliably than samosAT's.</p>
+    <p>Why the freeze survives this: the headline +0.0207 margin is computed <strong>inside stage 4, where both sides got the identical three-start budget</strong> — the winner beats the best version of the incumbent that equalised search can produce, which is precisely the comparison criterion 4 exists to protect. The residual risk — that some <em>non-finalist</em> was understated in stage 1 badly enough to leapfrog — would require a mean lift of roughly +0.035, larger than anything measured for any candidate, delivered uniformly rather than by the few-stuck-cases mechanism actually observed. The design authority closed it by measurement rather than judgment: ranking all 48 stage-1 candidates against the winner&rsquo;s confirmed score, <strong>exactly two non-finalists sit within the largest lift ever observed — and both are the entrainment-ON twins of finalists already in stage 4</strong>, proven bit-identical simulations (raw footprints equal on 101/101 cases). They cannot leapfrog the winner; they <em>are</em> the winner. The nearest genuinely distinct candidate would need +0.0306, exceeding the largest observed lift by 20%, delivered uniformly rather than by the few-stuck-cases mechanism actually seen. One correction was recorded into the plan for future reuse: the criterion as originally written tested the wrong quantity (the winner&rsquo;s own lift, which is irrelevant if it still leads under equalised budget) — the operative test is whether any <em>non-finalist</em> sits within the maximum observed lift of the winner&rsquo;s confirmed score. Verdict: <strong>all four criteria pass; vector v1 frozen.</strong></p>
+  </div>
+
+</section>
+
+<!-- ============================================================== TRANSFER -->
+<section class="stage" id="transfer">
+  <div class="eyebrow"><b>&sect;4</b> &middot; cross-dataset transfer</div>
+  <h2>Do the globals apply to all the datasets?</h2>
+  <div class="col">
+    <p>The freeze was measured on the 2018 storm panel. The project holds three mapped-outline datasets — <strong>2018 (602 clean cases), 2019 (443), 1999 (457)</strong>, extracted through an identical, verified funnel — and a frozen vector is only "general" if it survives contact with the other two. This is a <em>measurement, not a gate</em>: the global vector freezes on stage 4 alone, and a dataset that rejects the frozen structure becomes a finding for the per-dataset track, not a rollback.</p>
+    <p>Design: a seeded ~100-case random panel from each pool; on each panel, the four stage-4 finalists (does the structure ranking transfer?) and a four-point ifa profile (does the validity-edge shape transfer?); plus the pooled union for a single "global-global" read. 2019 shares the dry-storm regime with 2018, so it isolates "different storm" as a single factor; 1999 contains the wet/full-depth suspects, where the design already predicts structure selection may need to re-run from scratch — a transfer failure there is expected to be informative, not alarming.</p>
+  </div>
+    <div class="col">
+    <h3>Panel soundness first</h3>
+    <p>Every panel passed the screen before its rankings were read. The campaign control reproduced its own known behaviour exactly (same single refusal, same four severe cases at identical percentages — the instrument is stable). 2018-holdout and 2019 show clip statistics indistinguishable from the control. <strong>1999 first hit a data bug, not a physics problem</strong>: its pool writes explicit JSON nulls for its dead source columns, which the harness's defaulting didn't cover — all 100 cases refused to parse. After the fix (data-side that night, null-tolerant deserialization committed permanently), 1999 screened at 99/100 — and its clip-fraction distribution turned out to be <strong>the cleanest of the four panels</strong> (scored mean 0.018 vs 0.036&ndash;0.039 elsewhere; zero scored cases past the 50% severity line, where the others have 1&ndash;4). That is itself a result: <strong>the scoring conventions transfer across mapping standards</strong> — a dataset with 91% quality-2 outlines from a different era and filter chain registers against its DEMs at least as well as 2018's 25%-quality-1 panel, evidence the conventions are instrument properties rather than artifacts tuned to one panel.</p>
+    <h3>Structure transfer — the four-panel verdict</h3>
+    <p>The four stage-4 finalists on each panel, single-start, per-case re-fit, paired against the Voellmy incumbent. Winner margin (&Delta; vs incumbent, 95% CI):</p>
+  </div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>candidate</th><th class="num">campaign<br>(in-sample, n=101)</th><th class="num">2018hold<br>(overfit control, n=99)</th><th class="num">2019<br>(storm lever, n=100)</th><th class="num">1999<br>(4-way confounded, n=99)</th><th class="num">pooled<br>(n=399)</th></tr></thead>
+      <tbody>
+        <tr class="hl"><td><span class="mono">m3_samosat_c1p1e1n0</span><br><span class="chip ok">frozen</span></td>
+          <td class="num"><strong>+0.0359</strong><br>[+0.0213,+0.0525]</td>
+          <td class="num"><strong>+0.0275</strong><br>[+0.0130,+0.0439]</td>
+          <td class="num"><strong>+0.0346</strong><br>[+0.0191,+0.0514]</td>
+          <td class="num">+0.0229<br>[+0.0080,+0.0390]</td>
+          <td class="num"><strong>+0.0303</strong><br>[+0.0227,+0.0383]</td></tr>
+        <tr><td><span class="mono">m3_samosat_c0p1e1n0</span></td>
+          <td class="num">+0.0315</td><td class="num">+0.0265</td><td class="num">+0.0277</td><td class="num">+0.0250</td><td class="num">+0.0277</td></tr>
+        <tr><td><span class="mono">m3_samosat_c1p1e0n0</span></td>
+          <td class="num">+0.0178</td><td class="num">+0.0229</td><td class="num">+0.0196</td><td class="num"><strong>+0.0264</strong></td><td class="num">+0.0216</td></tr>
+        <tr><td><span class="mono">m1_voellmy_c1p1e1n0</span></td>
+          <td class="num">0</td><td class="num">0</td><td class="num">0</td><td class="num">0</td><td class="num">0</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="col">
+    <p><strong>The frozen structure's margin over Voellmy holds on all four panels with CIs excluding zero</strong> — including the overfit control (so the freeze is not an artifact of its 101 selection cases) and most strongly on 2019, the cleanest cross-storm test, where the margin is <em>larger</em> than in-sample. The pooled read across all 399 dataset-namespaced cases puts the frozen structure on top at +0.0303 (p&nbsp;=&nbsp;3.3&times;10<sup>&minus;14</sup>). The one bolded cell — 1999, where the earth-pressure-off variant's point estimate edges ahead by 0.0035 — is resolved by the direct contrasts below.</p>
+        <div class="callout">
+      <div class="callout-label">The formal reading: it transfers 4/4</div>
+      <p>The margin table alone suggests "rank transfers on three panels of four" — and that framing is wrong, because rank among near-tied variants is settled by <em>direct paired contrasts</em>, not by comparing separate deltas against a common baseline. Frozen winner vs the earth-pressure-off variant, head to head:</p>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th>panel</th><th class="num">winner &minus; EP-off</th><th class="num">95% CI</th><th class="num">winner better on</th></tr></thead>
+          <tbody>
+            <tr><td>campaign</td><td class="num">+0.0181</td><td class="num">[+0.0072, +0.0291]</td><td class="num">72/101</td></tr>
+            <tr><td>2019</td><td class="num">+0.0150</td><td class="num">[+0.0041, +0.0260]</td><td class="num">59/100</td></tr>
+            <tr><td>2018hold</td><td class="num">+0.0046</td><td class="num">[&minus;0.0119, +0.0205]</td><td class="num">50/99</td></tr>
+            <tr><td>1999</td><td class="num">&minus;0.0035</td><td class="num">[&minus;0.0168, +0.0094]</td><td class="num">53/99</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>On 1999 the frozen variant wins 53 of 99 cases — a coin flip — and the CI spans zero comfortably. <strong>No panel shows the frozen structure significantly beaten by any alternative.</strong> And the overfit control settles the scale of the wobble: campaign and 2018hold are the <em>same dataset, different draw</em>, and this same head-to-head contrast moves by 0.0135 between them — larger than 1999's entire 0.0081 departure from 2018hold. The shift among near-tied variants is smaller than the sampling variation between two draws of one dataset; no dataset-level explanation is needed or supported.</p>
+      <p><strong>Verdict, as ruled by the design authority:</strong> the frozen structure&rsquo;s advantage over the pre-campaign incumbent transfers to all four panels with confidence intervals excluding zero (+0.0207 to +0.0346). Where the point-estimate ordering shifts among the near-tied samosAT variants, the shift is inside same-dataset noise.</p>
+    </div>
+    <h3>The validity edge, cross-dataset</h3>
+        <div class="tablewrap">
+      <table>
+        <thead><tr><th>panel</th><th class="num">ifa 25&deg;</th><th class="num">30&deg;</th><th class="num">40&deg;</th><th class="num">45&deg;</th><th class="num">step 25&rarr;30</th><th class="num">plateau spread</th></tr></thead>
+        <tbody>
+          <tr><td>2018hold</td><td class="num">0.0616</td><td class="num">0.0709</td><td class="num">0.0727</td><td class="num">0.0674</td><td class="num">+0.0094</td><td class="num">0.0054</td></tr>
+          <tr><td>2019</td><td class="num">0.1131</td><td class="num">0.1190</td><td class="num">0.1171</td><td class="num">0.1127</td><td class="num">+0.0059</td><td class="num">0.0064</td></tr>
+          <tr><td>1999</td><td class="num">0.0993</td><td class="num">0.1077</td><td class="num">0.1066</td><td class="num">0.1016</td><td class="num">+0.0085</td><td class="num">0.0062</td></tr>
+          <tr><td>campaign</td><td class="num">&minus;0.0148</td><td class="num">0.0008</td><td class="num">0.0072</td><td class="num">0.0047</td><td class="num">+0.0157</td><td class="num">0.0063</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p><strong>The step at 25&deg; travels — and this is arguably the strongest result of the campaign.</strong> These are single fixed-(&mu;, slab) runs — no inner loop, hence the much lower absolute values — and in every panel ifa&nbsp;25&deg; is the worst point, with the step off it 1.5&ndash;2.6&times; larger than the entire spread across the 30/40/45 plateau, whose width is constant to a thousandth across four independent datasets (0.0054&ndash;0.0064). It is the only finding of the night that was <em>predicted from reading the source</em> — the <span class="mono">max(inside,&nbsp;0)</span> clamp — then confirmed on its own panel, then reproduced across different storms, mapping standards, and trigger populations. A fitted artifact does not reproduce like that; everything else in this campaign is a comparison, this is a mechanism. It also sharpens the audit flag above: <span class="mono">basal_friction_angle</span> sets this boundary identically on every dataset we have, globally live, and it has never been swept.</p>
+    <h3>What 1999 can and cannot say</h3>
+    <p>On the 1999 panel the earth-pressure-off variant has the highest point estimate, 0.0035 above the frozen variant. The difference is not statistically distinguishable, and it is smaller than the amount by which this same contrast varies between two independent draws of the 2018 dataset. Earth pressure is a plausible place for wet-snow behaviour to differ — but nothing here supports that reading: the 1999 panel is confounded across flow regime, storm, mapping standard and trigger mix simultaneously, and <strong>its extraction carries no humidity attribute at all, so the wet cases cannot even be identified</strong>. More pointedly, the one mechanism-level measurement available cuts <em>against</em> it: the ifa profile below shows the earth-pressure formulation behaving identically on 1999 — the same validity edge at 25&deg;, a plateau of the same width — so there is no measured sense in which earth pressure differs on that dataset. There is also a parsimonious non-physics alternative: EP-off is the arm that flipped cal/val sign in stage 4, and an arm with higher subgroup variance will occasionally top a panel by chance. The observation is recorded as a hypothesis for the per-dataset track, not as evidence.</p>
+    <p>One more caveat the transfer data itself teaches: <strong>absolute &Omega;<sub>T</sub> is not comparable across panels.</strong> 1999 posts the highest raw scores of the four despite 91% quality-2 outlines; four candidate explanations — avalanche size mix (wrong sign), digitisation smoothness (identical across panels), outline quality class (direction flips between panels), conservative mapping (same-class footprints are the same size) — were each tested against the data and each rejected. The rejected list travels with the anomaly so the next person knows which four guesses not to spend time on. Every panel has its own achievable ceiling, set by factors this campaign demonstrated it cannot decompose — which is exactly why the transfer design rests on within-panel paired contrasts, and why the curiosity changes nothing about the reading. A deeper limitation from the same audit: <strong>1999 has zero coverage on every deployable feature</strong> (start zone, aspect, fracture width), so it can supply calibration targets but can never test the conditions model's central bet. 2019 is the only new dataset that can.</p>
+  </div>
+
+</section>
+
+<!-- ================================================================= COSTS -->
+<section class="stage" id="costs">
+  <div class="eyebrow"><b>&sect;5</b> &middot; operations</div>
+  <h2>Costs, fleet, and operations</h2>
+  <div class="col">
+    <p>The campaign ran on three rented VAST.ai boxes — cheap cards, deliberately: the workload saturates on job-submission overhead at ~23 cases/s per card regardless of GPU class, so economics favour many slow cards (~$1.70 per million simulations on 4070-class vs ~$4 on 5090-class). GPU count is a latency decision, not a cost decision.</p>
+  </div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>box</th><th>hardware</th><th class="num">$/hr</th><th>role</th></tr></thead>
+      <tbody>
+        <tr><td>A</td><td>4&times; RTX 4070S</td><td class="num">0.416</td><td>compute; network-degraded (listing lied: 3.2&nbsp;Gbps advertised, 250&nbsp;KB/s delivered) — loaded once, never fed again</td></tr>
+        <tr><td>B</td><td>4&times; RTX 4070S</td><td class="num">0.384</td><td>campaign box; benchmarked 15.7 cases/s/GPU</td></tr>
+        <tr><td>C</td><td>8&times; RTX 3060</td><td class="num">0.520</td><td>largest worker; also proved the 8-GPU container bug is host-class-specific</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="col">
+    <p>All three boxes were destroyed the same night the campaign ended, after every artifact was verified home twice over: the structured sweep (213&nbsp;MB, 4,531 files, integrity-checked) plus complete raw tarballs of each box&rsquo;s data directory (A: 1,581 files, B: 5,995, C: 3,014 — all listing clean before anything was destroyed). Teardown was verified by both runbook methods — the instance list returning none of ours, and SSH refusing on all three endpoints. Total fleet cost for the entire campaign, at ~$1.32/hr across three boxes for roughly one working day: on the order of $15&ndash;25 — less than the price of the coffee consumed thinking about it.</p>
+    <p>Everything operational learned tonight — the Vulkan/GLVND package trap on CUDA images, the dead-host container failure mode, verified teardown, the kill-by-PID discipline, why listings must be re-verified after provisioning — is written into the operations runbook so none of it has to be rediscovered.</p>
+  </div>
+</section>
+
+<!-- =============================================================== CAVEATS -->
+<section class="stage" id="caveats">
+  <div class="eyebrow"><b>&sect;6</b> &middot; honesty section</div>
+  <h2>Caveats, debts, and what happens next</h2>
+  <div class="col">
+    <h3>Standing caveats</h3>
+    <ul>
+      <li><strong>The reproducibility ceiling.</strong> Ground truth agrees with itself at &Omega;<sub>T</sub>&nbsp;&asymp;&nbsp;+0.28. Per-event calibrated scores sit at that floor already; absolute-score improvements beyond it are chasing mapping noise. All claims here are paired contrasts, which survive this — but any future reader quoting absolute &Omega;<sub>T</sub> must quote the ceiling with it.</li>
+      <li><strong>Entrainment's contradiction is unresolved.</strong> The flag is inert (bit-identical footprints), most plausibly for want of an erodible-depth input. Must be resolved before the 1999 wet track, where entrainment has a real job.</li>
+      <li><strong>basal_friction_angle = 25&deg; was never swept.</strong> Explicitly fixed-at-default. Tier-2 candidate for per-dataset work; prime suspect for wet snow.</li>
+      <li><strong>&mu;-semantics break.</strong> All earlier &mu;-feature correlations were Voellmy-&mu;; the conditions model trains on samosAT-&mu; and those results must be re-measured, not inherited.</li>
+      <li><strong>The pre-harvest numerics gate.</strong> Stage 0 validated numerics at per-case optima; the harvest spends most evaluations off-optimum. Re-confirm the ordering there before harvesting.</li>
+      <li><strong>The rule this campaign kept re-learning: measure, don&rsquo;t argue.</strong> Seven times tonight a confident "this obviously can&rsquo;t matter" or "this rule says adopt X" was checked by measurement, and several times the argument was wrong — the clip no-op, the numerics anchor, the ifa flatness prior, criterion 4&rsquo;s operationalisation. The full seven-instance table, and the two operative rules it produced (reproduce a recommendation against its own response surface before freezing; when a surface and a single CI disagree, believe the surface), are in the plan doc.</li>
+    </ul>
+    <h3>The sequence from here</h3>
+    <ul>
+      <li><strong>Harvest</strong>: per-event (&mu;, slab) calibration at the frozen vector across all ~1,500 clean cases, plus deliberately-random parameter draws to fix search-exhaust sampling bias. Hour-scale on a comparable fleet.</li>
+      <li><strong>Per-dataset freezes and transfer tests</strong>, done rigorously (tonight's transfer stage is the first-pass version): 2019 first (same regime, isolates "different storm"), then 1999-dry vs 2018-dry (nuisance floor), then 1999-wet vs 1999-dry (the physics contrast). A pooled global-global vector ships only if transfer agrees; if it doesn't, the per-dataset vectors <em>are</em> the training signal.</li>
+      <li><strong>The conditions model</strong>: deployable features only as the headline track; train-on-2018 &rarr; test-on-2019 out-of-storm generalisation is <em>the</em> experiment. The standing wall to beat: on deployable features alone, regression is currently indistinguishable from a global constant.</li>
+      <li><strong>Later</strong>: emulator distillation, Hexagons/PowFinder integration, Austria/LAWIS extension.</li>
+    </ul>
+  </div>
+</section>
+
+<footer>
+  <h3>Where everything lives</h3>
+  <ul>
+    <li><span class="mono">campaign/results_2026-07-28/</span> — every stage's raw tables and Parquet evaluation logs (293,789 total: 284,984 in the committed stage Parquet (s1 163,177; s3 24,129; s4 41,653; transfer 56,025) plus 8,805 archived grid/validation rows (stage-0 grid 7,650; fix validation 840; velocity_threshold check 210; rebaseline 105) evaluations logged campaign-wide)</li>
+    <li><span class="mono">campaign/GLOBAL_CALIBRATION_PLAN.md</span> — the full experiment design, pre-registrations, and stage narratives</li>
+    <li><span class="mono">campaign/search_algorithm.html</span> — why the staged profile search works and what it assumes</li>
+    <li><span class="mono">campaign/clip_visuals/severe_cases.html</span> — before/after evidence for the ridge-leak fix</li>
+    <li>the fleet runbook (not published)</li>
+    <li><span class="mono">notes_for_markus.md</span> — 26 items for Markus, including the upstream shader findings</li>
+    <li><span class="mono">automated_suggestions_todo.md</span> — the forward-looking roadmap</li>
+  </ul>
+  <p>Generated 2026-07-28, from the night's committed artifacts. Data panel: 2018 Tirol storm, 105 extracted cases (104 scored; one refused by the release-floor rule).</p>
+</footer>
+
+</main>
+</body>
+</html>

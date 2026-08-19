@@ -1,3 +1,4 @@
+//! swissALTI3D fetch and cache. Tries 8 acquisition years per tile (the shipped code hardcoded 2019), falls back to `decode_tiled_lzw_f32` for tiles whose LZW stream lacks an end code, resamples 2 m → 5 m by area weighting, stores into a Zarr array. `get_dem(bbox)` is the entry point.
 use ndarray::{Array1, Array2};
 use reqwest::Client;
 use serde_json::json;
@@ -58,6 +59,183 @@ pub enum TileManagerError {
 
     #[error(transparent)]
     FilesystemStoreCreate(#[from] zarrs::filesystem::FilesystemStoreCreateError),
+
+    #[error("Fallback TIFF decode failed: {0}")]
+    TiffFallback(String),
+}
+
+/// Minimal reader for the exact flavour of GeoTIFF that swisstopo serves for
+/// swissALTI3D: tiled, LZW-compressed, single-band 32-bit float, no predictor.
+///
+/// Some of those tiles end their LZW stream without an end-of-information code.
+/// The `tiff` crate treats that as a hard error ("no lzw end code found") and
+/// refuses the whole image, so we decode the tiles ourselves and simply accept
+/// a stream that ends early. Returns `(width, height, row-major f32 data)` with
+/// row 0 at the *top* (native TIFF order), matching `Decoder::read_image`.
+pub fn decode_tiled_lzw_f32(bytes: &[u8]) -> Result<(u32, u32, Vec<f32>), TileManagerError> {
+    use weezl::{BitOrder, decode::Decoder as LzwDecoder};
+
+    let err = |m: &str| TileManagerError::TiffFallback(m.to_string());
+    if bytes.len() < 8 {
+        return Err(err("file too short"));
+    }
+    let little = match &bytes[0..2] {
+        b"II" => true,
+        b"MM" => false,
+        _ => return Err(err("bad byte order mark")),
+    };
+    let u16at = |o: usize| -> u32 {
+        let b = [bytes[o], bytes[o + 1]];
+        if little {
+            u16::from_le_bytes(b) as u32
+        } else {
+            u16::from_be_bytes(b) as u32
+        }
+    };
+    let u32at = |o: usize| -> u32 {
+        let b = [bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]];
+        if little {
+            u32::from_le_bytes(b)
+        } else {
+            u32::from_be_bytes(b)
+        }
+    };
+    if u16at(2) != 42 {
+        return Err(err("not a classic TIFF"));
+    }
+
+    let ifd = u32at(4) as usize;
+    if ifd + 2 > bytes.len() {
+        return Err(err("IFD out of range"));
+    }
+    let n_entries = u16at(ifd) as usize;
+    let mut tags: std::collections::HashMap<u32, (u32, u32, usize)> = Default::default();
+    for i in 0..n_entries {
+        let e = ifd + 2 + i * 12;
+        if e + 12 > bytes.len() {
+            return Err(err("IFD entry out of range"));
+        }
+        tags.insert(u16at(e), (u16at(e + 2), u32at(e + 4), e + 8));
+    }
+
+    // Reads a tag as a list of u32 (handling SHORT/LONG, inline or out-of-line).
+    let values = |tag: u32| -> Option<Vec<u32>> {
+        let &(ty, count, voff) = tags.get(&tag)?;
+        let size = match ty {
+            3 => 2usize,
+            4 => 4usize,
+            _ => return None,
+        };
+        let total = size * count as usize;
+        let base = if total <= 4 {
+            voff
+        } else {
+            u32at(voff) as usize
+        };
+        let mut out = Vec::with_capacity(count as usize);
+        for i in 0..count as usize {
+            let o = base + i * size;
+            if o + size > bytes.len() {
+                return None;
+            }
+            out.push(if size == 2 { u16at(o) } else { u32at(o) });
+        }
+        Some(out)
+    };
+    let scalar = |tag: u32, default: u32| -> u32 {
+        values(tag)
+            .and_then(|v| v.first().copied())
+            .unwrap_or(default)
+    };
+
+    let width = scalar(256, 0);
+    let height = scalar(257, 0);
+    if width == 0 || height == 0 {
+        return Err(err("missing image dimensions"));
+    }
+    if scalar(258, 0) != 32 || scalar(339, 1) != 3 || scalar(277, 1) != 1 {
+        return Err(err("expected single-band 32-bit float samples"));
+    }
+    if scalar(259, 1) != 5 {
+        return Err(err("expected LZW compression"));
+    }
+    if scalar(317, 1) != 1 {
+        return Err(err("predictor not supported"));
+    }
+    let tile_w = scalar(322, 0) as usize;
+    let tile_h = scalar(323, 0) as usize;
+    if tile_w == 0 || tile_h == 0 {
+        return Err(err("expected a tiled TIFF"));
+    }
+    let offsets = values(324).ok_or_else(|| err("missing tile offsets"))?;
+    let counts = values(325).ok_or_else(|| err("missing tile byte counts"))?;
+    if offsets.len() != counts.len() {
+        return Err(err("tile offset/bytecount mismatch"));
+    }
+
+    let (w, h) = (width as usize, height as usize);
+    let tiles_across = w.div_ceil(tile_w);
+    let mut out = vec![f32::NAN; w * h];
+    let tile_bytes = tile_w * tile_h * 4;
+    let mut raw = vec![0u8; tile_bytes];
+
+    for (i, (&off, &len)) in offsets.iter().zip(counts.iter()).enumerate() {
+        let (off, len) = (off as usize, len as usize);
+        if off + len > bytes.len() {
+            return Err(err("tile data out of range"));
+        }
+        raw.iter_mut().for_each(|b| *b = 0);
+        let mut dec = LzwDecoder::with_tiff_size_switch(BitOrder::Msb, 8);
+        // weezl decodes incrementally; keep feeding it until the stream is done,
+        // the output tile is full, or it stops making progress. A stream that
+        // ends without an EOI code is accepted with whatever it produced.
+        let mut in_pos = 0usize;
+        let mut produced = 0usize;
+        loop {
+            let res = dec.decode_bytes(&bytes[off + in_pos..off + len], &mut raw[produced..]);
+            in_pos += res.consumed_in;
+            produced += res.consumed_out;
+            let done = match res.status {
+                Ok(weezl::LzwStatus::Done) | Ok(weezl::LzwStatus::NoProgress) => true,
+                Ok(weezl::LzwStatus::Ok) => res.consumed_in == 0 && res.consumed_out == 0,
+                Err(_) => true,
+            };
+            if done || in_pos >= len || produced >= tile_bytes {
+                break;
+            }
+        }
+        if produced == 0 {
+            return Err(err("tile decoded to zero bytes"));
+        }
+
+        let tx = (i % tiles_across) * tile_w;
+        let ty = (i / tiles_across) * tile_h;
+        for row in 0..tile_h {
+            let y = ty + row;
+            if y >= h {
+                break;
+            }
+            for col in 0..tile_w {
+                let x = tx + col;
+                if x >= w {
+                    break;
+                }
+                let src = (row * tile_w + col) * 4;
+                if src + 4 > produced {
+                    continue;
+                }
+                let b = [raw[src], raw[src + 1], raw[src + 2], raw[src + 3]];
+                let v = if little {
+                    f32::from_le_bytes(b)
+                } else {
+                    f32::from_be_bytes(b)
+                };
+                out[y * w + x] = v;
+            }
+        }
+    }
+
+    Ok((width, height, out))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -258,12 +436,35 @@ impl TileManager {
 
     /// Fetches the TIFF from geo.admin.ch and decodes it into a 500x500 f32 array
     async fn fetch_and_parse_tif(&self, id: TileId) -> Result<Array2<f32>, TileManagerError> {
-        let url = format!(
-            "https://data.geo.admin.ch/ch.swisstopo.swissalti3d/swissalti3d_2019_{}-{}/swissalti3d_2019_{}-{}_2_2056_5728.tif",
-            id.easting, id.northing, id.easting, id.northing,
-        );
-
-        let response = self.client.get(&url).send().await?;
+        // swissALTI3D is flown region by region, so the acquisition year in the
+        // asset name is not the same everywhere. Try the most common year first
+        // and fall through the others rather than 404-ing on whole regions.
+        const YEARS: [u32; 8] = [2019, 2020, 2021, 2022, 2023, 2024, 2018, 2017];
+        let mut response = None;
+        let mut url = String::new();
+        let mut last_status = reqwest::StatusCode::NOT_FOUND;
+        for year in YEARS {
+            let candidate = format!(
+                "https://data.geo.admin.ch/ch.swisstopo.swissalti3d/swissalti3d_{year}_{}-{}/swissalti3d_{year}_{}-{}_2_2056_5728.tif",
+                id.easting, id.northing, id.easting, id.northing,
+            );
+            let r = self.client.get(&candidate).send().await?;
+            last_status = r.status();
+            if r.status().is_success() {
+                url = candidate;
+                response = Some(r);
+                break;
+            }
+        }
+        let response = match response {
+            Some(r) => r,
+            None => {
+                return Err(TileManagerError::Http(format!(
+                    "tile {:?}: no swissALTI3D asset found (last status {})",
+                    id, last_status
+                )));
+            }
+        };
 
         let status = response.status();
         let content_type = response
@@ -286,58 +487,58 @@ impl TileManager {
             return Err(TileManagerError::InvalidData);
         }
 
-        let cursor = Cursor::new(bytes.clone());
-
-        let mut decoder = Decoder::new(cursor).map_err(|e| {
-            eprintln!(
-                "Failed to create TIFF decoder for {:?}. \
-             content-type={}, bytes={}, error={:?}",
-                id,
-                content_type,
-                bytes.len(),
-                e
-            );
-            e
-        })?;
-
-        let (width, height) = decoder.dimensions()?;
-
-        match decoder.read_image() {
-            Ok(DecodingResult::F32(mut vec)) => {
-                if vec.len() != (width * height) as usize {
-                    return Err(TileManagerError::InvalidData);
+        // Primary path: the `tiff` crate. Some swissALTI3D tiles have an LZW
+        // stream without a terminating end-of-information code, which it
+        // rejects outright; those fall through to our own tolerant decoder.
+        let decoded: Option<(u32, u32, Vec<f32>)> = match Decoder::new(Cursor::new(bytes.clone())) {
+            Ok(mut decoder) => match (decoder.dimensions(), decoder.read_image()) {
+                (Ok((width, height)), Ok(DecodingResult::F32(vec))) => Some((width, height, vec)),
+                (Ok(_), Ok(other)) => {
+                    warn!(
+                        "Unexpected TIFF sample type for {:?}: {:?}",
+                        id,
+                        std::mem::discriminant(&other)
+                    );
+                    None
                 }
-
-                compute_core::utils::flip_rows_flat_vec(&mut vec, width, height);
-
-                Array2::from_shape_vec((height as usize, width as usize), vec)
-                    .map_err(|_| TileManagerError::InvalidData)
-            }
-
-            Ok(other) => {
-                eprintln!(
-                    "Unexpected TIFF type for {:?}: {:?}",
-                    id,
-                    std::mem::discriminant(&other)
-                );
-                Err(TileManagerError::InvalidData)
-            }
-
+                (_, Err(e)) | (Err(e), _) => {
+                    warn!(
+                        "tiff crate could not decode {:?} (content-type={}, bytes={}): {:?}; \
+                         retrying with the tolerant LZW decoder",
+                        id,
+                        content_type,
+                        bytes.len(),
+                        e
+                    );
+                    None
+                }
+            },
             Err(e) => {
-                eprintln!(
-                    "Failed to decode TIFF {:?}: \
-                 content-type={}, bytes={}, dimensions={}x{}, error={:?}",
+                warn!(
+                    "tiff crate could not open {:?} (content-type={}, bytes={}): {:?}; \
+                     retrying with the tolerant LZW decoder",
                     id,
                     content_type,
                     bytes.len(),
-                    width,
-                    height,
                     e
                 );
-
-                Err(e.into())
+                None
             }
+        };
+
+        let (width, height, mut vec) = match decoded {
+            Some(v) => v,
+            None => decode_tiled_lzw_f32(&bytes)?,
+        };
+
+        if vec.len() != (width * height) as usize {
+            return Err(TileManagerError::InvalidData);
         }
+
+        compute_core::utils::flip_rows_flat_vec(&mut vec, width, height);
+
+        Array2::from_shape_vec((height as usize, width as usize), vec)
+            .map_err(|_| TileManagerError::InvalidData)
     }
 
     fn resample_2m_to_5m(input: &Array2<f32>) -> Array2<f32> {
@@ -459,13 +660,17 @@ impl TileManager {
         let rows = (row1 - row0) as usize;
         let cols = (col1 - col0) as usize;
 
+        // `data` is retrieved row-major over the subset [northing_rows, easting_cols],
+        // i.e. index = row * cols + col. A `Dem` is indexed data1d[y * width + x] with
+        // x = easting and y = northing, so width must be the number of easting columns
+        // and height the number of northing rows.
         let mut dem = Dem {
-            width: rows,
-            height: cols,
+            width: cols,
+            height: rows,
             data1d: data,
             data: Vec::new(),
-            x: linspace(min_e as f32, max_e as f32, rows),
-            y: linspace(min_n as f32, max_n as f32, cols),
+            x: linspace(min_e as f32, max_e as f32, cols),
+            y: linspace(min_n as f32, max_n as f32, rows),
             cell_size: 5.0,
             bounds: Bounds {
                 xmin: min_e as f32,
@@ -477,6 +682,9 @@ impl TileManager {
             minimum_elevation: f32::INFINITY, // Will be calculated later
         };
         dem.data = to_2d(&dem.data1d, dem.width, dem.height);
+        // `load_dem` does this for file-backed DEMs; without it the elevation
+        // threshold handed to the particle shader stays at +inf.
+        dem.minimum_elevation = Dem::calculate_minimum_elevation(&dem.data1d);
 
         Ok(dem)
     }
@@ -682,6 +890,41 @@ mod tests {
             max_y_start, 400,
             "Lowest northing should map to bottom of image (Y=400)"
         );
+    }
+
+    /// Cross-check of the tolerant LZW fallback against the `tiff` crate.
+    /// Needs two locally downloaded swissALTI3D tiles; skipped otherwise.
+    #[test]
+    fn test_fallback_decoder_matches_tiff_crate() {
+        let base = match std::env::var("SWISSALTI_TEST_TILES") {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        for name in ["t2.tif", "t1.tif"] {
+            let path = format!("{base}/{name}");
+            let bytes = std::fs::read(&path).expect("tile");
+            let (w, h, mine) = decode_tiled_lzw_f32(&bytes).expect("fallback decode");
+            println!(
+                "{name}: {w}x{h} min={:?} max={:?} mean={}",
+                mine.iter().cloned().fold(f32::INFINITY, f32::min),
+                mine.iter().cloned().fold(f32::NEG_INFINITY, f32::max),
+                mine.iter().sum::<f32>() / mine.len() as f32
+            );
+            let mut dec = match Decoder::new(Cursor::new(bytes.clone())) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            if let Ok(DecodingResult::F32(theirs)) = dec.read_image() {
+                assert_eq!(theirs.len(), mine.len());
+                let diff = theirs
+                    .iter()
+                    .zip(mine.iter())
+                    .filter(|(a, b)| (*a - *b).abs() > 1e-6)
+                    .count();
+                println!("{name}: {diff} differing samples vs tiff crate");
+                assert_eq!(diff, 0);
+            }
+        }
     }
 
     /// 5. Test Exporting Array2 to CSV

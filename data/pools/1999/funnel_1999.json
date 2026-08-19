@@ -1,0 +1,83 @@
+{
+ "dataset": "1999",
+ "n_total": 11120,
+ "dead_fields": {
+  "aspect": 1.0,
+  "start_zone": 1.0,
+  "dpo_alt": 1.0,
+  "trg_typ": 0.9997302158273381
+ },
+ "funnel": [
+  {
+   "stage": "all mapped polygons",
+   "remaining": 11120,
+   "removed": 0,
+   "removed_pct_of_prev": 0.0,
+   "would_remove_alone": 0
+  },
+  {
+   "stage": "geometry valid/repairable & non-degenerate",
+   "remaining": 11120,
+   "removed": 0,
+   "removed_pct_of_prev": 0.0,
+   "would_remove_alone": 0
+  },
+  {
+   "stage": "typ = SLAB",
+   "remaining": 4306,
+   "removed": 6814,
+   "removed_pct_of_prev": 61.276978417266186,
+   "would_remove_alone": 6814
+  },
+  {
+   "stage": "single ring (nparts = 1)",
+   "remaining": 4062,
+   "removed": 244,
+   "removed_pct_of_prev": 5.66651184393869,
+   "would_remove_alone": 393
+  },
+  {
+   "stage": "size class 2-5",
+   "remaining": 4055,
+   "removed": 7,
+   "removed_pct_of_prev": 0.17232890201870998,
+   "would_remove_alone": 208
+  },
+  {
+   "stage": "area 2-60 ha",
+   "remaining": 2993,
+   "removed": 1062,
+   "removed_pct_of_prev": 26.189889025893958,
+   "would_remove_alone": 6187
+  },
+  {
+   "stage": "bbox <= 2000 m",
+   "remaining": 2880,
+   "removed": 113,
+   "removed_pct_of_prev": 3.7754761109254926,
+   "would_remove_alone": 303
+  },
+  {
+   "stage": "no neighbour within 25 m",
+   "remaining": 457,
+   "removed": 2423,
+   "removed_pct_of_prev": 84.13194444444444,
+   "would_remove_alone": 9434
+  }
+ ],
+ "n_pool": 457,
+ "pool_by_size": [
+  {
+   "value": "3",
+   "n": 247
+  },
+  {
+   "value": "4",
+   "n": 206
+  },
+  {
+   "value": "5",
+   "n": 4
+  }
+ ]
+}

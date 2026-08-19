@@ -1,0 +1,841 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The search for the general parameters</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --surface:      #fcfcfb;
+    --surface-2:    #f4f3ef;
+    --ink:          #14140f;
+    --ink-2:        #52514e;
+    --ink-3:        #7b7a75;
+    --rule:         #dcdbd4;
+    --rule-strong:  #b9b8b0;
+    --right:        #2a78d6;   /* categorical slot 1 — the procedure that works */
+    --wrong:        #eb6834;   /* categorical slot 2 — the procedure that fails */
+    --right-fill:   rgba(42,120,214,0.13);
+    --band:         rgba(42,120,214,0.16);
+    --band-edge:    rgba(42,120,214,0.45);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --surface:      #1a1a19;
+      --surface-2:    #232322;
+      --ink:          #f2f1ec;
+      --ink-2:        #c3c2b7;
+      --ink-3:        #908f88;
+      --rule:         #35352f;
+      --rule-strong:  #4d4d45;
+      --right:        #3987e5;
+      --wrong:        #d95926;
+      --right-fill:   rgba(57,135,229,0.16);
+      --band:         rgba(57,135,229,0.20);
+      --band-edge:    rgba(57,135,229,0.55);
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--surface);
+    color: var(--ink);
+    font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, "Times New Roman", serif;
+    font-size: 17px;
+    line-height: 1.62;
+    overflow-x: hidden;
+  }
+  .wrap { max-width: 43rem; margin: 0 auto; padding: 3.5rem 1.25rem 6rem; }
+
+  h1, h2, h3, .lbl, figcaption, table, .box-title, .glossary dt, .meta {
+    font-family: "Helvetica Neue", Helvetica, Arial, system-ui, sans-serif;
+  }
+  h1 { font-size: 1.85rem; line-height: 1.22; letter-spacing: -0.015em; margin: 0 0 0.6rem; font-weight: 650; }
+  .deck { font-size: 1.08rem; color: var(--ink-2); margin: 0 0 1.4rem; line-height: 1.5; }
+  .meta { font-size: 0.78rem; color: var(--ink-3); letter-spacing: 0.02em;
+          border-top: 1px solid var(--rule); padding-top: 0.85rem; margin-bottom: 3rem; }
+  h2 { font-size: 1.18rem; margin: 3.2rem 0 0.9rem; letter-spacing: -0.005em; font-weight: 650;
+       padding-bottom: 0.35rem; border-bottom: 1px solid var(--rule); }
+  h2 .num { color: var(--ink-3); font-weight: 400; margin-right: 0.55em; }
+  h3 { font-size: 0.94rem; margin: 2rem 0 0.5rem; font-weight: 650; letter-spacing: 0.005em; }
+  p { margin: 0 0 1.05rem; }
+
+  code, .mono { font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+                font-size: 0.87em; background: var(--surface-2); padding: 0.1em 0.32em;
+                border-radius: 3px; }
+  strong { font-weight: 650; }
+
+  .lede::first-letter { font-size: 2.7em; float: left; line-height: 0.86; padding: 0.04em 0.09em 0 0; font-weight: 600; }
+
+  /* callouts */
+  .box { background: var(--surface-2); border: 1px solid var(--rule);
+         border-radius: 6px; padding: 1rem 1.15rem 0.35rem; margin: 1.6rem 0; }
+  .box-title { font-size: 0.74rem; letter-spacing: 0.09em; text-transform: uppercase;
+               color: var(--ink-3); margin-bottom: 0.5rem; }
+  .box p { font-size: 0.95rem; }
+  .keyclaim { border-left: 3px solid var(--right); background: var(--right-fill);
+              border-radius: 0 5px 5px 0; padding: 0.85rem 1.15rem 0.05rem; margin: 1.6rem 0; }
+  .keyclaim p { font-size: 0.97rem; }
+
+  /* tables */
+  table { border-collapse: collapse; width: 100%; font-size: 0.85rem; margin: 1.4rem 0 1.6rem; }
+  caption { caption-side: top; text-align: left; font-size: 0.78rem; color: var(--ink-3);
+            padding-bottom: 0.5rem; letter-spacing: 0.02em; }
+  th, td { text-align: left; padding: 0.4rem 0.7rem 0.4rem 0; border-bottom: 1px solid var(--rule);
+           vertical-align: top; }
+  th { font-weight: 650; font-size: 0.76rem; letter-spacing: 0.045em; text-transform: uppercase;
+       color: var(--ink-3); border-bottom: 1px solid var(--rule-strong); }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums;
+                   padding-right: 1.1rem; white-space: nowrap; }
+  td.num:last-child, th.num:last-child { padding-right: 0; }
+  .scroller { overflow-x: auto; }
+
+  /* figures */
+  figure { margin: 2.2rem 0; }
+  .panels { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 0.9rem; }
+  .panel { min-width: 0; }
+  .panel h4 { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 0.76rem;
+              margin: 0 0 0.2rem; letter-spacing: 0.02em; font-weight: 650; }
+  .panel p { font-size: 0.78rem; line-height: 1.42; color: var(--ink-2); margin: 0.35rem 0 0; }
+  svg { display: block; width: 100%; height: auto; }
+  figcaption { font-size: 0.8rem; color: var(--ink-2); line-height: 1.45; margin-top: 0.9rem;
+               border-top: 1px solid var(--rule); padding-top: 0.55rem; }
+  figcaption b { color: var(--ink); font-weight: 650; }
+
+  /* svg roles */
+  .ax     { stroke: var(--rule-strong); stroke-width: 1; fill: none; }
+  .gridln { stroke: var(--rule); stroke-width: 1; fill: none; }
+  .band   { fill: var(--band); stroke: var(--band-edge); stroke-width: 1; }
+  .curve  { fill: none; stroke: var(--ink); stroke-width: 2; stroke-linejoin: round; }
+  .rightl { stroke: var(--right); stroke-width: 2; fill: none; }
+  .wrongl { stroke: var(--wrong); stroke-width: 2; fill: none; }
+  .rightf { fill: var(--right); }
+  .wrongf { fill: var(--wrong); }
+  .dot    { fill: var(--ink-2); stroke: var(--surface); stroke-width: 1.5; }
+  .dash   { stroke: var(--ink-3); stroke-width: 1.25; stroke-dasharray: 5 4; fill: none; }
+  .svgtxt { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 9px;
+            fill: var(--ink-2); }
+  .svgtxt.small { font-size: 8px; fill: var(--ink-3); }
+  .svgtxt.strong { fill: var(--ink); font-weight: 650; }
+  .svgtxt.r { fill: var(--right); font-weight: 650; }
+  .svgtxt.w { fill: var(--wrong); font-weight: 650; }
+
+  /* glossary */
+  .glossary { background: var(--surface-2); border: 1px solid var(--rule); border-radius: 6px;
+              padding: 1.1rem 1.25rem 1.25rem; margin: 2rem 0; }
+  .glossary dl { margin: 0; }
+  .glossary dt { font-size: 0.83rem; font-weight: 650; margin-top: 0.85rem; }
+  .glossary dt:first-of-type { margin-top: 0.2rem; }
+  .glossary dd { margin: 0.15rem 0 0; font-size: 0.9rem; line-height: 1.5; color: var(--ink-2); }
+
+  ul, ol { padding-left: 1.15rem; margin: 0 0 1.05rem; }
+  li { margin-bottom: 0.45rem; }
+  .footer { margin-top: 3.5rem; border-top: 1px solid var(--rule); padding-top: 1rem;
+            font-size: 0.8rem; color: var(--ink-3); }
+  .footer code { background: none; padding: 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>The search for the general parameters</h1>
+<p class="deck">Why the calibration is a staged profile search with per-event nuisance
+re-fitting — and why the two procedures everyone reaches for first are unavailable and
+wrong, in that order.</p>
+<p class="meta">avalanchers &middot; baseline-calibration &middot; companion to
+<span class="mono">campaign/GLOBAL_CALIBRATION_PLAN.md</span> and <span class="mono">the campaign's working record</span></p>
+
+<h2><span class="num">1</span>What is being searched for</h2>
+
+<p class="lede">The simulator has two kinds of knob, and the whole design follows from
+keeping them apart. A handful are <strong>shared constants</strong>: the friction model and
+its optional components, the turbulent drag coefficient &xi;, the numerical settings (CFL
+number, particles per cell, step cap), the internal friction angle. These are properties of
+the model, not of any particular avalanche, and they get one value for the whole world.
+The rest are <strong>per-event parameters</strong>: the Coulomb friction coefficient &mu; and
+the slab thickness, which plainly differ between a wet spring slide and a dry January slab
+and which the eventual deployed system must predict from conditions.</p>
+
+<p>The measurement is the repo's own area-overlap index. For a case, both the observed
+outline and the simulated footprint are rasterised on the same 5&nbsp;m grid; every cell in
+the union is classified as intersection <em>X</em>, missed <em>U</em>, or spurious <em>O</em>;
+and with &alpha;&nbsp;=&nbsp;X/T, &beta;&nbsp;=&nbsp;U/T, &gamma;&nbsp;=&nbsp;O/T over the
+union T,</p>
+
+<p style="text-align:center; font-size:1.02rem; margin:1.2rem 0;">
+&Omega;<sub>T</sub> &nbsp;=&nbsp; &alpha; &minus; &beta; &minus; &gamma; &nbsp;=&nbsp; 2&nbsp;&middot;&nbsp;IoU &minus; 1
+</p>
+
+<p>which is &minus;1 for disjoint footprints, 0 when the overlap is half the union, and +1 for an
+exact match. Where the scale sits for this project: doing nothing scores &minus;0.696, the repo
+defaults score &minus;0.390, the best single global parameter vector reaches +0.005, and
+calibrating every event separately reaches +0.295. That last gap — a single vector at +0.073
+against per-event fitting at +0.260 on the twelve-event identifiability panel, widening rather
+than shrinking under leave-one-out — is the reason the architecture is per-event at all.</p>
+
+<p>So the question this document is about is narrow and specific: <strong>what values should
+the shared constants take?</strong> Not "what parameters fit avalanche 6716" — that is the
+per-event problem, and it is solved. The shared constants have to be frozen <em>first</em>,
+because the 20,000-event harvest that follows produces the regression targets, and a harvest
+run at a badly chosen global configuration produces per-event optima that are partly
+compensating for that configuration. A regressor trained on those learns the compensation as
+if it were physics.</p>
+
+<div class="scroller">
+<table>
+<caption>The search space, from <span class="mono">BOUNDS</span> / <span class="mono">DIM_NAMES</span> in <span class="mono">crates/cli/src/bin/calibrate.rs</span>. The simplex works in the unit cube; a per-dimension mask decides which coordinates it may move.</caption>
+<thead><tr><th>dimension</th><th>range</th><th>scale</th><th>role here</th></tr></thead>
+<tbody>
+<tr><td><span class="mono">mu</span></td><td>0.05 &ndash; 0.60</td><td>linear</td><td>per-event, re-fitted in every comparison</td></tr>
+<tr><td><span class="mono">slab</span></td><td>0.10 &ndash; 2.00 m</td><td>linear</td><td>per-event, re-fitted in every comparison</td></tr>
+<tr><td><span class="mono">xi</span></td><td>200 &ndash; 12000</td><td>log</td><td>shared; the profiled coordinate</td></tr>
+<tr><td><span class="mono">ifa</span></td><td>15 &ndash; 45&deg;</td><td>linear</td><td>shared; conditional on two flags being on</td></tr>
+<tr><td><span class="mono">roughness</span></td><td>0.002 &ndash; 0.05</td><td>log</td><td>shared; believed to be a no-op, tested as one</td></tr>
+<tr><td><span class="mono">density</span></td><td>100 &ndash; 400</td><td>linear</td><td>cancels analytically (&Omega;<sub>T</sub> moves 6&times;10<sup>&minus;6</sup> over the range)</td></tr>
+<tr><td colspan="4" style="color:var(--ink-3)"><span class="mono">band</span>, <span class="mono">amp</span>, <span class="mono">wind</span>, <span class="mono">entrain</span> — held fixed for this experiment</td></tr>
+</tbody>
+</table>
+</div>
+
+<h2><span class="num">2</span>Not differentiation</h2>
+
+<p>The instinct of anyone with a machine-learning reflex is to ask for
+&part;&Omega;<sub>T</sub>/&part;&theta; and walk downhill. It is worth being precise about why that
+is unavailable here, because the reason is not the usual one ("the simulator is a black box")
+but something sharper.</p>
+
+<h3>The objective is a staircase, not a rough surface</h3>
+
+<p>Follow the chain in <span class="mono">evaluate_case</span>. Parameters go into a GPU
+material-point simulation; out comes a peak flow-thickness field; that field is
+<em>thresholded</em> at <span class="mono">flow_threshold</span> = 0.1&nbsp;m into a boolean
+mask; the mask passes a residence gate and a connected-to-release filter, both boolean; the
+surviving cells are <em>counted</em>; and &Omega;<sub>T</sub> is a ratio of those integer
+counts. Every step after the simulation is a discretisation. Nudge &mu; by 10<sup>&minus;6</sup>
+and, almost always, not one cell changes side of the threshold, so &Omega;<sub>T</sub> is
+<em>exactly</em> unchanged. The function is piecewise constant: its true derivative is zero
+almost everywhere and undefined on the measure-zero set where a cell flips.</p>
+
+<p>The steps are small — footprints here run 800 to 24,000 cells (2&ndash;60&nbsp;ha at 5&nbsp;m),
+so a single cell flipping moves &Omega;<sub>T</sub> by something like 10<sup>&minus;4</sup> to
+10<sup>&minus;3</sup> — but "small steps" is not "smooth". A finite difference with a small
+<em>h</em> returns exactly 0.0, and a finite difference with a large <em>h</em> returns a
+secant across an unknown number of steps, which is a difference quotient of the discretisation
+and not an estimate of anything. Figure&nbsp;2 shows the shape of the problem.</p>
+
+<figure>
+<svg viewBox="0 0 460 190" role="img" aria-label="A step-function objective: Omega_T against mu is piecewise constant, so a small finite difference returns zero and a wide secant misses the peak.">
+  <line class="ax" x1="46" y1="30" x2="46" y2="152"/>
+  <line class="ax" x1="46" y1="152" x2="446" y2="152"/>
+  <text class="svgtxt" x="18" y="34">&Omega;<tspan font-size="7" dy="2">T</tspan></text>
+  <text class="svgtxt" x="428" y="167">&mu;</text>
+
+  <polyline class="curve" points="46,138 78,138 78,126 104,126 104,118 138,118 138,104 160,104 160,96 196,96 196,86 232,86 232,78 256,78 256,82 292,82 292,90 330,90 330,100 362,100 362,112 400,112 400,126 440,126"/>
+
+  <!-- finite difference within one tread, far from the secant -->
+  <circle class="wrongf" cx="112" cy="118" r="3.2"/>
+  <circle class="wrongf" cx="124" cy="118" r="3.2"/>
+  <text class="svgtxt w" x="150" y="146">small h: &Delta;&Omega;<tspan font-size="7" dy="2">T</tspan><tspan dy="-2"> = 0 exactly</tspan></text>
+  <line class="gridln" x1="147" y1="142" x2="128" y2="123"/>
+
+  <!-- wide secant -->
+  <circle class="wrongf" cx="170" cy="96" r="3.2"/>
+  <circle class="wrongf" cx="340" cy="100" r="3.2"/>
+  <line class="wrongl" x1="170" y1="96" x2="340" y2="100" stroke-dasharray="6 4"/>
+  <text class="svgtxt w" x="352" y="66">wide h: a secant</text>
+  <text class="svgtxt w" x="352" y="77">of slope &asymp; 0</text>
+  <line class="gridln" x1="356" y1="82" x2="342" y2="96"/>
+
+  <circle class="dot" cx="244" cy="78" r="3.4"/>
+  <text class="svgtxt strong" x="262" y="46">the peak it never sees</text>
+  <line class="gridln" x1="264" y1="50" x2="248" y2="74"/>
+</svg>
+<figcaption><b>Figure 2 — the objective is a staircase.</b> &Omega;<sub>T</sub> as a
+function of one continuous parameter, schematically. Treads are regions where no cell changes
+side of the 0.1&nbsp;m threshold; risers are single cells flipping in or out of the footprint.
+A finite difference costs one simulation and measures either nothing or the wrong thing.</figcaption>
+</figure>
+
+<h3>There is no adjoint, and building one was priced and declined</h3>
+
+<p>Even granting a smoothed objective, the gradient would have to come from somewhere. The
+options are an adjoint through the solver or finite differences, and both have been examined:</p>
+
+<ul>
+<li><strong>Adjoint / autodiff.</strong> The horizon is roughly 4,000 timesteps, about
+30&times; beyond published practice for differentiable granular MPM, so the memory and
+stability cost of reverse-mode through the rollout is severe. More decisively, the
+particle-to-grid transfer scatters through <em>quantised integer atomics</em> —
+<span class="mono">atomicAdd(&amp;grid_mass_atomic[idx], u32(round(p.mass * weight * MASS_FACTOR)))</span>
+in <span class="mono">p2g.wgsl</span>. That quantisation keeps the scatter's <em>values</em> exact — though not, it was later
+measured, the summation <em>order</em>: two identical 105-case runs differed on two cases by
+exactly one cell each (~2×10⁻⁴ in Ω<sub>T</sub>), because <span class="mono">atomicAdd</span>
+ordering varies between runs. Stage <span class="mono">s3_roughness</span> therefore asserts
+|ΔΩ<sub>T</sub>| &lt; 10⁻³ as its null check rather than bit-identity — a noise floor two
+orders of magnitude below the 0.02 decision band. The same quantisation makes the derivative
+through the transfer identically zero. Near-determinism and differentiability are bought with
+the same coin here, and the project spent it on the former.</li>
+<li><strong>Finite differences.</strong> A central-difference gradient in the two-dimensional
+inner problem costs four simulations per point, before any line search. Nelder-Mead advances a
+whole iteration on one or two. Direct search is not a fallback for the gradient here; it is
+strictly cheaper per unit of progress.</li>
+</ul>
+
+<p>The project's own conclusion, recorded under "ruled out": making the solver differentiable
+is worth it only for inferring spatially varying <em>fields</em> — on the order of 100 to 1,000
+parameters. For roughly ten scalars, derivative-free search converges in seconds to minutes.</p>
+
+<div class="box">
+<div class="box-title">A distinction worth keeping</div>
+<p>It is tempting to say the objective is "noisy". It is better to say it is
+<strong>discontinuous and near-deterministic</strong>. Re-running the same parameters returns
+the same score to within ~2×10⁻⁴ (a one-cell flip from atomic summation order, on 2 of 105
+cases) — stochasticity two orders of magnitude below the 0.02 decision band. What defeats
+differentiation is the staircase, not that residual flicker — and that matters, because the
+standard remedies for noise (averaging replicates, stochastic gradients) buy nothing against
+a staircase.</p>
+</div>
+
+<h2><span class="num">3</span>Not per-avalanche-best-then-average</h2>
+
+<p>The second instinct is more sophisticated and much more dangerous, because it produces a
+number that looks perfectly reasonable. It goes: we already fit every event separately, so for
+a shared constant like &xi;, take each event's fitted &xi;*, average them, and freeze that. One
+line of pandas. It is wrong, and the project has measured how wrong.</p>
+
+<h3>&xi; is not identified</h3>
+
+<p>The evidence is a 12&times;12 grid of &Omega;<sub>T</sub> over (&mu;, &xi;) for twelve
+events — 1,728 simulations. For each event, take the set of grid points scoring within 0.02 of
+that event's best (0.02 being the band at which this project declines to distinguish two
+parameter vectors at all) and ask how far each axis can travel inside it:</p>
+
+<div class="scroller">
+<table>
+<caption>Admissible window per axis, from <span class="mono">campaign/analysis/ident_report.json</span>.</caption>
+<thead><tr><th>parameter</th><th class="num">median window</th><th>spread across the twelve events</th></tr></thead>
+<tbody>
+<tr><td>&mu;</td><td class="num">1.21&times;</td><td>tight everywhere; worst case 2.7&times;</td></tr>
+<tr><td>&xi;</td><td class="num">2.11&times;</td><td>4 of 12 events tolerate &gt;3&times;; one spans <strong>19.6&times;</strong> — the entire physical range</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>The cleanest single illustration is <span class="mono">aval_6716</span>, whose admissible
+&xi; window spans 13.5&times; against 1.33&times; for &mu;. The grid scan puts its optimum at
+&xi;&nbsp;=&nbsp;12000 with &Omega;<sub>T</sub>&nbsp;=&nbsp;0.2044; Nelder-Mead, on the same
+event, reports &xi;&nbsp;=&nbsp;2605 with &Omega;<sub>T</sub>&nbsp;=&nbsp;0.2077. A 4.6&times;
+difference in the parameter, 0.003 in the score — and the <em>lower</em> &xi; scores very
+slightly better, so you cannot even say the grid was closer to the truth. Neither number is
+that event's "best &xi;". Both are arbitrary points on a level set, and which one you get
+depends on the optimiser, not on the avalanche.</p>
+
+<h3>The near-optimal set is a diagonal ridge, and that is the whole story</h3>
+
+<p>The within-tolerance region is not a blob. Fitting a principal axis to it, in coordinates
+where &mu; and log&nbsp;&xi; are each normalised to their search range, gives an axial mean
+orientation of <strong>+65&deg;</strong> at the 0.02 band (alignment R = 0.71; at the 0.05 band
++69&deg;, R = 0.95), with elongation growing from 1.6 to 3.4 as the band widens from 0.02 to
+0.10. The ridge is steep — long in log&nbsp;&xi;, narrow in &mu; — which is the geometric
+statement of "&xi; is not identified, &mu; is".</p>
+
+<p>The positive slope has a physical reading, and it is the one you would predict. Larger &xi;
+means weaker turbulent drag, so the flow is more mobile; to arrest it at the same observed
+runout you need more Coulomb friction. <strong>The optimal &mu; is a function of &xi;.</strong>
+What the data constrain is the pair, not either coordinate alone.</p>
+
+<figure>
+<div class="panels">
+
+  <div class="panel">
+    <h4>A &nbsp;&middot;&nbsp; one event</h4>
+    <svg viewBox="0 0 250 210" role="img" aria-label="One event's near-optimal region is an elongated ridge tilted at about 65 degrees; two very different xi values on it score almost identically.">
+      <line class="ax" x1="44" y1="26" x2="44" y2="186"/>
+      <line class="ax" x1="44" y1="186" x2="228" y2="186"/>
+      <text class="svgtxt small" x="44" y="199">0.05</text>
+      <text class="svgtxt small" x="228" y="199" text-anchor="end">0.60</text>
+      <text class="svgtxt" x="136" y="207" text-anchor="middle">&mu;</text>
+      <text class="svgtxt small" x="40" y="190" text-anchor="end">200</text>
+      <text class="svgtxt small" x="40" y="30" text-anchor="end">12000</text>
+      <text class="svgtxt" x="14" y="112" text-anchor="middle" transform="rotate(-90 14 112)">&xi; (log)</text>
+
+      <ellipse class="band" cx="121" cy="71" rx="54" ry="15" transform="rotate(-64 121 71)"/>
+      <circle class="dot" cx="143" cy="28" r="3.6"/>
+      <circle class="dot" cx="114" cy="86" r="3.6"/>
+      <text class="svgtxt strong" x="150" y="30">&xi; 12000</text>
+      <text class="svgtxt small" x="150" y="40">&Omega;<tspan font-size="7" dy="2">T</tspan><tspan dy="-2"> 0.2044</tspan></text>
+      <text class="svgtxt strong" x="122" y="90">&xi; 2605</text>
+      <text class="svgtxt small" x="122" y="100">&Omega;<tspan font-size="7" dy="2">T</tspan><tspan dy="-2"> 0.2077</tspan></text>
+      <text class="svgtxt small" x="48" y="140">shaded: within 0.02</text>
+      <text class="svgtxt small" x="48" y="150">of this event's best</text>
+    </svg>
+    <p>Two optimisers, the same event, 4.6&times; apart in &xi; and 0.003 apart in score.
+    The reported optimum is a coin toss along the ridge.</p>
+  </div>
+
+  <div class="panel">
+    <h4>B &nbsp;&middot;&nbsp; fit free, pin after</h4>
+    <svg viewBox="0 0 250 210" role="img" aria-label="Three events, each with its own ridge. Each event's freely fitted optimum is moved vertically to a shared xi, holding its fitted mu; every landing point is off that event's ridge.">
+      <line class="ax" x1="44" y1="26" x2="44" y2="186"/>
+      <line class="ax" x1="44" y1="186" x2="228" y2="186"/>
+      <text class="svgtxt" x="136" y="207" text-anchor="middle">&mu;</text>
+      <text class="svgtxt" x="14" y="112" text-anchor="middle" transform="rotate(-90 14 112)">&xi; (log)</text>
+
+      <ellipse class="band" cx="92.8" cy="83.3" rx="60" ry="12" transform="rotate(-64 92.8 83.3)"/>
+      <ellipse class="band" cx="141" cy="103" rx="44" ry="12" transform="rotate(-64 141 103)"/>
+      <ellipse class="band" cx="196" cy="150" rx="40" ry="12" transform="rotate(-64 196 150)"/>
+
+      <line class="dash" x1="44" y1="130" x2="228" y2="130"/>
+      <text class="svgtxt small" x="228" y="121" text-anchor="end">shared &xi;</text>
+
+      <circle class="dot" cx="110" cy="47" r="3.6"/>
+      <circle class="dot" cx="154" cy="76" r="3.6"/>
+      <circle class="dot" cx="181" cy="181" r="3.6"/>
+
+      <line class="wrongl" x1="110" y1="52" x2="110" y2="124"/>
+      <line class="wrongl" x1="154" y1="81" x2="154" y2="124"/>
+      <line class="wrongl" x1="181" y1="176" x2="181" y2="136"/>
+      <path class="wrongl" d="M106,120 L110,127 L114,120"/>
+      <path class="wrongl" d="M150,120 L154,127 L158,120"/>
+      <path class="wrongl" d="M177,140 L181,133 L185,140"/>
+
+      <g stroke="var(--wrong)" stroke-width="2">
+        <path d="M106,126 l8,8 M114,126 l-8,8"/>
+        <path d="M150,126 l8,8 M158,126 l-8,8"/>
+        <path d="M177,126 l8,8 M185,126 l-8,8"/>
+      </g>
+      <text class="svgtxt w" x="48" y="160">each event keeps its</text>
+      <text class="svgtxt w" x="48" y="171">&mu; and moves off-ridge</text>
+    </svg>
+    <p>&mu; was co-adapted to a &xi; that was itself arbitrary. Pinning &xi; afterwards moves
+    every event straight off its own ridge. <b>Measured: 52% of the gain lost.</b></p>
+  </div>
+
+  <div class="panel">
+    <h4>C &nbsp;&middot;&nbsp; fix &xi;, then re-fit</h4>
+    <svg viewBox="0 0 250 210" role="img" aria-label="The same three events with xi fixed first. The inner search moves along mu at that fixed xi until it meets each event's ridge, so every event ends on its own ridge.">
+      <line class="ax" x1="44" y1="26" x2="44" y2="186"/>
+      <line class="ax" x1="44" y1="186" x2="228" y2="186"/>
+      <text class="svgtxt" x="136" y="207" text-anchor="middle">&mu;</text>
+      <text class="svgtxt" x="14" y="112" text-anchor="middle" transform="rotate(-90 14 112)">&xi; (log)</text>
+
+      <ellipse class="band" cx="92.8" cy="83.3" rx="60" ry="12" transform="rotate(-64 92.8 83.3)"/>
+      <ellipse class="band" cx="141" cy="103" rx="44" ry="12" transform="rotate(-64 141 103)"/>
+      <ellipse class="band" cx="196" cy="150" rx="40" ry="12" transform="rotate(-64 196 150)"/>
+
+      <line class="dash" x1="44" y1="130" x2="228" y2="130"/>
+      <text class="svgtxt small" x="228" y="118" text-anchor="end">&xi; frozen</text>
+
+      <line class="rightl" x1="48" y1="130" x2="64" y2="130"/>
+      <path class="rightl" d="M60,126 L67,130 L60,134"/>
+      <line class="rightl" x1="104" y1="130" x2="120" y2="130"/>
+      <path class="rightl" d="M116,126 L123,130 L116,134"/>
+      <line class="rightl" x1="182" y1="130" x2="198" y2="130"/>
+      <path class="rightl" d="M194,126 L201,130 L194,134"/>
+
+      <circle class="rightf" cx="70" cy="130" r="4"/>
+      <circle class="rightf" cx="128" cy="130" r="4"/>
+      <circle class="rightf" cx="206" cy="130" r="4"/>
+
+      <text class="svgtxt r" x="48" y="160">&mu; re-fitted at the</text>
+      <text class="svgtxt r" x="48" y="171">frozen &xi;: on-ridge</text>
+    </svg>
+    <p>With &xi; held, the inner search moves along &mu; until it meets that event's ridge.
+    Every event lands on its own. <b>Measured: 3% of the gain lost.</b></p>
+  </div>
+
+</div>
+<figcaption><b>Figure 1 — why conditional optima cannot be averaged.</b> Schematic, with the
+geometry taken from the 12&times;12 (&mu;, &xi;) grid scan: shaded regions are within 0.02 of an
+event's best score, oriented at +65&deg; in normalised (&mu;, log&nbsp;&xi;) coordinates, with
+lengths varying by event (the admissible &xi; window ranges from 2.1&times; to 19.6&times;).
+Panels B and C differ only in the <em>order</em> of two operations.</figcaption>
+</figure>
+
+<h3>Two separate failures, and only the second is fatal</h3>
+
+<p><strong>First</strong>, averaging arbitrary points is meaningless. If each event's reported
+&xi;* is wherever its optimiser stopped along a near-level set, then the average of the
+&xi;* is an average of optimiser path-dependence. Widen the tolerance a little and the numbers
+would all change without a single score changing meaningfully. A statistic whose value is set
+by the stopping rule is not an estimate.</p>
+
+<p><strong>Second, and worse</strong>: each event's fitted &mu; was <em>co-adapted</em> to that
+event's arbitrary &xi;. Reuse that &mu; and impose a shared &xi; afterwards, and you have moved
+along the vertical in Figure&nbsp;1B — off the ridge, into a region worse than either end of
+it. This is not a hypothetical. It was run:</p>
+
+<div class="scroller">
+<table>
+<caption>Per-event calibration, 105 cases, budget 40, from <span class="mono">the campaign's working record</span>. All three rows use the same simulator and the same cases; only the order of operations differs.</caption>
+<thead><tr><th>procedure</th><th class="num">mean &Omega;<sub>T</sub></th><th class="num">share of the free-&xi; gain</th></tr></thead>
+<tbody>
+<tr><td>&xi; free: &mu;, slab and &xi; all fitted per event (the oracle)</td><td class="num">+0.2945</td><td class="num">100%</td></tr>
+<tr><td><strong>&xi; fixed at 754 first, then &mu; and slab fitted at that &xi;</strong></td><td class="num"><strong>+0.2864</strong></td><td class="num"><strong>97%</strong></td></tr>
+<tr><td>&mu; and slab from the free-&xi; fit, &xi; then pinned to 754</td><td class="num">+0.1414</td><td class="num">48%</td></tr>
+</tbody>
+</table>
+</div>
+
+<div class="keyclaim">
+<p><strong>The same &xi; costs 3% of the achievable per-event gain when it is fixed before
+calibration and 52% when it is pinned afterwards.</strong> The parameter did not change. The
+order did. That factor of seventeen is the entire justification for the algorithm in
+&sect;4.</p>
+</div>
+
+<p>Stated as a principle, so it transfers: <strong>you cannot average conditional optima of an
+ill-identified parameter.</strong> The average of the argmaxes is not the argmax of the
+average, and when the argmax is nearly arbitrary along a level set the average is nearly
+meaningless — while the companion parameters that were fitted alongside it carry the
+arbitrariness forward into whatever you do next.</p>
+
+<p>Two honest qualifications. The 52% figure was measured by pinning &xi; to 754 specifically,
+not by averaging the twelve fitted &xi; and pinning that; averaging has not been separately
+measured. The failure mechanism is co-adaptation, which does not care which shared value you
+land on, so there is no reason to expect the average to be rescued — but the arithmetic of
+"average then pin" is an inference here, not a measurement. Separately, the per-event optima do
+not all sit on one common ridge: across 105 events, corr(&mu;*, log&nbsp;&xi;*) is only +0.20.
+Each event has <em>its own</em> ridge, roughly parallel to the others but offset — which is
+exactly what Figure&nbsp;1 draws, and it is the good outcome, since it means the per-event
+optima carry event-specific information rather than tracing one shared curve.</p>
+
+<h2><span class="num">4</span>What the search actually is</h2>
+
+<p>The procedure has a name in statistics, and using it makes the design legible:
+<strong>a staged profile search over the shared constants, with the per-event parameters
+treated as nuisance parameters and re-optimised inside every comparison</strong>. Five
+ingredients, each doing one job.</p>
+
+<h3>4.1 &nbsp; The profile objective</h3>
+
+<p>Write &theta; for a candidate vector of shared constants and &phi;<sub>e</sub> = (&mu;,
+slab) for the per-event parameters of case <em>e</em>. The merit of &theta; is</p>
+
+<p style="text-align:center; font-size:1.02rem; margin:1.2rem 0;">
+&Omega;&#772;(&theta;) &nbsp;=&nbsp; (1/N) &nbsp;&sum;<sub>e</sub> &nbsp; max<sub>&phi;<sub>e</sub></sub> &nbsp; &Omega;<sub>T</sub>(&theta;, &phi;<sub>e</sub>)
+</p>
+
+<p>The inner maximisation is the point. It is the direct analogue of the <em>profile
+likelihood</em> L<sub>p</sub>(&theta;) = max<sub>&eta;</sub> L(&theta;, &eta;), in which the
+parameter of interest is scanned and the nuisance parameters &eta; are re-maximised — "profiled
+out" — at every candidate value, rather than held at some previously fitted value. Holding them
+fixed is precisely the mistake of Figure&nbsp;1B; profiling them is Figure&nbsp;1C.</p>
+
+<p>&mu; and slab are nuisance parameters only <em>for this question</em>. They are the
+project's eventual regression targets and the most interesting quantities in it. But when the
+question is "which &xi; should be frozen", they are things that must be allowed to move so
+they cannot contaminate the answer.</p>
+
+<h3>4.2 &nbsp; The inner solver: Nelder-Mead</h3>
+
+<p>The inner problem is two-dimensional, bounded, cheap, and — with &xi; held — well behaved.
+The harness solves it with a bounded Nelder-Mead simplex in the unit cube, which is
+derivative-free by construction:</p>
+
+<ul>
+<li>Parameters are mapped to [0,1] per dimension (log for &xi; and roughness, linear
+otherwise), and the simplex is built from the start point plus one vertex per free dimension
+displaced by 0.25 — three vertices for a 2-D inner problem.</li>
+<li>Standard moves: reflect at 1.0, expand at 2.0, contract at &minus;0.5, shrink toward the
+best vertex at 0.5, with every proposal clamped to the box.</li>
+<li>It stops when the simplex's Chebyshev radius drops below 0.01, or at the evaluation
+budget. A simulation that fails returns +2.0, worse than any attainable score, so failures push
+the simplex away rather than crashing the run.</li>
+</ul>
+
+<p>The budget is <strong>40 evaluations</strong>, and that number is measured rather than
+guessed: on exactly this configuration the fixed-&xi; run used a mean of 34.2 and a median of
+35 evaluations, with <strong>81 of 105 searches terminating by simplex collapse rather than
+budget exhaustion</strong>. The inner loop is not being truncated; it is converging.</p>
+
+<h3>4.3 &nbsp; A fixed panel and paired comparison</h3>
+
+<p>Every candidate is scored on the same 102 cases — the 105-case set minus
+<span class="mono">aval_4117</span>, <span class="mono">aval_7743</span> and
+<span class="mono">aval_847</span>, whose fabricated-terrain contamination overlaps a footprint
+by &ge;1% — with the same inner start (&mu; = 0.36, slab = 0.56, the panel medians of the
+fixed-&xi; optima) and therefore the identical initial simplex. Candidates are compared
+case-by-case, and the statistic is the <em>paired</em> mean difference.</p>
+
+<p>This is the single largest variance reduction in the design, and it is worth seeing the
+size of it. Between events, &Omega;<sub>T</sub> at the per-event optimum has a standard
+deviation of 0.224 (measured across the 105 fixed-&xi; optima: they range from &minus;0.19 to
++0.69). The paired difference between two nearby candidates on the <em>same</em> event is
+expected to have a standard deviation near 0.10, because the inner loop absorbs most of what
+distinguishes them. At n = 102 that is a standard error near 0.0099, so the 0.02 decision band
+is roughly a 2&sigma; effect. An unpaired two-sample comparison at &sigma; = 0.224 would need
+about <strong>1,024 cases per arm</strong> for the same standard error. Pairing buys a factor
+of ten in panel size, for free, by asking every candidate to face identical data.</p>
+
+<p>One deliberate refusal: the inner loop is <em>not</em> warm-started from each case's own
+previous optimum, even though that would be cheaper. Warm-starting would advantage
+configurations near the incumbent, which is the one bias this experiment cannot afford.</p>
+
+<h3>4.4 &nbsp; Bootstrap confidence intervals and an explicit freeze rule</h3>
+
+<p>A challenger replaces the incumbent only if <strong>both</strong> the paired mean
+&Delta;&Omega;<sub>T</sub> is at least <strong>0.02</strong> <em>and</em> the 95% paired
+bootstrap confidence interval excludes zero. Otherwise the incumbent stands, and ties inside the
+band break toward lower cost and then toward fewer enabled components. The 0.02 is not
+arbitrary: it is the same band at which the identifiability work declines to distinguish two
+parameter vectors, so a global knob that moves the panel mean by less than that is not worth
+freezing to a non-default value.</p>
+
+<p>The bootstrap, rather than a t-interval, because the paired differences are bounded,
+skewed and lumpy — many are exactly zero, on cases where the footprint does not change at all —
+and resampling cases makes no distributional assumption about them. The rule is applied by
+<span class="mono">analyze_stage.py</span>, which prints a verdict rather than a table, so the
+decision cannot drift with the reader.</p>
+
+<figure>
+<svg viewBox="0 0 470 262" role="img" aria-label="Four nested boxes: a stage contains candidates, each candidate is scored on the whole panel, each case gets its own Nelder-Mead inner search, and the results reduce outward to a profile score, a paired difference, and a bootstrap decision.">
+  <rect x="8" y="8" width="454" height="246" rx="8" class="ax" fill="none" stroke="var(--rule-strong)"/>
+  <rect x="26" y="38" width="418" height="184" rx="7" class="ax" fill="none" stroke="var(--rule-strong)"/>
+  <rect x="44" y="68" width="382" height="122" rx="6" class="ax" fill="none" stroke="var(--rule-strong)"/>
+  <rect x="62" y="98" width="346" height="60" rx="5" fill="var(--right-fill)" stroke="var(--right)" stroke-width="1.5"/>
+
+  <text class="svgtxt strong" x="20" y="27">STAGE &nbsp;&middot;&nbsp; one tier of shared constants (75, 48, 9, 7, 3, 12 candidates)</text>
+  <text class="svgtxt strong" x="38" y="57">CANDIDATE &theta; &nbsp;&middot;&nbsp; one full global vector</text>
+  <text class="svgtxt strong" x="56" y="87">PANEL &nbsp;&middot;&nbsp; the same 102 cases for every candidate</text>
+  <text class="svgtxt r" x="74" y="117">CASE e &nbsp;&middot;&nbsp; Nelder-Mead over (&mu;, slab), &le; 40 simulations</text>
+  <text class="svgtxt small" x="74" y="130">&xi; is NOT free here — co-fitting it is what costs 52%</text>
+  <text class="svgtxt small" x="74" y="146">&rarr; keep this case's best &Omega;<tspan font-size="6.5" dy="2">T</tspan></text>
+
+  <text class="svgtxt" x="56" y="178">&rarr; mean over the 102 cases = &Omega;&#772;(&theta;), the profile score</text>
+  <text class="svgtxt" x="38" y="210">&rarr; paired difference against the incumbent, case by case</text>
+  <text class="svgtxt" x="20" y="242">&rarr; 95% paired bootstrap CI &nbsp;&middot;&nbsp; freeze if &Delta;&Omega;&#772; &ge; 0.02 and the CI excludes zero</text>
+</svg>
+<figcaption><b>Figure 3 — the nesting.</b> Read outward. The inner box is the expensive part
+and the reason the design is honest: no candidate is ever scored at another candidate's
+per-event parameters.</figcaption>
+</figure>
+
+<h3>4.5 &nbsp; Greedy stagewise sequencing</h3>
+
+<p>The stages run in a fixed order, each freezing one tier and passing its winner forward —
+numerics, then discrete structure, then the &xi; profile, then the remaining constants, then a
+confirmation pass.</p>
+
+<div class="scroller">
+<table>
+<caption>The stage ladder and its cost in simulations, from <span class="mono">campaign/GLOBAL_CALIBRATION_PLAN.md</span>.</caption>
+<thead><tr><th>stage</th><th>what it decides</th><th class="num">candidates</th><th class="num">sims (cap)</th></tr></thead>
+<tbody>
+<tr><td><span class="mono">s0_numerics</span></td><td>CFL &times; particles-per-cell &times; step cap, jointly</td><td class="num">75</td><td class="num">11,900</td></tr>
+<tr><td><span class="mono">s1_structure</span></td><td>friction model &times; curvature &times; particle interaction &times; earth pressure &times; entrainment</td><td class="num">48</td><td class="num">195,840</td></tr>
+<tr><td><span class="mono">s2_xi</span></td><td>&xi;, profiled over 9 log-spaced values 250&ndash;10000</td><td class="num">9</td><td class="num">36,720</td></tr>
+<tr><td><span class="mono">s3_ifa</span></td><td>internal friction angle over 7 values</td><td class="num">7</td><td class="num">28,560</td></tr>
+<tr><td><span class="mono">s3_roughness</span></td><td>null check: expects bit-identical scores</td><td class="num">3</td><td class="num">306</td></tr>
+<tr><td><span class="mono">s4_confirm</span></td><td>top four structures at the frozen &xi;, three inner starts pooled</td><td class="num">4 &times; 3</td><td class="num">48,960</td></tr>
+<tr><td><strong>total</strong></td><td></td><td class="num"></td><td class="num"><strong>322,300</strong></td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Two details of the ladder matter for understanding the method rather than the project.
+Stage&nbsp;0 is the one stage with <em>no</em> inner loop: numerics are evaluated once per case
+at that case's own already-fitted optimum, because the question there is "does this setting
+change the score at the operating point the harvest will run at", not "does it move the
+optimum". And stage&nbsp;2's decision rule is deliberately <em>not</em> the argmax — since &xi;
+is the parameter known not to be identified, the profile will be flat and its argmax will be
+noise, so the rule is to take the region within 0.01 of the maximum and choose the geometric
+centre of that plateau, recording the plateau's width as the honest statement of how well &xi;
+is determined at panel level.</p>
+
+<h2><span class="num">5</span>Why it works</h2>
+
+<h3>It asks the deployment question, not a proxy for it</h3>
+
+<p>At deployment, &theta; is frozen in the binary and &phi;<sub>e</sub> arrives per event from
+the regressor or mixture density network. So the correct merit for a candidate &theta; is:
+<em>when every event is allowed to adapt its own conditional knobs, which shared value serves
+the panel best?</em> That is &Omega;&#772;(&theta;) verbatim. Any scoring that holds
+&phi;<sub>e</sub> at stale values is measuring a situation that will never occur.</p>
+
+<h3>It is robust to the ridge by construction</h3>
+
+<p>The ridge says the <em>pair</em> (&mu;, &xi;) is what the data constrain. The profile
+respects that: pick the shared coordinate first, and let each event slide along its own ridge
+to the conditional &mu; that suits it at that &xi;. Nothing is ever asked of &xi; that &xi;
+alone can answer. This is why non-identifiability, which is fatal to the averaging approach,
+is merely an inconvenience here — it makes the profile flat, and a flat profile is a result
+you can report (the plateau width) rather than a failure.</p>
+
+<p>The empirical proof is already in hand. "Fix &xi;, then calibrate &mu; and slab at that
+&xi;" is exactly the inner loop, and it was measured at <strong>97% of the free-&xi;
+oracle</strong>. Stage&nbsp;2 is that same procedure run at nine values of &xi; instead of one.
+The method is not being introduced on faith; it is being scaled from a measurement.</p>
+
+<h3>The side effects were measured too, and they all point the same way</h3>
+
+<ul>
+<li><strong>The inner search converges.</strong> With &xi; free, 11 of 105 searches terminated
+by convergence; with &xi; fixed, 81 of 105 do on the same budget. The optimiser had been
+spending its evaluations wandering the non-identified direction.</li>
+<li><strong>The targets get more predictable.</strong> Correlations with the fitted slab all
+rise once &xi; is fixed: size class +0.36 &rarr; +0.44, area +0.28 &rarr; +0.37,
+<span class="mono">frac_wdh</span> +0.30 &rarr; +0.34 — and that last one is a deployable
+feature.</li>
+<li><strong>A known leak shrinks.</strong> The correlation between fitted &mu; and
+<span class="mono">aval_shape</span> — outline digitisation quality, a property of the mapping
+rather than of the avalanche — falls from +0.31 to +0.25.</li>
+</ul>
+
+<p>Removing a badly identified degree of freedom did not cost accuracy; it bought convergence,
+cleaner regression targets, and a smaller leak, for 3% of the score.</p>
+
+<h2><span class="num">6</span>Why it is the most efficient option available</h2>
+
+<p>Cost here is counted in simulations. The hardware retires them at 90&ndash;180 per second
+aggregate on the eight-GPU box — 0.3 to 0.65 million per hour — with 64 workers running
+concurrently; a single RTX 5090 was measured at 23.4 cases/s. The whole 322,300-simulation
+experiment fits in 30 to 60 minutes. That economic fact should shape the algorithm, and it
+does.</p>
+
+<ul>
+<li><strong>Derivative-free inner solve</strong> exploits an inner problem that is 2-D,
+bounded and benign: about 34 simulations per (candidate, case), with four out of five searches
+converging rather than exhausting.</li>
+<li><strong>Profiling one shared coordinate at a time</strong> exploits the low effective
+dimensionality of the shared block. Most of the ten nominal dimensions are not live: density
+cancels analytically, roughness is unread on every code path this harness exercises, and
+entrainment was selected in 1 of 104 free searches.</li>
+<li><strong>Greedy staging</strong> replaces an exponential factorial with a short sequence of
+cheap decisions. The full factorial over stages 0&ndash;3 is 75 &times; 48 &times; 9 &times; 7 =
+226,800 configurations; at 102 cases and 40 evaluations each that is roughly 9.3&times;10<sup>8</sup>
+simulations, about <strong>60 days</strong> of box time at the optimistic throughput. The
+staged ladder answers the same questions in 322,300 simulations — a factor of nearly
+3,000.</li>
+<li><strong>Pairing on a fixed panel</strong> shrinks the variance of every comparison, which
+is what makes a 0.02 difference decidable with 102 cases instead of a thousand.</li>
+<li><strong>Cheap parallel evaluations invert the usual trade.</strong> When a function
+evaluation is a millisecond-scale GPU job and 64 run at once, a brute inner loop is cheaper
+than clever outer machinery that spends serial thinking time to save evaluations.</li>
+</ul>
+
+<h3>Against the obvious alternatives</h3>
+
+<p><strong>CMA-ES.</strong> The right tool for the <em>later</em> per-event work — it is what
+the upstream thesis plans for exactly that, and it is what you would want if the inner problem
+were seven-dimensional and multimodal. For profiling one or two shared coordinates it is a
+population method with a covariance matrix to adapt, needing hundreds of evaluations before
+the adaptation earns its keep, applied to a question that nine grid points answer exactly. Use
+it where the dimension justifies it, which is not here.</p>
+
+<p><strong>Bayesian optimisation.</strong> Its premium is sample efficiency, bought by
+spending modelling effort per evaluation and by <em>serialising</em> — each proposal wants the
+previous result. That trade pays when evaluations are scarce and expensive. Here they are
+abundant, cheap and embarrassingly parallel, so the surrogate's savings are denominated in the
+resource that is not scarce while its serialisation taxes the one that is. Its usual surrogate
+also assumes a smoothness the staircase objective of &sect;2 does not have.</p>
+
+<p><strong>Full grid search.</strong> The standard complaint against grids is dimensional: cost
+grows exponentially. Profiling removes the dimension, and at dimension one a grid <em>is</em>
+the efficient choice — it is exhaustive over the range, trivially parallel, and it returns the
+whole profile rather than a point, which is what the plateau rule needs. That is why stages 2
+and 3 are grids: nine &xi; values, seven angles. The method here is not "avoid grid search"; it
+is "reduce to a dimension where grid search is correct".</p>
+
+<h2><span class="num">7</span>What the design does not claim</h2>
+
+<p>Three limitations are structural and are handled explicitly rather than hidden.</p>
+
+<p><strong>Single-start Nelder-Mead is not a global optimiser.</strong> A candidate could in
+principle lose because its basin is awkward from the shared start rather than because it is
+worse. Stage&nbsp;4 re-runs the finalists from three different starts and pools the best per
+case; if the ranking is start-sensitive, that is where it shows. This is a check, not a
+proof.</p>
+
+<p><strong>Greedy ordering is a real risk.</strong> Stage&nbsp;1 screens 48 structures at
+&xi; = 754 — the value the +0.2864 run used, deliberately not the repo default of 4000, which
+sits in the least dissipative corner of the published RAMMS range and would reward whichever
+structure best compensates for a bad &xi;. A structure that is only best at 754 would still
+survive stage&nbsp;1. Stage&nbsp;4 re-runs the top four at the frozen &xi; to catch it. Bought
+off, not eliminated.</p>
+
+<p><strong>The panel is one storm.</strong> All 18,737 SPOT6 polygons are from 24 January
+2018, so every calibrated event shares a snowpack. What gets frozen is the general
+configuration <em>for this snowpack</em>, and the honest reading of any result downstream is
+"given this snowpack, what does terrain predict?" That is narrower than the question the target
+architecture poses.</p>
+
+<p>And one piece of arithmetic to verify rather than assume: the power calculation in
+&sect;4.3 rests on the paired standard deviation actually being near 0.10. Stage&nbsp;0
+produces exactly such paired comparisons, so the realised value is computed from the stage-0
+rows before stage&nbsp;1 is read. If it comes in much higher, the panel cannot resolve 0.02 and
+the band must widen — which is a finding about the experiment, not a reason to quietly lower
+the bar.</p>
+
+<h2><span class="num">8</span>Glossary</h2>
+
+<div class="glossary">
+<dl>
+<dt>&Omega;<sub>T</sub></dt>
+<dd>The area-overlap score used throughout: &alpha; &minus; &beta; &minus; &gamma; over the
+union of observed and simulated footprints, equivalently 2&nbsp;&middot;&nbsp;IoU&nbsp;&minus;&nbsp;1.
+Range &minus;1 (disjoint) to +1 (exact). Computed from integer cell counts, which is why it is
+piecewise constant in the parameters.</dd>
+
+<dt>Nuisance parameter</dt>
+<dd>A parameter that must be in the model for it to be correct, but whose value is not the
+question being asked. Here &mu; and slab are nuisance parameters when choosing &xi; — even
+though they are, in the wider project, the quantities of primary interest. The defining
+property is that a nuisance parameter must be re-optimised at every candidate value of the
+parameter of interest, never held at a previously fitted value.</dd>
+
+<dt>Profile likelihood</dt>
+<dd>The technique of eliminating nuisance parameters by maximising over them:
+L<sub>p</sub>(&theta;) = max<sub>&eta;</sub> L(&theta;, &eta;). The parameter of interest is
+scanned across a range and the nuisance parameters are re-fitted at each point, producing a
+curve in &theta; alone. The analogue here replaces the likelihood with mean &Omega;<sub>T</sub>
+and the re-fit with a Nelder-Mead search, but the logic — and the reason it is right when
+parameters are correlated — is identical.</dd>
+
+<dt>Nelder-Mead simplex</dt>
+<dd>A derivative-free direct-search method. In <em>n</em> dimensions it maintains
+<em>n</em>+1 points, and at each iteration reflects the worst point through the centroid of the
+rest, expanding if that helps a lot, contracting if it does not help, and shrinking the whole
+simplex toward the best point if nothing works. It needs only function values, never
+gradients, which is what makes it usable on a staircase objective.</dd>
+
+<dt>Paired comparison</dt>
+<dd>Evaluating every candidate on the identical set of cases and comparing case-by-case
+differences, rather than comparing group means. Between-case variation cancels in the
+difference, so the variance of the comparison collapses — here, from a between-event standard
+deviation of 0.224 to a paired standard deviation near 0.10, which is worth roughly a factor of
+ten in the number of cases needed.</dd>
+
+<dt>Bootstrap confidence interval</dt>
+<dd>An interval built by resampling the observed cases with replacement many times,
+recomputing the statistic on each resample, and taking percentiles of the resulting
+distribution. It makes no assumption that the differences are normally distributed, which
+matters here because paired &Omega;<sub>T</sub> differences are bounded, skewed and contain many
+exact zeros.</dd>
+
+<dt>Greedy / stagewise search</dt>
+<dd>Deciding one group of parameters at a time and passing the winner forward, instead of
+searching all combinations. It trades a guarantee for a cost reduction — the risk is that a
+choice made early is only best under conditions that later stages change — and the standard
+mitigation, used here, is a confirmation pass that re-runs the leading candidates under the
+final frozen configuration.</dd>
+</dl>
+</div>
+
+<div class="footer">
+<p>Sources: <code>campaign/GLOBAL_CALIBRATION_PLAN.md</code> (stages, panel, inner loop, freeze
+criterion, budget); <code>the campaign's working record</code> (identifiability, the ordering result, the
+data caveats); <code>campaign/analysis/ident_report.json</code> and
+<code>campaign/analysis/perevent_fixedxi.json</code> (per-event windows, ridge geometry,
+convergence counts, the 0.224 between-event standard deviation);
+<code>crates/cli/src/bin/calibrate.rs</code> (search space, Nelder-Mead, footprint rules);
+<code>crates/compute_core/src/evaluation.rs</code> (&Omega;<sub>T</sub>);
+<code>crates/compute_core/src/shaders/p2g.wgsl</code> (quantised atomics).</p>
+</div>
+
+</div>
+</body>
+</html>

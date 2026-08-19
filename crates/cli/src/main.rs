@@ -1,3 +1,4 @@
+//! The upstream CLI: run one simulation from a `settings.json`.
 // compute_cli/src/main.rs
 use anyhow::Result;
 use clap::Parser;

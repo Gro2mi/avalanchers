@@ -1,3 +1,4 @@
+//! CAAML avalanche-bulletin parsing: `AvalancheBulletinCollection` / `Bulletin`, `DangerRating` (with numeric conversion) and `AvalancheProblem`, plus human-readable summaries.
 use serde::{Deserialize, Serialize};
 use std::fmt::Write;
 

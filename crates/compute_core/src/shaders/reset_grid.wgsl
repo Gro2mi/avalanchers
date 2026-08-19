@@ -1,3 +1,4 @@
+// @atlas: Zeroes the grid mass/momentum atomics each step.
 @group(0) @binding(1) var<storage, read_write> grid_mass_atomic: array<u32>;
 @group(0) @binding(2) var<storage, read_write> atomic_values: AtomicValues;
 @group(0) @binding(3) var<storage, read_write> grid_momentum_atomic: array<i32>;
@@ -17,6 +18,7 @@ fn reset_grid(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
 // import utils.wgsl;
 // BEGIN utils.wgsl
+// @atlas: Shared prelude: constants, `Particle`/`SimInfo`/`SimSettings`/`AtomicValues` structs, quantisation factors, cell↔uv↔index helpers, MPM quadratic weights.
 const WG_SIZE_2D: u32 = 16u;
 
 const g: f32 = 9.81;

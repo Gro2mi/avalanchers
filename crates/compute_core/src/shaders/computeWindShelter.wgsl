@@ -1,3 +1,4 @@
+// @atlas: 75th-percentile horizon angle over 21 rays upwind. Computed, stored, and never read by the release decision.
 const MAX_RAYS = 21;
 const MAX_STEPS = 25;
 

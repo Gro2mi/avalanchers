@@ -1,4 +1,7 @@
-geopandas 
+geopandas
 pyogrio
 matplotlib
 numpy
+pyarrow
+scipy
+pyshp

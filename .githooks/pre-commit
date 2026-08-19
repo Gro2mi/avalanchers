@@ -1,0 +1,15 @@
+#!/bin/sh
+# Regenerate code_atlas.md from each file's summary line (Rust `//!` module docs,
+# `@atlas:` comments elsewhere) before every commit, and stage it if it changed.
+# Warnings about untagged files are printed but never block the commit.
+set -e
+
+REPO_ROOT=$(git rev-parse --show-toplevel)
+cd "$REPO_ROOT"
+
+python3 python_scripts/generate_code_atlas.py
+
+if ! git diff --quiet -- code_atlas.md; then
+    echo "pre-commit: code_atlas.md changed, staging it"
+    git add code_atlas.md
+fi

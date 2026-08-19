@@ -130,3 +130,40 @@ Test examples are from [AvaFrame](https://docs.avaframe.org/en/latest/testing.ht
 ](https://github.com/OpenNHM/AvaFrame#EUPL-1.2-1-ov-file)
 
 Vals data: D'Amboise Christopher J. L., Neuhauser Michael, Teich Michaela, & Fischer Jan-Thomas. (2021). Maverick-bfw/Flow_py_inputs_results: First releases (Version v1) [Data set]. Zenodo. https://doi.org/10.5281/zenodo.5154787
+
+### Avalanche outlines (`data/pools/`)
+
+The per-case avalanche outlines under `data/pools/<year>/cases/` are extracted
+subsets of three published datasets from the WSL Institute for Snow and
+Avalanche Research SLF, redistributed here under their respective licences.
+Full provenance — authors, DOI, licence, distribution filename, exact byte
+count, sha256, and the filter funnel applied — is recorded in
+`data/pools/<year>/SOURCE.md`.
+
+**Two different licences apply. They are not interchangeable.**
+
+*2018 and 2019 — ODbL 1.0* ([opendatacommons.org/licenses/odbl/1-0/](https://opendatacommons.org/licenses/odbl/1-0/)):
+
+> Hafner, E. & Bühler, Y. (2019). *SPOT6 Avalanche outlines 24 January 2018.*
+> EnviDat. [doi:10.16904/envidat.77](https://doi.org/10.16904/envidat.77)
+
+> Hafner, E. & Bühler, Y. *SPOT6 Avalanche outlines 16 January 2019.*
+> EnviDat. [doi:10.16904/envidat.235](https://doi.org/10.16904/envidat.235)
+
+Attribution is required, and the ODbL's share-alike condition applies to
+derived *databases*.
+
+*1999 — CC-BY-SA 4.0* ([creativecommons.org/licenses/by-sa/4.0/](https://creativecommons.org/licenses/by-sa/4.0/)):
+
+> Hafner, E. D. & Dal, J. F. *Avalanche outlines February and March 1999 from
+> aerial imagery.* EnviDat.
+> [doi:10.16904/envidat.579](https://doi.org/10.16904/envidat.579)
+
+Attribution is required, and the share-alike condition applies to derivative
+*works*. Do not carry the ODbL wording over to this dataset, or vice versa.
+
+Only the filtered candidate pools are in this repository (1,502 cases). The
+master distributions are roughly 350 MB and are not redistributed here; each
+sidecar carries the DOI and checksum needed to fetch and verify the original.
+
+Terrain throughout is swissALTI3D © swisstopo (open government data).

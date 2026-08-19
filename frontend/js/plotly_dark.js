@@ -1,3 +1,4 @@
+// @atlas: Plotly 2-D/3-D result rendering and the dark theme.
 const plotly_dark = {
   data: {
     barpolar: [

@@ -1,3 +1,4 @@
+// @atlas: Shared prelude: constants, `Particle`/`SimInfo`/`SimSettings`/`AtomicValues` structs, quantisation factors, cell↔uv↔index helpers, MPM quadratic weights.
 const WG_SIZE_2D: u32 = 16u;
 
 const g: f32 = 9.81;

@@ -1,3 +1,4 @@
+//! The two scoring indices: `evaluate_mass_movement_area` (Ω_T = α−β−γ over the union) and `evaluate_distance_weighted_mass_movement_runout` (HWRI, apex-distance weighted, asymmetric via λ).
 /// Structure to hold the evaluated normalized components of the metric.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MassMovementEvaluation {

@@ -1,3 +1,4 @@
+// @atlas: Browser app wiring: DEM/GPX loading, settings UI, drives `WasmSimulation`.
 import init, { WasmSimulation } from "./pkg/avalanchers.js";
 
 
@@ -91,7 +92,7 @@ function changeFrictionModel() {
         frictionCoefficientSlider.value = 0.4663;
         frictionCoefficientValue.textContent = frictionCoefficientSlider.value;
     } else {
-        frictionCoefficientSlider.value = 0.2;
+        frictionCoefficientSlider.value = 0.155;
         frictionCoefficientValue.textContent = frictionCoefficientSlider.value;
     }
     updateFrictionControlsFromModel();
