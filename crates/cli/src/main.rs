@@ -12,22 +12,43 @@ use std::{env, time::Instant};
 use tracing::{debug, error, info, warn};
 
 #[derive(Parser, Debug)]
-#[command(name = "Avalanche Simulation")]
+#[command(
+    name = "avalanchers",
+    version,
+    about = "Dense flow avalanche simulation on the GPU"
+)]
 struct Args {
     /// Path to the input file
     #[arg()]
     file_path: Option<std::path::PathBuf>,
+
+    /// Show copyright and data attribution information
+    #[arg(long)]
+    about: bool,
 }
 
 fn main() -> Result<()> {
     timer_new();
     init_logging();
     let start = Instant::now();
+    let args = Args::parse();
+    if args.about {
+        println!("avalanchers");
+        println!("Copyright © 2026 Markus Rampp");
+        println!();
+        println!("Map data:");
+        println!("  Austrian data source: basemap.at");
+        println!("  https://www.basemap.at");
+        println!("  Swiss data source: Federal Office of Topography swisstopo. © swisstopo");
+        println!("  https://www.swisstopo.admin.ch");
+        println!();
+        println!("This program is licensed under the MIT License.");
+        return Ok(());
+    }
     match env::current_dir() {
         Ok(path) => debug!("Current working directory: {}", path.display()),
         Err(e) => error!("Failed to get current directory: {}", e),
     }
-    let args = Args::parse();
     let file_path = match &args.file_path {
         Some(path) if path.exists() && path.is_file() => {
             info!("File path: {}", path.display());
@@ -147,6 +168,7 @@ fn main() -> Result<()> {
         block_on(simulation.get_release_volume()).unwrap()
     );
     simulation.print_grid(&peak_velocity, 20, 20);
+    block_on(simulation.save()).expect("Failed to save simulation");
     let duration = start.elapsed();
 
     info!("Time elapsed is: {:?}", duration);

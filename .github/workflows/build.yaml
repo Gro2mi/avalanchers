@@ -208,6 +208,9 @@ jobs:
           cp -r crates/wasm_bindings/wasm_dist/*.wasm staging_all/wasm || true
           cp -r crates/wasm_bindings/wasm_dist/*.js staging_all/wasm || true
           cp -r settings.json staging_all/ || true
+          cp -r README.md staging_all/ || true
+          cp -r LICENSE staging_all/ || true
+          cp -r NOTICE staging_all/ || true
 
       - name: Upload All Artifacts
         uses: actions/upload-artifact@v6

@@ -45,6 +45,7 @@ thiserror = "2.0"
 zarrs = "0.23"
 zarrs_filesystem = "0.3"
 zarrs_plugin = "0.4"
+zarrs_data_type = "0.9"
 lz4_flex = "0.11"
 bincode = "2.0"
 image = "0.25" 
@@ -74,3 +75,10 @@ serde-wasm-bindgen = "0.6"
 clap = { version = "4.6", features = ["derive"] }
 
 criterion = { version = "0.5", features = ["html_reports"] }
+
+[profile.dev]
+# Reduce debug symbol detail (0, 1, or "line-tables-only")
+debug = 1 
+
+# Keep debug information in separate files to minimize linking friction
+split-debuginfo = "unpacked"

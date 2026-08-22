@@ -17,6 +17,7 @@ use wgpu::{
 pub mod buffers;
 pub mod dem;
 pub mod evaluation;
+pub mod post_processing;
 pub mod settings;
 pub mod shaders;
 pub mod utils;

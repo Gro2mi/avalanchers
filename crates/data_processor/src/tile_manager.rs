@@ -1,3 +1,8 @@
+// Austria links: https://data.bev.gv.at/download/ALS/DTM/20250915/ALS_DTM_CRS3035RES50000mN2550000E4650000.tif
+// Overview: https://data.bev.gv.at/download/ALS/ALS_Kacheluebersicht.pdf
+// All info: https://data.bev.gv.at/geonetwork/srv/api/records/9a4e3e4f-2cd5-4f73-af51-384beb9331d0
+// 50km x 50 km tiles, 55 pieces
+// doi: https://doi.org/10.48677/9a4e3e4f-2cd5-4f73-af51-384beb9331d0
 use ndarray::{Array1, Array2};
 use reqwest::Client;
 use serde_json::json;

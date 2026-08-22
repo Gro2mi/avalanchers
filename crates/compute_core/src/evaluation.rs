@@ -8,7 +8,7 @@ pub struct MassMovementEvaluation {
     /// Overestimation normalized component (gamma_T)
     pub gamma: f64,
     /// The final composite index (Omega_T) which ranges between -1 and 1
-    pub omega: f64,
+    pub jaccard: f64,
 }
 
 /// Errors that could happen during the evaluation phase.
@@ -75,7 +75,7 @@ pub fn evaluate_mass_movement_area(
             alpha: 1.0,
             beta: 0.0,
             gamma: 0.0,
-            omega: 1.0, // Perfect fit if nothing was supposed to happen and nothing did
+            jaccard: 1.0, // Perfect fit if nothing was supposed to happen and nothing did
         });
     }
 
@@ -93,7 +93,7 @@ pub fn evaluate_mass_movement_area(
         alpha: alpha_t,
         beta: beta_t,
         gamma: gamma_t,
-        omega: omega_t,
+        jaccard: (omega_t + 1.0) / 2.0,
     })
 }
 
@@ -174,7 +174,7 @@ pub fn evaluate_distance_weighted_mass_movement_runout(
             alpha: 1.0,
             beta: 0.0,
             gamma: 0.0,
-            omega: 1.0,
+            jaccard: 1.0,
         });
     }
 
@@ -189,15 +189,13 @@ pub fn evaluate_distance_weighted_mass_movement_runout(
         alpha,
         beta,
         gamma,
-        omega,
+        jaccard: (omega + 1.0) / 2.0,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // --- AREA EVALUATION TESTS (Omega_T) ---
 
     #[test]
     fn test_perfect_match() {
@@ -210,19 +208,19 @@ mod tests {
         assert_eq!(result.alpha, 1.0);
         assert_eq!(result.beta, 0.0);
         assert_eq!(result.gamma, 0.0);
-        assert_eq!(result.omega, 1.0);
+        assert_eq!(result.jaccard, 1.0);
     }
 
     #[test]
     fn test_complete_mismatch() {
         // Simulation completely misses the reference area (X = 0)
-        // Expected: alpha_t = 0.0, omega_t = -1.0
+        // Expected: alpha_t = 0.0, jaccard = 0.0
         let reference = vec![vec![true, true, false], vec![false, false, false]];
         let simulated = vec![vec![false, false, false], vec![false, true, true]];
 
         let result = evaluate_mass_movement_area(&reference, &simulated).unwrap();
         assert_eq!(result.alpha, 0.0);
-        assert_eq!(result.omega, -1.0);
+        assert_eq!(result.jaccard, 0.0);
 
         // Total area T is the union of 2 reference cells + 2 simulated cells = 4 cells
         assert_eq!(result.beta, 0.5); // 2/4
@@ -246,7 +244,7 @@ mod tests {
         assert_eq!(result.alpha, 0.5);
         assert_eq!(result.beta, 0.25);
         assert_eq!(result.gamma, 0.25);
-        assert_eq!(result.omega, 0.0);
+        assert_eq!(result.jaccard, 0.5);
     }
 
     #[test]
@@ -258,7 +256,7 @@ mod tests {
 
         let result = evaluate_mass_movement_area(&reference, &simulated).unwrap();
         assert_eq!(result.alpha, 1.0);
-        assert_eq!(result.omega, 1.0);
+        assert_eq!(result.jaccard, 1.0);
     }
 
     #[test]
@@ -303,7 +301,7 @@ mod tests {
         let grid = vec![vec![false, false], vec![false, true]];
         let result =
             evaluate_distance_weighted_mass_movement_runout(&grid, &grid, (0, 0), 0.5).unwrap();
-        assert_near(result.omega, 1.0);
+        assert_near(result.jaccard, 1.0);
     }
 
     #[test]
@@ -330,10 +328,10 @@ mod tests {
         // The spatial configurations are mirror mismatches, but because overshoot is safer,
         // the overshoot scenario MUST yield a higher hazard evaluation score than the undershoot.
         assert!(
-            eval_overshoot.omega > eval_undershoot.omega,
+            eval_overshoot.jaccard > eval_undershoot.jaccard,
             "Overshoot score ({}) should be preferred over Undershoot score ({})",
-            eval_overshoot.omega,
-            eval_undershoot.omega
+            eval_overshoot.jaccard,
+            eval_undershoot.jaccard
         );
     }
 
@@ -363,10 +361,10 @@ mod tests {
         // The runout-failing simulation (eval_far) must get penalized more heavily (lower score)
         // because the error happened further down the path from the apex point.
         assert!(
-            eval_close.omega > eval_far.omega,
+            eval_close.jaccard > eval_far.jaccard,
             "Distal runout errors must yield a worse metric score than proximal errors. Close: {}, Far: {}",
-            eval_close.omega,
-            eval_far.omega
+            eval_close.jaccard,
+            eval_far.jaccard
         );
     }
 
@@ -450,9 +448,9 @@ mod tests {
                             sim_bits
                         );
                         assert!(
-                            result.omega <= 1.0,
+                            result.jaccard <= 1.0,
                             "omega ({}) exceeded 1.0 at ref: {}, sim: {}",
-                            result.omega,
+                            result.jaccard,
                             ref_bits,
                             sim_bits
                         );
@@ -464,9 +462,9 @@ mod tests {
 
                         // Omega can go down to -1.0, but never past +1.0
                         assert!(
-                            result.omega >= -1.00001,
+                            result.jaccard >= -1.00001,
                             "omega ({}) below -1.0 at ref: {}, sim: {}",
-                            result.omega,
+                            result.jaccard,
                             ref_bits,
                             sim_bits
                         );
