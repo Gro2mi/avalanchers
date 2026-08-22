@@ -3,9 +3,12 @@ use compute_core::{
     ComputeOrchestrator, GpuCache, Particle, SimInfo, TextureRgba, TimestepData,
     buffers::{AtomicValues, BufferName, TextureName},
     dem::{Bounds, Dem},
+    post_processing::*,
     settings::{Settings, SimSettings},
     utils::*,
 };
+// use data_processor;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Once;
 use web_time::Instant;
 static INIT: Once = Once::new();
@@ -45,6 +48,8 @@ pub enum SimulationState {
     ParticlesInitialized,
     Running,
     Finished,
+    PostProcessed,
+    Evaluated,
 }
 
 pub struct Simulation {
@@ -52,12 +57,15 @@ pub struct Simulation {
     pub settings: SimSettings,
     pub dem_path: String,
     pub dem: Dem,
+    pub output_path: String,
     release_areas_path: Option<String>,
     release_areas_array: Option<Vec<f32>>,
     sim_info: SimInfo,
     number_particles: u32,
     state: SimulationState,
     pub gpu_cache: GpuCache,
+    pub ava_mask: Vec<bool>,
+    output: Option<data_processor::output::Output>,
 }
 
 impl Simulation {
@@ -67,6 +75,7 @@ impl Simulation {
         Ok(Self {
             orchestrator,
             settings: SimSettings::default(),
+            output_path: "avalanchers".to_string(),
             dem_path: String::new(),
             dem: Dem::default(),
             number_particles: 0,
@@ -75,10 +84,22 @@ impl Simulation {
             sim_info: SimInfo::default(),
             release_areas_path: None,
             release_areas_array: None,
+            ava_mask: Vec::new(),
+            output: None,
         })
     }
     pub fn get_state(&self) -> SimulationState {
         self.state
+    }
+
+    pub fn release_hash(&self) -> u64 {
+        let mut s = DefaultHasher::new();
+        if let Some(release_areas_array) = &self.release_areas_array {
+            for val in release_areas_array.iter() {
+                val.to_bits().hash(&mut s);
+            }
+        }
+        s.finish()
     }
 
     pub fn get_gpu_cache_read_count(&self) -> usize {
@@ -99,6 +120,10 @@ impl Simulation {
         }
         self.dem = dem_result;
         self.dem_path = settings.dem_path.unwrap_or_default().clone();
+        self.output_path = settings
+            .output_path
+            .unwrap_or_else(|| "avalanchers.zarr".to_string())
+            .clone();
         self.release_areas_path = settings.release_areas_path.clone();
         timer_checkpoint("Load settings");
         self.gpu_cache.reset_all();
@@ -307,6 +332,126 @@ impl Simulation {
 
         timer_checkpoint("Simulation finished");
         info!("{}", timer_get_summary());
+        Ok(())
+    }
+
+    pub async fn post_process(&mut self) -> Result<()> {
+        assert!(
+            self.state >= SimulationState::Finished,
+            "Simulation must be finished before post-processing results"
+        );
+        let threshold = 0.01;
+        let (peak_flow_thickness, ava_mask) = mask_threshold_and_biggest_blob(
+            &self.fetch_peak_flow_thickness().await?,
+            self.dem.width,
+            threshold,
+        );
+        self.ava_mask = ava_mask;
+        self.gpu_cache.peak_flow_thickness = Some(peak_flow_thickness);
+        self.fetch_peak_velocity().await?;
+        mask_in_place(
+            self.gpu_cache.peak_velocity.as_mut().unwrap(),
+            &self.ava_mask,
+        );
+        self.state = SimulationState::PostProcessed;
+        Ok(())
+    }
+
+    pub async fn evaluate(&mut self) -> Result<(f32, f32, f32, f32)> {
+        assert!(
+            self.state >= SimulationState::PostProcessed,
+            "Simulation must be post-processed before evaluation"
+        );
+        let iou = 0.0;
+        let (horizontal_distance, vertical_drop) = self
+            .dem
+            .get_elevation_extrema_distance_and_drop(&self.ava_mask);
+        let velocities = self.fetch_peak_velocity().await?;
+        let peak_velocity = velocities.iter().copied().reduce(f32::max).unwrap_or(0.0);
+        self.state = SimulationState::Evaluated;
+        Ok((iou, horizontal_distance, vertical_drop, peak_velocity))
+    }
+
+    pub async fn save_with_path(&mut self, path: &str) -> Result<()> {
+        self.output_path = path.to_string();
+        self.save().await
+    }
+
+    pub async fn save(&mut self) -> Result<()> {
+        let mut site_name = std::path::Path::new(&self.dem_path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("default_site")
+            .to_string()
+            .replace("_", "-");
+        site_name += &format!("_{:x}", self.dem.calculate_hash());
+        let release_areas_str = match &self.release_areas_path {
+            Some(path) => std::path::Path::new(path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(path)
+                .to_string()
+                .replace("_", "-"),
+            None => format!(
+                "calculated-elev{}-minslope{}-maxslope{}-rough{}",
+                // TODO save release relevant parameters to zarr store
+                self.settings.release_min_elevation,
+                self.settings.min_slope_angle,
+                self.settings.max_slope_angle,
+                self.settings.roughness_threshold,
+            ),
+        };
+
+        let scenario_name = format!("{}_{:x}", release_areas_str, self.release_hash());
+        if self.output.is_none() {
+            self.output = Some(data_processor::output::Output::new(&self.output_path)?);
+        }
+        let release_areas = self.fetch_release_areas().await?;
+
+        self.fetch_peak_velocity().await?;
+        self.fetch_peak_flow_thickness().await?;
+        timer_checkpoint("Peak data fetched");
+        let travel_length = 1000.0;
+        let travel_angle = 25.0;
+        let center_of_mass_x = vec![1000.0, 1100.0, 900.0];
+        let center_of_mass_y = vec![1000.0, 1100.0, 900.0];
+
+        let output = self.output.as_mut().unwrap();
+        if !output.site_exists(&site_name) {
+            output.add_new_site(
+                &site_name,
+                self.dem.y.clone(),
+                &self.dem.x,
+                &self.dem.data1d,
+            )?;
+        }
+
+        if output.scenario_exists(&site_name, &scenario_name) {
+            output.connect_scenario(&site_name, &scenario_name)?;
+        } else {
+            output.add_new_scenario(
+                &site_name,
+                &scenario_name,
+                10000, // number runs
+                self.settings.max_steps as u64,
+                &release_areas,
+                20.0,    //aspect_release_value: f32,
+                10000.0, //release_volume: f32,
+                self.dem.y.clone(),
+                &self.dem.x,
+            )?;
+        }
+        output.add_new_run(
+            &site_name,
+            &scenario_name,
+            self.gpu_cache.peak_velocity.as_ref().unwrap(),
+            self.gpu_cache.peak_flow_thickness.as_ref().unwrap(),
+            &center_of_mass_x,
+            &center_of_mass_y,
+            travel_length,
+            travel_angle,
+            &self.settings,
+        )?;
         Ok(())
     }
 
@@ -1524,5 +1669,60 @@ mod tests {
             block_on(sim.fetch_timestep_data()).unwrap();
         }));
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_scenario_name_formatting() {
+        let dem_path = "path_with_underscores/dem_file_1.tif";
+        let release_path = "release_with_underscores/rel_1.png";
+        let settings = SimSettings::new();
+        let hash_hex = format!("{:x}", settings.calculate_hash());
+
+        let release_areas_str = Some(release_path.to_string())
+            .as_ref()
+            .map(|p| p.replace('_', ""))
+            .unwrap_or_else(|| "calculated".to_string());
+        let scenario_name = format!(
+            "{}_{}_{:x}",
+            dem_path.replace('_', ""),
+            release_areas_str,
+            settings.calculate_hash()
+        );
+
+        assert_eq!(
+            scenario_name,
+            format!("pathwithunderscores/demfile1.tif_releasewithunderscores/rel1.png_{hash_hex}")
+        );
+
+        let release_areas_none: Option<String> = None;
+        let release_none_str = match &release_areas_none {
+            Some(path) => path.replace('_', ""),
+            None => format!(
+                "calculated-elev{}-minslope{}-maxslope{}-rough{}-slab{}",
+                settings.release_min_elevation,
+                settings.min_slope_angle,
+                settings.max_slope_angle,
+                settings.roughness_threshold,
+                settings.slab_thickness,
+            ),
+        };
+        let scenario_name_none = format!(
+            "{}_{}_{:x}",
+            dem_path.replace('_', ""),
+            release_none_str,
+            settings.calculate_hash()
+        );
+
+        assert_eq!(
+            scenario_name_none,
+            format!(
+                "pathwithunderscores/demfile1.tif_calculated-elev{}-minslope{}-maxslope{}-rough{}-slab{}_{hash_hex}",
+                settings.release_min_elevation,
+                settings.min_slope_angle,
+                settings.max_slope_angle,
+                settings.roughness_threshold,
+                settings.slab_thickness,
+            )
+        );
     }
 }

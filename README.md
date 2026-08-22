@@ -39,7 +39,7 @@ avalanchers.plot3d(sim, "max_velocity")
 ### Windows
 
 Install [Rust](https://rust-lang.org/tools/install/)
-Install [Python](https://www.python.org/) 
+Install [Python](https://www.python.org/)
 
 ```
 # wasm bindings
@@ -61,7 +61,7 @@ python -m pip install maturin
 #### Install dependencies
 
 Install [Rust](https://rust-lang.org/tools/install/) (WSL (2026.04.04): `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`)
-Install [Python](https://www.python.org/) 
+Install [Python](https://www.python.org/)
 
 ```
 sudo apt update
@@ -108,7 +108,7 @@ wasm-pack build crates/wasm_bindings --target web --out-dir ../../frontend/js/pk
 
 ### Benchmarks
 
-```cargo bench -p simulation```
+``cargo bench -p simulation``
 
 ## Code Guidelines
 
@@ -130,3 +130,7 @@ Test examples are from [AvaFrame](https://docs.avaframe.org/en/latest/testing.ht
 ](https://github.com/OpenNHM/AvaFrame#EUPL-1.2-1-ov-file)
 
 Vals data: D'Amboise Christopher J. L., Neuhauser Michael, Teich Michaela, & Fischer Jan-Thomas. (2021). Maverick-bfw/Flow_py_inputs_results: First releases (Version v1) [Data set]. Zenodo. https://doi.org/10.5281/zenodo.5154787
+
+Swiss maps and geodata provided by the Federal Office of Topography swisstopo. © [swisstopo](https://www.swisstopo.admin.ch/en)
+
+Austrian maps provided by  © [basemap.at](https://basemap.at)

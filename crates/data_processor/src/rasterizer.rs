@@ -168,7 +168,7 @@ impl RasterGrid {
 
                 intersections.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
-                for pair in intersections.chunks_exact(2) {
+                for pair in intersections.as_chunks::<2>().0 {
                     // 1. Calculate the continuous cell coordinate values for the intersections
                     let start_x_float = (pair[0] - self.origin_x) / self.cell_size;
                     let end_x_float = (pair[1] - self.origin_x) / self.cell_size;

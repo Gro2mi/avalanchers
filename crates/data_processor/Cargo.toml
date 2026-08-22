@@ -30,6 +30,7 @@ bytemuck = { workspace = true }
 zarrs = { workspace = true }
 zarrs_filesystem = { workspace = true }
 zarrs_plugin = { workspace = true }
+zarrs_data_type = { workspace = true }
 reqwest = { workspace = true }
 futures = { workspace = true }
 ndarray = { workspace = true }

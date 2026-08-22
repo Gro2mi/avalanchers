@@ -4,6 +4,7 @@ use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray2, ToPyArray};
 use pollster::FutureExt;
 use pyo3::exceptions::{PyIOError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use pythonize::depythonize;
 use simulation::{Simulation, init_logging};
 
@@ -236,6 +237,34 @@ impl PySimulation {
 
     pub fn run(&mut self) -> PyResult<()> {
         self.inner.run().block_on().map_runtime_err()
+    }
+
+    pub fn post_process(&mut self) -> PyResult<()> {
+        self.inner.post_process().block_on().map_runtime_err()
+    }
+
+    #[pyo3(signature = (path=None))]
+    pub fn save(&mut self, path: Option<String>) -> PyResult<()> {
+        match path {
+            Some(path) => self
+                .inner
+                .save_with_path(&path)
+                .block_on()
+                .map_runtime_err(),
+            None => self.inner.save().block_on().map_runtime_err(),
+        }
+    }
+
+    pub fn evaluate<'a>(&mut self, py: Python<'a>) -> PyResult<Bound<'a, PyDict>> {
+        let (a, b, c, d) = self.inner.evaluate().block_on().map_runtime_err()?;
+
+        let dict = PyDict::new(py);
+        dict.set_item("jaccard", a)?;
+        dict.set_item("horizontal_distance", b)?;
+        dict.set_item("vertical_drop", c)?;
+        dict.set_item("peak_velocity", d)?;
+
+        Ok(dict)
     }
 
     pub fn prepare(&mut self) -> PyResult<()> {

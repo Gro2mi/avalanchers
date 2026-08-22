@@ -1,6 +1,7 @@
 use crate::utils::*;
+use std::hash::{DefaultHasher, Hash, Hasher};
 
-#[derive(Default, Debug, PartialEq)]
+#[derive(Default, Debug, PartialEq, Clone)]
 pub struct Bounds {
     pub xmin: f32,
     pub xmax: f32,
@@ -8,6 +9,16 @@ pub struct Bounds {
     pub ymax: f32,
 }
 
+impl Hash for Bounds {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.xmin.to_bits().hash(state);
+        self.xmax.to_bits().hash(state);
+        self.ymin.to_bits().hash(state);
+        self.ymax.to_bits().hash(state);
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct Dem {
     pub width: usize,
     pub height: usize,
@@ -19,6 +30,26 @@ pub struct Dem {
     pub cell_size: f32,
     pub map_factor: f32,
     pub minimum_elevation: f32,
+}
+
+impl Hash for Dem {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.width.hash(state);
+        self.height.hash(state);
+        self.bounds.hash(state);
+        for val in &self.data1d {
+            val.to_bits().hash(state);
+        }
+        for val in &self.x {
+            val.to_bits().hash(state);
+        }
+        for val in &self.y {
+            val.to_bits().hash(state);
+        }
+        self.cell_size.to_bits().hash(state);
+        self.map_factor.to_bits().hash(state);
+        self.minimum_elevation.to_bits().hash(state);
+    }
 }
 
 impl Default for Dem {
@@ -44,6 +75,11 @@ impl Default for Dem {
 }
 
 impl Dem {
+    pub fn calculate_hash(&self) -> u64 {
+        let mut s = DefaultHasher::new();
+        self.hash(&mut s);
+        s.finish()
+    }
     pub fn calculate_minimum_elevation(data1d: &[f32]) -> f32 {
         data1d
             .iter()
@@ -80,6 +116,57 @@ impl Dem {
         } else {
             None
         }
+    }
+
+    fn get_elevation_extrema_points(&self, mask: &[bool]) -> ((usize, usize), (usize, usize)) {
+        assert_eq!(self.data1d.len(), mask.len());
+
+        let mut min_idx = None;
+        let mut max_idx = None;
+
+        for (i, (&elevation, &valid)) in self.data1d.iter().zip(mask.iter()).enumerate() {
+            if !valid || elevation.is_nan() {
+                continue;
+            }
+
+            if min_idx.is_none_or(|idx| elevation < self.data1d[idx]) {
+                min_idx = Some(i);
+            }
+
+            if max_idx.is_none_or(|idx| elevation > self.data1d[idx]) {
+                max_idx = Some(i);
+            }
+        }
+
+        let min_idx = min_idx.expect("No valid DEM pixels found");
+        let max_idx = max_idx.expect("No valid DEM pixels found");
+
+        let min_point = (min_idx / self.width, min_idx % self.width);
+        let max_point = (max_idx / self.width, max_idx % self.width);
+
+        (min_point, max_point)
+    }
+
+    #[allow(dead_code)]
+    fn get_elevation_extrema(&self, mask: &[bool]) -> (f32, f32) {
+        let (min_point, max_point) = self.get_elevation_extrema_points(mask);
+        let min_elevation = self.data1d[min_point.0 * self.width + min_point.1];
+        let max_elevation = self.data1d[max_point.0 * self.width + max_point.1];
+        (min_elevation, max_elevation)
+    }
+
+    pub fn get_elevation_extrema_distance_and_drop(&self, mask: &[bool]) -> (f32, f32) {
+        let (min_point, max_point) = self.get_elevation_extrema_points(mask);
+        let min_elevation = self.data1d[min_point.0 * self.width + min_point.1];
+        let max_elevation = self.data1d[max_point.0 * self.width + max_point.1];
+
+        let dx = (max_point.1 as isize - min_point.1 as isize) as f32;
+        let dy = (max_point.0 as isize - min_point.0 as isize) as f32;
+        let distance2d = ((dx * dx + dy * dy).sqrt()) * self.cell_size * self.map_factor;
+
+        let drop = max_elevation - min_elevation;
+
+        (distance2d, drop)
     }
 }
 
@@ -199,6 +286,51 @@ mod tests {
         let interp = dem.interpolate_elevation(&pt);
         assert!((interp.z.unwrap() - 10.0).abs() < 1e-6);
     }
+
+    #[test_log::test]
+    fn test_dem_get_extrema_points() {
+        let width = 3;
+        let height = 3;
+        let data1d = vec![
+            5.0, 2.0, 3.0, // Row 0
+            4.0, 1.0, 6.0, // Row 1
+            7.0, 8.0, 9.0, // Row 2
+        ];
+        let dem = Dem {
+            width,
+            height,
+            bounds: Bounds::default(),
+            data1d: data1d.clone(),
+            data: vec![vec![0.0; width]; height], // Not used in this test
+            x: vec![],
+            y: vec![],
+            cell_size: 2.0,
+            map_factor: 1.0,
+            minimum_elevation: 1.0,
+        };
+
+        let mask = vec![
+            true, true, true, // Row 0
+            true, false, true, // Row 1 (mask out the minimum)
+            true, true, true, // Row 2
+        ];
+
+        let (min_point, max_point) = dem.get_elevation_extrema_points(&mask);
+        assert_eq!(min_point, (0, 1)); // Elevation of 1.0 at (row=1,col=1)
+        assert_eq!(max_point, (2, 2)); // Elevation of 9.0 at (row=2,col=2)
+        let (min_elevation, max_elevation) = dem.get_elevation_extrema(&mask);
+        println!(
+            "Min elevation: {}, Max elevation: {}",
+            min_elevation, max_elevation
+        );
+        assert_eq!(min_elevation, 2.0); // The minimum in the masked area is 2.0
+        assert_eq!(max_elevation, 9.0); // The maximum is 9.0
+        let (distance2d, drop) = dem.get_elevation_extrema_distance_and_drop(&mask);
+        println!("Distance: {}, Drop: {}", distance2d, drop);
+        assert!((distance2d - 4.472136).abs() < 1e-3); // Distance between (0,1) and (2,2) in pixel space is sqrt(2^2 + 1^2) = sqrt(5) ~ 2.236, but scaled by cell_size=2.0 gives ~4.472
+        assert_eq!(drop, 7.0); // Drop from 9.0 to 2.0 is 7.0
+    }
+
     fn create_mock_metadata(width: u32, height: u32) -> GeoMetadata {
         GeoMetadata {
             width,
@@ -289,5 +421,80 @@ mod tests {
         // Test getting value through the high-level GeoTiff struct
         assert_eq!(geotiff.get_f32(1, 1), Some(400.0));
         assert_eq!(geotiff.get_f32(2, 0), None); // OOB width
+    }
+
+    #[test]
+    fn test_dem_hash_deterministic() {
+        let dem1 = Dem {
+            width: 2,
+            height: 2,
+            bounds: Bounds {
+                xmin: 0.0,
+                xmax: 10.0,
+                ymin: 0.0,
+                ymax: 10.0,
+            },
+            data1d: vec![1.0, 2.0, 3.0, 4.0],
+            data: vec![vec![1.0, 2.0], vec![3.0, 4.0]],
+            x: vec![0.0, 5.0],
+            y: vec![0.0, 5.0],
+            cell_size: 5.0,
+            map_factor: 1.0,
+            minimum_elevation: 1.0,
+        };
+
+        let dem2 = dem1.clone();
+        assert_eq!(dem1.calculate_hash(), dem2.calculate_hash());
+    }
+
+    #[test]
+    fn test_dem_hash_ignores_data_field() {
+        let dem1 = Dem {
+            width: 2,
+            height: 2,
+            bounds: Bounds {
+                xmin: 0.0,
+                xmax: 10.0,
+                ymin: 0.0,
+                ymax: 10.0,
+            },
+            data1d: vec![1.0, 2.0, 3.0, 4.0],
+            data: vec![vec![1.0, 2.0], vec![3.0, 4.0]],
+            x: vec![0.0, 5.0],
+            y: vec![0.0, 5.0],
+            cell_size: 5.0,
+            map_factor: 1.0,
+            minimum_elevation: 1.0,
+        };
+
+        let mut dem2 = dem1.clone();
+        // Change the 2D `data` field - hash should remain identical since only data1d is hashed
+        dem2.data = vec![vec![999.0, 888.0], vec![777.0, 666.0]];
+        assert_eq!(dem1.calculate_hash(), dem2.calculate_hash());
+    }
+
+    #[test]
+    fn test_dem_hash_changes_on_data1d() {
+        let dem1 = Dem {
+            width: 2,
+            height: 2,
+            bounds: Bounds {
+                xmin: 0.0,
+                xmax: 10.0,
+                ymin: 0.0,
+                ymax: 10.0,
+            },
+            data1d: vec![1.0, 2.0, 3.0, 4.0],
+            data: vec![],
+            x: vec![0.0, 5.0],
+            y: vec![0.0, 5.0],
+            cell_size: 5.0,
+            map_factor: 1.0,
+            minimum_elevation: 1.0,
+        };
+
+        let mut dem2 = dem1.clone();
+        dem2.data1d = vec![1.0, 2.0, 3.0, 5.0];
+        assert_ne!(dem1.calculate_hash(), dem2.calculate_hash());
     }
 }

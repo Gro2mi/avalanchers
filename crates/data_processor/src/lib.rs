@@ -302,6 +302,15 @@ impl EsriGrid {
         Ok(EsriGrid { header, data })
     }
 
+    pub fn flip_y(&mut self) {
+        // Perform the flip
+        flip_rows_flat_vec(
+            &mut self.data,
+            self.header.ncols as u32,
+            self.header.nrows as u32,
+        );
+    }
+
     /// Helper to look up a value at a given 2D index (row, col)
     pub fn get(&self, row: usize, col: usize) -> Option<f32> {
         if row < self.header.nrows && col < self.header.ncols {
@@ -444,7 +453,9 @@ pub async fn read_png(path: &str) -> Result<(Vec<u8>, usize, usize), Box<dyn std
 }
 
 pub fn rgba_bytes_to_f32(data: &[u8]) -> Vec<f32> {
-    data.chunks_exact(4)
+    data.as_chunks::<4>()
+        .0
+        .iter()
         .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
         .collect()
 }
@@ -650,7 +661,8 @@ pub async fn load_release_areas(path: &str) -> Result<Vec<f32>, Box<dyn std::err
 
     let data: Vec<f32> = match ext.to_lowercase().as_str() {
         "asc" => {
-            let grid = EsriGrid::from_file(path)?;
+            let mut grid = EsriGrid::from_file(path)?;
+            grid.flip_y();
             grid.data
         }
         "png" => {
@@ -844,6 +856,8 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    use compute_core::settings::{FrictionModel, SimModel};
+
     const PARABOLA_PATH: &str = "../../data/avaframe/avaParabola.png";
 
     #[test_log::test]
@@ -977,13 +991,14 @@ mod tests {
     #[test_log::test]
     fn test_settings_to_json_and_from_json() {
         let settings = Settings {
+            output_path: Some(String::from("avalanchers.zarr")),
             outlines_path: Some(String::from("outline.shp")),
             outlines_padding: Some(5.0),
             dem_path: Some(String::from("dem.png")),
             release_areas_path: Some(String::from("release_areas.png")),
             max_steps: Some(100),
-            sim_model: Some(1),
-            friction_model: Some(2),
+            sim_model: Some(SimModel::Block),
+            friction_model: Some(FrictionModel::Voellmy),
             released_particles_per_cell: Some(3),
             density: Some(4.0),
             slab_thickness: Some(5.0),
@@ -1019,8 +1034,8 @@ mod tests {
             Some(String::from("release_areas.png"))
         );
         assert_eq!(loaded.max_steps, Some(100));
-        assert_eq!(loaded.sim_model, Some(1));
-        assert_eq!(loaded.friction_model, Some(2));
+        assert_eq!(loaded.sim_model, Some(SimModel::Block));
+        assert_eq!(loaded.friction_model, Some(FrictionModel::Voellmy));
         assert_eq!(loaded.released_particles_per_cell, Some(3));
         assert_eq!(loaded.density, Some(4.0));
         assert_eq!(loaded.slab_thickness, Some(5.0));

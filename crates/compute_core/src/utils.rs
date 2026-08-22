@@ -303,7 +303,7 @@ pub fn split_channels<T: Copy>(flat: &[T]) -> (Vec<T>, Vec<T>, Vec<T>, Vec<T>) {
     let mut b = Vec::with_capacity(n);
     let mut a = Vec::with_capacity(n);
 
-    for chunk in flat.chunks_exact(4) {
+    for chunk in flat.as_chunks::<4>().0 {
         r.push(chunk[0]);
         g.push(chunk[1]);
         b.push(chunk[2]);
@@ -427,9 +427,152 @@ pub fn flip_rows_flat_vec<T>(data: &mut [T], width: u32, height: u32) {
     }
 }
 
+#[allow(dead_code)]
+fn percentile(data: &[f32], percentile: f32) -> f32 {
+    assert!(!data.is_empty());
+    assert!((0.0..=100.0).contains(&percentile));
+
+    let mut sorted = data.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+    let index = (percentile / 100.0) * (sorted.len() - 1) as f32;
+
+    let lower = index.floor() as usize;
+    let upper = index.ceil() as usize;
+
+    if lower == upper {
+        sorted[lower]
+    } else {
+        let weight = index - lower as f32;
+        sorted[lower] * (1.0 - weight) + sorted[upper] * weight
+    }
+}
+
+#[allow(dead_code)]
+fn percentile_with_threshold(data: &[f32], percentile: f32, threshold: f32) -> f32 {
+    assert!((0.0..=100.0).contains(&percentile));
+
+    let mut sorted: Vec<f32> = data
+        .iter()
+        .copied()
+        .filter(|x| *x != 0.0 && *x >= threshold)
+        .collect();
+
+    assert!(!sorted.is_empty());
+
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+    let index = (percentile / 100.0) * (sorted.len() - 1) as f32;
+
+    let lower = index.floor() as usize;
+    let upper = index.ceil() as usize;
+
+    if lower == upper {
+        sorted[lower]
+    } else {
+        let weight = index - lower as f32;
+
+        sorted[lower] * (1.0 - weight) + sorted[upper] * weight
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_percentile_with_threshold() {
+        let data = vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0];
+        let threshold = 2.0;
+        let result = percentile_with_threshold(&data, 50.0, threshold);
+        assert_eq!(result, 3.5); // Median of [2.0, 3.0, 4.0, 5.0] is (3+4)/2 = 3.5
+    }
+
+    #[test]
+    fn percentile_empty_input_panics() {
+        let data: Vec<f32> = vec![];
+
+        assert!(
+            std::panic::catch_unwind(|| {
+                percentile(&data, 50.0);
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn percentile_zero_returns_minimum() {
+        let data = vec![1.0, 3.0, 5.0, 7.0, 9.0];
+
+        assert_eq!(percentile(&data, 0.0), 1.0);
+    }
+
+    #[test]
+    fn percentile_hundred_returns_maximum() {
+        let data = vec![1.0, 3.0, 5.0, 7.0, 9.0];
+
+        assert_eq!(percentile(&data, 100.0), 9.0);
+    }
+
+    #[test]
+    fn percentile_fifty_returns_median() {
+        let data = vec![1.0, 3.0, 5.0, 7.0, 9.0];
+
+        assert_eq!(percentile(&data, 50.0), 5.0);
+    }
+
+    #[test]
+    fn percentile_interpolates_between_values() {
+        let data = vec![1.0, 2.0, 3.0, 4.0];
+
+        // Index = 0.2 * (4 - 1) = 0.6
+        // 1.0 + 0.6 * (2.0 - 1.0) = 1.6
+        assert_eq!(percentile(&data, 20.0), 1.6);
+    }
+
+    #[test]
+    fn percentile_sorts_unsorted_input() {
+        let data = vec![5.0, 1.0, 4.0, 2.0, 3.0];
+
+        assert_eq!(percentile(&data, 50.0), 3.0);
+    }
+
+    #[test]
+    fn percentile_does_not_modify_input() {
+        let data = vec![5.0, 1.0, 4.0, 2.0, 3.0];
+        let original = data.clone();
+
+        let _ = percentile(&data, 50.0);
+
+        assert_eq!(data, original);
+    }
+
+    #[test]
+    fn percentile_accepts_duplicate_values() {
+        let data = vec![1.0, 1.0, 2.0, 2.0, 3.0];
+
+        assert_eq!(percentile(&data, 50.0), 2.0);
+    }
+
+    #[test]
+    fn percentile_out_of_range_panics() {
+        let data = vec![1.0, 2.0, 3.0];
+
+        assert!(
+            std::panic::catch_unwind(|| {
+                percentile(&data, -1.0);
+            })
+            .is_err()
+        );
+
+        assert!(
+            std::panic::catch_unwind(|| {
+                percentile(&data, 101.0);
+            })
+            .is_err()
+        );
+    }
+
     #[test]
     fn test_flip_even_rows() {
         // 2x4 matrix (width 2, height 4)
