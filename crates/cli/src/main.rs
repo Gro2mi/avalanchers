@@ -25,6 +25,10 @@ struct Args {
     /// Show copyright and data attribution information
     #[arg(long)]
     about: bool,
+
+    /// List available GPU devices
+    #[arg(long)]
+    list_devices: bool,
 }
 
 fn main() -> Result<()> {
@@ -43,6 +47,13 @@ fn main() -> Result<()> {
         println!("  https://www.swisstopo.admin.ch");
         println!();
         println!("This program is licensed under the MIT License.");
+        return Ok(());
+    }
+    if args.list_devices {
+        let devices = block_on(compute_core::list_devices());
+        for device in devices? {
+            println!("{}", device);
+        }
         return Ok(());
     }
     match env::current_dir() {

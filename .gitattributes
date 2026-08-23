@@ -1,2 +1,5 @@
 *.ipynb linguist-vendored
 *.asc linguist-vendored
+*.ags linguist-vendored
+*.rp linguist-vendored
+*.aabb linguist-vendored

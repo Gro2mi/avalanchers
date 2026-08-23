@@ -280,6 +280,110 @@ fn magnitude_diff(a: &[f32; 3], b: &[f32; 3]) -> f32 {
     ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
 }
 
+use std::collections::BTreeMap;
+use wgpu::Backends;
+pub async fn list_devices() -> Result<Vec<String>> {
+    let instance = Instance::new(InstanceDescriptor::new_without_display_handle());
+    let adapters = instance.enumerate_adapters(Backends::all()).await;
+
+    // Map to group details by device name:
+    // (DeviceType, Vec<Backends>, Vec<u32> (Device IDs), Driver, DriverInfo, SubgroupMin, SubgroupMax, PerfRating)
+    type DeviceDetails = (
+        wgpu::DeviceType,
+        Vec<wgpu::Backend>,
+        Vec<u32>, // Device IDs
+        String,
+        String,
+        u32,
+        u32,
+        u8, // Performance Rating
+    );
+    let mut device_map: BTreeMap<String, DeviceDetails> = BTreeMap::new();
+
+    for adapter in adapters {
+        let info = adapter.get_info();
+
+        // Assign a performance rating based on the device type
+        let perf_rating = match info.device_type {
+            wgpu::DeviceType::DiscreteGpu => 4,   // Highest performance
+            wgpu::DeviceType::IntegratedGpu => 3, // Medium-high performance
+            wgpu::DeviceType::VirtualGpu => 2,    // Emulated/Cloud performance
+            wgpu::DeviceType::Cpu => 1,           // Software rendering fallback
+            wgpu::DeviceType::Other => 0,         // Unknown / lowest
+        };
+
+        let entry = device_map.entry(info.name.clone()).or_insert_with(|| {
+            (
+                info.device_type,
+                Vec::new(),
+                Vec::new(),
+                info.driver.clone(),
+                info.driver_info.clone(),
+                info.subgroup_min_size,
+                info.subgroup_max_size,
+                perf_rating,
+            )
+        });
+
+        // Keep the highest rating if the same device name appears across multiple backends
+        if perf_rating > entry.7 {
+            entry.7 = perf_rating;
+            entry.0 = info.device_type;
+        }
+
+        if !entry.1.contains(&info.backend) {
+            entry.1.push(info.backend);
+        }
+
+        // Collect unique Device IDs (useful for multi-backend / multi-GPU setups)
+        if !entry.2.contains(&info.device) && info.device != 0 {
+            entry.2.push(info.device);
+        }
+    }
+
+    // Sort devices descending by performance rating (DiscreteGpu -> IntegratedGpu -> etc.)
+    let mut sorted_devices: Vec<_> = device_map.into_iter().collect();
+    sorted_devices.sort_by_key(|a| std::cmp::Reverse(a.1.7));
+
+    let device_names = sorted_devices
+        .into_iter()
+        .map(
+            |(
+                name,
+                (
+                    device_type,
+                    backends,
+                    device_ids,
+                    driver,
+                    driver_info,
+                    sub_min,
+                    sub_max,
+                    _perf_rating,
+                ),
+            )| {
+                let backends_str = backends
+                    .iter()
+                    .map(|b| format!("{:?}", b))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+
+                let ids_str = device_ids
+                    .iter()
+                    .map(|id| format!("{:#06X}", id))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+
+                format!(
+                    "{} | {:?} | IDs: [{}] | Backends: [{}] | Driver: {} {} | Subgroups: {}-{}",
+                    name, device_type, ids_str, backends_str, driver, driver_info, sub_min, sub_max
+                )
+            },
+        )
+        .collect();
+
+    Ok(device_names)
+}
+
 const WORKGROUP_SIZE_2D: u32 = 16;
 
 pub struct ComputeOrchestrator {
@@ -303,38 +407,95 @@ pub struct ComputeOrchestrator {
 
 impl ComputeOrchestrator {
     pub async fn new() -> Result<Self> {
+        Self::new_with_gpu(None).await
+    }
+    pub async fn new_with_gpu(target_gpu: Option<String>) -> Result<Self> {
         let instance = Instance::new(InstanceDescriptor::new_without_display_handle());
-        let mut adapter = instance
-            .request_adapter(&RequestAdapterOptions {
-                power_preference: PowerPreference::HighPerformance,
-                compatible_surface: None,
-                force_fallback_adapter: false,
-            })
-            .await;
+        let mut selected_adapter = None;
 
-        if adapter.is_err() {
-            warn!("High-performance GPU not found, falling back to LowPower/Software.");
-            adapter = instance
+        // 1. If a target string was provided, search by Device ID (if numeric) or Name
+        if let Some(mut target) = target_gpu {
+            target = target
+                .split("|")
+                .next()
+                .unwrap_or(&target)
+                .trim()
+                .to_string();
+            let adapters = instance.enumerate_adapters(Backends::all()).await;
+
+            // Try parsing the target string as a number (supports both hex "0x1E84" and decimal)
+            let target_id = Self::parse_numeric_id(&target);
+
+            for adapter in adapters {
+                let info = adapter.get_info();
+
+                let matched = if let Some(id) = target_id {
+                    // Match by PCI Device ID
+                    info.device == id
+                } else {
+                    // Match by Name substring (case-insensitive)
+                    info.name.to_lowercase().contains(&target.to_lowercase())
+                };
+
+                if matched {
+                    info!(
+                        "Found target GPU: {} [ID: {:#06X}, Vendor: {:#06X}] ({:?})",
+                        info.name, info.device, info.vendor, info.device_type
+                    );
+                    selected_adapter = Some(adapter);
+                    break;
+                }
+            }
+
+            if selected_adapter.is_none() {
+                warn!(
+                    "Requested GPU '{}' not found, falling back to automatic selection.",
+                    target
+                );
+            }
+        }
+
+        // 2. Fallback logic if no argument was given or the target wasn't found
+        let adapter = if let Some(adapter) = selected_adapter {
+            adapter
+        } else {
+            let mut fallback_adapter = instance
                 .request_adapter(&RequestAdapterOptions {
-                    power_preference: PowerPreference::LowPower,
+                    power_preference: PowerPreference::HighPerformance,
                     compatible_surface: None,
                     force_fallback_adapter: false,
+                    apply_limit_buckets: false,
                 })
                 .await;
-        }
 
-        if adapter.is_err() {
-            warn!("Low-performance GPU not found, falling back to Software.");
-            adapter = instance
-                .request_adapter(&RequestAdapterOptions {
-                    power_preference: PowerPreference::LowPower,
-                    compatible_surface: None,
-                    force_fallback_adapter: true,
-                })
-                .await;
-        }
+            if fallback_adapter.is_err() {
+                warn!("High-performance GPU not found, falling back to LowPower/Software.");
+                fallback_adapter = instance
+                    .request_adapter(&RequestAdapterOptions {
+                        power_preference: PowerPreference::LowPower,
+                        compatible_surface: None,
+                        force_fallback_adapter: false,
+                        apply_limit_buckets: false,
+                    })
+                    .await;
+            }
 
-        let adapter = adapter.expect("Failed to find any suitable GPU adapter");
+            if fallback_adapter.is_err() {
+                warn!("Low-performance GPU not found, falling back to Software.");
+                fallback_adapter = instance
+                    .request_adapter(&RequestAdapterOptions {
+                        power_preference: PowerPreference::LowPower,
+                        compatible_surface: None,
+                        force_fallback_adapter: true,
+                        apply_limit_buckets: false,
+                    })
+                    .await;
+            }
+
+            fallback_adapter.expect("Failed to find any suitable GPU adapter")
+        };
+
+        // let adapter = adapter.expect("Failed to find any suitable GPU adapter");
         timer_checkpoint("Get GPU adapter");
 
         let info = adapter.get_info();
@@ -471,6 +632,16 @@ impl ComputeOrchestrator {
             has_float32_filterable,
             batch_compute_steps: 200,
         })
+    }
+
+    // Helper function to safely parse hex ("0x1e84") or decimal strings into a u32 Device ID
+    fn parse_numeric_id(s: &str) -> Option<u32> {
+        let s = s.trim();
+        if s.starts_with("0x") || s.starts_with("0X") {
+            u32::from_str_radix(&s[2..], 16).ok()
+        } else {
+            s.parse::<u32>().ok()
+        }
     }
 
     #[allow(dead_code)]
@@ -994,8 +1165,8 @@ mod tests {
 
     #[test_log::test]
     fn test_shader_report_generation() {
-        let orchestrator =
-            block_on(ComputeOrchestrator::new()).expect("Failed to create ComputeOrchestrator");
+        let orchestrator = block_on(ComputeOrchestrator::new_with_gpu(None))
+            .expect("Failed to create ComputeOrchestrator");
         orchestrator.generate_shader_report();
     }
 
