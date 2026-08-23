@@ -28,7 +28,7 @@ pollster = "0.4" # For async execution in native
 
 simulation = { path = "crates/simulation" }
 compute_core = { path = "crates/compute_core" }
-wgpu = "29.0"
+wgpu = "30.0"
 regex = "1.11"
 rand = "0.10"
 bytemuck = { version = "1.25", features = ["derive"] }

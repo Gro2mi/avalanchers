@@ -326,7 +326,12 @@ impl GpuResources {
             .await
             .ok_or_else(|| anyhow!("Failed to receive map result"))??;
 
-        let data = buffer_slice.get_mapped_range();
+        // let data = buffer_slice.get_mapped_range();
+        // let result: Vec<T> = bytemuck::cast_slice(&data).to_vec();
+        let data = buffer_slice
+            .get_mapped_range()
+            .map_err(|e| anyhow!("Failed to get mapped range: {:?}", e))?;
+
         let result: Vec<T> = bytemuck::cast_slice(&data).to_vec();
 
         drop(data);
@@ -531,7 +536,9 @@ impl GpuResources {
             .await
             .ok_or_else(|| anyhow!("Failed to receive map result"))??;
 
-        let padded_range = buffer_slice.get_mapped_range();
+        let padded_range = buffer_slice
+            .get_mapped_range()
+            .map_err(|e| anyhow!("Failed to get mapped range: {:?}", e))?;
         let mut unpadded_data = Vec::with_capacity((unpadded_bytes_per_row * size.height) as usize);
 
         for y in 0..size.height as usize {

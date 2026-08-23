@@ -1,4 +1,4 @@
-use compute_core::{TimestepData, settings::Settings};
+use compute_core::{TimestepData, list_devices, settings::Settings};
 use data_processor::{settings_from_json_file, settings_to_json_file};
 use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray2, ToPyArray};
 use pollster::FutureExt;
@@ -17,6 +17,13 @@ impl<T, E: std::fmt::Display> IntoPyResult<T> for Result<T, E> {
     fn map_runtime_err(self) -> PyResult<T> {
         self.map_err(|e| PyErr::new::<PyRuntimeError, _>(e.to_string()))
     }
+}
+
+#[pyfunction]
+pub fn list_available_gpus() -> PyResult<Vec<String>> {
+    let devices = pollster::block_on(list_devices())
+        .map_err(|e| PyErr::new::<PyRuntimeError, _>(e.to_string()))?;
+    Ok(devices)
 }
 
 #[pyclass]
@@ -127,8 +134,9 @@ pub struct PySimulation {
 #[pymethods]
 impl PySimulation {
     #[staticmethod]
-    pub fn new() -> PyResult<Self> {
-        let inner = Simulation::new().block_on().map_runtime_err()?;
+    #[pyo3(signature = (gpu=None))]
+    pub fn new(gpu: Option<String>) -> PyResult<Self> {
+        let inner = Simulation::new_with_gpu(gpu).block_on().map_runtime_err()?;
         Ok(PySimulation { inner })
     }
 
@@ -493,5 +501,7 @@ fn _avalanchers(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add_class::<PySimulation>()?;
     m.add_class::<PySettings>()?;
+
+    m.add_function(wrap_pyfunction!(list_available_gpus, m)?)?;
     Ok(())
 }

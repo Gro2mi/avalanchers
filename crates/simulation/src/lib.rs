@@ -34,7 +34,7 @@ pub fn init_logging() {
             .with(filter)
             .try_init();
 
-        info!("Simulation logging initialized");
+        info!("Avalanchers logging initialized");
     });
 }
 
@@ -65,13 +65,17 @@ pub struct Simulation {
     state: SimulationState,
     pub gpu_cache: GpuCache,
     pub ava_mask: Vec<bool>,
+    #[cfg(not(target_arch = "wasm32"))]
     output: Option<data_processor::output::Output>,
 }
 
 impl Simulation {
     pub async fn new() -> Result<Self> {
+        Self::new_with_gpu(None).await
+    }
+    pub async fn new_with_gpu(gpu: Option<String>) -> Result<Self> {
         timer_new();
-        let orchestrator = ComputeOrchestrator::new().await?;
+        let orchestrator = ComputeOrchestrator::new_with_gpu(gpu).await?;
         Ok(Self {
             orchestrator,
             settings: SimSettings::default(),
@@ -85,6 +89,7 @@ impl Simulation {
             release_areas_path: None,
             release_areas_array: None,
             ava_mask: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
             output: None,
         })
     }
@@ -371,12 +376,13 @@ impl Simulation {
         self.state = SimulationState::Evaluated;
         Ok((iou, horizontal_distance, vertical_drop, peak_velocity))
     }
-
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn save_with_path(&mut self, path: &str) -> Result<()> {
         self.output_path = path.to_string();
         self.save().await
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn save(&mut self) -> Result<()> {
         let mut site_name = std::path::Path::new(&self.dem_path)
             .file_stem()
@@ -600,13 +606,6 @@ impl Simulation {
         ))
     }
 
-    async fn get_texture_data_single_channel<T: bytemuck::Pod + Send + Sync>(
-        &self,
-        name: TextureName,
-    ) -> Result<Vec<T>> {
-        self.orchestrator.read_texture_single_channel(name).await
-    }
-
     async fn fetch_roughness_texture(&mut self) -> Result<&TextureRgba<f32>> {
         assert!(
             self.state >= SimulationState::ReleaseAreasComputed,
@@ -685,10 +684,6 @@ impl Simulation {
 
     pub async fn get_curvature(&mut self) -> Result<Vec<f32>> {
         Ok(self.fetch_normals_texture().await?.a.clone())
-    }
-
-    pub async fn get_dem_texture(&self) -> Result<Vec<f32>> {
-        self.get_texture_data_single_channel(TextureName::Dem).await
     }
 
     async fn fetch_release_areas_texture(&mut self) -> Result<&TextureRgba<f32>> {
@@ -1724,5 +1719,54 @@ mod tests {
                 settings.slab_thickness,
             )
         );
+    }
+
+    #[test_log::test]
+    fn test_create_sim_with_gpu() {
+        let gpus = block_on(compute_core::list_devices()).expect("Failed to list GPUs");
+        let _ = block_on(Simulation::new_with_gpu(gpus.first().cloned()))
+            .expect("Failed to create Simulation with GPU");
+    }
+
+    #[test_log::test]
+    fn test_print_grid() {
+        let sim = setup_simple_sim(40.0, 4.0);
+        let grid = vec![
+            0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0,
+        ];
+        let width = 4;
+        let height = 4;
+        sim.print_grid(&grid, width, height);
+    }
+
+    #[test_log::test]
+    fn test_get_gpu_data() {
+        let mut sim = setup_simple_sim(40.0, 4.0);
+        block_on(sim.run()).expect("Failed to run simulation");
+        block_on(sim.get_normals_x()).expect("Failed to get normals_x");
+        block_on(sim.get_normals_y()).expect("Failed to get normals_y");
+        block_on(sim.get_normals_z()).expect("Failed to get normals_z");
+        block_on(sim.get_slope_angle()).expect("Failed to get slope");
+        block_on(sim.get_slope_aspect()).expect("Failed to get slope");
+        block_on(sim.get_curvature()).expect("Failed to get curvature");
+    }
+
+    #[test_log::test]
+    fn test_sim_save() {
+        let mut sim = setup_simple_sim(40.0, 4.0);
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let file_path = tmp_dir.path().join("test_sim_save.zarr");
+        block_on(sim.run()).expect("Failed to run simulation");
+        assert_eq!(sim.get_state(), SimulationState::Finished);
+        block_on(sim.save_with_path(&file_path.to_string_lossy()))
+            .expect("Failed to save simulation");
+    }
+
+    #[test_log::test]
+    fn test_release_hash() {
+        let sim = setup_simple_sim(40.0, 4.0);
+        let release_hash = sim.release_hash();
+        assert_eq!(release_hash, 8163359721371807571);
     }
 }
