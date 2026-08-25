@@ -1,15 +1,33 @@
 // compute_cli/src/main.rs
 use anyhow::Result;
 use clap::Parser;
-use compute_core::settings::Settings;
+use compute_core::settings::{FrictionModel, Settings, SimModel};
 #[allow(unused_imports)]
 use compute_core::utils::{MaxValue, timer_checkpoint, timer_get_summary, timer_new};
 use pollster::block_on;
 use simulation::{Simulation, init_logging};
 #[allow(unused_imports)]
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::{env, time::Instant};
 use tracing::{debug, error, info, warn};
+
+fn parse_bool(value: &str) -> Result<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "y" | "on" => Ok(true),
+        "false" | "0" | "no" | "n" | "off" => Ok(false),
+        other => anyhow::bail!("invalid boolean value '{other}', expected true/false"),
+    }
+}
+
+fn parse_sim_model(value: &str) -> Result<SimModel> {
+    SimModel::from_str(value).map_err(|err| anyhow::anyhow!("invalid sim model '{value}': {err}"))
+}
+
+fn parse_friction_model(value: &str) -> Result<FrictionModel> {
+    FrictionModel::from_str(value)
+        .map_err(|err| anyhow::anyhow!("invalid friction model '{value}': {err}"))
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -29,6 +47,168 @@ struct Args {
     /// List available GPU devices
     #[arg(long)]
     list_devices: bool,
+
+    #[arg(long)]
+    outlines_path: Option<String>,
+    #[arg(long)]
+    outlines_padding: Option<f32>,
+    #[arg(long)]
+    dem_path: Option<String>,
+    #[arg(long)]
+    release_areas_path: Option<String>,
+    #[arg(long)]
+    output_path: Option<String>,
+    #[arg(long)]
+    max_steps: Option<u32>,
+    #[arg(long, value_parser = parse_sim_model)]
+    sim_model: Option<SimModel>,
+    #[arg(long)]
+    batch_compute_steps: Option<u32>,
+    #[arg(long, value_parser = parse_friction_model)]
+    friction_model: Option<FrictionModel>,
+    #[arg(long)]
+    released_particles_per_cell: Option<u32>,
+    #[arg(long)]
+    density: Option<f32>,
+    #[arg(long)]
+    slab_thickness_factor: Option<f32>,
+    #[arg(long)]
+    friction_coefficient: Option<f32>,
+    #[arg(long)]
+    drag_coefficient: Option<f32>,
+    #[arg(long)]
+    n0: Option<f32>,
+    #[arg(long)]
+    i0: Option<f32>,
+    #[arg(long)]
+    mu0: Option<f32>,
+    #[arg(long)]
+    mu2: Option<f32>,
+    #[arg(long)]
+    grain_diameter: Option<f32>,
+    #[arg(long)]
+    internal_friction_angle: Option<f32>,
+    #[arg(long)]
+    basal_friction_angle: Option<f32>,
+    #[arg(long)]
+    cfl: Option<f32>,
+    #[arg(long)]
+    min_slope_angle: Option<f32>,
+    #[arg(long)]
+    max_slope_angle: Option<f32>,
+    #[arg(long)]
+    release_min_elevation: Option<f32>,
+    #[arg(long)]
+    velocity_threshold: Option<f32>,
+    #[arg(long)]
+    roughness_threshold: Option<f32>,
+    #[arg(long, value_parser = parse_bool)]
+    enable_curvature: Option<bool>,
+    #[arg(long, value_parser = parse_bool)]
+    enable_particle_interaction: Option<bool>,
+    #[arg(long, value_parser = parse_bool)]
+    enable_earth_pressure_coefficient: Option<bool>,
+    #[arg(long, value_parser = parse_bool)]
+    enable_entrainment: Option<bool>,
+}
+
+impl Args {
+    fn apply_overrides(&self, settings: &mut Settings) -> Result<()> {
+        if let Some(value) = self.outlines_path.clone() {
+            settings.outlines_path = Some(value);
+        }
+        if let Some(value) = self.outlines_padding {
+            settings.outlines_padding = Some(value);
+        }
+        if let Some(value) = self.dem_path.clone() {
+            settings.dem_path = Some(value);
+        }
+        if let Some(value) = self.release_areas_path.clone() {
+            settings.release_areas_path = Some(value);
+        }
+        if let Some(value) = self.output_path.clone() {
+            settings.output_path = Some(value);
+        }
+        if let Some(value) = self.max_steps {
+            settings.max_steps = Some(value);
+        }
+        if let Some(value) = self.sim_model {
+            settings.sim_model = Some(value);
+        }
+        if let Some(value) = self.batch_compute_steps {
+            settings.batch_compute_steps = Some(value);
+        }
+        if let Some(value) = self.friction_model {
+            settings.friction_model = Some(value);
+        }
+        if let Some(value) = self.released_particles_per_cell {
+            settings.released_particles_per_cell = Some(value);
+        }
+        if let Some(value) = self.density {
+            settings.density = Some(value);
+        }
+        if let Some(value) = self.slab_thickness_factor {
+            settings.slab_thickness_factor = Some(value);
+        }
+        if let Some(value) = self.friction_coefficient {
+            settings.friction_coefficient = Some(value);
+        }
+        if let Some(value) = self.drag_coefficient {
+            settings.drag_coefficient = Some(value);
+        }
+        if let Some(value) = self.n0 {
+            settings.n0 = Some(value);
+        }
+        if let Some(value) = self.i0 {
+            settings.i0 = Some(value);
+        }
+        if let Some(value) = self.mu0 {
+            settings.mu0 = Some(value);
+        }
+        if let Some(value) = self.mu2 {
+            settings.mu2 = Some(value);
+        }
+        if let Some(value) = self.grain_diameter {
+            settings.grain_diameter = Some(value);
+        }
+        if let Some(value) = self.internal_friction_angle {
+            settings.internal_friction_angle = Some(value);
+        }
+        if let Some(value) = self.basal_friction_angle {
+            settings.basal_friction_angle = Some(value);
+        }
+        if let Some(value) = self.cfl {
+            settings.cfl = Some(value);
+        }
+        if let Some(value) = self.min_slope_angle {
+            settings.min_slope_angle = Some(value);
+        }
+        if let Some(value) = self.max_slope_angle {
+            settings.max_slope_angle = Some(value);
+        }
+        if let Some(value) = self.release_min_elevation {
+            settings.release_min_elevation = Some(value);
+        }
+        if let Some(value) = self.velocity_threshold {
+            settings.velocity_threshold = Some(value);
+        }
+        if let Some(value) = self.roughness_threshold {
+            settings.roughness_threshold = Some(value);
+        }
+        if let Some(value) = self.enable_curvature {
+            settings.enable_curvature = Some(value);
+        }
+        if let Some(value) = self.enable_particle_interaction {
+            settings.enable_particle_interaction = Some(value);
+        }
+        if let Some(value) = self.enable_earth_pressure_coefficient {
+            settings.enable_earth_pressure_coefficient = Some(value);
+        }
+        if let Some(value) = self.enable_entrainment {
+            settings.enable_entrainment = Some(value);
+        }
+        Ok(())
+    }
 }
 
 fn main() -> Result<()> {
@@ -84,8 +264,9 @@ fn main() -> Result<()> {
     };
     timer_checkpoint("Startup");
 
-    let settings = Settings::from_json(&file_path.to_string_lossy())
+    let mut settings = Settings::from_json(&file_path.to_string_lossy())
         .expect("Failed to load settings from JSON file");
+    args.apply_overrides(&mut settings)?;
 
     let mut simulation: Simulation = block_on(Simulation::new())?;
     block_on(simulation.create(settings.clone()))?;
@@ -184,4 +365,66 @@ fn main() -> Result<()> {
 
     info!("Time elapsed is: {:?}", duration);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use compute_core::settings::{FrictionModel, SimModel};
+
+    #[test]
+    fn cli_args_override_settings_file() {
+        let mut settings = Settings::default();
+        settings.max_steps = Some(10);
+        settings.density = Some(123.4);
+        settings.sim_model = Some(SimModel::ParticleInteraction);
+        settings.friction_model = Some(FrictionModel::Voellmy);
+        settings.enable_curvature = Some(false);
+
+        let args = Args {
+            file_path: None,
+            about: false,
+            list_devices: false,
+            max_steps: Some(42),
+            sim_model: Some(SimModel::Block),
+            friction_model: Some(FrictionModel::Coulomb),
+            density: Some(456.7),
+            enable_curvature: Some(true),
+            outlines_path: None,
+            outlines_padding: None,
+            dem_path: None,
+            release_areas_path: None,
+            output_path: None,
+            batch_compute_steps: None,
+            released_particles_per_cell: None,
+            slab_thickness_factor: None,
+            friction_coefficient: None,
+            drag_coefficient: None,
+            n0: None,
+            i0: None,
+            mu0: None,
+            mu2: None,
+            grain_diameter: None,
+            internal_friction_angle: None,
+            basal_friction_angle: None,
+            cfl: None,
+            min_slope_angle: None,
+            max_slope_angle: None,
+            release_min_elevation: None,
+            velocity_threshold: None,
+            roughness_threshold: None,
+            enable_particle_interaction: None,
+            enable_earth_pressure_coefficient: None,
+            enable_entrainment: None,
+        };
+
+        args.apply_overrides(&mut settings)
+            .expect("Failed to apply args");
+
+        assert_eq!(settings.max_steps, Some(42));
+        assert_eq!(settings.density, Some(456.7));
+        assert_eq!(settings.sim_model, Some(SimModel::Block));
+        assert_eq!(settings.friction_model, Some(FrictionModel::Coulomb));
+        assert_eq!(settings.enable_curvature, Some(true));
+    }
 }

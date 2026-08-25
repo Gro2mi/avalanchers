@@ -428,7 +428,7 @@ pub fn flip_rows_flat_vec<T>(data: &mut [T], width: u32, height: u32) {
 }
 
 #[allow(dead_code)]
-fn percentile(data: &[f32], percentile: f32) -> f32 {
+pub fn percentile(data: &[f32], percentile: f32) -> f32 {
     assert!(!data.is_empty());
     assert!((0.0..=100.0).contains(&percentile));
 
@@ -449,7 +449,7 @@ fn percentile(data: &[f32], percentile: f32) -> f32 {
 }
 
 #[allow(dead_code)]
-fn percentile_with_threshold(data: &[f32], percentile: f32, threshold: f32) -> f32 {
+pub fn percentile_with_threshold(data: &[f32], percentile: f32, threshold: f32) -> f32 {
     assert!((0.0..=100.0).contains(&percentile));
 
     let mut sorted: Vec<f32> = data

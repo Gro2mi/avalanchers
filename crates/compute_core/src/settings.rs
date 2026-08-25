@@ -6,6 +6,9 @@ use std::io::{self, Write};
 use std::str::FromStr;
 use std::{fmt, fs};
 
+#[allow(unused_imports)]
+use tracing::{debug, error, info, trace, warn};
+
 use crate::dem::Dem;
 
 #[repr(C)]
@@ -69,7 +72,7 @@ pub struct SimSettings {
     pub world_size_x: f32,
     pub world_size_y: f32,
     pub density: f32,
-    pub slab_thickness: f32,
+    pub slab_thickness_factor: f32,
     pub friction_coefficient: f32,
     pub drag_coefficient: f32,
     pub n0: f32,
@@ -102,7 +105,7 @@ impl Hash for SimSettings {
         self.world_size_x.to_bits().hash(state);
         self.world_size_y.to_bits().hash(state);
         self.density.to_bits().hash(state);
-        self.slab_thickness.to_bits().hash(state);
+        self.slab_thickness_factor.to_bits().hash(state);
         self.friction_coefficient.to_bits().hash(state);
         self.drag_coefficient.to_bits().hash(state);
         self.n0.to_bits().hash(state);
@@ -139,7 +142,7 @@ impl SimSettings {
 
     pub fn new() -> Self {
         Self {
-            max_steps: 3000,
+            max_steps: 6000,
             sim_model: SimModel::ParticleInteraction.as_int(),
             friction_model: FrictionModel::Voellmy.as_int(),
             released_particles_per_cell: 8,
@@ -148,10 +151,10 @@ impl SimSettings {
             world_size_x: 1.0,
             world_size_y: 1.0,
             density: 200.0,
-            slab_thickness: 1.0,
+            slab_thickness_factor: 1.0,
 
-            friction_coefficient: 0.155,
-            drag_coefficient: 4000.0,
+            friction_coefficient: 0.2,
+            drag_coefficient: 2000.0,
             n0: 70.0,
             i0: 0.29,
             mu0: 0.38,
@@ -162,7 +165,7 @@ impl SimSettings {
 
             cfl: 0.5,
             cell_size: 1.0,
-            velocity_threshold: 1e-6,
+            velocity_threshold: 0.1,
             roughness_threshold: 0.01,
             flags: SimFlags::new(true, true, true, true).mask,
 
@@ -201,8 +204,8 @@ impl SimSettings {
         if let Some(val) = patch.density {
             settings.density = val;
         }
-        if let Some(val) = patch.slab_thickness {
-            settings.slab_thickness = val;
+        if let Some(val) = patch.slab_thickness_factor {
+            settings.slab_thickness_factor = val;
         }
         if let Some(val) = patch.friction_coefficient {
             settings.friction_coefficient = val;
@@ -454,6 +457,7 @@ impl<'de> Deserialize<'de> for SimModel {
 }
 
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct Settings {
     pub outlines_path: Option<String>,
     pub outlines_padding: Option<f32>,
@@ -466,7 +470,7 @@ pub struct Settings {
     pub friction_model: Option<FrictionModel>,
     pub released_particles_per_cell: Option<u32>,
     pub density: Option<f32>,
-    pub slab_thickness: Option<f32>,
+    pub slab_thickness_factor: Option<f32>,
     pub friction_coefficient: Option<f32>,
     pub drag_coefficient: Option<f32>,
     pub n0: Option<f32>,
@@ -492,14 +496,18 @@ pub struct Settings {
 
 impl Settings {
     pub fn loads(json_str: &str) -> io::Result<Self> {
-        let settings: Settings = serde_json::from_str(json_str)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let settings: Settings = serde_json::from_str(json_str).map_err(|e| {
+            error!("Failed to deserialize settings: {e}");
+            io::Error::new(io::ErrorKind::InvalidData, e)
+        })?;
         Ok(settings)
     }
 
     pub fn dumps(&self) -> io::Result<String> {
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let json = serde_json::to_string_pretty(self).map_err(|e| {
+            error!("Failed to serialize settings: {e}");
+            io::Error::new(io::ErrorKind::InvalidData, e)
+        })?;
         Ok(json)
     }
 
@@ -540,7 +548,7 @@ mod tests {
     #[test_log::test]
     fn test_simsettings_new_defaults() {
         let settings = SimSettings::new();
-        assert_eq!(settings.max_steps, 3000);
+        assert_eq!(settings.max_steps, 6000);
         assert_eq!(settings.sim_model, SimModel::ParticleInteraction.as_int());
         assert_eq!(settings.friction_model, FrictionModel::Voellmy.as_int());
         assert_eq!(settings.released_particles_per_cell, 8);
@@ -549,15 +557,15 @@ mod tests {
         assert_eq!(settings.world_size_x, 1.0);
         assert_eq!(settings.world_size_y, 1.0);
         assert_eq!(settings.density, 200.0);
-        assert_eq!(settings.slab_thickness, 1.0);
-        assert_eq!(settings.friction_coefficient, 0.155);
-        assert_eq!(settings.drag_coefficient, 4000.0);
+        assert_eq!(settings.slab_thickness_factor, 1.0);
+        assert_eq!(settings.friction_coefficient, 0.2);
+        assert_eq!(settings.drag_coefficient, 2000.0);
         assert_eq!(settings.cfl, 0.5);
         assert_eq!(settings.cell_size, 1.0);
         assert_eq!(settings.min_slope_angle, 28.0);
         assert_eq!(settings.max_slope_angle, 60.0);
         assert_eq!(settings.release_min_elevation, 1500.0);
-        assert_eq!(settings.velocity_threshold, 1e-6);
+        assert_eq!(settings.velocity_threshold, 0.1);
         assert_eq!(settings.roughness_threshold, 0.01);
     }
 
@@ -591,7 +599,7 @@ mod tests {
             friction_model: Some(FrictionModel::VoellmyMinShear),
             released_particles_per_cell: Some(3),
             density: Some(123.4),
-            slab_thickness: Some(5.6),
+            slab_thickness_factor: Some(5.6),
             friction_coefficient: Some(0.2),
             drag_coefficient: Some(999.0),
             n0: Some(1.0),
@@ -623,7 +631,7 @@ mod tests {
         assert_eq!(sim_settings.friction_model, 2);
         assert_eq!(sim_settings.released_particles_per_cell, 3);
         assert_eq!(sim_settings.density, 123.4);
-        assert_eq!(sim_settings.slab_thickness, 5.6);
+        assert_eq!(sim_settings.slab_thickness_factor, 5.6);
         assert_eq!(sim_settings.friction_coefficient, 0.2);
         assert_eq!(sim_settings.drag_coefficient, 999.0);
         assert_eq!(sim_settings.cfl, 0.9);
@@ -701,7 +709,10 @@ mod tests {
         assert_eq!(settings.world_size_x, deserialized.world_size_x);
         assert_eq!(settings.world_size_y, deserialized.world_size_y);
         assert_eq!(settings.density, deserialized.density);
-        assert_eq!(settings.slab_thickness, deserialized.slab_thickness);
+        assert_eq!(
+            settings.slab_thickness_factor,
+            deserialized.slab_thickness_factor
+        );
         assert_eq!(
             settings.friction_coefficient,
             deserialized.friction_coefficient

@@ -1001,7 +1001,7 @@ mod tests {
             friction_model: Some(FrictionModel::Voellmy),
             released_particles_per_cell: Some(3),
             density: Some(4.0),
-            slab_thickness: Some(5.0),
+            slab_thickness_factor: Some(5.0),
             friction_coefficient: Some(6.0),
             drag_coefficient: Some(7.0),
             n0: Some(1.0),
@@ -1038,7 +1038,7 @@ mod tests {
         assert_eq!(loaded.friction_model, Some(FrictionModel::Voellmy));
         assert_eq!(loaded.released_particles_per_cell, Some(3));
         assert_eq!(loaded.density, Some(4.0));
-        assert_eq!(loaded.slab_thickness, Some(5.0));
+        assert_eq!(loaded.slab_thickness_factor, Some(5.0));
         assert_eq!(loaded.friction_coefficient, Some(6.0));
         assert_eq!(loaded.drag_coefficient, Some(7.0));
         assert_eq!(loaded.cfl, Some(8.0));

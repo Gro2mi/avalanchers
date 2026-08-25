@@ -4,7 +4,7 @@
   "friction_model": "voellmy",
   "max_steps": 6000,
   "released_particles_per_cell": 4,
-  "slab_thickness": 1.0,
+  "slab_thickness_factor": 1.0,
   "friction_coefficient": 0.2,
   "drag_coefficient": 2000.0,
   "velocity_threshold": 0.1

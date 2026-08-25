@@ -821,6 +821,8 @@ impl ComputeOrchestrator {
         Ok(number_release_cells)
     }
 
+    // TODO change to slab_thickness_factor
+
     pub async fn run_load_release_areas(
         &mut self, // `&mut self` because we're adding textures
         data: &[f32],

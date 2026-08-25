@@ -20,7 +20,7 @@ def create_mesh(sim):
     return x, y, dem, dem_mask
 
 
-def plot3d(sim, parameter, particles=False, threshold_value=1e-3, particle_threshold=0):
+def plot3d(sim, parameter, particles=False, threshold_value=1e-2, particle_threshold=0):
     try:
         import pyvista as pv
     except ImportError:
@@ -41,10 +41,10 @@ def plot3d(sim, parameter, particles=False, threshold_value=1e-3, particle_thres
 
     if parameter == "cell_count":
         data = np.log10(data)
-    if parameter == "peak_velocity":
-        data[sim.peak_velocity < 1] = np.nan
-    if parameter == "peak_flow_thickness":
-        data[sim.peak_flow_thickness < 0.5] = np.nan
+    # if parameter == "peak_velocity":
+    #     data[sim.peak_velocity < 1] = np.nan
+    # if parameter == "peak_flow_thickness":
+    #     data[sim.peak_flow_thickness < 0.5] = np.nan
 
     # 2. Create the StructuredGrid
     # We pass x, y, and the elevation (dem) directly as coordinates
@@ -123,7 +123,7 @@ def plot2d(
     sim,
     parameter,
     title="Avalanche Simulation",
-    threshold_value=1e-3,
+    threshold_value=1e-2,
     particle_threshold=0,
 ):
     import_plt()

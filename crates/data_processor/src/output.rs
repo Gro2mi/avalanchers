@@ -568,9 +568,9 @@ impl Output {
         self.create_run_variable(
             &scenario_group_path,
             max_number_runs,
-            "slab_thickness",
-            "Slab thickness",
-            "m",
+            "slab_thickness_factor",
+            "Slab thickness factor",
+            "-",
             zarrs::array::data_type::float32(),
         )?;
         // self.create_run_variable(
@@ -774,7 +774,11 @@ impl Output {
         Self::write_scalar(&scenario.mu, run_id, settings.friction_coefficient)?;
         Self::write_scalar(&scenario.xsi, run_id, settings.drag_coefficient)?;
         Self::write_scalar(&scenario.density, run_id, settings.density)?;
-        Self::write_scalar(&scenario.slab_thickness, run_id, settings.slab_thickness)?;
+        Self::write_scalar(
+            &scenario.slab_thickness_factor,
+            run_id,
+            settings.slab_thickness_factor,
+        )?;
         Self::write_scalar_u32(&scenario.sim_model, run_id, settings.sim_model)?;
         Self::write_scalar_u32(&scenario.friction_model, run_id, settings.friction_model)?;
         Self::write_scalar(&scenario.cfl, run_id, settings.cfl)?;
@@ -882,7 +886,7 @@ pub struct Scenario {
     pub xsi: Array<FilesystemStore>,
     pub released_particles_per_cell: Array<FilesystemStore>,
     pub density: Array<FilesystemStore>,
-    pub slab_thickness: Array<FilesystemStore>,
+    pub slab_thickness_factor: Array<FilesystemStore>,
     pub sim_model: Array<FilesystemStore>,
     pub friction_model: Array<FilesystemStore>,
     pub cfl: Array<FilesystemStore>,
@@ -940,7 +944,10 @@ impl Scenario {
                 &format!("{base}/released_particles_per_cell"),
             )?,
             density: Array::open(store.clone(), &format!("{base}/density"))?,
-            slab_thickness: Array::open(store.clone(), &format!("{base}/slab_thickness"))?,
+            slab_thickness_factor: Array::open(
+                store.clone(),
+                &format!("{base}/slab_thickness_factor"),
+            )?,
             // grain_diameter: Array::open(store.clone(), &format!("{base}/grain_diameter"))?,
             // internal_friction_angle: Array::open(
             //     store.clone(),

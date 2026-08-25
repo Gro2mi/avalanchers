@@ -34,7 +34,7 @@ pub fn init_logging() {
             .with(filter)
             .try_init();
 
-        info!("Avalanchers logging initialized");
+        debug!("Avalanchers logging initialized");
     });
 }
 
@@ -935,7 +935,7 @@ mod tests {
             number_cache_elements + number_sim_results_elements
         );
 
-        sim.settings.friction_coefficient = 0.2;
+        sim.settings.released_particles_per_cell = 7;
         block_on(sim.run()).expect("Failed to run simulation after changing settings");
 
         block_on(sim.fetch_results()).expect("Failed to get data on second call");
@@ -1698,7 +1698,7 @@ mod tests {
                 settings.min_slope_angle,
                 settings.max_slope_angle,
                 settings.roughness_threshold,
-                settings.slab_thickness,
+                settings.slab_thickness_factor,
             ),
         };
         let scenario_name_none = format!(
@@ -1716,7 +1716,7 @@ mod tests {
                 settings.min_slope_angle,
                 settings.max_slope_angle,
                 settings.roughness_threshold,
-                settings.slab_thickness,
+                settings.slab_thickness_factor,
             )
         );
     }
