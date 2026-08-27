@@ -4,6 +4,7 @@ import avalanchers
 start = time.time()
 
 
+# example_case = "avaPyramid45"
 example_case = "avaWog"
 # example_case = "avaMal"
 # example_case = "avaKot"
@@ -26,10 +27,10 @@ settings = {
     "batch_compute_steps": 300,
     "sim_model": 0,
     "released_particles_per_cell": 4,
-    "friction_model": 2,
+    "friction_model": "voellmy",
     "density": 200.0,
-    "slab_thickness": 1.5,
-    "friction_coefficient": 0.4,
+    "slab_thickness_factor": 1.5,
+    "friction_coefficient": 0.2,
     "drag_coefficient": 2000.0,
     "cfl": 0.5,
     "min_slope_angle": 28.0,
@@ -57,9 +58,9 @@ print(f"Execution time without plotting: {end - start:.2f} seconds")
 # avalanchers.plot3d(sim, "dem")
 
 
-avalanchers.plot3d(sim, "peak_flow_thickness", True)
+avalanchers.plot3d(sim, "peak_flow_thickness", False, blur_passes=3)
 # avalanchers.plot3d(sim, "cell_count")
-# avalanchers.plot3d(sim, "peak_velocity")
+avalanchers.plot3d(sim, "peak_velocity", blur_passes=3)
 avalanchers.plot_overview(sim)
 
 # avalanchers.plot2d(sim, "peak_flow_thickness")

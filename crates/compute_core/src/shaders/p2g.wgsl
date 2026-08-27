@@ -42,10 +42,10 @@ fn p2g(@builtin(global_invocation_id) id: vec3u) {
 
             atomicAdd(
                 &grid_mass_atomic[idx],
-                u32(p.mass * weight * MASS_FACTOR)
+                u32(round(p.mass * weight * MASS_FACTOR))
             );
-            atomicAdd(&grid_momentum_atomic[idx * 2], i32(p.mass * p.velocity.x * weight * MOMENTUM_FACTOR));
-            atomicAdd(&grid_momentum_atomic[idx * 2 + 1], i32(p.mass * p.velocity.y * weight * MOMENTUM_FACTOR));
+            atomicAdd(&grid_momentum_atomic[idx * 2], i32(round(p.mass * p.velocity.x * weight * MOMENTUM_FACTOR)));
+            atomicAdd(&grid_momentum_atomic[idx * 2 + 1], i32(round(p.mass * p.velocity.y * weight * MOMENTUM_FACTOR)));
         }
     }
 }
@@ -151,6 +151,15 @@ fn cellf_to_uv(cell: vec2f) -> vec2f {
     return (cell + 0.5) / vec2f(sim_settings.grid_shape);
 }
 
+fn position_to_cell(position: vec3f) -> vec2u {
+    return vec2u(
+        floor(position.xy / sim_settings.cell_size)
+    );
+}
+
+fn cell_center_xy(cell: vec2u) -> vec2f {
+    return (vec2f(cell) + 0.5) * sim_settings.cell_size;
+}
 
 fn position_to_uv(position: vec3f) -> vec2f {
     return (position.xy + 0.5 * sim_settings.cell_size) / (vec2f(sim_settings.world_size)); // add some padding to ensure particles outside the world bounds are still captured in the simulation info
