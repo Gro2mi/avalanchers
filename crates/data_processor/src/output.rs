@@ -1,8 +1,10 @@
+use compute_core::dem::Dem;
 use compute_core::settings::SimSettings;
 use half::f16;
 use serde_json::json;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[allow(unused_imports)]
 use tracing::{debug, error, info, trace, warn};
@@ -149,32 +151,43 @@ impl Output {
         self.path.join(site_name).join(scenario_name).is_dir()
     }
 
-    pub fn add_new_site(
-        &mut self,
-        site_name: &str,
-        mut y_coords: Vec<f32>,
-        x_coords: &[f32],
-        dem: &[f32],
-    ) -> Result<(), OutputError> {
+    pub fn add_new_site(&mut self, site_name: &str, dem: &Dem) -> Result<(), OutputError> {
         if self.site_exists(site_name) {
             return Err(OutputError::SiteAlreadyExists(site_name.to_string()));
         }
 
+        let mut y_coords = dem.y.clone();
+        let x_coords = &dem.x;
+        let dem_data = &dem.data1d;
+
         y_coords.reverse();
         let ylen = y_coords.len() as u64;
         let xlen = x_coords.len() as u64;
-        let size = xlen * ylen;
-
-        if !dem.is_empty() && dem.len() != size as usize {
-            return Err(OutputError::InvalidData(format!(
-                "DEM has incorrect size: expected {}, got {}",
-                size,
-                dem.len()
-            )));
-        }
+        let _size = xlen * ylen;
 
         let site_group_path = format!("/{}", site_name);
-        let site_group = GroupBuilder::new().build(self.store.clone(), &site_group_path)?;
+        let mut site_group = GroupBuilder::new().build(self.store.clone(), &site_group_path)?;
+        site_group.attributes_mut().extend(
+            json!({
+                "dem_width": dem.width,
+                "dem_height": dem.height,
+                "dem_cell_size": dem.cell_size,
+                "dem_map_factor": dem.map_factor,
+                "dem_minimum_elevation": dem.minimum_elevation,
+                "dem_source": dem.source,
+                "dem_projection": dem.projection,
+                "dem_hash": format!("{:x}", dem.calculate_hash()),
+                "dem_bounds": {
+                    "xmin": dem.bounds.xmin,
+                    "xmax": dem.bounds.xmax,
+                    "ymin": dem.bounds.ymin,
+                    "ymax": dem.bounds.ymax
+                }
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        );
         site_group.store_metadata()?;
 
         let mut y = zarrs::array::ArrayBuilder::new(
@@ -239,6 +252,20 @@ impl Output {
                 "standard_name": "elevation",
                 "long_name": "Digital Elevation Model",
                 "units": "m",
+                "source": dem.source,
+                "projection": dem.projection,
+                "cell_size": dem.cell_size,
+                "map_factor": dem.map_factor,
+
+                "width": dem.width,
+                "height": dem.height,
+                "hash": format!("{:x}", dem.calculate_hash()),
+                "bounds": {
+                    "xmin": dem.bounds.xmin,
+                    "xmax": dem.bounds.xmax,
+                    "ymin": dem.bounds.ymin,
+                    "ymax": dem.bounds.ymax
+                }
             })
             .as_object()
             .unwrap()
@@ -247,7 +274,7 @@ impl Output {
         dem_array_builder.store_metadata()?;
 
         let dem_array = Array::open(self.store.clone(), &format!("/{}/dem", site_name))?;
-        dem_array.store_chunk(&[0, 0], dem)?;
+        dem_array.store_chunk(&[0, 0], dem_data)?;
 
         Ok(())
     }
@@ -342,6 +369,8 @@ impl Output {
                 "aspect_release_degrees": aspect_release_value,
                 "release_volume_m3": release_volume,
                 "number_of_runs": 0,
+                "max_number_runs": max_number_runs,
+                "max_timesteps": max_timesteps,
             })
             .as_object()
             .unwrap()
@@ -735,6 +764,474 @@ impl Output {
         Ok(())
     }
 
+    fn normalize_store_path(path: &str) -> PathBuf {
+        let path = PathBuf::from(path);
+        if path.extension().is_some_and(|ext| ext == "zarr") {
+            path
+        } else {
+            path.with_extension("zarr")
+        }
+    }
+
+    fn list_child_dirs(base_path: &Path) -> Result<Vec<String>, OutputError> {
+        let entries = fs::read_dir(base_path).map_err(|e| {
+            OutputError::InvalidData(format!(
+                "Failed to list directories in '{}': {e}",
+                base_path.display()
+            ))
+        })?;
+
+        let mut dirs = Vec::new();
+        for entry_result in entries {
+            let entry = entry_result.map_err(|e| {
+                OutputError::InvalidData(format!(
+                    "Failed to read directory entry in '{}': {e}",
+                    base_path.display()
+                ))
+            })?;
+            if entry.path().is_dir() {
+                dirs.push(entry.file_name().to_string_lossy().to_string());
+            }
+        }
+        Ok(dirs)
+    }
+
+    fn resolve_unique_partial_match(
+        base_path: &Path,
+        query: &str,
+        level_name: &str,
+    ) -> Result<String, OutputError> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Err(OutputError::InvalidData(format!(
+                "{level_name} query must not be empty"
+            )));
+        }
+
+        let dirs = Self::list_child_dirs(base_path)?;
+        if dirs.is_empty() {
+            return Err(OutputError::InvalidData(format!(
+                "No {level_name} directories found under '{}'",
+                base_path.display()
+            )));
+        }
+
+        let query_lower = query.to_lowercase();
+
+        let exact: Vec<String> = dirs
+            .iter()
+            .filter(|name| name.to_lowercase() == query_lower)
+            .cloned()
+            .collect();
+        if exact.len() == 1 {
+            return Ok(exact[0].clone());
+        }
+
+        let matches: Vec<String> = dirs
+            .iter()
+            .filter(|name| name.to_lowercase().contains(&query_lower))
+            .cloned()
+            .collect();
+
+        match matches.len() {
+            1 => Ok(matches[0].clone()),
+            0 => Err(OutputError::InvalidData(format!(
+                "No {level_name} matches for '{query}' under '{}'. Available: {}",
+                base_path.display(),
+                dirs.join(", ")
+            ))),
+            _ => Err(OutputError::InvalidData(format!(
+                "Ambiguous {level_name} query '{query}' under '{}'. Matches: {}",
+                base_path.display(),
+                matches.join(", ")
+            ))),
+        }
+    }
+
+    pub fn read_dem_from_store(store_path: &str, site_query: &str) -> Result<Dem, OutputError> {
+        let zarr_path = Self::normalize_store_path(store_path);
+        let store = Arc::new(FilesystemStore::new(&zarr_path)?);
+
+        let site_name = Self::resolve_unique_partial_match(&zarr_path, site_query, "site")?;
+        let site_group_path = format!("/{site_name}");
+        let site_group = Group::open(store.clone(), &site_group_path)?;
+
+        let dem_array = Array::open(store.clone(), &format!("/{site_name}/dem"))?;
+        let dem_shape = dem_array.shape().to_vec();
+        if dem_shape.len() != 2 {
+            return Err(OutputError::InvalidData(format!(
+                "DEM array in site '{site_name}' must be 2D, got shape {:?}",
+                dem_shape
+            )));
+        }
+
+        let dem_subset = ArraySubset::new_with_start_shape(vec![0, 0], dem_shape.clone())?;
+        let dem_data: Vec<f32> = dem_array.retrieve_array_subset::<Vec<f32>>(&dem_subset)?;
+
+        let x_array = Array::open(store.clone(), &format!("/{site_name}/x"))?;
+        let x_shape = x_array.shape().to_vec();
+        if x_shape.len() != 1 {
+            return Err(OutputError::InvalidData(format!(
+                "x array in site '{site_name}' must be 1D, got shape {:?}",
+                x_shape
+            )));
+        }
+        let x_subset = ArraySubset::new_with_start_shape(vec![0], x_shape.clone())?;
+        let x_coords: Vec<f32> = x_array.retrieve_array_subset::<Vec<f32>>(&x_subset)?;
+
+        let y_array = Array::open(store.clone(), &format!("/{site_name}/y"))?;
+        let y_shape = y_array.shape().to_vec();
+        if y_shape.len() != 1 {
+            return Err(OutputError::InvalidData(format!(
+                "y array in site '{site_name}' must be 1D, got shape {:?}",
+                y_shape
+            )));
+        }
+        let y_subset = ArraySubset::new_with_start_shape(vec![0], y_shape.clone())?;
+        let y_coords: Vec<f32> = y_array.retrieve_array_subset::<Vec<f32>>(&y_subset)?;
+
+        let width = dem_shape[1] as usize;
+        let height = dem_shape[0] as usize;
+
+        if x_coords.len() != width || y_coords.len() != height {
+            return Err(OutputError::InvalidData(format!(
+                "DEM/x/y shape mismatch for site '{site_name}': dem={:?}, x={}, y={}",
+                dem_shape,
+                x_coords.len(),
+                y_coords.len()
+            )));
+        }
+
+        let source = site_group
+            .attributes()
+            .get("dem_source")
+            .and_then(|v| v.as_str())
+            .unwrap_or("zarr")
+            .to_string();
+
+        let projection = site_group
+            .attributes()
+            .get("dem_projection")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let cell_size = site_group
+            .attributes()
+            .get("dem_cell_size")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(1.0) as f32;
+
+        let map_factor = site_group
+            .attributes()
+            .get("dem_map_factor")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(1.0) as f32;
+
+        let (xmin, xmax) = x_coords
+            .iter()
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(mn, mx), v| {
+                (mn.min(*v), mx.max(*v))
+            });
+        let (ymin, ymax) = y_coords
+            .iter()
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(mn, mx), v| {
+                (mn.min(*v), mx.max(*v))
+            });
+
+        let data = dem_data
+            .chunks(width)
+            .map(|row| row.to_vec())
+            .collect::<Vec<Vec<f32>>>();
+
+        Ok(Dem {
+            width,
+            height,
+            bounds: compute_core::dem::Bounds {
+                xmin,
+                xmax,
+                ymin,
+                ymax,
+            },
+            data1d: dem_data.clone(),
+            data,
+            x: x_coords,
+            y: y_coords,
+            cell_size,
+            map_factor,
+            minimum_elevation: Dem::calculate_minimum_elevation(&dem_data),
+            source,
+            projection,
+        })
+    }
+
+    pub fn read_release_area_from_store(
+        store_path: &str,
+        site_query: &str,
+        scenario_query: &str,
+    ) -> Result<Vec<f32>, OutputError> {
+        let zarr_path = Self::normalize_store_path(store_path);
+        let store = Arc::new(FilesystemStore::new(&zarr_path)?);
+
+        let site_name = Self::resolve_unique_partial_match(&zarr_path, site_query, "site")?;
+        let site_path = zarr_path.join(&site_name);
+        let scenario_name =
+            Self::resolve_unique_partial_match(&site_path, scenario_query, "scenario")?;
+
+        let release_area = Array::open(
+            store.clone(),
+            &format!("/{site_name}/{scenario_name}/release_area"),
+        )?;
+        let shape = release_area.shape().to_vec();
+        if shape.len() != 2 {
+            return Err(OutputError::InvalidData(format!(
+                "release_area in '{site_name}/{scenario_name}' must be 2D, got shape {:?}",
+                shape
+            )));
+        }
+
+        let subset = ArraySubset::new_with_start_shape(vec![0, 0], shape.clone())?;
+        let release_area_f16: Vec<f16> = release_area.retrieve_array_subset::<Vec<f16>>(&subset)?;
+        Ok(release_area_f16
+            .into_iter()
+            .map(|v| v.to_f32())
+            .collect::<Vec<f32>>())
+    }
+
+    pub fn write_flow_fields(
+        &mut self,
+        site_name: &str,
+        scenario_name: &str,
+        run_id: u64,
+        timestep: u64,
+        flow_velocity_data: &[f32],
+        flow_thickness_data: &[f32],
+    ) -> Result<(), OutputError> {
+        let scenario_key = format!("{site_name}/{scenario_name}");
+        let scenario = self
+            .scenarios
+            .get_mut(&scenario_key)
+            .ok_or_else(|| OutputError::ScenarioNotFound(scenario_key.clone()))?;
+
+        if flow_velocity_data.len() != (scenario.width * scenario.height) as usize
+            || flow_thickness_data.len() != (scenario.width * scenario.height) as usize
+        {
+            return Err(OutputError::InvalidData(format!(
+                "Flow field shape mismatch for scenario '{site_name}/{scenario_name}': expected {}, got {} and {}",
+                scenario.width * scenario.height,
+                flow_velocity_data.len(),
+                flow_thickness_data.len()
+            )));
+        }
+
+        if run_id >= scenario.max_number_runs {
+            return Err(OutputError::InvalidRunID(
+                run_id,
+                scenario.max_number_runs.saturating_sub(1),
+            ));
+        }
+        if timestep >= scenario.max_timesteps {
+            return Err(OutputError::InvalidData(format!(
+                "Timestep {} out of bounds for scenario '{site_name}/{scenario_name}' (max {})",
+                timestep, scenario.max_timesteps
+            )));
+        }
+
+        if scenario.flow_velocity.is_none() || scenario.flow_thickness.is_none() {
+            let scenario_group_path = format!("/{site_name}/{scenario_name}");
+            let mut flow_velocity = ArrayBuilder::new(
+                vec![
+                    scenario.max_number_runs,
+                    scenario.width,
+                    scenario.height,
+                    scenario.max_timesteps,
+                ],
+                vec![1, scenario.width, scenario.height, 1],
+                zarrs::array::data_type::float16(),
+                FillValue::from(f16::from_f32(0.0)),
+            )
+            .bytes_to_bytes_codecs(self.blosc_f16.clone())
+            .dimension_names(["run", "x", "y", "timestep"].into())
+            .build(
+                self.store.clone(),
+                &format!("{}/flow_velocity", scenario_group_path),
+            )?;
+            flow_velocity.attributes_mut().extend(
+                json!({
+                    "standard_name": "flow_velocity",
+                    "long_name": "Flow velocity grid",
+                    "units": "m/s",
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            );
+            flow_velocity.store_metadata()?;
+
+            let mut flow_thickness = ArrayBuilder::new(
+                vec![
+                    scenario.max_number_runs,
+                    scenario.width,
+                    scenario.height,
+                    scenario.max_timesteps,
+                ],
+                vec![1, scenario.width, scenario.height, 1],
+                zarrs::array::data_type::float16(),
+                FillValue::from(f16::from_f32(0.0)),
+            )
+            .bytes_to_bytes_codecs(self.blosc_f16.clone())
+            .dimension_names(["run", "x", "y", "timestep"].into())
+            .build(
+                self.store.clone(),
+                &format!("{}/flow_thickness", scenario_group_path),
+            )?;
+            flow_thickness.attributes_mut().extend(
+                json!({
+                    "standard_name": "flow_thickness",
+                    "long_name": "Flow thickness grid",
+                    "units": "m",
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            );
+            flow_thickness.store_metadata()?;
+
+            scenario.flow_velocity = Some(flow_velocity);
+            scenario.flow_thickness = Some(flow_thickness);
+        }
+
+        let flow_velocity = scenario.flow_velocity.as_ref().unwrap();
+        let flow_thickness = scenario.flow_thickness.as_ref().unwrap();
+
+        let velocity_subset = ArraySubset::new_with_start_shape(
+            vec![run_id, 0, 0, timestep],
+            vec![1, scenario.width, scenario.height, 1],
+        )?;
+        let thickness_subset = ArraySubset::new_with_start_shape(
+            vec![run_id, 0, 0, timestep],
+            vec![1, scenario.width, scenario.height, 1],
+        )?;
+
+        let velocity_data_f16: Vec<f16> = flow_velocity_data
+            .iter()
+            .map(|x| f16::from_f32(*x))
+            .collect();
+        let thickness_data_f16: Vec<f16> = flow_thickness_data
+            .iter()
+            .map(|x| f16::from_f32(*x))
+            .collect();
+
+        flow_velocity.store_array_subset(&velocity_subset, &velocity_data_f16)?;
+        flow_thickness.store_array_subset(&thickness_subset, &thickness_data_f16)?;
+        Ok(())
+    }
+
+    pub fn write_particle_position(
+        &mut self,
+        site_name: &str,
+        scenario_name: &str,
+        run_id: u64,
+        timestep: u64,
+        particle_position_data: &[f32],
+    ) -> Result<(), OutputError> {
+        let scenario_key = format!("{site_name}/{scenario_name}");
+        let scenario = self
+            .scenarios
+            .get_mut(&scenario_key)
+            .ok_or_else(|| OutputError::ScenarioNotFound(scenario_key.clone()))?;
+
+        if run_id >= scenario.max_number_runs {
+            return Err(OutputError::InvalidRunID(
+                run_id,
+                scenario.max_number_runs.saturating_sub(1),
+            ));
+        }
+        if timestep >= scenario.max_timesteps {
+            return Err(OutputError::InvalidData(format!(
+                "Timestep {} out of bounds for scenario '{site_name}/{scenario_name}' (max {})",
+                timestep, scenario.max_timesteps
+            )));
+        }
+        if particle_position_data.is_empty() {
+            return Err(OutputError::InvalidData(format!(
+                "Particle position data is empty for scenario '{site_name}/{scenario_name}'"
+            )));
+        }
+        if !particle_position_data.len().is_multiple_of(3) {
+            return Err(OutputError::InvalidData(format!(
+                "Particle position data length must be divisible by 3 (x,y,z) for scenario '{site_name}/{scenario_name}', got {}",
+                particle_position_data.len()
+            )));
+        }
+
+        if scenario.particle_position.is_none() {
+            let scenario_group_path = format!("/{site_name}/{scenario_name}");
+            let particle_count = (particle_position_data.len() / 3) as u64;
+            let mut particle_position = ArrayBuilder::new(
+                vec![
+                    scenario.max_number_runs,
+                    scenario.max_timesteps,
+                    particle_count,
+                    3,
+                ],
+                vec![1, 1, particle_count, 3],
+                zarrs::array::data_type::float32(),
+                FillValue::from(0.0_f32),
+            )
+            .bytes_to_bytes_codecs(self.blosc_f32.clone())
+            .dimension_names(["run", "timestep", "particle_id", "component"].into())
+            .build(
+                self.store.clone(),
+                &format!("{}/particle_position", scenario_group_path),
+            )?;
+            particle_position.attributes_mut().extend(
+                json!({
+                    "standard_name": "particle_position",
+                    "long_name": "Particle xyz position values",
+                    "units": "m",
+                    "components": ["x", "y", "z"],
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            );
+            particle_position.store_metadata()?;
+
+            scenario.particle_position = Some(particle_position);
+            scenario.particle_count = Some(particle_count);
+        }
+
+        let particle_count = scenario.particle_count.ok_or_else(|| {
+            OutputError::InvalidData(format!(
+                "Missing particle count for scenario '{site_name}/{scenario_name}'"
+            ))
+        })?;
+
+        if particle_position_data.len() != particle_count as usize * 3 {
+            return Err(OutputError::InvalidData(format!(
+                "Particle position shape mismatch for scenario '{site_name}/{scenario_name}': expected {} values ({} particles * 3 components), got {}",
+                particle_count * 3,
+                particle_count,
+                particle_position_data.len()
+            )));
+        }
+
+        let particle_position = scenario.particle_position.as_ref().ok_or_else(|| {
+            OutputError::InvalidData(format!(
+                "Missing particle_position array for scenario '{site_name}/{scenario_name}'"
+            ))
+        })?;
+
+        let position_subset = ArraySubset::new_with_start_shape(
+            vec![run_id, timestep, 0, 0],
+            vec![1, 1, particle_count, 3],
+        )?;
+
+        particle_position.store_array_subset(&position_subset, particle_position_data)?;
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn add_new_run(
         &mut self,
@@ -875,10 +1372,16 @@ pub struct Scenario {
     pub scenario_name: String,
     width: u64,
     height: u64,
+    pub max_number_runs: u64,
+    pub max_timesteps: u64,
     pub number_of_runs: u64,
 
     pub peak_flow_velocity: Array<FilesystemStore>,
     pub peak_flow_thickness: Array<FilesystemStore>,
+    pub flow_velocity: Option<Array<FilesystemStore>>,
+    pub flow_thickness: Option<Array<FilesystemStore>>,
+    pub particle_position: Option<Array<FilesystemStore>>,
+    pub particle_count: Option<u64>,
     pub travel_length: Array<FilesystemStore>,
     pub travel_angle: Array<FilesystemStore>,
     // TODO take the settings struct and store in a single array, provide a python function to parse it. Or does this make data analysis too hard?
@@ -922,17 +1425,38 @@ impl Scenario {
                     "Missing or invalid 'number_of_runs' attribute in scenario '{site_name}/{scenario_name}'"
                 ))
             })?;
+        let max_number_runs = avalanche_group
+            .attributes()
+            .get("max_number_runs")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(number_of_runs);
+        let max_timesteps = avalanche_group
+            .attributes()
+            .get("max_timesteps")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let flow_velocity = Array::open(store.clone(), &format!("{base}/flow_velocity")).ok();
+        let flow_thickness = Array::open(store.clone(), &format!("{base}/flow_thickness")).ok();
+        let particle_position =
+            Array::open(store.clone(), &format!("{base}/particle_position")).ok();
+        let particle_count = particle_position.as_ref().map(|array| array.shape()[2]);
         Ok(Self {
             site_name: site_name.to_string(),
             scenario_name: scenario_name.to_string(),
             width,
             height,
+            max_number_runs,
+            max_timesteps,
             number_of_runs,
             peak_flow_velocity,
             peak_flow_thickness: Array::open(
                 store.clone(),
                 &format!("{base}/peak_flow_thickness"),
             )?,
+            flow_velocity,
+            flow_thickness,
+            particle_position,
+            particle_count,
             travel_length: Array::open(store.clone(), &format!("{base}/travel_length"))?,
             travel_angle: Array::open(store.clone(), &format!("{base}/travel_angle"))?,
             mu: Array::open(store.clone(), &format!("{base}/mu"))?,
@@ -970,7 +1494,30 @@ impl Scenario {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use compute_core::dem::{Bounds, Dem};
     use tempfile::TempDir;
+
+    fn build_dem(x: &[f32], y: &[f32], data1d: &[f32]) -> Dem {
+        Dem {
+            width: x.len(),
+            height: y.len(),
+            bounds: Bounds {
+                xmin: *x.first().unwrap_or(&0.0),
+                xmax: *x.last().unwrap_or(&0.0),
+                ymin: *y.first().unwrap_or(&0.0),
+                ymax: *y.last().unwrap_or(&0.0),
+            },
+            data1d: data1d.to_vec(),
+            data: Vec::new(),
+            x: x.to_vec(),
+            y: y.to_vec(),
+            cell_size: 1.0,
+            map_factor: 1.0,
+            minimum_elevation: Dem::calculate_minimum_elevation(data1d),
+            source: "test_dem".to_string(),
+            projection: "EPSG:2056".to_string(),
+        }
+    }
 
     #[test_log::test]
     fn test() {
@@ -978,13 +1525,13 @@ mod tests {
         let zarr_path = tmp_dir.path().join("test.zarr");
         let mut output =
             Output::new(zarr_path.to_str().unwrap()).expect("Failed to create Output struct");
+        let dem = build_dem(
+            &[3.0, 4.0, 5.0],
+            &[2.0, 3.0],
+            &[1000.0, 2000.0, 3000.0, 4000.0, 5000.0, 6000.0],
+        );
         output
-            .add_new_site(
-                "site_test",
-                vec![2.0, 3.0],
-                &[3.0, 4.0, 5.0],
-                &[1000.0, 2000.0, 3000.0, 4000.0, 5000.0, 6000.0],
-            )
+            .add_new_site("site_test", &dem)
             .expect("Failed to add new site");
         output
             .add_new_scenario(
@@ -1031,16 +1578,14 @@ mod tests {
         // Dummy dimensions and properties
         let y_coords = vec![1000.0, 950.0, 900.0]; // height = 3
         let x_coords = vec![500.0, 550.0, 600.0, 650.0]; // width = 4
-        let dem = vec![2100.0; 12]; // 3x4
+        let dem = build_dem(&x_coords, &y_coords, &vec![2100.0; 12]); // 3x4
         let release_area = vec![1.5; 12];
 
         let max_timesteps = 50;
         let max_number_runs = 5;
 
         // 2. Register site
-        output
-            .add_new_site("Chamonix", y_coords.clone(), &x_coords, &dem)
-            .unwrap();
+        output.add_new_site("Chamonix", &dem).unwrap();
 
         // 3. Register scenario
         output
@@ -1115,5 +1660,176 @@ mod tests {
             dem_chunk_file.exists(),
             "DEM chunk wasn't written to the expected location."
         );
+    }
+
+    #[test_log::test]
+    fn test_write_flow_fields_lazily_creates_optional_grids() {
+        let tmp_dir = TempDir::new().unwrap();
+        let zarr_path = tmp_dir.path().join("flow_fields.zarr");
+        let mut output = Output::new(zarr_path.to_str().unwrap()).unwrap();
+
+        let y_coords = vec![1000.0, 950.0, 900.0];
+        let x_coords = vec![500.0, 550.0, 600.0, 650.0];
+        let dem = build_dem(&x_coords, &y_coords, &vec![2100.0; 12]);
+        let release_area = vec![1.5; 12];
+
+        output.add_new_site("Chamonix", &dem).unwrap();
+        output
+            .add_new_scenario(
+                "Chamonix",
+                "Valley_A",
+                2,
+                10,
+                &release_area,
+                32.5,
+                15000.0,
+                y_coords,
+                &x_coords,
+            )
+            .unwrap();
+
+        let velocity = vec![1.0f32; 12];
+        let thickness = vec![0.5f32; 12];
+
+        output
+            .write_flow_fields("Chamonix", "Valley_A", 0, 3, &velocity, &thickness)
+            .unwrap();
+
+        let scenario = output.scenarios.get("Chamonix/Valley_A").unwrap();
+        assert!(scenario.flow_velocity.is_some());
+        assert!(scenario.flow_thickness.is_some());
+        assert!(
+            zarr_path
+                .join("Chamonix/Valley_A/flow_velocity/zarr.json")
+                .exists()
+        );
+        assert!(
+            zarr_path
+                .join("Chamonix/Valley_A/flow_thickness/zarr.json")
+                .exists()
+        );
+
+        let bad_result =
+            output.write_flow_fields("Chamonix", "Valley_A", 0, 3, &[1.0f32; 11], &thickness);
+        assert!(bad_result.is_err());
+    }
+
+    #[test_log::test]
+    fn test_write_particle_position_lazily_creates_and_validates_shape() {
+        let tmp_dir = TempDir::new().unwrap();
+        let zarr_path = tmp_dir.path().join("particle_position.zarr");
+        let mut output = Output::new(zarr_path.to_str().unwrap()).unwrap();
+
+        let y_coords = vec![1000.0, 950.0, 900.0];
+        let x_coords = vec![500.0, 550.0, 600.0, 650.0];
+        let dem = build_dem(&x_coords, &y_coords, &vec![2100.0; 12]);
+        let release_area = vec![1.5; 12];
+
+        output.add_new_site("Chamonix", &dem).unwrap();
+        output
+            .add_new_scenario(
+                "Chamonix",
+                "Valley_A",
+                2,
+                10,
+                &release_area,
+                32.5,
+                15000.0,
+                y_coords,
+                &x_coords,
+            )
+            .unwrap();
+
+        let particle_positions = vec![
+            10.0f32, 11.0, 12.0, // particle 0: x,y,z
+            13.0, 14.0, 15.0, // particle 1: x,y,z
+        ];
+        output
+            .write_particle_position("Chamonix", "Valley_A", 0, 3, &particle_positions)
+            .unwrap();
+
+        let scenario = output.scenarios.get("Chamonix/Valley_A").unwrap();
+        assert!(scenario.particle_position.is_some());
+        assert_eq!(scenario.particle_count, Some(2));
+        assert!(
+            zarr_path
+                .join("Chamonix/Valley_A/particle_position/zarr.json")
+                .exists()
+        );
+
+        let bad_result =
+            output.write_particle_position("Chamonix", "Valley_A", 0, 3, &[10.0f32, 11.0, 12.0]);
+        assert!(bad_result.is_err());
+
+        let bad_component_count = output.write_particle_position(
+            "Chamonix",
+            "Valley_A",
+            0,
+            4,
+            &[10.0f32, 11.0, 12.0, 13.0],
+        );
+        assert!(bad_component_count.is_err());
+    }
+
+    #[test_log::test]
+    fn test_read_dem_and_release_area_with_partial_matches() {
+        let tmp_dir = TempDir::new().unwrap();
+        let zarr_path = tmp_dir.path().join("reader_test.zarr");
+        let mut output = Output::new(zarr_path.to_str().unwrap()).unwrap();
+
+        let y_coords = vec![1000.0, 950.0, 900.0];
+        let x_coords = vec![500.0, 550.0, 600.0, 650.0];
+        let dem_data = vec![2100.0; 12];
+        let dem = build_dem(&x_coords, &y_coords, &dem_data);
+        let release_area = vec![1.5f32; 12];
+
+        output.add_new_site("Chamonix", &dem).unwrap();
+        output
+            .add_new_scenario(
+                "Chamonix",
+                "Valley_A",
+                2,
+                10,
+                &release_area,
+                32.5,
+                15000.0,
+                y_coords,
+                &x_coords,
+            )
+            .unwrap();
+
+        let loaded_dem = Output::read_dem_from_store(zarr_path.to_str().unwrap(), "amoni").unwrap();
+        assert_eq!(loaded_dem.width, dem.width);
+        assert_eq!(loaded_dem.height, dem.height);
+        assert_eq!(loaded_dem.data1d.len(), dem_data.len());
+
+        let loaded_release_area =
+            Output::read_release_area_from_store(zarr_path.to_str().unwrap(), "hamon", "ley_a")
+                .unwrap();
+        assert_eq!(loaded_release_area.len(), release_area.len());
+        assert!(
+            loaded_release_area
+                .iter()
+                .zip(release_area.iter())
+                .all(|(a, b)| (a - b).abs() < 0.01)
+        );
+    }
+
+    #[test_log::test]
+    fn test_readers_fail_on_ambiguous_partial_match() {
+        let tmp_dir = TempDir::new().unwrap();
+        let zarr_path = tmp_dir.path().join("reader_ambiguous.zarr");
+        let mut output = Output::new(zarr_path.to_str().unwrap()).unwrap();
+
+        let y_coords = vec![1000.0, 950.0, 900.0];
+        let x_coords = vec![500.0, 550.0, 600.0, 650.0];
+        let dem = build_dem(&x_coords, &y_coords, &vec![2100.0; 12]);
+
+        output.add_new_site("Chamonix", &dem).unwrap();
+        output.add_new_site("Chamrousse", &dem).unwrap();
+
+        let ambiguous_site_result =
+            Output::read_dem_from_store(zarr_path.to_str().unwrap(), "cham");
+        assert!(ambiguous_site_result.is_err());
     }
 }

@@ -592,6 +592,8 @@ async fn load_png_as_dem(path: &str) -> Result<Dem, DataProcessorError> {
         bounds,
         map_factor: 1.0,
         minimum_elevation: f32::INFINITY,
+        source: path.to_string(),
+        projection: "unknown".to_string(),
     };
     dem.data = to_2d(&dem.data1d, width, height);
     Ok(dem)
@@ -621,6 +623,8 @@ fn load_asc_as_dem(path: &str) -> Result<Dem, DataProcessorError> {
         bounds,
         map_factor: 1.0,
         minimum_elevation: f32::INFINITY,
+        source: path.to_string(),
+        projection: "unknown".to_string(),
     };
     dem.data = to_2d(&dem.data1d, dem.width, dem.height);
     Ok(dem)
@@ -648,6 +652,8 @@ fn load_tiff_as_dem(path: &str) -> Result<Dem, DataProcessorError> {
         bounds: tiff.metadata.bounds,
         map_factor: 1.0,
         minimum_elevation: f32::INFINITY, // Will be calculated later
+        source: path.to_string(),
+        projection: format!("EPSG:{}", tiff.metadata.epsg_code),
     };
     dem.data = to_2d(&dem.data1d, dem.width, dem.height);
     Ok(dem)

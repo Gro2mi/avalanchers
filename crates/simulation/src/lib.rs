@@ -286,6 +286,8 @@ impl Simulation {
             },
             x: linspace(bounds_xmin, bounds_xmax, width),
             y: linspace(bounds_ymin, bounds_ymax, height),
+            source: String::new(),
+            projection: String::new(),
         };
         self.settings.set_dem(&self.dem);
 
@@ -424,12 +426,7 @@ impl Simulation {
 
         let output = self.output.as_mut().unwrap();
         if !output.site_exists(&site_name) {
-            output.add_new_site(
-                &site_name,
-                self.dem.y.clone(),
-                &self.dem.x,
-                &self.dem.data1d,
-            )?;
+            output.add_new_site(&site_name, &self.dem)?;
         }
 
         if output.scenario_exists(&site_name, &scenario_name) {

@@ -1,3 +1,5 @@
+//! Python bindings for the avalanchers simulation engine.
+
 use compute_core::{TimestepData, list_devices, settings::Settings};
 use data_processor::{settings_from_json_file, settings_to_json_file};
 use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray2, ToPyArray};
@@ -19,6 +21,7 @@ impl<T, E: std::fmt::Display> IntoPyResult<T> for Result<T, E> {
     }
 }
 
+/// Return the names of GPUs available to the simulation backend.
 #[pyfunction]
 pub fn list_available_gpus() -> PyResult<Vec<String>> {
     let devices = pollster::block_on(list_devices())
@@ -26,6 +29,7 @@ pub fn list_available_gpus() -> PyResult<Vec<String>> {
     Ok(devices)
 }
 
+/// Snapshot of a single simulation timestep of a random particle
 #[pyclass]
 pub struct PyTimestepData {
     // We store the inner core struct
@@ -88,6 +92,7 @@ pub fn to_2d_numpy<'py, const N: usize>(
         .expect("Failed to convert data to numpy array")
 }
 
+/// Simulation settings container used by the Python API.
 #[pyclass]
 pub struct PySettings {
     pub inner: Settings,
@@ -96,6 +101,7 @@ pub struct PySettings {
 #[allow(clippy::new_without_default)]
 #[pymethods]
 impl PySettings {
+    /// Create a new settings object with default values.
     #[new]
     pub fn new() -> Self {
         Self {
@@ -103,6 +109,7 @@ impl PySettings {
         }
     }
 
+    /// Load settings from a JSON file.
     #[staticmethod]
     pub fn from_json(path: String) -> PyResult<Self> {
         let settings = settings_from_json_file(&path)
@@ -110,6 +117,7 @@ impl PySettings {
         Ok(PySettings { inner: settings })
     }
 
+    /// Write the current settings to a JSON file.
     pub fn to_json(&self, path: String) -> PyResult<()> {
         settings_to_json_file(&self.inner, &path)
             .map_err(|e| PyErr::new::<PyIOError, _>(e.to_string()))
@@ -126,6 +134,7 @@ impl PySettings {
     }
 }
 
+/// Main avalanche simulation object
 #[pyclass]
 pub struct PySimulation {
     inner: Simulation,
@@ -133,6 +142,7 @@ pub struct PySimulation {
 
 #[pymethods]
 impl PySimulation {
+    /// Create a simulation instance on a specific GPU, if provided.
     #[staticmethod]
     #[pyo3(signature = (gpu=None))]
     pub fn new(gpu: Option<String>) -> PyResult<Self> {
@@ -140,6 +150,7 @@ impl PySimulation {
         Ok(PySimulation { inner })
     }
 
+    /// Configure the simulation from a Python dictionary of settings.
     pub fn create(&mut self, dict: &Bound<'_, PyAny>) -> PyResult<()> {
         let json_value: serde_json::Value = depythonize(dict)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyTypeError, _>(e.to_string()))?;
@@ -156,8 +167,8 @@ impl PySimulation {
         Ok(())
     }
 
+    /// Initialize the simulation from the bundled example digital elevation model.
     pub fn create_example(&mut self, dem_path: String) -> PyResult<()> {
-        // block_on is used here to bridge async Rust to sync Python
         self.inner
             .create_example(&dem_path)
             .block_on()
@@ -243,14 +254,17 @@ impl PySimulation {
         Ok(())
     }
 
+    /// Run the simulation to completion.
     pub fn run(&mut self) -> PyResult<()> {
         self.inner.run().block_on().map_runtime_err()
     }
 
+    /// Run post-processing steps after the simulation finishes.
     pub fn post_process(&mut self) -> PyResult<()> {
         self.inner.post_process().block_on().map_runtime_err()
     }
 
+    /// Save the current results to disk. Optionally takes an output path. Default is avalanchers.zarr
     #[pyo3(signature = (path=None))]
     pub fn save(&mut self, path: Option<String>) -> PyResult<()> {
         match path {
@@ -263,6 +277,7 @@ impl PySimulation {
         }
     }
 
+    /// Evaluate the final simulation against the configured metrics.
     pub fn evaluate<'a>(&mut self, py: Python<'a>) -> PyResult<Bound<'a, PyDict>> {
         let (a, b, c, d) = self.inner.evaluate().block_on().map_runtime_err()?;
 
@@ -275,6 +290,7 @@ impl PySimulation {
         Ok(dict)
     }
 
+    /// Prepare the simulation resources before running it.
     pub fn prepare(&mut self) -> PyResult<()> {
         self.inner.prepare().block_on().map_runtime_err()
     }
@@ -494,6 +510,7 @@ type PyTexture<'py> = (
     Bound<'py, PyArray2<f32>>,
 );
 
+/// Python module entry point for the avalanche simulator.
 #[pymodule]
 fn _avalanchers(m: &Bound<'_, PyModule>) -> PyResult<()> {
     pyo3_log::init();

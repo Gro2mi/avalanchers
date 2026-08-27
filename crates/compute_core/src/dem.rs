@@ -30,6 +30,8 @@ pub struct Dem {
     pub cell_size: f32,
     pub map_factor: f32,
     pub minimum_elevation: f32,
+    pub source: String,
+    pub projection: String,
 }
 
 impl Hash for Dem {
@@ -70,6 +72,8 @@ impl Default for Dem {
             cell_size: 1.0,
             map_factor: 1.0,
             minimum_elevation: 1.0,
+            source: String::new(),
+            projection: String::new(),
         }
     }
 }
@@ -277,6 +281,8 @@ mod tests {
             cell_size: 1.0,
             map_factor: 1.0,
             minimum_elevation: 1.0,
+            source: String::new(),
+            projection: String::new(),
         };
         let pt = Point {
             x: 1.0,
@@ -307,6 +313,8 @@ mod tests {
             cell_size: 2.0,
             map_factor: 1.0,
             minimum_elevation: 1.0,
+            source: String::new(),
+            projection: String::new(),
         };
 
         let mask = vec![
@@ -441,6 +449,8 @@ mod tests {
             cell_size: 5.0,
             map_factor: 1.0,
             minimum_elevation: 1.0,
+            source: String::new(),
+            projection: String::new(),
         };
 
         let dem2 = dem1.clone();
@@ -465,6 +475,8 @@ mod tests {
             cell_size: 5.0,
             map_factor: 1.0,
             minimum_elevation: 1.0,
+            source: String::new(),
+            projection: String::new(),
         };
 
         let mut dem2 = dem1.clone();
@@ -491,6 +503,8 @@ mod tests {
             cell_size: 5.0,
             map_factor: 1.0,
             minimum_elevation: 1.0,
+            source: String::new(),
+            projection: String::new(),
         };
 
         let mut dem2 = dem1.clone();
