@@ -85,8 +85,8 @@ def test_simulation_save():
     assert_dataarray_shape(ds, "peak_flow_velocity", 87, 70)
     assert_dataarray_shape(ds, "peak_flow_thickness", 87, 70)
     assert_dataarray_shape(ds, "release_area", 87, 70)
-    assert np.isclose(ds.mu.isel(run=1).item(), 0.155)
-    assert np.isclose(ds.xsi.isel(run=1).item(), 4000.0)
+    assert np.isclose(ds.mu.isel(run=1).item(), 0.2)
+    assert np.isclose(ds.xsi.isel(run=1).item(), 2000.0)
     assert np.isclose(ds.travel_angle.isel(run=1).item(), 25.0)
     assert np.isclose(ds.travel_length.isel(run=1).item(), 1000.0)
     if os.path.exists(path):
