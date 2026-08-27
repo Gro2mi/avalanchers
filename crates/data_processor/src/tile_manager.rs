@@ -480,6 +480,9 @@ impl TileManager {
             },
             map_factor: 1.0,
             minimum_elevation: f32::INFINITY, // Will be calculated later
+            source: "Swiss map data © swisstopo\nSource: Federal Office of Topography swisstopo"
+                .to_string(),
+            projection: "EPSG:2056".to_string(),
         };
         dem.data = to_2d(&dem.data1d, dem.width, dem.height);
 

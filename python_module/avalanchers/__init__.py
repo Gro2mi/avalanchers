@@ -20,7 +20,34 @@ def create_mesh(sim):
     return x, y, dem, dem_mask
 
 
-def plot3d(sim, parameter, particles=False, threshold_value=1e-2, particle_threshold=0):
+def blur_nan_grid(data, passes=1):
+    blurred = data.copy()
+    for _ in range(max(0, int(passes))):
+        valid = np.isfinite(blurred)
+        values = np.where(valid, blurred, 0.0)
+        weights = valid.astype(np.float32)
+
+        values_sum = np.zeros_like(blurred, dtype=np.float32)
+        weights_sum = np.zeros_like(blurred, dtype=np.float32)
+
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                values_sum += np.roll(np.roll(values, dy, axis=0), dx, axis=1)
+                weights_sum += np.roll(np.roll(weights, dy, axis=0), dx, axis=1)
+
+        with np.errstate(invalid="ignore", divide="ignore"):
+            blurred = np.where(weights_sum > 0, values_sum / weights_sum, np.nan)
+    return blurred
+
+
+def plot3d(
+    sim,
+    parameter,
+    particles=False,
+    threshold_value=1e-2,
+    particle_threshold=0,
+    blur_passes=0,
+):
     try:
         import pyvista as pv
     except ImportError:
@@ -45,6 +72,9 @@ def plot3d(sim, parameter, particles=False, threshold_value=1e-2, particle_thres
     #     data[sim.peak_velocity < 1] = np.nan
     # if parameter == "peak_flow_thickness":
     #     data[sim.peak_flow_thickness < 0.5] = np.nan
+
+    if blur_passes > 0:
+        data = blur_nan_grid(data, passes=blur_passes)
 
     # 2. Create the StructuredGrid
     # We pass x, y, and the elevation (dem) directly as coordinates
