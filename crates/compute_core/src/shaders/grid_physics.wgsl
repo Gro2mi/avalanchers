@@ -1,13 +1,12 @@
 @group(0) @binding(1) var<storage> grid_mass_atomic: array<u32>;
 @group(0) @binding(2) var normals_texture: texture_2d<f32>;
-@group(0) @binding(3) var<storage, read_write> grid_forces: array<vec2f>;
+@group(0) @binding(3) var<storage, read_write> grad_h_buffer: array<vec2f>;
 @group(0) @binding(4) var<storage, read_write> peak_flow_thickness: array<f32>;
 @group(0) @binding(5) var<storage, read_write> atomic_values: AtomicValues;
 @group(0) @binding(6) var<storage, read_write> grid_momentum_atomic: array<i32>; // Combined u, v
 @group(0) @binding(7) var curvature_texture: texture_2d<f32>;
 @group(0) @binding(8) var<storage, read_write> new_cells_rolling_window: array<u32>;
 @group(0) @binding(9) var<storage, read_write> sim_info: SimInfo;
-
 
 @compute @workgroup_size(WG_SIZE_2D, WG_SIZE_2D, 1)
 fn grid_physics(@builtin(global_invocation_id) id: vec3u) {
@@ -17,7 +16,7 @@ fn grid_physics(@builtin(global_invocation_id) id: vec3u) {
     if sim_info.flags >= SIM_INFO_STOPPED {
         return;
     }
-    
+
     let use_particle_interaction: bool = (sim_settings.flags & (1u << 1u)) != 0u;
     if !use_particle_interaction {
         new_cells_rolling_window[sim_info.timestep % 40u] = new_cells_rolling_window[sim_info.timestep % 40u] + 1u; // update new cell count for diagnostics
@@ -33,7 +32,7 @@ fn grid_physics(@builtin(global_invocation_id) id: vec3u) {
     let v = f32(grid_momentum_atomic[idx * 2 + 1]) * INV_MOMENTUM_FACTOR / (mass + 1e-6);
     // peak_flow_thickness[idx] = max(peak_flow_thickness[idx], h);
     if peak_flow_thickness[idx] < h {
-        if peak_flow_thickness[idx] < 1e-5 {
+        if peak_flow_thickness[idx] < 1e-3 {
             new_cells_rolling_window[sim_info.timestep % 40u] = new_cells_rolling_window[sim_info.timestep % 40u] + 1u; // update new cell count for diagnostics
         }
         peak_flow_thickness[idx] = h;
@@ -45,14 +44,9 @@ fn grid_physics(@builtin(global_invocation_id) id: vec3u) {
     // TODO calculate divergence and earth pressure coefficient
     // let div_u = (get_u(id.x + 1, id.y) - get_u(id.x - 1, id.y)) / (2.0 * dx);
     var k = 0f;
-    
+
     let use_earth_pressure_coefficient: bool = (sim_settings.flags & (1u << 2u)) != 0u;
-    if use_earth_pressure_coefficient {
-        let div_u = div_u(id.x, id.y, mass);
-        k = earth_pressure_coefficient(radians(sim_settings.internal_friction_angle), radians(sim_settings.basal_friction_angle), div_u);
-    } else {
-        k = 1.0;
-    }
+
     // let k = 1.0;
     // 3. Lateral Pressure Force[cite: 3]
     // Force = -0.5 * g * cos(theta) * k * gradient(h^2)
@@ -64,44 +58,56 @@ fn grid_physics(@builtin(global_invocation_id) id: vec3u) {
     //     (get_h2(id.x + 1, id.y) - get_h2(id.x - 1, id.y)) / (2.0 * sim_settings.cell_size),
     //     (get_h2(id.x, id.y + 1) - get_h2(id.x, id.y - 1)) / (2.0 * sim_settings.cell_size)
     // ), vec2f(0.0, 0.0), h < 1e-5);
-    let grad_h2 = vec2f(
+    if h > 1e-3 {
+        if use_earth_pressure_coefficient {
+            let div_u = div_u(id.x, id.y, mass);
+            k = earth_pressure_coefficient(radians(sim_settings.internal_friction_angle), radians(sim_settings.basal_friction_angle), div_u);
+        } else {
+            k = 1.0;
+        }
+        let grad_h2 = vec2f(
         // TODO account for slope in x and y direction. multiply by cos_theta_x
-        (get_h2(id.x + 1, id.y) - get_h2(id.x - 1, id.y)) / (2.0 * sim_settings.cell_size),
-        (get_h2(id.x, id.y + 1) - get_h2(id.x, id.y - 1)) / (2.0 * sim_settings.cell_size)
-    );
-    let grad_h = grad_h2 * 0.5 / (h + 1e-5);
+            (get_h2(id.x + 1, id.y) - get_h2(id.x - 1, id.y)) / (2.0 * sim_settings.cell_size),
+            (get_h2(id.x, id.y + 1) - get_h2(id.x, id.y - 1)) / (2.0 * sim_settings.cell_size)
+        );
+        let grad_h = grad_h2 * 0.5 / h;
 
-    // TODO do i need a slope limiter like minmod?
-    // 1. Fetch the center value once to save redundant lookups
-    // let h2_c = get_h2(id.x, id.y);
+        // TODO do i need a slope limiter like minmod?
+        // 1. Fetch the center value once to save redundant lookups
+        // let h2_c = get_h2(id.x, id.y);
 
-    // // 2. Fetch the 4 neighbors
-    // let h2_r = get_h2(id.x + 1, id.y);
-    // let h2_l = get_h2(id.x - 1, id.y);
-    // let h2_t = get_h2(id.x, id.y + 1);
-    // let h2_b = get_h2(id.x, id.y - 1);
+        // // 2. Fetch the 4 neighbors
+        // let h2_r = get_h2(id.x + 1, id.y);
+        // let h2_l = get_h2(id.x - 1, id.y);
+        // let h2_t = get_h2(id.x, id.y + 1);
+        // let h2_b = get_h2(id.x, id.y - 1);
 
-    // // 3. Calculate forward and backward differences in X
-    // let dx_fwd = (h2_r - h2_c) / sim_settings.cell_size;
-    // let dx_bwd = (h2_c - h2_l) / sim_settings.cell_size;
+        // // 3. Calculate forward and backward differences in X
+        // let dx_fwd = (h2_r - h2_c) / sim_settings.cell_size;
+        // let dx_bwd = (h2_c - h2_l) / sim_settings.cell_size;
 
-    // // 4. Calculate forward and backward differences in Y
-    // let dy_fwd = (h2_t - h2_c) / sim_settings.cell_size;
-    // let dy_bwd = (h2_c - h2_b) / sim_settings.cell_size;
+        // // 4. Calculate forward and backward differences in Y
+        // let dy_fwd = (h2_t - h2_c) / sim_settings.cell_size;
+        // let dy_bwd = (h2_c - h2_b) / sim_settings.cell_size;
 
-    // // 5. Apply the Minmod limiter to get the stable gradient
-    // let grad_h2 = vec2f(
-    //     minmod(dx_fwd, dx_bwd),
-    //     minmod(dy_fwd, dy_bwd)
-    // );
+        // // 5. Apply the Minmod limiter to get the stable gradient
+        // let grad_h2 = vec2f(
+        //     minmod(dx_fwd, dx_bwd),
+        //     minmod(dy_fwd, dy_bwd)
+        // );
 
-    // 6. Recover grad_h (Chain rule: grad(h^2) = 2 * h * grad(h))
-    // let grad_h = grad_h2 * 0.5 / (h + 1e-5);
-    // correct for slope sqrt(1-nx²), and again sqrt(1-nx²) to rotate it into 3d coordinates
-    // let slope_corrected_grad_h2 = grad_h2 * vec2f(sqrt(1.0 - n.x * n.x), sqrt(1.0 - n.y * n.y));
-    let slope_corrected_grad_h = grad_h * vec2f(sqrt(1.0 - n.x * n.x), sqrt(1.0 - n.y * n.y));
-    let lateral_factor = select(vec2f(0.0), slope_corrected_grad_h, length(slope_corrected_grad_h) > tan(radians(sim_settings.internal_friction_angle)));
-    grid_forces[idx] = -g * n.z * k * slope_corrected_grad_h;
+        // 6. Recover grad_h (Chain rule: grad(h^2) = 2 * h * grad(h))
+        // let grad_h = grad_h2 * 0.5 / (h + 1e-5);
+        // correct for slope sqrt(1-nx²), and again sqrt(1-nx²) to rotate it into 3d coordinates
+        // let slope_corrected_grad_h2 = grad_h2 * vec2f(sqrt(1.0 - n.x * n.x), sqrt(1.0 - n.y * n.y));
+        let slope_corrected_grad_h = grad_h * vec2f(sqrt(1.0 - n.x * n.x), sqrt(1.0 - n.y * n.y));
+        let lateral_factor = select(vec2f(0.0), slope_corrected_grad_h, length(slope_corrected_grad_h) > tan(radians(sim_settings.internal_friction_angle)));
+        // k = 1;
+        // grad_h_buffer[idx] = -g * n.z * k * slope_corrected_grad_h;
+        grad_h_buffer[idx] = -k * slope_corrected_grad_h;
+    } else {
+        grad_h_buffer[idx] = vec2f(0.0, 0.0);
+    }
 }
 
 fn minmod(a: f32, b: f32) -> f32 {
@@ -147,24 +153,20 @@ fn earth_pressure_coefficient(
     let cos_phi = cos(phi);
     let cos_delta = cos(delta);
 
-    let inside =
-        1.0 -
+    let inside = 1.0 -
         (cos_phi * cos_phi) /
         (cos_delta * cos_delta);
 
     // numerical safety
     let root = sqrt(max(inside, 0.0));
 
-    let sec_phi2 =
-        1.0 / (cos_phi * cos_phi);
+    let sec_phi2 = 1.0 / (cos_phi * cos_phi);
 
     // active for expansion
-    let Ka =
-        2.0 * (1.0 - root) * sec_phi2 - 1.0;
+    let Ka = 2.0 * (1.0 - root) * sec_phi2 - 1.0;
 
     // passive for compression
-    let Kp =
-        2.0 * (1.0 + root) * sec_phi2 - 1.0;
+    let Kp = 2.0 * (1.0 + root) * sec_phi2 - 1.0;
 
     return select(Kp, Ka, div_u > 0.0);
 }
@@ -270,6 +272,15 @@ fn cellf_to_uv(cell: vec2f) -> vec2f {
     return (cell + 0.5) / vec2f(sim_settings.grid_shape);
 }
 
+fn position_to_cell(position: vec3f) -> vec2u {
+    return vec2u(
+        floor(position.xy / sim_settings.cell_size)
+    );
+}
+
+fn cell_center_xy(cell: vec2u) -> vec2f {
+    return (vec2f(cell) + 0.5) * sim_settings.cell_size;
+}
 
 fn position_to_uv(position: vec3f) -> vec2f {
     return (position.xy + 0.5 * sim_settings.cell_size) / (vec2f(sim_settings.world_size)); // add some padding to ensure particles outside the world bounds are still captured in the simulation info

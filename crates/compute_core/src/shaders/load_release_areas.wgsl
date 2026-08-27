@@ -122,6 +122,15 @@ fn cellf_to_uv(cell: vec2f) -> vec2f {
     return (cell + 0.5) / vec2f(sim_settings.grid_shape);
 }
 
+fn position_to_cell(position: vec3f) -> vec2u {
+    return vec2u(
+        floor(position.xy / sim_settings.cell_size)
+    );
+}
+
+fn cell_center_xy(cell: vec2u) -> vec2f {
+    return (vec2f(cell) + 0.5) * sim_settings.cell_size;
+}
 
 fn position_to_uv(position: vec3f) -> vec2f {
     return (position.xy + 0.5 * sim_settings.cell_size) / (vec2f(sim_settings.world_size)); // add some padding to ensure particles outside the world bounds are still captured in the simulation info
