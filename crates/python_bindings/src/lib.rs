@@ -307,14 +307,41 @@ impl PySimulation {
     }
 
     #[getter]
-    pub fn get_terrain_l_x<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f32>>> {
-        let terrain = self.inner.get_terrain_l_x().block_on().map_runtime_err()?;
+    pub fn get_terrain_geometry_x<'py>(
+        &mut self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        let terrain = self
+            .inner
+            .get_terrain_geometry_x()
+            .block_on()
+            .map_runtime_err()?;
         self.get_layer_f32(py, terrain.to_vec())
     }
 
     #[getter]
-    pub fn get_terrain_l_y<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f32>>> {
-        let terrain = self.inner.get_terrain_l_y().block_on().map_runtime_err()?;
+    pub fn get_terrain_geometry_y<'py>(
+        &mut self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        let terrain = self
+            .inner
+            .get_terrain_geometry_y()
+            .block_on()
+            .map_runtime_err()?;
+        self.get_layer_f32(py, terrain.to_vec())
+    }
+
+    #[getter]
+    pub fn get_terrain_geometry_z<'py>(
+        &mut self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        let terrain = self
+            .inner
+            .get_terrain_geometry_z()
+            .block_on()
+            .map_runtime_err()?;
         self.get_layer_f32(py, terrain.to_vec())
     }
 

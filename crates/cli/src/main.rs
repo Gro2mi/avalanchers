@@ -55,8 +55,7 @@ fn main() -> Result<()> {
     let settings = Settings::from_json(&file_path.to_string_lossy())
         .expect("Failed to load settings from JSON file");
 
-    let mut simulation: Simulation = block_on(Simulation::new())?;
-    block_on(simulation.create(settings.clone()))?;
+    let mut simulation: Simulation = block_on(Simulation::new_with_settings(settings.clone()))?;
 
     block_on(simulation.run())?;
     timer_checkpoint("Fetch data from GPU");
@@ -72,34 +71,47 @@ fn main() -> Result<()> {
         "Peak velocity during simulation: {:.2} m/s",
         peak_velocity.max_value().unwrap(),
     );
-    // timer_checkpoint("Write data to disk");
-    // let bytes_v: &[u8] = unsafe {
-    //     std::slice::from_raw_parts(
-    //         peak_velocity.as_ptr() as *const u8,
-    //         peak_velocity.len() * std::mem::size_of::<f32>(),
-    //     )
-    // };
-    // data_processor::write_bin(Path::new("peak_velocity.bin"), bytes_v);
-    // let peak_flow_thickness = block_on(simulation.fetch_peak_flow_thickness()).expect("Failed to get peak flow thickness");
-    // let bytes_f: &[u8] = unsafe {
-    //     std::slice::from_raw_parts(
-    //         peak_flow_thickness.as_ptr() as *const u8,
-    //         peak_flow_thickness.len() * std::mem::size_of::<f32>(),
-    //     )
-    // };
-    // data_processor::write_bin(Path::new("peak_flow_thickness.bin"), bytes_f);
-
-    // let cell_count = block_on(simulation.fetch_cell_count()).expect("Failed to get cell count");
-    // let bytes_c: &[u8] = unsafe {
-    //     std::slice::from_raw_parts(
-    //         cell_count.as_ptr() as *const u8,
-    //         cell_count.len() * std::mem::size_of::<f32>(),
-    //     )
-    // };
-    // data_processor::write_bin(Path::new("cell_count.bin"), bytes_c);
 
     // info!("{}", timer_get_summary());
 
+    {
+        let vel = block_on(simulation.fetch_particles_velocity())
+            .unwrap()
+            .clone();
+        let pos = block_on(simulation.fetch_particles_position())
+            .unwrap()
+            .clone();
+        let stopped = block_on(simulation.fetch_particles_stopped())
+            .unwrap()
+            .clone();
+        let max_speed = vel
+            .iter()
+            .map(|v| (v[0] * v[0] + v[1] * v[1]).sqrt())
+            .fold(0.0f32, f32::max);
+        debug!("DBG max particle speed: {}", max_speed);
+        debug!("DBG first positions: {:?}", &pos[..5.min(pos.len())]);
+        debug!("DBG first velocities: {:?}", &vel[..5.min(vel.len())]);
+        let n_stopped = stopped.iter().filter(|&&s| s != 0).count();
+        let max_stop_step = stopped.iter().copied().max().unwrap_or(0);
+        debug!(
+            "DBG stopped {} / {}, max stop marker {}",
+            n_stopped,
+            stopped.len(),
+            max_stop_step
+        );
+        debug!(
+            "DBG sim_info {:?}",
+            block_on(simulation.fetch_sim_info()).unwrap()
+        );
+        debug!(
+            "DBG atomics {:?}",
+            block_on(simulation.fetch_atomic_values()).unwrap()
+        );
+        debug!(
+            "DBG debug buffer {:?}",
+            &block_on(simulation.get_compute_particles_debug()).unwrap()[..20]
+        );
+    }
     info!(
         "Total mass of particles: {:.2} kg",
         block_on(simulation.get_total_mass()).unwrap()

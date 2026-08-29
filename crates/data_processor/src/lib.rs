@@ -769,7 +769,9 @@ pub async fn read_png(path: &str) -> Result<(Vec<u8>, usize, usize), Box<dyn std
 }
 
 pub fn rgba_bytes_to_f32(data: &[u8]) -> Vec<f32> {
-    data.chunks_exact(4)
+    data.as_chunks::<4>()
+        .0
+        .iter()
         .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
         .collect()
 }

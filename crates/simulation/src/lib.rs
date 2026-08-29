@@ -58,6 +58,14 @@ pub struct Simulation {
     pub gpu_cache: GpuCache,
 }
 
+pub struct SimulationLoadResult {
+    pub settings: SimSettings,
+    pub dem: Dem,
+    pub dem_path: String,
+    pub release_areas_path: Option<String>,
+    pub batch_compute_steps: Option<u32>,
+}
+
 impl Simulation {
     pub async fn new() -> Result<Self> {
         timer_new();
@@ -75,6 +83,18 @@ impl Simulation {
             release_areas_array: None,
         })
     }
+
+    pub async fn new_with_settings(settings: Settings) -> Result<Self> {
+        let (simulation, simulation_data) =
+            futures::join!(Simulation::new(), Simulation::load_data(&settings),);
+
+        let mut simulation = simulation?;
+        let simulation_data = simulation_data?;
+
+        simulation.apply_data(simulation_data);
+        Ok(simulation)
+    }
+
     pub fn get_state(&self) -> SimulationState {
         self.state
     }
@@ -87,30 +107,53 @@ impl Simulation {
         self.sim_info.elevation_threshold
     }
 
-    pub async fn create(&mut self, settings: Settings) -> Result<()> {
+    pub async fn load_data(settings: &Settings) -> Result<SimulationLoadResult> {
         timer_checkpoint("Start create");
+
         let (settings_result, dem_result) =
-            data_processor::create_sim_settings_and_dem(&settings).await;
-        self.settings = settings_result;
-        if let Some(batch_steps) = settings.batch_compute_steps {
+            data_processor::create_sim_settings_and_dem(settings).await;
+
+        timer_checkpoint("Load settings");
+
+        Ok(SimulationLoadResult {
+            settings: settings_result,
+            dem: dem_result,
+            batch_compute_steps: settings.batch_compute_steps,
+            dem_path: settings.dem_path.clone().unwrap_or_default(),
+            release_areas_path: settings.release_areas_path.clone(),
+        })
+    }
+
+    pub fn apply_data(&mut self, data: SimulationLoadResult) {
+        self.settings = data.settings;
+
+        if let Some(batch_steps) = data.batch_compute_steps {
             self.orchestrator.batch_compute_steps = batch_steps;
         }
-        self.dem = dem_result;
-        self.dem_path = settings.dem_path.unwrap_or_default().clone();
-        self.release_areas_path = settings.release_areas_path.clone();
-        timer_checkpoint("Load settings");
+
+        self.dem = data.dem;
+        self.dem_path = data.dem_path;
+        self.release_areas_path = data.release_areas_path;
+
         self.gpu_cache.reset_all();
+
         if self.dem.data1d.is_empty() {
             self.state = SimulationState::DemMissing;
         } else {
             self.state = SimulationState::DemLoaded;
+
             info!(
-                "Updated simulation with DEM path: {}\nSettings: {:#?}",
+                "Updated simulation with DEM path: {:?}\nSettings: {:#?}",
                 self.dem_path, self.settings
             );
         }
-        timer_checkpoint("Simulation updated/created");
 
+        timer_checkpoint("Simulation updated/created");
+    }
+
+    pub async fn create(&mut self, settings: Settings) -> Result<()> {
+        let data = Self::load_data(&settings).await?;
+        self.apply_data(data);
         Ok(())
     }
 
@@ -418,7 +461,7 @@ impl Simulation {
         );
         self.gpu_cache.reset_simulation_result();
         self.orchestrator
-            .run_compute_particles(
+            .run_sim(
                 &self.settings,
                 self.number_particles,
                 self.dem.minimum_elevation,
@@ -510,76 +553,53 @@ impl Simulation {
         Ok(self.gpu_cache.slope_aspect.clone().unwrap())
     }
 
-    async fn fetch_terrain_metrics_texture(&mut self) -> Result<&TextureRgba<f32>> {
+    async fn fetch_terrain_geometry_texture(&mut self) -> Result<&TextureRgba<f32>> {
         assert!(
             self.state >= SimulationState::TerrainAnalyzed,
-            "Terrain metrics must be computed before reading terrain metrics texture"
+            "Terrain geometry must be computed before reading terrain geometry texture"
         );
-        if self.gpu_cache.terrain_metrics.is_none() {
+        if self.gpu_cache.terrain_geometry.is_none() {
             self.gpu_cache.read_count += 1;
-            self.gpu_cache.terrain_metrics =
-                Some(self.get_texture_data(TextureName::TerrainMetrics).await?);
+            self.gpu_cache.terrain_geometry =
+                Some(self.get_texture_data(TextureName::TerrainGeometry).await?);
         }
-        Ok(self.gpu_cache.terrain_metrics.as_ref().unwrap())
+        Ok(self.gpu_cache.terrain_geometry.as_ref().unwrap())
     }
 
-    pub async fn fetch_terrain_dynamics(&mut self) -> Result<Vec<f32>> {
+    pub async fn fetch_terrain_curvature(&mut self) -> Result<&TextureRgba<f32>> {
         if self.state < SimulationState::TerrainAnalyzed {
-            bail!("Terrain metrics must be computed before reading slope aspect texture");
+            bail!("Terrain curvature must be computed before reading terrain curvature texture");
         }
-        if self.gpu_cache.terrain_dynamics.is_none() {
+        if self.gpu_cache.curvature.is_none() {
             self.gpu_cache.read_count += 1;
-            self.gpu_cache.terrain_dynamics = Some(
-                self.orchestrator
-                    .read_buffer(BufferName::TerrainDynamics)
-                    .await?,
-            );
+            self.gpu_cache.curvature = Some(self.get_texture_data(TextureName::Curvature).await?);
         }
-        info!("{:?}", self.gpu_cache.terrain_dynamics.as_ref().unwrap());
-        Ok(self.gpu_cache.terrain_dynamics.clone().unwrap())
+        Ok(self.gpu_cache.curvature.as_ref().unwrap())
     }
 
     pub async fn get_slope_gravity(&mut self) -> Result<(Vec<f32>, Vec<f32>)> {
-        let data = self.fetch_terrain_dynamics().await?.clone();
-        let g_x = data.iter().step_by(4).copied().collect::<Vec<f32>>();
-        let g_y = data
-            .iter()
-            .skip(1)
-            .step_by(4)
-            .copied()
-            .collect::<Vec<f32>>();
-
+        let g_x = self.fetch_terrain_curvature().await?.a.clone();
+        let g_y = self.fetch_terrain_geometry_texture().await?.a.clone();
         Ok((g_x, g_y))
     }
 
     pub async fn get_curvature(&mut self) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>)> {
-        let k_xy = self.fetch_terrain_metrics_texture().await?.a.clone();
-        let dynamics = self.fetch_terrain_dynamics().await?.clone();
-        let k_x = dynamics
-            .iter()
-            .skip(2)
-            .step_by(4)
-            .copied()
-            .collect::<Vec<f32>>();
-        let k_y = dynamics
-            .iter()
-            .skip(3)
-            .step_by(4)
-            .copied()
-            .collect::<Vec<f32>>();
+        let k_x = self.fetch_terrain_curvature().await?.r.clone();
+        let k_y = self.fetch_terrain_curvature().await?.g.clone();
+        let k_xy = self.fetch_terrain_curvature().await?.b.clone();
         Ok((k_x, k_y, k_xy))
     }
 
-    pub async fn get_terrain_l_x(&mut self) -> Result<Vec<f32>> {
-        Ok(self.fetch_terrain_metrics_texture().await?.r.clone())
+    pub async fn get_terrain_geometry_x(&mut self) -> Result<Vec<f32>> {
+        Ok(self.fetch_terrain_geometry_texture().await?.r.clone())
     }
 
-    pub async fn get_terrain_l_y(&mut self) -> Result<Vec<f32>> {
-        Ok(self.fetch_terrain_metrics_texture().await?.g.clone())
+    pub async fn get_terrain_geometry_y(&mut self) -> Result<Vec<f32>> {
+        Ok(self.fetch_terrain_geometry_texture().await?.g.clone())
     }
 
-    pub async fn get_terrain_jacobian(&mut self) -> Result<Vec<f32>> {
-        Ok(self.fetch_terrain_metrics_texture().await?.b.clone())
+    pub async fn get_terrain_geometry_z(&mut self) -> Result<Vec<f32>> {
+        Ok(self.fetch_terrain_geometry_texture().await?.b.clone())
     }
 
     pub async fn get_dem_texture(&self) -> Result<Vec<f32>> {
@@ -749,8 +769,8 @@ impl Simulation {
         self.fetch_roughness().await?;
         self.fetch_slope_angle().await?;
         self.fetch_slope_aspect().await?;
-        self.fetch_terrain_metrics_texture().await?;
-        self.fetch_terrain_dynamics().await?;
+        self.fetch_terrain_geometry_texture().await?;
+        self.fetch_terrain_curvature().await?;
         self.fetch_release_areas().await?;
         let end = Instant::now();
         trace!(
@@ -913,10 +933,10 @@ mod tests {
                 && sim.gpu_cache.particles_elevation.is_none()
                 && sim.gpu_cache.particles_stopped.is_none()
                 && sim.gpu_cache.roughness.is_none()
-                && sim.gpu_cache.terrain_dynamics.is_none()
-                && sim.gpu_cache.terrain_metrics.is_none()
+                && sim.gpu_cache.curvature.is_none()
+                && sim.gpu_cache.terrain_geometry.is_none()
                 && sim.gpu_cache.release_areas.is_none()
-                && sim.gpu_cache.terrain_metrics.is_none()
+                && sim.gpu_cache.terrain_geometry.is_none()
                 && sim.gpu_cache.slope_angle.is_none()
                 && sim.gpu_cache.slope_aspect.is_none()
                 && sim.gpu_cache.peak_velocity.is_none()
@@ -932,10 +952,10 @@ mod tests {
                 && sim.gpu_cache.particles_elevation.is_none()
                 && sim.gpu_cache.particles_stopped.is_none()
                 && sim.gpu_cache.roughness.is_none()
-                && sim.gpu_cache.terrain_dynamics.is_none()
-                && sim.gpu_cache.terrain_metrics.is_none()
+                && sim.gpu_cache.curvature.is_none()
+                && sim.gpu_cache.terrain_geometry.is_none()
                 && sim.gpu_cache.release_areas.is_none()
-                && sim.gpu_cache.terrain_metrics.is_none()
+                && sim.gpu_cache.terrain_geometry.is_none()
                 && sim.gpu_cache.slope_angle.is_none()
                 && sim.gpu_cache.slope_aspect.is_none()
                 && sim.gpu_cache.peak_velocity.is_none()
@@ -950,10 +970,10 @@ mod tests {
                 && sim.gpu_cache.particles_elevation.is_some()
                 && sim.gpu_cache.particles_stopped.is_some()
                 && sim.gpu_cache.roughness.is_some()
-                && sim.gpu_cache.terrain_dynamics.is_some()
-                && sim.gpu_cache.terrain_metrics.is_some()
+                && sim.gpu_cache.curvature.is_some()
+                && sim.gpu_cache.terrain_geometry.is_some()
                 && sim.gpu_cache.release_areas.is_some()
-                && sim.gpu_cache.terrain_metrics.is_some()
+                && sim.gpu_cache.terrain_geometry.is_some()
                 && sim.gpu_cache.slope_angle.is_some()
                 && sim.gpu_cache.slope_aspect.is_some()
                 && sim.gpu_cache.peak_velocity.is_some()
@@ -969,10 +989,10 @@ mod tests {
                 && sim.gpu_cache.particles_elevation.is_none()
                 && sim.gpu_cache.particles_stopped.is_none()
                 && sim.gpu_cache.roughness.is_none()
-                && sim.gpu_cache.terrain_dynamics.is_none()
-                && sim.gpu_cache.terrain_metrics.is_none()
+                && sim.gpu_cache.curvature.is_none()
+                && sim.gpu_cache.terrain_geometry.is_none()
                 && sim.gpu_cache.release_areas.is_none()
-                && sim.gpu_cache.terrain_metrics.is_none()
+                && sim.gpu_cache.terrain_geometry.is_none()
                 && sim.gpu_cache.slope_angle.is_none()
                 && sim.gpu_cache.slope_aspect.is_none()
                 && sim.gpu_cache.peak_velocity.is_none()
@@ -990,10 +1010,10 @@ mod tests {
         assert!(sim.gpu_cache.particles_elevation.is_none());
         assert!(sim.gpu_cache.particles_stopped.is_none());
         assert!(sim.gpu_cache.release_areas.is_none());
-        assert!(sim.gpu_cache.terrain_dynamics.is_some());
-        assert!(sim.gpu_cache.terrain_metrics.is_some());
+        assert!(sim.gpu_cache.curvature.is_some());
+        assert!(sim.gpu_cache.terrain_geometry.is_some());
         assert!(sim.gpu_cache.roughness.is_some());
-        assert!(sim.gpu_cache.terrain_metrics.is_some());
+        assert!(sim.gpu_cache.terrain_geometry.is_some());
         assert!(sim.gpu_cache.slope_angle.is_some());
         assert!(sim.gpu_cache.slope_aspect.is_some());
         assert!(sim.gpu_cache.peak_velocity.is_none());
@@ -1009,10 +1029,10 @@ mod tests {
         assert!(sim.gpu_cache.particles_elevation.is_none());
         assert!(sim.gpu_cache.particles_stopped.is_none());
         assert!(sim.gpu_cache.release_areas.is_some());
-        assert!(sim.gpu_cache.terrain_dynamics.is_some());
-        assert!(sim.gpu_cache.terrain_metrics.is_some());
+        assert!(sim.gpu_cache.curvature.is_some());
+        assert!(sim.gpu_cache.terrain_geometry.is_some());
         assert!(sim.gpu_cache.roughness.is_some());
-        assert!(sim.gpu_cache.terrain_metrics.is_some());
+        assert!(sim.gpu_cache.terrain_geometry.is_some());
         assert!(sim.gpu_cache.slope_angle.is_some());
         assert!(sim.gpu_cache.slope_aspect.is_some());
         assert!(sim.gpu_cache.peak_velocity.is_none());
@@ -1028,10 +1048,10 @@ mod tests {
         assert!(sim.gpu_cache.particles_elevation.is_none());
         assert!(sim.gpu_cache.particles_stopped.is_none());
         assert!(sim.gpu_cache.release_areas.is_some());
-        assert!(sim.gpu_cache.terrain_dynamics.is_some());
-        assert!(sim.gpu_cache.terrain_metrics.is_some());
+        assert!(sim.gpu_cache.curvature.is_some());
+        assert!(sim.gpu_cache.terrain_geometry.is_some());
         assert!(sim.gpu_cache.roughness.is_some());
-        assert!(sim.gpu_cache.terrain_metrics.is_some());
+        assert!(sim.gpu_cache.terrain_geometry.is_some());
         assert!(sim.gpu_cache.slope_angle.is_some());
         assert!(sim.gpu_cache.slope_aspect.is_some());
         assert!(sim.gpu_cache.peak_velocity.is_none());
@@ -1305,7 +1325,7 @@ mod tests {
                     .to_string()
                     .replace(".png", "releaseTexture.png"),
             ),
-            cfl: Some(0.3),
+            cfl: Some(0.5),
             max_steps: Some(6000),
             ..Default::default()
         };
@@ -1322,6 +1342,19 @@ mod tests {
         let peak_velocity =
             block_on(sim.fetch_peak_velocity()).expect("Failed to get max velocity");
         info!("Peak velocity: {:?}", peak_velocity.max_value().unwrap());
+
+        let width = 401usize;
+        let x = 900usize;
+        let count_above_1 = peak_velocity
+            .as_slice()
+            .chunks(width)
+            .nth(x)
+            .map(|row| row.iter().filter(|&&v| v > 1.0).count())
+            .unwrap_or(0);
+        info!(
+            "Count of cells at x={} with peak velocity > 1: {}",
+            x, count_above_1
+        );
 
         let sim_info: Vec<SimInfo> = block_on(sim.orchestrator.resources.read_buffer(
             &sim.orchestrator.device,
@@ -1409,7 +1442,7 @@ mod tests {
     }
 
     #[test_log::test]
-    fn test_analyze_terrain() {
+    fn test_analyze_terrain_curvilinear() {
         if std::env::var("GITHUB_ACTIONS").is_ok()
             && (cfg!(target_os = "macos") || cfg!(target_os = "windows"))
         {
@@ -1468,14 +1501,15 @@ mod tests {
         sim.set_dem(dem, 5, 5, 2.0).expect("Failed to set DEM");
         sim.set_release_areas(release)
             .expect("Failed to set release areas");
+        sim.settings.sim_model = 1;
         block_on(sim.prepare()).expect("Failed to prepare simulation");
         let slope_angle = block_on(sim.fetch_slope_angle()).expect("Failed to fetch slope angle");
         let slope_aspect =
             block_on(sim.fetch_slope_aspect()).expect("Failed to fetch slope aspect");
-        let l_x = block_on(sim.get_terrain_l_x()).expect("Failed to get terrain metric l_x");
-        let l_y = block_on(sim.get_terrain_l_y()).expect("Failed to get terrain metric l_y");
+        let l_x = block_on(sim.get_terrain_geometry_x()).expect("Failed to get terrain metric l_x");
+        let l_y = block_on(sim.get_terrain_geometry_y()).expect("Failed to get terrain metric l_y");
         let jacobian =
-            block_on(sim.get_terrain_jacobian()).expect("Failed to get terrain metric j");
+            block_on(sim.get_terrain_geometry_z()).expect("Failed to get terrain metric j");
         let (k_xx, k_yy, k_xy) =
             block_on(sim.get_curvature()).expect("Failed to get terrain metric curvature");
         let (g_x, g_y) =
@@ -1505,6 +1539,139 @@ mod tests {
 
             assert!((g_x[idx] - expected_g_x[idx]).abs() < 1e-6);
             assert!((g_y[idx] - expected_g_y[idx]).abs() < 1e-6);
+        }
+    }
+
+    #[test_log::test]
+    fn test_analyze_terrain() {
+        if std::env::var("GITHUB_ACTIONS").is_ok()
+            && (cfg!(target_os = "macos") || cfg!(target_os = "windows"))
+        {
+            println!("Skipping heavy GPU test on CI (macOS/Windows)");
+            return;
+        }
+        let mut sim = block_on(Simulation::new()).expect("Failed to create Simulation");
+        let dem: &[f32] = &[
+            15.0, 9.0, 8.0, 9.0, 12.0, 6.0, 3.0, 2.0, 3.0, 6.0, 4.0, 1.0, 0.0, 1.0, 4.0, 6.0, 3.0,
+            2.0, 3.0, 6.0, 12.0, 9.0, 8.0, 9.0, 12.0,
+        ];
+        let expected_slope_angle: &[f32] = &[
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 65.90516, 63.43495, 65.90516, 0.0, 0.0, 45.0, 0.0, 45.0,
+            0.0, 0.0, 65.90516, 63.43495, 65.90516, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        ];
+        // TODO one calculates slope aspect wrong
+        let expected_slope_aspect: &[f32] = &[
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 206.56505, 180.0, 153.43495, 0.0, 0.0, 270.0, -1.0, 90.0,
+            0.0, 0.0, 333.43494, 0.0, 26.565048, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        ];
+        let expected_normals_x: &[f32] = &[
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.40824828,
+            -0.0,
+            -0.40824828,
+            0.0,
+            0.0,
+            0.7071067,
+            -0.0,
+            -0.7071067,
+            0.0,
+            0.0,
+            0.40824828,
+            -0.0,
+            -0.40824828,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ];
+        let expected_normals_y: &[f32] = &[
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.81649655,
+            0.8944271,
+            0.81649655,
+            0.0,
+            0.0,
+            -0.0,
+            -0.0,
+            -0.0,
+            0.0,
+            0.0,
+            -0.81649655,
+            -0.8944271,
+            -0.81649655,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ];
+        let expected_normals_z: &[f32] = &[
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.40824828, 0.44721356, 0.40824828, 0.0, 0.0, 0.7071067,
+            1.0, 0.7071067, 0.0, 0.0, 0.40824828, 0.44721356, 0.40824828, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0,
+        ];
+        let expected_k_xx: &[f32] = &[
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.5, 0.0, 0.0, 0.5, 0.5, 0.5, 0.0, 0.0, 0.5,
+            0.5, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        ];
+        let expected_k_yy: &[f32] = &[
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1875, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        ];
+        let expected_k_xy: &[f32] = &[
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0,
+            1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        ];
+        let release: &[f32] = &[1.0; 25];
+        sim.set_dem(dem, 5, 5, 2.0).expect("Failed to set DEM");
+        sim.set_release_areas(release)
+            .expect("Failed to set release areas");
+        sim.settings.sim_model = 0;
+        block_on(sim.prepare()).expect("Failed to prepare simulation");
+        let slope_angle = block_on(sim.fetch_slope_angle()).expect("Failed to fetch slope angle");
+        let slope_aspect =
+            block_on(sim.fetch_slope_aspect()).expect("Failed to fetch slope aspect");
+        let normals_x =
+            block_on(sim.get_terrain_geometry_x()).expect("Failed to get terrain metric l_x");
+        let normals_y =
+            block_on(sim.get_terrain_geometry_y()).expect("Failed to get terrain metric l_y");
+        let normals_z =
+            block_on(sim.get_terrain_geometry_z()).expect("Failed to get terrain metric j");
+        let (k_xx, k_yy, k_xy) =
+            block_on(sim.get_curvature()).expect("Failed to get terrain metric curvature");
+        info!("slope_angle: {:?}", slope_angle);
+        info!("slope_aspect: {:?}", slope_aspect);
+        info!("normals_x: {:?}", normals_x);
+        info!("normals_y: {:?}", normals_y);
+        info!("normals_z: {:?}", normals_z);
+        info!("k_xx: {:?}", k_xx);
+        info!("k_yy: {:?}", k_yy);
+        info!("k_xy: {:?}", k_xy);
+
+        for idx in 0..25 {
+            assert!((normals_x[idx] - expected_normals_x[idx]).abs() < 1e-6);
+            assert!((normals_y[idx] - expected_normals_y[idx]).abs() < 1e-6);
+            assert!((normals_z[idx] - expected_normals_z[idx]).abs() < 1e-6);
+
+            assert!((k_xx[idx] - expected_k_xx[idx]).abs() < 1e-6);
+            assert!((k_yy[idx] - expected_k_yy[idx]).abs() < 1e-6);
+            assert!((k_xy[idx] - expected_k_xy[idx]).abs() < 1e-6);
+
+            assert!((slope_angle[idx] - expected_slope_angle[idx]).abs() < 1e-1);
+            assert!((slope_aspect[idx] - expected_slope_aspect[idx]).abs() < 1e-1);
         }
     }
     #[test_log::test]

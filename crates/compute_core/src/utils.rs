@@ -303,7 +303,7 @@ pub fn split_channels<T: Copy>(flat: &[T]) -> (Vec<T>, Vec<T>, Vec<T>, Vec<T>) {
     let mut b = Vec::with_capacity(n);
     let mut a = Vec::with_capacity(n);
 
-    for chunk in flat.chunks_exact(4) {
+    for chunk in flat.as_chunks::<4>().0 {
         r.push(chunk[0]);
         g.push(chunk[1]);
         b.push(chunk[2]);

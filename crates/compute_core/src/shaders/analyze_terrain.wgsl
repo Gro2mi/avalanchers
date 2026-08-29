@@ -1,120 +1,101 @@
 @group(0) @binding(1) var dem_texture: texture_2d<f32>;
-// dynamics: vec4<f32>,  // x = g_x, y = g_y, z = K_xx, w = K_yy
-@group(0) @binding(2) var<storage, read_write> terrain_dynamics: array<vec4<f32>>;
-@group(0) @binding(3) var<storage, read_write> slope_angle_buffer: array<f32>;
-@group(0) @binding(4) var<storage, read_write> slope_aspect_buffer: array<f32>;
-// metrics: vec4<f32>,   // x = l_x, y = l_y, z = J, w = K_xy
-@group(0) @binding(5) var terrain_metrics: texture_storage_2d<rgba32float, write>;
+@group(0) @binding(2) var terrain_geometry_texture: texture_storage_2d<rgba32float, write>;
+@group(0) @binding(3) var curvature_texture: texture_storage_2d<rgba32float, write>;
+@group(0) @binding(4) var<storage, read_write> slope_angle_buffer: array<f32>;
+@group(0) @binding(5) var<storage, read_write> slope_aspect_buffer: array<f32>;
 @group(0) @binding(6) var<storage, read_write> debug: array<f32>;
 
+
 @compute @workgroup_size(WG_SIZE_2D, WG_SIZE_2D, 1)
-fn analyze_terrain(@builtin(global_invocation_id) id: vec3<u32>) {
+fn analyze_terrain(@builtin(global_invocation_id) cell: vec3<u32>) {
     // boundary guard
-    if id.x < 1 || id.x >= sim_settings.grid_shape.x - 1 || id.y < 1 || id.y >= sim_settings.grid_shape.y - 1 {
+    if cell.x < 1 || cell.x >= sim_settings.grid_shape.x - 1 || cell.y < 1 || cell.y >= sim_settings.grid_shape.y - 1 {
         return;
     }
 
-    let dx = sim_settings.cell_size;
-    let dy = sim_settings.cell_size;
-    let coords = vec2<i32>(id.xy);
+    let resolution = sim_settings.cell_size;
+    let resolution2 = resolution * resolution;
+    let coord = vec2<i32>(cell.xy);
 
-    // 2. Fetch 9-Point Stencil Neighborhood
-    let z_cc = textureLoad(dem_texture, coords, 0).r;
+    // Sample center and neighbors
+    // selects handle domain edges
+    let center = textureLoad(dem_texture, coord + vec2<i32>(0, 0), 0).r;                    
+    let left   = select(textureLoad(dem_texture, coord + vec2<i32>(-1, 0), 0).r, center, cell.x==0);
+    let right  = select(textureLoad(dem_texture, coord + vec2<i32>( 1, 0), 0).r, center, cell.x==sim_settings.grid_shape.x - 1);
+    let down   = select(textureLoad(dem_texture, coord + vec2<i32>(0, -1), 0).r, center, cell.y==0);
+    let up     = select(textureLoad(dem_texture, coord + vec2<i32>(0,  1), 0).r, center, cell.y==sim_settings.grid_shape.y - 1);
 
-    let z_l = textureLoad(dem_texture, coords + vec2<i32>(-1, 0), 0).r;
-    let z_r = textureLoad(dem_texture, coords + vec2<i32>(1, 0), 0).r;
-    let z_d = textureLoad(dem_texture, coords + vec2<i32>(0, -1), 0).r;
-    let z_u = textureLoad(dem_texture, coords + vec2<i32>(0, 1), 0).r;
+    let up_right    = select(textureLoad(dem_texture, coord + vec2<i32>(1,  1), 0).r, center, cell.x==sim_settings.grid_shape.x - 1 || cell.y==sim_settings.grid_shape.y - 1);
+    let down_right  = select(textureLoad(dem_texture, coord + vec2<i32>(-1,  1), 0).r, center, cell.x==sim_settings.grid_shape.x - 1  || cell.y==0);
+    let up_left     = select(textureLoad(dem_texture, coord + vec2<i32>(1,  -1), 0).r, center, cell.x==0 || cell.y==0);
+    let down_left   = select(textureLoad(dem_texture, coord + vec2<i32>(-1,  -1), 0).r, center, cell.x==0 || cell.y==sim_settings.grid_shape.y - 1);
+    // selects handle domain edges
+    let dx = select((right - left) / (2.0 * resolution), (right - left) / resolution, cell.x==0 || cell.x==sim_settings.grid_shape.x - 1);
+    let dy = select((up - down) / (2.0 * resolution), (up - down) / resolution, cell.y==0 || cell.y==sim_settings.grid_shape.y - 1);
+    let normal = normalize(vec3f(-dx, -dy, 1.0));
 
-    let z_lu = textureLoad(dem_texture, coords + vec2<i32>(-1, 1), 0).r;
-    let z_ru = textureLoad(dem_texture, coords + vec2<i32>(1, 1), 0).r;
-    let z_ld = textureLoad(dem_texture, coords + vec2<i32>(-1, -1), 0).r;
-    let z_rd = textureLoad(dem_texture, coords + vec2<i32>(1, -1), 0).r;
+    // TODO: 2nd derivative needs more care at the edges
+    let dxx = select((left - 2*center + right) / resolution2, (left - 2*center + right) / (4 * resolution2), cell.x==0 || cell.x==sim_settings.grid_shape.x - 1);
+    let dyy = select((up - 2*center + down) / resolution2, (up - 2*center + down) / (4 * resolution2), cell.y==0 || cell.y==sim_settings.grid_shape.y - 1);
+    let dxy = select((up_right - down_right - up_left + down_left) / (4 * resolution2), (up_right - down_right - up_left + down_left) / (16 * resolution2), cell.x==0 || cell.x==sim_settings.grid_shape.x - 1 || cell.y==0 || cell.y==sim_settings.grid_shape.y - 1);
 
-    // 3. First Derivatives (Slopes)
-    let dB_dx = (z_r - z_l) / (2.0 * dx);
-    let dB_dy = (z_u - z_d) / (2.0 * dy);
+    let denom = pow(dx*dx + dy*dy + 1e-12, 1.5);
+    let p = dx;
+    let q = dy;
+    let profile_curvature = select((dxx*dx*dx + 2.0*dxy*dx*dy + dyy*dy*dy) / denom, 0.0, cell.x==0 || cell.x==sim_settings.grid_shape.x - 1 || cell.y==0 || cell.y==sim_settings.grid_shape.y - 1);
+    let plan_curvature = select((dxx*dy*dy - 2.0*dxy*dx*dy + dyy*dx*dx) / denom, 0.0, cell.x==0 || cell.x==sim_settings.grid_shape.x - 1 || cell.y==0 || cell.y==sim_settings.grid_shape.y - 1);
+    // let planCurvature    = (dxx*dy*dy - 2.0*dxy*dx*dy + dyy*dx*dx) / denom;
+    // let meanCurvature = ((1.0 + dy*dy)*dxx - 2.0*dx*dy*dxy + (1.0 + dx*dx)*dyy) / (2.0 * pow(1.0 + dx*dx + dy*dy, 1.5));
+    // let normal_f16: vec4<f16> = vec4<f16>(
+    //     f16(normal.x), f16(normal.y), f16(normal.z), f16(1.0)
+    // );
+    // textureStore(normalsTexture, coord, normal_f16);
+    textureStore(terrain_geometry_texture, coord, vec4f(normal, profile_curvature));
+    textureStore(curvature_texture, coord, vec4f(dxx, dxy, dyy, plan_curvature));
 
-    // 4. Metric Coefficients & Surface Jacobian
-    let l_x = sqrt(1.0 + dB_dx * dB_dx);
-    let l_y = sqrt(1.0 + dB_dy * dB_dy);
-    let J = sqrt(1.0 + dB_dx * dB_dx + dB_dy * dB_dy);
-
-    // 5. Second Derivatives (Hessian Matrix)
-    let dB_dx2 = (z_r - 2.0 * z_cc + z_l) / (dx * dx);
-    let dB_dy2 = (z_u - 2.0 * z_cc + z_d) / (dy * dy);
-    let dB_dxdy = (z_ru + z_ld - z_lu - z_rd) / (4.0 * dx * dy);
-
-    // 6. Curvatures
-    let K_xx = dB_dx2 / J;
-    let K_yy = dB_dy2 / J;
-    let K_xy = dB_dxdy / J;
-
-    // 7. Slope-parallel Driving Gravity Forces (m/s^2)
-    let g_x = -g * dB_dx / l_x;
-    let g_y = -g * dB_dy / l_y;
-
-    // 8. --- CALCULATE SLOPE ANGLE & ASPECT IN DEGREES ---
-
-    // Magnitude of the terrain gradient vector
-    let slope_magnitude = sqrt(dB_dx * dB_dx + dB_dy * dB_dy);
-
-    // Angle computation: atan(gradient)
-    let slope_angle_deg = degrees(atan(slope_magnitude));
+    let slope_angle = degrees(acos(normal.z));
 
     var slope_aspect_deg = 0.0;
-
-    // Safety check: prevent division/undefined states on perfectly flat terrain
-    if slope_magnitude > 1e-5 {
-        // atan2(y, x) returns the math angle counter-clockwise from East (+x)
-        let aspect_rad = atan2(dB_dy, dB_dx);
-
-        // Convert counter-clockwise from East to clockwise from North
+    if length(vec2f(dx, dy)) > 1e-5 {
+        // Match the curvilinear shader convention: aspect is measured clockwise from north,
+        // using the terrain gradient direction, not the opposite-facing surface normal.
+        let aspect_rad = atan2(dy, dx);
         slope_aspect_deg = 90.0 - degrees(aspect_rad);
-
-        // Wrap negative angles back into the positive 0° - 360° compass range
         if slope_aspect_deg < 0.0 {
             slope_aspect_deg += 360.0;
         }
     } else {
-        // GIS convention representation for flat terrain (Aspect = -1)
         slope_aspect_deg = -1.0;
     }
 
-    // 9. Write everything to WebGPU Storage Buffers
-    let index = xy_to_idx(id.xy);
-
-    // Curvilinear physics buffer
-    textureStore(terrain_metrics, coords, vec4f(l_x, l_y, J, K_xy));
-    terrain_dynamics[index] = vec4<f32>(g_x, g_y, K_xx, K_yy);
-
-    // New analysis buffers
-    slope_angle_buffer[index] = slope_angle_deg;
+    let index = xy_to_idx(cell.xy);
+    slope_angle_buffer[index] = slope_angle;
     slope_aspect_buffer[index] = slope_aspect_deg;
 
-    // if(cell.x == 0 && cell.y == 0) {
-    //     debug[0] = normal.x;
-    //     debug[1] = normal.y;
-    //     debug[2] = normal.z;
-    //     debug[3] = resolution;
-    //     debug[4] = dx;
-    //     debug[5] = dy;
-    //     debug[6] = dxx;
-    //     debug[7] = dyy;
-    //     debug[8] = dxy;
-    //     debug[9] = profile_curvature;
-    //     debug[10] = left;
-    //     debug[11] = right;
-    //     debug[12] = up;
-    //     debug[13] = down;
-    //     debug[14] = center;
-    //     debug[15] = slope_angle;
-    //     debug[16] = slope_aspect;
-    //     debug[17] = up_right;
-    //     debug[18] = down_right;
-    //     debug[19] = up_left;
-    //     debug[20] = down_left;
-    // }
+    if(cell.x == 0 && cell.y == 0) {
+        debug[0] = normal.x;
+        debug[1] = normal.y;
+        debug[2] = normal.z;
+        debug[3] = resolution;
+        debug[4] = dx;
+        debug[5] = dy;
+        debug[6] = dxx;
+        debug[7] = dyy;
+        debug[8] = dxy;
+        debug[9] = profile_curvature;
+        debug[10] = left;
+        debug[11] = right;
+        debug[12] = up;
+        debug[13] = down;
+        debug[14] = center;
+        debug[15] = slope_angle;
+        debug[16] = slope_aspect_deg;
+        debug[17] = up_right;
+        debug[18] = down_right;
+        debug[19] = up_left;
+        debug[20] = down_left;
+    }
+
 }
 
 // import utils.wgsl;
@@ -194,7 +175,27 @@ struct AtomicValues {
     stopped_particles: atomic<u32>,
 };
 
+struct G2PUpdate {
+    velocity: vec2f,
+    affine_matrix: mat2x2<f32>,
+};
+
 @group(0) @binding(0) var<uniform> sim_settings: SimSettings;
+
+fn is_nan(x: f32) -> bool {
+    let bits: u32 = bitcast<u32>(x);
+    return (bits & 0x7F800000u) == 0x7F800000u
+          && (bits & 0x007FFFFFu) != 0u;
+}
+
+fn is_inf(x: f32) -> bool {
+    let bits: u32 = bitcast<u32>(x);
+    return (bits == 0x7F800000u || bits == 0xFF800000u);
+}
+
+fn is_finite(x: f32) -> bool {
+    return !is_nan(x) && !is_inf(x);
+}
 
 fn cell_to_uv(cell: vec2u) -> vec2f {
     return (vec2f(cell) + 0.5) / vec2f(sim_settings.grid_shape);
@@ -219,12 +220,11 @@ fn position_to_cell(position: vec2f) -> vec2u {
     return vec2u(floor(position / sim_settings.cell_size));
 }
 
-
 fn uv_to_cell(uv: vec2f) -> vec2u {
     let epsilon = 1e-5f; // A tiny offset to counteract negative rounding bias
     let scaled_uv = uv * vec2f(sim_settings.grid_shape) + epsilon;
     let max_bound = vec2f(sim_settings.grid_shape - 1u);
-    
+
     return vec2u(clamp(scaled_uv, vec2f(0.0), max_bound));
 }
 
@@ -259,9 +259,12 @@ fn quadratic_weight(d: f32) -> f32 {
     return 0.0;
 }
 
-fn calculate_weight(particle_position: vec2f, node_position: vec2u) -> f32 {
-    let dist = particle_position - vec2f(node_position);
-    return quadratic_weight(dist.x) * quadratic_weight(dist.y);
+fn calculate_weight(distance: vec2f) -> f32 {
+    return quadratic_weight(distance.x) * quadratic_weight(distance.y);
+}
+
+fn calculate_distance_to_node(particle_position: vec2f, node_position: vec2u) -> vec2f {
+    return particle_position - vec2f(node_position);
 }
 
 fn get_base_node(grid_pos: vec2f) -> vec2u {

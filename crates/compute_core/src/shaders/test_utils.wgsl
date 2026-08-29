@@ -1,50 +1,57 @@
-@group(0) @binding(1) var<storage, read_write> sim_info: SimInfo;
-@group(0) @binding(2) var dem_texture: texture_2d<f32>;
-@group(0) @binding(3) var<storage> slope_angle_buffer: array<f32>;
-@group(0) @binding(4) var<storage> release_areas: array<f32>;
-@group(0) @binding(5) var tex_sampler: sampler;
+@group(0) @binding(1) var<storage, read_write> test_output: array<f32>;
+@group(0) @binding(2) var<storage, read_write> atomic_values: AtomicValues;
 
-@group(0) @binding(6) var<storage, read_write> position: array<vec2<f32>>;
-@group(0) @binding(7) var<storage, read_write> mass: array<f32>;
-@group(0) @binding(8) var<storage, read_write> start_elevation: array<f32>;
-@group(0) @binding(9) var<storage, read_write> atomic_values: AtomicValues;
-@group(0) @binding(10) var<storage, read_write> debug: array<f32>;
-// @group(0) @binding(13) var<uniform> tracked_particle_relative_positions: array<Particle>;
-// @group(0) @binding(14) var<storage, read_write> tracked_particle_ids: array<u32>;
 
-@compute @workgroup_size(WG_SIZE_2D, WG_SIZE_2D, 1)
-fn initialize_particles(@builtin(global_invocation_id) cell: vec3<u32>) {
-    if cell.x >= sim_settings.grid_shape.x || cell.y >= sim_settings.grid_shape.y {
-        return;
-    }
-    let idx = xy_to_idx(cell.xy);
-    let snow_thickness = release_areas[idx];
-    if snow_thickness <= 0.01 {
-        return;
-    }
+@compute @workgroup_size(1)
+fn test_utils(@builtin(global_invocation_id) id: vec3u) {
+    let nan = bitcast<f32>(0x7F800001u);
+    let neg_nan = bitcast<f32>(0xFF800001u);
+    let inf = bitcast<f32>(0x7F800000u);
+    let neg_inf = bitcast<f32>(0xFF800000u);
+    let low_val: f32 = 3.1415;
+    let high_val: f32 = 42.0;
+    atomicStore(&atomic_values.peak_velocity, bitcast<u32>(low_val));
+    test_output[0] = bitcast<f32>(atomicLoad(&atomic_values.peak_velocity));
+    atomicMax(&atomic_values.peak_velocity, bitcast<u32>(high_val));
+    test_output[1] = bitcast<f32>(atomicLoad(&atomic_values.peak_velocity));
+    atomicMax(&atomic_values.peak_velocity, bitcast<u32>(low_val));
+    test_output[2] = bitcast<f32>(atomicLoad(&atomic_values.peak_velocity));
 
-    // TODO: pass timestamp as seed
-    let seed = 42u;
-    var rng_seed = pcg_hash((cell.x * 73856093u) ^
-    (cell.y * 19349663u) ^
-    seed);
-    let factor = 1.0 / cos(radians(slope_angle_buffer[idx]));
-    let cell_volume = snow_thickness * sim_settings.cell_size * sim_settings.cell_size * factor;
-    let cell_mass = cell_volume * sim_settings.snow_density;
-    atomicAdd(&atomic_values.release_volume, u32(cell_volume));
-    let atomicParticleIndex = atomicAdd(&atomic_values.number_release_particles, sim_settings.released_particles_per_cell);
-    for (var n: u32 = 0; n < sim_settings.released_particles_per_cell; n++) {
-        let particleIndex = atomicParticleIndex + n;
-        let r = rand2(&rng_seed);
-        let cell_xy = (vec2f(cell.xy) + r - 0.5);
+    // is_nan tests
+    test_output[3] = f32(is_nan(nan)); // NaN -> true
+    test_output[4] = f32(is_nan(neg_nan)); // -NaN -> true
+    test_output[5] = f32(is_nan(inf)); // Inf -> false
+    test_output[6] = f32(is_nan(neg_inf)); // -Inf -> false
+    test_output[7] = f32(is_nan(1.2345)); // valid f32 -> false
 
-        position[particleIndex] = vec2f(cell_xy * sim_settings.cell_size);
-        mass[particleIndex] = cell_mass / f32(sim_settings.released_particles_per_cell);
-        start_elevation[particleIndex] = textureSampleLevel(dem_texture, tex_sampler, cellf_to_uv(cell_xy), 0).x;
-    }
+    // is_inf tests
+    test_output[8] = f32(is_inf(inf)); // Inf -> true
+    test_output[9] = f32(is_inf(neg_inf)); // -Inf -> true
+    test_output[10] = f32(is_inf(nan)); // NaN -> false
+    test_output[11] = f32(is_inf(neg_nan)); // -NaN -> false
+    test_output[12] = f32(is_inf(1.2345)); // valid f32 -> false
+
+    // is_finite tests
+    test_output[13] = f32(is_finite(nan)); // NaN -> false
+    test_output[14] = f32(is_finite(neg_nan)); // -NaN -> false
+    test_output[15] = f32(is_finite(inf)); // Inf -> false
+    test_output[16] = f32(is_finite(neg_inf)); // -Inf -> false
+    test_output[17] = f32(is_finite(1.2345)); // valid f32 -> true
+
+    
+    atomicStore(&atomic_values.peak_flow_thickness, bitcast<u32>(2.71828));
+    atomicStore(&atomic_values.expected_max_velocity, bitcast<u32>(1.618));
+    atomicStore(&atomic_values.peak_velocity, bitcast<u32>(1.4142));
+    atomicStore(&atomic_values.travel_length, bitcast<u32>(1.732));
+
+    atomicStore(&atomic_values.release_volume, 73u);
+    atomicStore(&atomic_values.number_release_cells, 37u);
+    atomicStore(&atomic_values.number_release_particles, 42u);
+    atomicStore(&atomic_values.stopped_particles, 99u);
+
 }
 
-// import utils.wgsl;
+// import utils.wgsl
 // BEGIN utils.wgsl
 const WG_SIZE_2D: u32 = 16u;
 
@@ -242,36 +249,3 @@ fn compute_centroid(points: ptr<function, array<vec2<f32>, 256>>, count: u32) ->
     return vec2<f32>(cx, cy) / (6.0 * area);
 }
 // END utils.wgsl
-
-// import random.wgsl;
-// BEGIN random.wgsl
-// A high-quality 32-bit hash (PCG)
-fn pcg_hash(input: u32) -> u32 {
-    var state = input * 747796405u + 2891336453u;
-    var word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
-    return (word >> 22u) ^ word;
-}
-
-// Advances the seed and returns a float 0.0 -> 1.0
-fn next_rand(seed: ptr<function, u32>) -> f32 {
-    *seed = pcg_hash(*seed);
-    return f32(*seed) / f32(0xffffffffu);
-}
-
-fn rand1(seed: ptr<function, u32>) -> f32 {
-    return next_rand(seed);
-}
-
-fn rand2(seed: ptr<function, u32>) -> vec2f {
-    return vec2f(next_rand(seed), next_rand(seed));
-}
-
-fn rand3(seed: ptr<function, u32>) -> vec3f {
-    return vec3f(next_rand(seed), next_rand(seed), next_rand(seed));
-}
-
-fn rand4(seed: ptr<function, u32>) -> vec4f {
-    return vec4f(next_rand(seed), next_rand(seed), next_rand(seed), next_rand(seed));
-}
-
-// END random.wgsl

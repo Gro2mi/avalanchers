@@ -24,6 +24,7 @@ struct TimestepData {
 
 // @group(0) @binding(10) var velocity_stretch_factor_texture: texture_2d<f32>;
 @group(0) @binding(10) var<storage, read_write> out_debug: array<f32>;
+@group(0) @binding(11) var<storage, read_write> particles_affine_matrix: array<mat2x2<f32>>;
 
 const density: f32 = 200.0;
 override WG_SIZE_1D: u32 = 1u;
@@ -63,6 +64,11 @@ fn g2p(
         return;
     }
     let interpolated_velocity = transfer_g2p(particleId);
+    // affine transfer
+    // let update = transfer_g2p(particleId);
+    // let interpolated_velocity = update.velocity;
+    // let new_affine_matrix = update.affine_matrix;
+    
 
     
 
@@ -70,18 +76,21 @@ fn g2p(
     var dt = sim_info.dt;
 
     // pseudo FLIP, take diff of particle velocity instead of grid velocity
-    let old_velocity = particles_velocity[particleId];
-    let flip_velocity = old_velocity + (interpolated_velocity - old_velocity); // simple delta approximation
+    // let old_velocity = particles_velocity[particleId];
+    // let flip_velocity = old_velocity + (interpolated_velocity - old_velocity); // simple delta approximation
 
-    let new_velocity = mix(interpolated_velocity, flip_velocity, 0.95);
+    // let new_velocity = mix(interpolated_velocity, old_velocity, 0.5);
 
     // TODO PIC is very diffusive, try APIC or FLIP
-    // let new_velocity = interpolated_velocity;
+    let new_velocity = interpolated_velocity;
     var velocity_contravariant = vec2f(new_velocity.x / l_x, new_velocity.y / l_y);
     position =  position + velocity_contravariant * dt;
 
     particles_position[particleId] = position;
     particles_velocity[particleId] = new_velocity;
+
+    // affine transfer
+    // particles_affine_matrix[particleId] = new_affine_matrix;
 
     if particleId == sim_info.number_particles / 2u {
         var current: TimestepData;
@@ -139,14 +148,6 @@ fn g2p(
         sim_info.flags |= SIM_INFO_OUT_OF_BOUNDS;
         return;
     }
-}
-
-fn is_nan(x: f32) -> bool {
-    // https://marktension.nl/blog/detecting-nans-on-webgpu/
-    // if one operand is a NaN, the other is returned.
-    let highVal = 1e38;
-    let x2 = min(x, highVal);
-    return x2 == highVal;
 }
 
 fn update_output_data(trajectory: u32, timestep: u32, timestep_data: TimestepData) {
@@ -245,7 +246,8 @@ fn transfer_g2p(p_idx: u32) -> vec2f {
     for (var i: u32 = 0; i < 3; i++) {
         for (var j: u32 = 0; j < 3; j++) {
             let node_coords = base_node + vec2u(i, j);
-            let weight = calculate_weight(grid_pos, node_coords);
+            let distance = calculate_distance_to_node(grid_pos, node_coords);
+            let weight = calculate_weight(distance);
             let idx = xy_to_idx(node_coords);
             
             interpolated_velocity += weight * grid_velocity[idx];
@@ -333,7 +335,27 @@ struct AtomicValues {
     stopped_particles: atomic<u32>,
 };
 
+struct G2PUpdate {
+    velocity: vec2f,
+    affine_matrix: mat2x2<f32>,
+};
+
 @group(0) @binding(0) var<uniform> sim_settings: SimSettings;
+
+fn is_nan(x: f32) -> bool {
+    let bits: u32 = bitcast<u32>(x);
+    return (bits & 0x7F800000u) == 0x7F800000u
+          && (bits & 0x007FFFFFu) != 0u;
+}
+
+fn is_inf(x: f32) -> bool {
+    let bits: u32 = bitcast<u32>(x);
+    return (bits == 0x7F800000u || bits == 0xFF800000u);
+}
+
+fn is_finite(x: f32) -> bool {
+    return !is_nan(x) && !is_inf(x);
+}
 
 fn cell_to_uv(cell: vec2u) -> vec2f {
     return (vec2f(cell) + 0.5) / vec2f(sim_settings.grid_shape);
@@ -358,12 +380,11 @@ fn position_to_cell(position: vec2f) -> vec2u {
     return vec2u(floor(position / sim_settings.cell_size));
 }
 
-
 fn uv_to_cell(uv: vec2f) -> vec2u {
     let epsilon = 1e-5f; // A tiny offset to counteract negative rounding bias
     let scaled_uv = uv * vec2f(sim_settings.grid_shape) + epsilon;
     let max_bound = vec2f(sim_settings.grid_shape - 1u);
-    
+
     return vec2u(clamp(scaled_uv, vec2f(0.0), max_bound));
 }
 
@@ -398,9 +419,12 @@ fn quadratic_weight(d: f32) -> f32 {
     return 0.0;
 }
 
-fn calculate_weight(particle_position: vec2f, node_position: vec2u) -> f32 {
-    let dist = particle_position - vec2f(node_position);
-    return quadratic_weight(dist.x) * quadratic_weight(dist.y);
+fn calculate_weight(distance: vec2f) -> f32 {
+    return quadratic_weight(distance.x) * quadratic_weight(distance.y);
+}
+
+fn calculate_distance_to_node(particle_position: vec2f, node_position: vec2u) -> vec2f {
+    return particle_position - vec2f(node_position);
 }
 
 fn get_base_node(grid_pos: vec2f) -> vec2u {

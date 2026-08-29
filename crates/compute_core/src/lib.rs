@@ -3,14 +3,13 @@ use crate::buffers::{
 };
 use crate::shaders::{ComputeShaderConfig, ShaderName, generate_shader_report};
 use crate::utils::timer_checkpoint;
-use anyhow::{Ok, Result, anyhow};
+use anyhow::{Result, anyhow};
 use std::cmp::min;
 use std::collections::HashMap;
 use std::hash::Hash;
 use wgpu::{
     Adapter, BufferUsages, CommandEncoderDescriptor, ComputePassDescriptor, Device,
-    DeviceDescriptor, Extent3d, Features, Instance, InstanceDescriptor, Limits, PowerPreference,
-    Queue, RequestAdapterOptions, TextureFormat, TextureUsages,
+    DeviceDescriptor, Extent3d, Features, Instance, Limits, Queue, TextureFormat, TextureUsages,
 };
 
 // use log::{debug, info, warn, error};
@@ -64,8 +63,8 @@ pub struct GpuCache {
     pub particles_elevation: Option<Vec<f32>>,
     pub peak_velocity: Option<Vec<f32>>,
     pub peak_flow_thickness: Option<Vec<f32>>,
-    pub terrain_metrics: Option<TextureRgba<f32>>,
-    pub terrain_dynamics: Option<Vec<f32>>,
+    pub terrain_geometry: Option<TextureRgba<f32>>,
+    pub curvature: Option<TextureRgba<f32>>,
     pub slope_angle: Option<Vec<f32>>,
     pub slope_aspect: Option<Vec<f32>>,
     pub roughness: Option<Vec<f32>>,
@@ -88,8 +87,8 @@ impl GpuCache {
 
     pub fn reset_all(&mut self) {
         self.reset_simulation_result();
-        self.terrain_metrics = None;
-        self.terrain_dynamics = None;
+        self.terrain_geometry = None;
+        self.curvature = None;
         self.slope_angle = None;
         self.slope_aspect = None;
         self.roughness = None;
@@ -113,8 +112,8 @@ pub struct SimInfo {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct TimestepDataAoS {
-    pub velocity: [f32; 2], // 8 bytes
-    pub position: [f32; 2], // 8 bytes
+    pub velocity: [f32; 3], // 12 bytes
+    pub position: [f32; 3], // 12 bytes
     pub uv: [f32; 2],       // 8 bytes
     pub dt: f32,            // 4 bytes
     pub _pad1: [f32; 1],    // 4 bytes (padding to 32 bytes)
@@ -122,8 +121,8 @@ pub struct TimestepDataAoS {
 
 #[derive(Clone)]
 pub struct TimestepData {
-    pub velocity: Vec<[f32; 2]>,
-    pub position: Vec<[f32; 2]>,
+    pub velocity: Vec<[f32; 3]>,
+    pub position: Vec<[f32; 3]>,
     pub dt: Vec<f32>,
     pub uv: Vec<[f32; 2]>,
     pub velocity_magnitude: Vec<f32>,
@@ -185,12 +184,12 @@ impl TimestepData {
     }
 }
 
-fn magnitude(v: &[f32; 2]) -> f32 {
-    (v[0].powi(2) + v[1].powi(2)).sqrt()
+fn magnitude(v: &[f32; 3]) -> f32 {
+    (v[0].powi(2) + v[1].powi(2) + v[2].powi(2)).sqrt()
 }
 
-fn magnitude_diff(a: &[f32; 2], b: &[f32; 2]) -> f32 {
-    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt()
+fn magnitude_diff(a: &[f32; 3], b: &[f32; 3]) -> f32 {
+    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
 }
 
 const WORKGROUP_SIZE_2D: u32 = 16;
@@ -216,38 +215,57 @@ pub struct ComputeOrchestrator {
 
 impl ComputeOrchestrator {
     pub async fn new() -> Result<Self> {
-        let instance = Instance::new(InstanceDescriptor::new_without_display_handle());
-        let mut adapter = instance
-            .request_adapter(&RequestAdapterOptions {
-                power_preference: PowerPreference::HighPerformance,
+        // VULKAN is much faster to request
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::VULKAN,
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        });
+
+        let (instance, adapter) = match instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: None,
                 force_fallback_adapter: false,
             })
-            .await;
+            .await
+        {
+            Ok(adapter) => (instance, adapter),
+            Err(_) => {
+                let fallback_instance =
+                    wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
 
-        if adapter.is_err() {
-            warn!("High-performance GPU not found, falling back to LowPower/Software.");
-            adapter = instance
-                .request_adapter(&RequestAdapterOptions {
-                    power_preference: PowerPreference::LowPower,
-                    compatible_surface: None,
-                    force_fallback_adapter: false,
-                })
-                .await;
-        }
+                let adapter = match fallback_instance
+                    .request_adapter(&wgpu::RequestAdapterOptions {
+                        power_preference: wgpu::PowerPreference::HighPerformance,
+                        compatible_surface: None,
+                        force_fallback_adapter: false,
+                    })
+                    .await
+                {
+                    Ok(adapter) => adapter,
+                    Err(_) => match fallback_instance
+                        .request_adapter(&wgpu::RequestAdapterOptions {
+                            power_preference: wgpu::PowerPreference::LowPower,
+                            compatible_surface: None,
+                            force_fallback_adapter: false,
+                        })
+                        .await
+                    {
+                        Ok(adapter) => adapter,
+                        Err(_) => fallback_instance
+                            .request_adapter(&wgpu::RequestAdapterOptions {
+                                power_preference: wgpu::PowerPreference::LowPower,
+                                compatible_surface: None,
+                                force_fallback_adapter: true,
+                            })
+                            .await
+                            .expect("Failed to request adapter"),
+                    },
+                };
 
-        if adapter.is_err() {
-            warn!("Low-performance GPU not found, falling back to Software.");
-            adapter = instance
-                .request_adapter(&RequestAdapterOptions {
-                    power_preference: PowerPreference::LowPower,
-                    compatible_surface: None,
-                    force_fallback_adapter: true,
-                })
-                .await;
-        }
-
-        let adapter = adapter.expect("Failed to find any suitable GPU adapter");
+                (fallback_instance, adapter)
+            }
+        };
         timer_checkpoint("Get GPU adapter");
 
         let info = adapter.get_info();
@@ -346,7 +364,7 @@ impl ComputeOrchestrator {
                     max_compute_invocations_per_workgroup,
                     max_storage_buffer_binding_size,
                     max_buffer_size,
-                    max_storage_buffers_per_shader_stage: 10,
+                    max_storage_buffers_per_shader_stage: 13,
                     ..Limits::default()
                 },
                 experimental_features: wgpu::ExperimentalFeatures::default(),
@@ -389,8 +407,12 @@ impl ComputeOrchestrator {
     }
 
     #[allow(dead_code)]
-    fn generate_shader_report(&self) -> String {
-        generate_shader_report(&self.shader_configs)
+    fn generate_shader_report(
+        &self,
+        filename: Option<&str>,
+        custom_order: &[ShaderName],
+    ) -> String {
+        generate_shader_report(filename, &self.shader_configs, Some(custom_order))
     }
 
     pub async fn run_shader(
@@ -509,13 +531,21 @@ impl ComputeOrchestrator {
                 texture_usage_input,
             )
             .expect("Failed to add texture with data");
-
-        self.run_shader(
-            &ShaderName::AnalyzeTerrain,
-            self.dispatch_number_workgroups_x_2d,
-            self.dispatch_number_workgroups_y_2d,
-            1,
-        )
+        match sim_settings.sim_model {
+            0 => self.run_shader(
+                &ShaderName::AnalyzeTerrain,
+                self.dispatch_number_workgroups_x_2d,
+                self.dispatch_number_workgroups_y_2d,
+                1,
+            ),
+            1 => self.run_shader(
+                &ShaderName::AnalyzeTerrainCurvilinear,
+                self.dispatch_number_workgroups_x_2d,
+                self.dispatch_number_workgroups_y_2d,
+                1,
+            ),
+            2_u32..=u32::MAX => todo!(),
+        }
         .await?;
         Ok(())
     }
@@ -629,6 +659,29 @@ impl ComputeOrchestrator {
             BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
         );
 
+        match sim_settings.sim_model {
+            0 => {
+                self.add_buffer(
+                    BufferName::ParticlesVelocityZ,
+                    particle_buffer_size_single_value,
+                    BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+                );
+                self.add_buffer(
+                    BufferName::GridForces,
+                    particle_buffer_size_single_value * 2,
+                    BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+                );
+            }
+            1 => {
+                self.add_buffer(
+                    BufferName::ParticlesAffineMatrix,
+                    particle_buffer_size_single_value * 4,
+                    BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+                );
+            }
+            2_u32..=u32::MAX => todo!(),
+        }
+
         self.run_shader(
             &ShaderName::InitializeParticles,
             self.dispatch_number_workgroups_x_2d,
@@ -696,6 +749,242 @@ impl ComputeOrchestrator {
         let grid_physics_config = self
             .shader_configs
             .get(&ShaderName::GridPhysics)
+            .expect("GridPhysics shader config not found");
+
+        let grid_physics_bindgroup =
+            grid_physics_config.create_bind_group(&self.device, &self.resources)?;
+
+        // Compute Particles Bind Group
+        let compute_particles_config = self
+            .shader_configs
+            .get(&ShaderName::ComputeParticles)
+            .expect("ComputeParticles shader config not found");
+
+        let compute_particles_bindgroup =
+            compute_particles_config.create_bind_group(&self.device, &self.resources)?;
+
+        let reset_grid_config = self
+            .shader_configs
+            .get(&ShaderName::ResetGrid)
+            .expect("ResetGrid shader config not found");
+
+        // Reset Grid Bind Group
+        let reset_grid_bind_group =
+            reset_grid_config.create_bind_group(&self.device, &self.resources)?;
+        let mut current_step = 0;
+        while current_step < sim_settings.max_steps {
+            // Determine how many steps to run in this specific hardware batch
+            let steps_to_run = std::cmp::min(
+                self.batch_compute_steps,
+                sim_settings.max_steps - current_step,
+            );
+
+            // 1. Create a fresh command encoder for this batch
+            let mut command_encoder =
+                self.device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some(&format!(
+                            "Compute Particles Compute Encoder - Batch Starting Step {}",
+                            current_step
+                        )),
+                    });
+
+            // 2. Open the compute pass and run the sub-steps
+            {
+                let mut compute_pass =
+                    command_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some("Compute Particles Compute Pass Batch"),
+                        timestamp_writes: None,
+                    });
+
+                for _i in 0..steps_to_run {
+                    // --- resetGrid ---
+                    compute_pass.set_pipeline(&reset_grid_config.pipeline);
+                    compute_pass.set_bind_group(0, &reset_grid_bind_group, &[]);
+                    compute_pass.dispatch_workgroups(
+                        self.dispatch_number_workgroups_x_2d,
+                        self.dispatch_number_workgroups_y_2d,
+                        1,
+                    );
+                    // --- P2G ---
+                    compute_pass.set_pipeline(&p2g_config.pipeline);
+                    compute_pass.set_bind_group(0, &p2g_bindgroup, &[]);
+                    compute_pass.dispatch_workgroups(self.dispatch_number_workgroups_1d, 1, 1);
+
+                    // --- Grid Physics ---
+                    compute_pass.set_pipeline(&grid_physics_config.pipeline);
+                    compute_pass.set_bind_group(0, &grid_physics_bindgroup, &[]);
+                    compute_pass.dispatch_workgroups(
+                        self.dispatch_number_workgroups_x_2d,
+                        self.dispatch_number_workgroups_y_2d,
+                        1,
+                    );
+
+                    // --- computeParticles ---
+                    compute_pass.set_pipeline(&compute_particles_config.pipeline);
+                    compute_pass.set_bind_group(0, &compute_particles_bindgroup, &[]);
+                    compute_pass.dispatch_workgroups(self.dispatch_number_workgroups_1d, 1, 1);
+
+                    // --- updateSimInfo ---
+                    compute_pass.set_pipeline(&update_sim_info_config.pipeline);
+                    compute_pass.set_bind_group(0, &update_sim_info_bindgroup, &[]);
+                    compute_pass.dispatch_workgroups(1, 1, 1);
+                }
+            }
+
+            // 3. Submit the batch to execution right now
+            self.queue.submit(Some(command_encoder.finish()));
+            current_step += steps_to_run;
+
+            sim_info = self
+                .read_buffer::<SimInfo>(BufferName::SimInfo)
+                .await
+                .expect("Failed to read SimInfo buffer")[0];
+            // info!("{:#?},", sim_info);
+            let flags = SimInfoFlags::from_bits_retain(sim_info.flags);
+            if flags.contains(SimInfoFlags::STOPPED) {
+                let reason = match flags {
+                    _ if flags.contains(SimInfoFlags::PARTICLES_STOPPED) => {
+                        "all particles have stopped moving"
+                    }
+                    _ if flags.contains(SimInfoFlags::NO_NEW_CELLS) => {
+                        "no new cells were conquered by particles"
+                    }
+                    _ => "unknown reason",
+                };
+                info!(
+                    "Simulation finished at step {} because {}.",
+                    sim_info.timestep, reason
+                );
+
+                break;
+            }
+            if flags.contains(SimInfoFlags::NO_NEW_CELLS) {
+                info!(
+                    "Simulation finished early at step {} as no new cells were conquered by particles!",
+                    current_step
+                );
+                break;
+            }
+            // else {
+            //     trace!(
+            //         "Step {}. Time: {:.4}, dt: {:.4}, Max velocity: {:.4}, Max flow thickness: {:.4}, stopped particles: {}, total particles: {}",
+            //         current_step, sim_info.elapsed_time, sim_info.dt, sim_info.max_velocity, sim_info.max_flow_thickness, atomic_values.stopped_particles, number_release_particles
+            //     );
+            // }
+        }
+        // info!("{:?}", new_cells);
+
+        info!(
+            "New cells conquered in the last 100 steps: {:?}",
+            self.read_buffer::<u32>(BufferName::NewCellsRollingWindow)
+                .await
+                .expect("Failed to read AtomicValues buffer")
+        );
+        let atomic_values = self
+            .read_buffer::<AtomicValues>(BufferName::AtomicValues)
+            .await
+            .expect("Failed to read AtomicValues buffer")[0];
+        info!("{:#?}", sim_info);
+        info!("{:#?}", atomic_values);
+        if sim_info.flags < SimInfoFlags::PARTICLES_STOPPED.bits() {
+            warn!(
+                "Simulation reached max steps without all particles stopping. Consider increasing max_steps or checking for issues in the simulation."
+            );
+        }
+        Ok(())
+    }
+
+    pub async fn run_sim(
+        &mut self,
+        sim_settings: &settings::SimSettings,
+        number_release_particles: u32,
+        minimum_dem_elevation: f32,
+    ) -> Result<()> {
+        debug!("Start simulation");
+        self.add_buffer(
+            BufferName::TimestepData,
+            size_of::<TimestepDataAoS>() * sim_settings.max_steps as usize * 3,
+            BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+        );
+
+        let sim_info: SimInfo = SimInfo {
+            timestep: 1,
+            number_particles: number_release_particles,
+            // estimated timestep for a 60 degree slope
+            dt: (2.0 * sim_settings.cfl * sim_settings.cell_size / (9.81 * 0.866) as f32).sqrt(),
+            elevation_threshold: minimum_dem_elevation - 0.1,
+            ..Default::default()
+        };
+        self.resources.write_buffer(
+            &self.queue,
+            BufferName::SimInfo,
+            bytemuck::bytes_of(&sim_info),
+        )?;
+
+        self.resources.write_buffer(
+            &self.queue,
+            BufferName::SimSettings,
+            sim_settings.as_bytes(),
+        )?;
+        match sim_settings.sim_model {
+            0 => {
+                self.run_compute_particles(
+                    sim_settings,
+                    number_release_particles,
+                    minimum_dem_elevation,
+                )
+                .await?
+            }
+            1 => self.run_mpm(sim_settings).await?,
+            2_u32..=u32::MAX => todo!(),
+        }
+
+        // info!("{:?}", new_cells);
+
+        info!(
+            "New cells conquered in the last 100 steps: {:?}",
+            self.read_buffer::<u32>(BufferName::NewCellsRollingWindow)
+                .await
+                .expect("Failed to read AtomicValues buffer")
+        );
+        let atomic_values = self
+            .read_buffer::<AtomicValues>(BufferName::AtomicValues)
+            .await
+            .expect("Failed to read AtomicValues buffer")[0];
+        let sim_info = self
+            .read_buffer::<SimInfo>(BufferName::SimInfo)
+            .await
+            .expect("Failed to read SimInfo buffer")[0];
+        info!("{:#?}", sim_info);
+        info!("{:#?}", atomic_values);
+        if sim_info.flags < SimInfoFlags::PARTICLES_STOPPED.bits() {
+            warn!(
+                "Simulation reached max steps without all particles stopping. Consider increasing max_steps or checking for issues in the simulation."
+            );
+        }
+        Ok(())
+    }
+
+    pub async fn run_mpm(&mut self, sim_settings: &settings::SimSettings) -> Result<()> {
+        let update_sim_info_config = self
+            .shader_configs
+            .get(&ShaderName::UpdateSimInfo)
+            .expect("UpdateSimInfo shader config not found");
+
+        let update_sim_info_bindgroup =
+            update_sim_info_config.create_bind_group(&self.device, &self.resources)?;
+
+        let p2g_config = self
+            .shader_configs
+            .get(&ShaderName::P2GMPM)
+            .expect("P2G shader config not found");
+
+        let p2g_bindgroup = p2g_config.create_bind_group(&self.device, &self.resources)?;
+
+        let grid_physics_config = self
+            .shader_configs
+            .get(&ShaderName::GridPhysicsMPM)
             .expect("GridPhysics shader config not found");
 
         let grid_physics_bindgroup =
@@ -782,7 +1071,7 @@ impl ComputeOrchestrator {
             self.queue.submit(Some(command_encoder.finish()));
             current_step += steps_to_run;
 
-            sim_info = self
+            let sim_info = self
                 .read_buffer::<SimInfo>(BufferName::SimInfo)
                 .await
                 .expect("Failed to read SimInfo buffer")[0];
@@ -808,7 +1097,7 @@ impl ComputeOrchestrator {
                     "Simulation finished early at step {} as no new cells were conquered by particles!",
                     current_step
                 );
-                break;
+                // break;
             }
             // else {
             //     trace!(
@@ -817,27 +1106,9 @@ impl ComputeOrchestrator {
             //     );
             // }
         }
-        // info!("{:?}", new_cells);
-
-        info!(
-            "New cells conquered in the last 100 steps: {:?}",
-            self.read_buffer::<u32>(BufferName::NewCellsRollingWindow)
-                .await
-                .expect("Failed to read AtomicValues buffer")
-        );
-        let atomic_values = self
-            .read_buffer::<AtomicValues>(BufferName::AtomicValues)
-            .await
-            .expect("Failed to read AtomicValues buffer")[0];
-        info!("{:#?}", sim_info);
-        info!("{:#?}", atomic_values);
-        if sim_info.flags < SimInfoFlags::PARTICLES_STOPPED.bits() {
-            warn!(
-                "Simulation reached max steps without all particles stopping. Consider increasing max_steps or checking for issues in the simulation."
-            );
-        }
         Ok(())
     }
+
     pub async fn read_texture<T: bytemuck::Pod + Send + Sync>(
         &self,
         name: TextureName,
@@ -900,10 +1171,43 @@ mod tests {
     use pollster::block_on;
 
     #[test_log::test]
-    fn test_shader_report_generation() {
+    fn test_shader_report_generation_sim_model_0() {
         let orchestrator =
             block_on(ComputeOrchestrator::new()).expect("Failed to create ComputeOrchestrator");
-        orchestrator.generate_shader_report();
+        orchestrator.generate_shader_report(
+            Some("shader_report_sim_model_0.html"),
+            &[
+                ShaderName::AnalyzeTerrain,
+                ShaderName::ComputeRoughness,
+                ShaderName::ComputeReleaseAreas,
+                ShaderName::InitializeParticles,
+                ShaderName::ResetGrid,
+                ShaderName::P2G,
+                ShaderName::GridPhysics,
+                ShaderName::ComputeParticles,
+                ShaderName::UpdateSimInfo,
+            ],
+        );
+    }
+
+    #[test_log::test]
+    fn test_shader_report_generation_sim_model_1() {
+        let orchestrator =
+            block_on(ComputeOrchestrator::new()).expect("Failed to create ComputeOrchestrator");
+        orchestrator.generate_shader_report(
+            Some("shader_report_sim_model_1.html"),
+            &[
+                ShaderName::AnalyzeTerrainCurvilinear,
+                ShaderName::ComputeRoughness,
+                ShaderName::ComputeReleaseAreas,
+                ShaderName::InitializeParticles,
+                ShaderName::ResetGrid,
+                ShaderName::P2GMPM,
+                ShaderName::GridPhysicsMPM,
+                ShaderName::G2P,
+                ShaderName::UpdateSimInfo,
+            ],
+        );
     }
 
     #[test]
@@ -998,6 +1302,70 @@ mod tests {
             );
         }
         info!("{:#?}", test_output.iter().take(10).collect::<Vec<_>>());
+    }
+    #[test_log::test]
+    fn test_shader_utils() {
+        let mut orchestrator: ComputeOrchestrator =
+            block_on(ComputeOrchestrator::new()).expect("Failed to create ComputeOrchestrator");
+        let sim_settings = settings::SimSettings {
+            ..Default::default()
+        };
+        orchestrator.add_buffer_with_data(
+            BufferName::SimSettings,
+            sim_settings.as_bytes(),
+            BufferUsages::UNIFORM,
+        );
+        orchestrator.add_buffer(
+            BufferName::TestOutput,
+            20 * 4,
+            BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+        );
+        orchestrator.add_buffer(
+            BufferName::AtomicValues,
+            ((size_of::<AtomicValues>() - 1) / 16 + 1) * 16,
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+        );
+        block_on(orchestrator.run_shader(&ShaderName::TestUtils, 4, 5, 1)).expect("msg");
+
+        let test_output =
+            block_on(orchestrator.read_buffer::<f32>(BufferName::TestOutput)).expect("msg");
+        info!("Test output length: {}", test_output.len());
+        info!("{:#?}", test_output.iter().take(10).collect::<Vec<_>>());
+        assert_eq!(test_output[0], 3.1415);
+        assert_eq!(test_output[1], 42.0);
+        assert_eq!(test_output[2], 42.0);
+
+        // is_nan
+        assert_eq!(test_output[3], 1.0);
+        assert_eq!(test_output[4], 1.0);
+        assert_eq!(test_output[5], 0.0);
+        assert_eq!(test_output[6], 0.0);
+        assert_eq!(test_output[7], 0.0);
+        // is_inf
+        assert_eq!(test_output[8], 1.0);
+        assert_eq!(test_output[9], 1.0);
+        assert_eq!(test_output[10], 0.0);
+        assert_eq!(test_output[11], 0.0);
+        assert_eq!(test_output[12], 0.0);
+        // is_finite
+        assert_eq!(test_output[13], 0.0);
+        assert_eq!(test_output[14], 0.0);
+        assert_eq!(test_output[15], 0.0);
+        assert_eq!(test_output[16], 0.0);
+        assert_eq!(test_output[17], 1.0);
+
+        let atomic_values =
+            block_on(orchestrator.read_buffer::<AtomicValues>(BufferName::AtomicValues))
+                .expect("msg");
+        info!("Atomic values: {:#?}", atomic_values);
+        assert_eq!(atomic_values[0].grid_peak_flow_thickness, 2.71828);
+        assert_eq!(atomic_values[0].expected_max_velocity, 1.618);
+        assert_eq!(atomic_values[0].grid_peak_velocity, 1.4142);
+        assert_eq!(atomic_values[0].travel_length, 1.732);
+        assert_eq!(atomic_values[0].estimated_release_volume, 73);
+        assert_eq!(atomic_values[0].number_release_cells, 37);
+        assert_eq!(atomic_values[0].number_release_particles, 42);
+        assert_eq!(atomic_values[0].stopped_particles, 99);
     }
     #[test_log::test]
     fn test_shader_sampling() {
@@ -1175,6 +1543,11 @@ mod tests {
             bytemuck::bytes_of(&mass),
             BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
         );
+        orchestrator.add_buffer_with_data(
+            BufferName::ParticlesAffineMatrix,
+            bytemuck::bytes_of(&mass),
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+        );
 
         orchestrator.add_buffer(
             BufferName::TestOutput,
@@ -1295,6 +1668,19 @@ mod tests {
             "Base node (lower-left) y coordinate wrong"
         );
 
+        info!(
+            "Momentum Grid X:\n {:8.2?} {:8.2?} {:8.2?}\n {:8.2?} {:8.2?} {:8.2?}\n {:8.2?} {:8.2?} {:8.2?}",
+            test_output[20],
+            test_output[21],
+            test_output[22],
+            test_output[23],
+            test_output[24],
+            test_output[25],
+            test_output[26],
+            test_output[27],
+            test_output[28],
+        );
+
         // expected momentum distribution (grid x-momentum)
         assert!(
             (test_output[20] - 325.6352).abs() < 1e-4,
@@ -1333,6 +1719,18 @@ mod tests {
             "test_output[28] failed"
         );
 
+        info!(
+            "Momentum Grid Y:\n {:8.2?} {:8.2?} {:8.2?}\n {:8.2?} {:8.2?} {:8.2?}\n {:8.2?} {:8.2?} {:8.2?}",
+            test_output[30],
+            test_output[31],
+            test_output[32],
+            test_output[33],
+            test_output[34],
+            test_output[35],
+            test_output[36],
+            test_output[37],
+            test_output[38],
+        );
         // expected momentum distribution (grid y-momentum)
         assert!(
             (test_output[30] - 488.4528).abs() < 1e-4,

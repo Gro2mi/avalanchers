@@ -3,7 +3,7 @@
 @group(0) @binding(3) var<storage> particles_velocity: array<vec2<f32>>;
 @group(0) @binding(4) var<storage> particles_mass: array<f32>;
 @group(0) @binding(5) var<storage, read_write> grid_mass_atomic: array<atomic<f32>>;
-@group(0) @binding(6) var<storage, read_write> grid_momentum_atomic: array<atomic<f32>>; // Combined u, v
+@group(0) @binding(6) var<storage, read_write> grid_momentum_atomic: array<atomic<f32>>; 
 
 override WG_SIZE_1D: u32 = 1u;
 @compute @workgroup_size(WG_SIZE_1D, 1, 1)
@@ -13,12 +13,16 @@ fn p2g(@builtin(global_invocation_id) id: vec3u) {
     }
     if sim_info.flags >= SIM_INFO_STOPPED {
         return;
+    }    
+    let use_particle_interaction: bool = (sim_settings.flags & (1u << 1u)) != 0u;
+    if !use_particle_interaction {
+        return;
     }
     let cell = position_to_cell(particles_position[id.x]);
     if cell.x < 1 || cell.x >= (sim_settings.grid_shape.x - 1) || cell.y < 1 || cell.y >= (sim_settings.grid_shape.y - 1) {
         return;
     }
-
+    
     transfer_p2g(id.x);
 }
 
@@ -31,21 +35,27 @@ fn transfer_p2g(p_idx: u32) {
     
     let p_mass = particles_mass[p_idx];
     let p_velocity = particles_velocity[p_idx];
+    // let affine_matrix = particles_affine_matrix[p_idx];
 
     for (var i: u32 = 0; i < 3; i++) {
         for (var j: u32 = 0; j < 3; j++) {
             let node_coords = base_node + vec2u(i, j);
-            let weight = calculate_weight(grid_pos, node_coords);
+            let distance = calculate_distance_to_node(grid_pos, node_coords);
+            let weight = calculate_weight(distance);
             let idx = xy_to_idx(node_coords);
+            // let affine_velocity = p_velocity + (affine_matrix * distance);
 
             
             atomicAdd(&grid_mass_atomic[idx], p_mass * weight);
             atomicAdd(&grid_momentum_atomic[idx * 2u], p_mass * p_velocity.x * weight);
             atomicAdd(&grid_momentum_atomic[idx * 2u + 1u], p_mass * p_velocity.y * weight);
+            // for affine transfer
+            // atomicAdd(&grid_momentum_atomic[idx * 2u], p_mass * affine_velocity.x * weight);
+            // atomicAdd(&grid_momentum_atomic[idx * 2u + 1u], p_mass * affine_velocity.y * weight);
 
-            // atomicAdd(&grid_mass_atomic[idx], u32(round(p_mass * weight * MASS_FACTOR)));
-            // atomicAdd(&grid_momentum_atomic[idx * 2u], i32(round(p_mass * p_velocity.x * weight * MOMENTUM_FACTOR)));
-            // atomicAdd(&grid_momentum_atomic[idx * 2u + 1u], i32(round(p_mass * p_velocity.y * weight * MOMENTUM_FACTOR)));
+            // no_atomic_float atomicAdd(&grid_mass_atomic[idx], u32(round(p_mass * weight * MASS_FACTOR)));
+            // no_atomic_float atomicAdd(&grid_momentum_atomic[idx * 2u], i32(round(p_mass * p_velocity.x * weight * MOMENTUM_FACTOR)));
+            // no_atomic_float atomicAdd(&grid_momentum_atomic[idx * 2u + 1u], i32(round(p_mass * p_velocity.y * weight * MOMENTUM_FACTOR)));
         }
     }
 }
@@ -128,7 +138,27 @@ struct AtomicValues {
     stopped_particles: atomic<u32>,
 };
 
+struct G2PUpdate {
+    velocity: vec2f,
+    affine_matrix: mat2x2<f32>,
+};
+
 @group(0) @binding(0) var<uniform> sim_settings: SimSettings;
+
+fn is_nan(x: f32) -> bool {
+    let bits: u32 = bitcast<u32>(x);
+    return (bits & 0x7F800000u) == 0x7F800000u
+          && (bits & 0x007FFFFFu) != 0u;
+}
+
+fn is_inf(x: f32) -> bool {
+    let bits: u32 = bitcast<u32>(x);
+    return (bits == 0x7F800000u || bits == 0xFF800000u);
+}
+
+fn is_finite(x: f32) -> bool {
+    return !is_nan(x) && !is_inf(x);
+}
 
 fn cell_to_uv(cell: vec2u) -> vec2f {
     return (vec2f(cell) + 0.5) / vec2f(sim_settings.grid_shape);
@@ -153,12 +183,11 @@ fn position_to_cell(position: vec2f) -> vec2u {
     return vec2u(floor(position / sim_settings.cell_size));
 }
 
-
 fn uv_to_cell(uv: vec2f) -> vec2u {
     let epsilon = 1e-5f; // A tiny offset to counteract negative rounding bias
     let scaled_uv = uv * vec2f(sim_settings.grid_shape) + epsilon;
     let max_bound = vec2f(sim_settings.grid_shape - 1u);
-    
+
     return vec2u(clamp(scaled_uv, vec2f(0.0), max_bound));
 }
 
@@ -193,9 +222,12 @@ fn quadratic_weight(d: f32) -> f32 {
     return 0.0;
 }
 
-fn calculate_weight(particle_position: vec2f, node_position: vec2u) -> f32 {
-    let dist = particle_position - vec2f(node_position);
-    return quadratic_weight(dist.x) * quadratic_weight(dist.y);
+fn calculate_weight(distance: vec2f) -> f32 {
+    return quadratic_weight(distance.x) * quadratic_weight(distance.y);
+}
+
+fn calculate_distance_to_node(particle_position: vec2f, node_position: vec2u) -> vec2f {
+    return particle_position - vec2f(node_position);
 }
 
 fn get_base_node(grid_pos: vec2f) -> vec2u {

@@ -1,48 +1,62 @@
 @group(0) @binding(1) var<storage, read_write> sim_info: SimInfo;
-@group(0) @binding(2) var dem_texture: texture_2d<f32>;
-@group(0) @binding(3) var<storage> slope_angle_buffer: array<f32>;
-@group(0) @binding(4) var<storage> release_areas: array<f32>;
-@group(0) @binding(5) var tex_sampler: sampler;
+@group(0) @binding(2) var<storage> particles_position: array<vec2<f32>>;
+@group(0) @binding(3) var<storage> particles_velocity: array<vec2<f32>>;
+@group(0) @binding(4) var<storage> particles_mass: array<f32>;
+@group(0) @binding(5) var<storage, read_write> grid_mass_atomic: array<atomic<f32>>;
+@group(0) @binding(6) var<storage, read_write> grid_momentum_atomic: array<atomic<f32>>; // Combined u, v
+@group(0) @binding(7) var<storage> particles_affine_matrix: array<mat2x2<f32>>;
 
-@group(0) @binding(6) var<storage, read_write> position: array<vec2<f32>>;
-@group(0) @binding(7) var<storage, read_write> mass: array<f32>;
-@group(0) @binding(8) var<storage, read_write> start_elevation: array<f32>;
-@group(0) @binding(9) var<storage, read_write> atomic_values: AtomicValues;
-@group(0) @binding(10) var<storage, read_write> debug: array<f32>;
-// @group(0) @binding(13) var<uniform> tracked_particle_relative_positions: array<Particle>;
-// @group(0) @binding(14) var<storage, read_write> tracked_particle_ids: array<u32>;
-
-@compute @workgroup_size(WG_SIZE_2D, WG_SIZE_2D, 1)
-fn initialize_particles(@builtin(global_invocation_id) cell: vec3<u32>) {
-    if cell.x >= sim_settings.grid_shape.x || cell.y >= sim_settings.grid_shape.y {
+override WG_SIZE_1D: u32 = 1u;
+@compute @workgroup_size(WG_SIZE_1D, 1, 1)
+fn p2g_mpm(@builtin(global_invocation_id) id: vec3u) {
+    if id.x >= sim_info.number_particles {
         return;
     }
-    let idx = xy_to_idx(cell.xy);
-    let snow_thickness = release_areas[idx];
-    if snow_thickness <= 0.01 {
+    if sim_info.flags >= SIM_INFO_STOPPED {
+        return;
+    }
+    let cell = position_to_cell(particles_position[id.x]);
+    if cell.x < 1 || cell.x >= (sim_settings.grid_shape.x - 1) || cell.y < 1 || cell.y >= (sim_settings.grid_shape.y - 1) {
         return;
     }
 
-    // TODO: pass timestamp as seed
-    let seed = 42u;
-    var rng_seed = pcg_hash((cell.x * 73856093u) ^
-    (cell.y * 19349663u) ^
-    seed);
-    let factor = 1.0 / cos(radians(slope_angle_buffer[idx]));
-    let cell_volume = snow_thickness * sim_settings.cell_size * sim_settings.cell_size * factor;
-    let cell_mass = cell_volume * sim_settings.snow_density;
-    atomicAdd(&atomic_values.release_volume, u32(cell_volume));
-    let atomicParticleIndex = atomicAdd(&atomic_values.number_release_particles, sim_settings.released_particles_per_cell);
-    for (var n: u32 = 0; n < sim_settings.released_particles_per_cell; n++) {
-        let particleIndex = atomicParticleIndex + n;
-        let r = rand2(&rng_seed);
-        let cell_xy = (vec2f(cell.xy) + r - 0.5);
+    transfer_p2g(id.x);
+}
 
-        position[particleIndex] = vec2f(cell_xy * sim_settings.cell_size);
-        mass[particleIndex] = cell_mass / f32(sim_settings.released_particles_per_cell);
-        start_elevation[particleIndex] = textureSampleLevel(dem_texture, tex_sampler, cellf_to_uv(cell_xy), 0).x;
+// import transfer_p2g.wgsl;
+// BEGIN transfer_p2g.wgsl
+fn transfer_p2g(p_idx: u32) {
+    // the stencil is offset by half a cell as it is in the middle of the cell
+    let grid_pos = particles_position[p_idx] / sim_settings.cell_size - vec2f(0.5);
+    let base_node = vec2u(floor(grid_pos - vec2f(0.5)));
+    
+    let p_mass = particles_mass[p_idx];
+    let p_velocity = particles_velocity[p_idx];
+    // let affine_matrix = particles_affine_matrix[p_idx];
+
+    for (var i: u32 = 0; i < 3; i++) {
+        for (var j: u32 = 0; j < 3; j++) {
+            let node_coords = base_node + vec2u(i, j);
+            let distance = calculate_distance_to_node(grid_pos, node_coords);
+            let weight = calculate_weight(distance);
+            let idx = xy_to_idx(node_coords);
+            // let affine_velocity = p_velocity + (affine_matrix * distance);
+
+            
+            atomicAdd(&grid_mass_atomic[idx], p_mass * weight);
+            atomicAdd(&grid_momentum_atomic[idx * 2u], p_mass * p_velocity.x * weight);
+            atomicAdd(&grid_momentum_atomic[idx * 2u + 1u], p_mass * p_velocity.y * weight);
+            // for affine transfer
+            // atomicAdd(&grid_momentum_atomic[idx * 2u], p_mass * affine_velocity.x * weight);
+            // atomicAdd(&grid_momentum_atomic[idx * 2u + 1u], p_mass * affine_velocity.y * weight);
+
+            // no_atomic_float atomicAdd(&grid_mass_atomic[idx], u32(round(p_mass * weight * MASS_FACTOR)));
+            // no_atomic_float atomicAdd(&grid_momentum_atomic[idx * 2u], i32(round(p_mass * p_velocity.x * weight * MOMENTUM_FACTOR)));
+            // no_atomic_float atomicAdd(&grid_momentum_atomic[idx * 2u + 1u], i32(round(p_mass * p_velocity.y * weight * MOMENTUM_FACTOR)));
+        }
     }
 }
+// END transfer_p2g.wgsl
 
 // import utils.wgsl;
 // BEGIN utils.wgsl
@@ -242,36 +256,3 @@ fn compute_centroid(points: ptr<function, array<vec2<f32>, 256>>, count: u32) ->
     return vec2<f32>(cx, cy) / (6.0 * area);
 }
 // END utils.wgsl
-
-// import random.wgsl;
-// BEGIN random.wgsl
-// A high-quality 32-bit hash (PCG)
-fn pcg_hash(input: u32) -> u32 {
-    var state = input * 747796405u + 2891336453u;
-    var word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
-    return (word >> 22u) ^ word;
-}
-
-// Advances the seed and returns a float 0.0 -> 1.0
-fn next_rand(seed: ptr<function, u32>) -> f32 {
-    *seed = pcg_hash(*seed);
-    return f32(*seed) / f32(0xffffffffu);
-}
-
-fn rand1(seed: ptr<function, u32>) -> f32 {
-    return next_rand(seed);
-}
-
-fn rand2(seed: ptr<function, u32>) -> vec2f {
-    return vec2f(next_rand(seed), next_rand(seed));
-}
-
-fn rand3(seed: ptr<function, u32>) -> vec3f {
-    return vec3f(next_rand(seed), next_rand(seed), next_rand(seed));
-}
-
-fn rand4(seed: ptr<function, u32>) -> vec4f {
-    return vec4f(next_rand(seed), next_rand(seed), next_rand(seed), next_rand(seed));
-}
-
-// END random.wgsl

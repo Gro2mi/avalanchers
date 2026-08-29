@@ -1,47 +1,120 @@
-@group(0) @binding(1) var<storage, read_write> sim_info: SimInfo;
-@group(0) @binding(2) var dem_texture: texture_2d<f32>;
-@group(0) @binding(3) var<storage> slope_angle_buffer: array<f32>;
-@group(0) @binding(4) var<storage> release_areas: array<f32>;
-@group(0) @binding(5) var tex_sampler: sampler;
-
-@group(0) @binding(6) var<storage, read_write> position: array<vec2<f32>>;
-@group(0) @binding(7) var<storage, read_write> mass: array<f32>;
-@group(0) @binding(8) var<storage, read_write> start_elevation: array<f32>;
-@group(0) @binding(9) var<storage, read_write> atomic_values: AtomicValues;
-@group(0) @binding(10) var<storage, read_write> debug: array<f32>;
-// @group(0) @binding(13) var<uniform> tracked_particle_relative_positions: array<Particle>;
-// @group(0) @binding(14) var<storage, read_write> tracked_particle_ids: array<u32>;
+@group(0) @binding(1) var dem_texture: texture_2d<f32>;
+// metrics: vec4<f32>,   // x = l_x, y = l_y, z = J, w = g_y
+@group(0) @binding(2) var terrain_geometry_texture: texture_storage_2d<rgba32float, write>;
+// dynamics: vec4<f32>,  // x = K_xx, y = K_yy, z = K_xy, w = g_x
+@group(0) @binding(3) var curvature_texture: texture_storage_2d<rgba32float, write>;
+@group(0) @binding(4) var<storage, read_write> slope_angle_buffer: array<f32>;
+@group(0) @binding(5) var<storage, read_write> slope_aspect_buffer: array<f32>;
+@group(0) @binding(6) var<storage, read_write> debug: array<f32>;
 
 @compute @workgroup_size(WG_SIZE_2D, WG_SIZE_2D, 1)
-fn initialize_particles(@builtin(global_invocation_id) cell: vec3<u32>) {
-    if cell.x >= sim_settings.grid_shape.x || cell.y >= sim_settings.grid_shape.y {
-        return;
-    }
-    let idx = xy_to_idx(cell.xy);
-    let snow_thickness = release_areas[idx];
-    if snow_thickness <= 0.01 {
+fn analyze_terrain_curvilinear(@builtin(global_invocation_id) id: vec3<u32>) {
+    // boundary guard
+    if id.x < 1 || id.x >= sim_settings.grid_shape.x - 1 || id.y < 1 || id.y >= sim_settings.grid_shape.y - 1 {
         return;
     }
 
-    // TODO: pass timestamp as seed
-    let seed = 42u;
-    var rng_seed = pcg_hash((cell.x * 73856093u) ^
-    (cell.y * 19349663u) ^
-    seed);
-    let factor = 1.0 / cos(radians(slope_angle_buffer[idx]));
-    let cell_volume = snow_thickness * sim_settings.cell_size * sim_settings.cell_size * factor;
-    let cell_mass = cell_volume * sim_settings.snow_density;
-    atomicAdd(&atomic_values.release_volume, u32(cell_volume));
-    let atomicParticleIndex = atomicAdd(&atomic_values.number_release_particles, sim_settings.released_particles_per_cell);
-    for (var n: u32 = 0; n < sim_settings.released_particles_per_cell; n++) {
-        let particleIndex = atomicParticleIndex + n;
-        let r = rand2(&rng_seed);
-        let cell_xy = (vec2f(cell.xy) + r - 0.5);
+    let dx = sim_settings.cell_size;
+    let dy = sim_settings.cell_size;
+    let coords = vec2<i32>(id.xy);
 
-        position[particleIndex] = vec2f(cell_xy * sim_settings.cell_size);
-        mass[particleIndex] = cell_mass / f32(sim_settings.released_particles_per_cell);
-        start_elevation[particleIndex] = textureSampleLevel(dem_texture, tex_sampler, cellf_to_uv(cell_xy), 0).x;
+    // 2. Fetch 9-Point Stencil Neighborhood
+    let z_cc = textureLoad(dem_texture, coords, 0).r;
+
+    let z_l = textureLoad(dem_texture, coords + vec2<i32>(-1, 0), 0).r;
+    let z_r = textureLoad(dem_texture, coords + vec2<i32>(1, 0), 0).r;
+    let z_d = textureLoad(dem_texture, coords + vec2<i32>(0, -1), 0).r;
+    let z_u = textureLoad(dem_texture, coords + vec2<i32>(0, 1), 0).r;
+
+    let z_lu = textureLoad(dem_texture, coords + vec2<i32>(-1, 1), 0).r;
+    let z_ru = textureLoad(dem_texture, coords + vec2<i32>(1, 1), 0).r;
+    let z_ld = textureLoad(dem_texture, coords + vec2<i32>(-1, -1), 0).r;
+    let z_rd = textureLoad(dem_texture, coords + vec2<i32>(1, -1), 0).r;
+
+    // 3. First Derivatives (Slopes)
+    let dB_dx = (z_r - z_l) / (2.0 * dx);
+    let dB_dy = (z_u - z_d) / (2.0 * dy);
+
+    // 4. Metric Coefficients & Surface Jacobian
+    let l_x = sqrt(1.0 + dB_dx * dB_dx);
+    let l_y = sqrt(1.0 + dB_dy * dB_dy);
+    let J = sqrt(1.0 + dB_dx * dB_dx + dB_dy * dB_dy);
+
+    // 5. Second Derivatives (Hessian Matrix)
+    let dB_dx2 = (z_r - 2.0 * z_cc + z_l) / (dx * dx);
+    let dB_dy2 = (z_u - 2.0 * z_cc + z_d) / (dy * dy);
+    let dB_dxdy = (z_ru + z_ld - z_lu - z_rd) / (4.0 * dx * dy);
+
+    // 6. Curvatures
+    let K_xx = dB_dx2 / J;
+    let K_yy = dB_dy2 / J;
+    let K_xy = dB_dxdy / J;
+
+    // 7. Slope-parallel Driving Gravity Forces (m/s^2)
+    let g_x = -g * dB_dx / l_x;
+    let g_y = -g * dB_dy / l_y;
+
+    // 8. --- CALCULATE SLOPE ANGLE & ASPECT IN DEGREES ---
+
+    // Magnitude of the terrain gradient vector
+    let slope_magnitude = sqrt(dB_dx * dB_dx + dB_dy * dB_dy);
+
+    // Angle computation: atan(gradient)
+    let slope_angle_deg = degrees(atan(slope_magnitude));
+
+    var slope_aspect_deg = 0.0;
+
+    // Safety check: prevent division/undefined states on perfectly flat terrain
+    if slope_magnitude > 1e-5 {
+        // atan2(y, x) returns the math angle counter-clockwise from East (+x)
+        let aspect_rad = atan2(dB_dy, dB_dx);
+
+        // Convert counter-clockwise from East to clockwise from North
+        slope_aspect_deg = 90.0 - degrees(aspect_rad);
+
+        // Wrap negative angles back into the positive 0° - 360° compass range
+        if slope_aspect_deg < 0.0 {
+            slope_aspect_deg += 360.0;
+        }
+    } else {
+        // GIS convention representation for flat terrain (Aspect = -1)
+        slope_aspect_deg = -1.0;
     }
+
+    // 9. Write everything to WebGPU Storage Buffers
+    let index = xy_to_idx(id.xy);
+
+    // Curvilinear physics buffer
+    textureStore(curvature_texture, coords, vec4f(K_xx, K_yy, K_xy, g_x));
+    textureStore(terrain_geometry_texture, coords, vec4f(l_x, l_y, J, g_y));
+
+    // New analysis buffers
+    slope_angle_buffer[index] = slope_angle_deg;
+    slope_aspect_buffer[index] = slope_aspect_deg;
+
+    // if(cell.x == 0 && cell.y == 0) {
+    //     debug[0] = normal.x;
+    //     debug[1] = normal.y;
+    //     debug[2] = normal.z;
+    //     debug[3] = resolution;
+    //     debug[4] = dx;
+    //     debug[5] = dy;
+    //     debug[6] = dxx;
+    //     debug[7] = dyy;
+    //     debug[8] = dxy;
+    //     debug[9] = profile_curvature;
+    //     debug[10] = left;
+    //     debug[11] = right;
+    //     debug[12] = up;
+    //     debug[13] = down;
+    //     debug[14] = center;
+    //     debug[15] = slope_angle;
+    //     debug[16] = slope_aspect;
+    //     debug[17] = up_right;
+    //     debug[18] = down_right;
+    //     debug[19] = up_left;
+    //     debug[20] = down_left;
+    // }
 }
 
 // import utils.wgsl;
@@ -242,36 +315,3 @@ fn compute_centroid(points: ptr<function, array<vec2<f32>, 256>>, count: u32) ->
     return vec2<f32>(cx, cy) / (6.0 * area);
 }
 // END utils.wgsl
-
-// import random.wgsl;
-// BEGIN random.wgsl
-// A high-quality 32-bit hash (PCG)
-fn pcg_hash(input: u32) -> u32 {
-    var state = input * 747796405u + 2891336453u;
-    var word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
-    return (word >> 22u) ^ word;
-}
-
-// Advances the seed and returns a float 0.0 -> 1.0
-fn next_rand(seed: ptr<function, u32>) -> f32 {
-    *seed = pcg_hash(*seed);
-    return f32(*seed) / f32(0xffffffffu);
-}
-
-fn rand1(seed: ptr<function, u32>) -> f32 {
-    return next_rand(seed);
-}
-
-fn rand2(seed: ptr<function, u32>) -> vec2f {
-    return vec2f(next_rand(seed), next_rand(seed));
-}
-
-fn rand3(seed: ptr<function, u32>) -> vec3f {
-    return vec3f(next_rand(seed), next_rand(seed), next_rand(seed));
-}
-
-fn rand4(seed: ptr<function, u32>) -> vec4f {
-    return vec4f(next_rand(seed), next_rand(seed), next_rand(seed), next_rand(seed));
-}
-
-// END random.wgsl
