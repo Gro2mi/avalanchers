@@ -106,6 +106,41 @@ wasm-pack build crates/wasm_bindings --target web --out-dir ../../frontend/js/pk
 3. Start the development server: `python .\frontend\dev_server.py` This launches the app with caching disabled and HTTPS enabled using self-signed certificates, which are required for WebGPU support in most browsers.
 4. Open your browser and go to: [https://localhost/](https://localhost/) If you are accessing the server from another device on the same network, replace `localhost` with the host machine’s IP address.
 
+The frontend is organised as a step-by-step workflow:
+
+* **Shortcut** — pick a bundled AvaFrame example and run it directly.
+* **Step 1: Select DEM** — upload or drag & drop a `.gpx`, `.tif`/`.tiff`, `.asc` file, or a Zarr store directory.
+  A `.gpx` track downloads matching elevation tiles; the zoom level slider controls their resolution.
+  When a Zarr store is selected, a dropdown lists the sites found in the store.
+* **Step 2: Select release areas** — either derive them from the terrain with *Calculate release areas*, or upload
+  a `.tif`/`.tiff` or `.asc` raster matching the DEM grid. For a Zarr store, a scenario dropdown lists the scenarios
+  of the site selected in step 1.
+* **Step 3: Simulation settings** — model and solver parameters.
+* **Step 4: Run simulation** — starts the run and shows progress and errors.
+
+Uploaded `.asc` and GeoTIFF files are decoded by the WASM build so that cell size, bounds and row order match the
+native and Python paths. After changing the Rust API, regenerate the bindings with the `wasm-pack` command above.
+
+#### Zarr stores
+
+Stores are expected to follow the layout written by `data_processor::output`:
+
+```
+<store>.zarr/
+  <site>/            # group, one per site
+    dem, x, y        # arrays: the terrain of the site
+    <scenario>/      # group, one per scenario
+      release_area   # array: the release areas of the scenario
+```
+
+Directory uploads use the browser's `webkitdirectory` support, so the whole store folder has to be selected
+(dropping the folder onto the drop zone works as well).
+
+Chunks are decoded by the WASM build. The blosc codec (zstd compressor, with the byte-shuffle or bitshuffle
+filter) is implemented in pure Rust in `data_processor::blosc`, using [`ruzstd`](https://crates.io/crates/ruzstd)
+rather than the C `zstd` bindings, because `zstd-sys` needs a clang cross-compiler to target
+`wasm32-unknown-unknown`. Half precision (`float16`) arrays are widened to `f32` when read.
+
 ### Benchmarks
 
 ``cargo bench -p simulation``

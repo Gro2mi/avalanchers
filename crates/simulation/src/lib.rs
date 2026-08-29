@@ -7,6 +7,8 @@ use compute_core::{
     settings::{Settings, SimSettings},
     utils::*,
 };
+#[cfg(target_arch = "wasm32")]
+use data_processor::zarr_writer::{ResultGrids, ZarrEntry};
 // use data_processor;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Once;
@@ -384,6 +386,85 @@ impl Simulation {
         self.save().await
     }
 
+    /// Name of the site this simulation writes to, derived from the DEM.
+    pub fn site_name(&self) -> String {
+        let source = if !self.dem.source.is_empty() {
+            self.dem.source.as_str()
+        } else {
+            self.dem_path.as_str()
+        };
+        let stem = std::path::Path::new(source)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("default-site")
+            .replace("_", "-");
+        format!("{}_{:x}", stem, self.dem.calculate_hash())
+    }
+
+    /// Name of the scenario, derived from the release areas.
+    pub fn scenario_name(&self) -> String {
+        let base = match &self.release_areas_path {
+            Some(path) => std::path::Path::new(path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(path)
+                .to_string()
+                .replace("_", "-"),
+            None => format!(
+                "calculated-elev{}-minslope{}-maxslope{}-rough{}",
+                self.settings.release_min_elevation,
+                self.settings.min_slope_angle,
+                self.settings.max_slope_angle,
+                self.settings.roughness_threshold,
+            ),
+        };
+        format!("{}_{:x}", base, self.release_hash())
+    }
+
+    /// Builds an in-memory Zarr store of the current results.
+    ///
+    /// Used by the browser, which cannot write files itself; the caller is
+    /// responsible for persisting the returned entries.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn export_zarr_entries(&mut self) -> Result<Vec<ZarrEntry>> {
+        if self.state < SimulationState::Finished {
+            bail!("Run the simulation before saving results");
+        }
+
+        let site_name = self.site_name();
+        let scenario_name = self.scenario_name();
+
+        let release_areas = self.fetch_release_areas().await?;
+        self.fetch_peak_velocity().await?;
+        self.fetch_peak_flow_thickness().await?;
+
+        let peak_velocity = self
+            .gpu_cache
+            .peak_velocity
+            .clone()
+            .unwrap_or_else(|| vec![0.0; release_areas.len()]);
+        let peak_flow_thickness = self
+            .gpu_cache
+            .peak_flow_thickness
+            .clone()
+            .unwrap_or_else(|| vec![0.0; release_areas.len()]);
+
+        let settings = serde_json::to_value(self.settings).unwrap_or(serde_json::Value::Null);
+
+        Ok(data_processor::zarr_writer::build_result_store(
+            &site_name,
+            &scenario_name,
+            &self.dem,
+            &ResultGrids {
+                release_areas: &release_areas,
+                peak_velocity: &peak_velocity,
+                peak_flow_thickness: &peak_flow_thickness,
+            },
+            settings,
+        ))
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn save(&mut self) -> Result<()> {
         let mut site_name = std::path::Path::new(&self.dem_path)
@@ -603,7 +684,7 @@ impl Simulation {
         ))
     }
 
-    async fn fetch_roughness_texture(&mut self) -> Result<&TextureRgba<f32>> {
+    pub async fn fetch_roughness_texture(&mut self) -> Result<&TextureRgba<f32>> {
         assert!(
             self.state >= SimulationState::ReleaseAreasComputed,
             "Release areas must be computed before reading roughness texture"
@@ -635,7 +716,7 @@ impl Simulation {
         Ok(self.fetch_roughness_texture().await?.r.clone())
     }
 
-    async fn fetch_slope_texture(&mut self) -> Result<&TextureRgba<f32>> {
+    pub async fn fetch_slope_texture(&mut self) -> Result<&TextureRgba<f32>> {
         assert!(
             self.state >= SimulationState::NormalsComputed,
             "Normals must be computed before reading normals texture"

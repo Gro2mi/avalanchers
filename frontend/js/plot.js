@@ -11,9 +11,7 @@ const resetLighting = {
 }
 
 function resetPlots() {
-    Plotly.purge('outputPlot');
-    Plotly.purge('demPlot');
-    Plotly.purge('histogramPlot');
+    ['outputPlot', 'demPlot', 'histogramPlot', 'timerPlot', 'debugPlot'].forEach(id => Plotly.purge(id));
 }
 
 function plotDem(sim) {
@@ -103,11 +101,29 @@ function percentileForLegend(percentile, variable) {
     return Math.round(p);
 }
 
-async function updatePlots(sim, selectedVariable) {
-    // await sim.fetch_cell_count();
-    // await sim.fetch_peak_flow_thickness();
-    // sim.fetch_results();
+/** Loads the cached data a variable needs, tolerating stages where it does not exist yet. */
+async function ensureVariableFetched(sim, variable) {
+    const fetchers = {
+        release_areas: () => sim.fetch_release_areas(),
+        slope_angle: () => sim.fetch_slope(),
+        slope_aspect: () => sim.fetch_slope(),
+        roughness: () => sim.fetch_roughness(),
+        peak_velocity: () => sim.fetch_peak_velocity(),
+        peak_flow_thickness: () => sim.fetch_peak_flow_thickness(),
+        cell_count: () => sim.fetch_cell_count(),
+    };
+    const fetcher = fetchers[variable];
+    if (!fetcher) return true;
+    try {
+        await fetcher();
+        return true;
+    } catch (error) {
+        console.warn(`"${variable}" is not available yet.`, error);
+        return false;
+    }
+}
 
+async function updatePlots(sim, selectedVariable) {
     if (selectedVariable === 'elevation') {
         Plotly.restyle(demPlot, {
             surfacecolor: [to2D(new Float32Array(sim.dem), sim.width, sim.height)],
@@ -121,9 +137,18 @@ async function updatePlots(sim, selectedVariable) {
         });
         return;
     }
+
+    if (!await ensureVariableFetched(sim, selectedVariable)) return;
+
+    const values = new Float32Array(sim[selectedVariable]);
+    if (values.length !== sim.width * sim.height) {
+        console.warn(`"${selectedVariable}" has no data to plot yet.`);
+        return;
+    }
+
     var traceHist = {
         type: 'histogram',
-        x: new Float32Array(sim[selectedVariable]),
+        x: values,
         autobinx: true, // or set fixed bin settings
     };
 
@@ -144,7 +169,7 @@ async function updatePlots(sim, selectedVariable) {
     }
 
     var plotOptions = {
-        surfacecolor: [to2D(new Float32Array(sim[selectedVariable]), sim.width, sim.height)],
+        surfacecolor: [to2D(values, sim.width, sim.height)],
         showscale: true,
         colorscale: ['Portland'],
         cmin: [cmin],
@@ -153,15 +178,14 @@ async function updatePlots(sim, selectedVariable) {
             title: selectedVariable,
         },
     };
-    traceHist.x = new Float32Array(sim[selectedVariable]).filter((val, index) => (sim.dem[index] > 0));
+    const demValues = new Float32Array(sim.dem);
+    traceHist.x = values.filter((val, index) => (demValues[index] > 0));
     if (selectedVariable === 'cell_count') {
-        const cellCountLog = new Float32Array(sim.cell_count).map(val => Math.log10(val));
+        const cellCountLog = values.map(val => Math.log10(val));
         plotOptions.surfacecolor = [to2D(cellCountLog, sim.width, sim.height)];
         traceHist.x = cellCountLog.filter(val => val > 0);
-    } else if (selectedVariable === 'peak_velocity') {
-        traceHist.x = traceHist.x.filter(val => val > 1e-5)
-    } else if (selectedVariable === 'peak_flow_thickness') {
-        traceHist.x = traceHist.x.filter(val => val > 1e-5)
+    } else if (selectedVariable === 'peak_velocity' || selectedVariable === 'peak_flow_thickness') {
+        traceHist.x = traceHist.x.filter(val => val > 1e-5);
     }
     Plotly.restyle(demPlot, plotOptions, [0]);
     Plotly.react(histogramPlot, [traceHist], layoutHist);

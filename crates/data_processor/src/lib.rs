@@ -3,6 +3,7 @@ use std::fs::File;
 use std::io::Cursor;
 use std::io::{self, BufWriter, Write};
 use std::io::{BufRead, BufReader};
+use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 use std::vec::Vec;
 use tiff::decoder::{Decoder, DecodingResult};
@@ -12,9 +13,13 @@ use compute_core::dem::{Bounds, Dem, GeoMetadata, GeoTiff, TiffData};
 use compute_core::settings::{Settings, SimSettings};
 use compute_core::utils::*;
 
+#[cfg(target_arch = "wasm32")]
+pub mod blosc;
 pub mod caaml_parser;
 pub mod rasterizer;
 pub mod shapefile_reader;
+#[cfg(target_arch = "wasm32")]
+pub mod zarr_writer;
 use rasterizer::RasterGrid;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -496,7 +501,16 @@ pub enum GeoTiffError {
 }
 pub fn read_geo_tiff(path: &str) -> Result<GeoTiff, GeoTiffError> {
     let file = File::open(path)?;
-    let mut decoder = Decoder::new(BufReader::new(file))?;
+    read_geo_tiff_from_reader(BufReader::new(file))
+}
+
+/// Parses a GeoTIFF from raw bytes, e.g. a file uploaded in the browser.
+pub fn read_geo_tiff_from_bytes(bytes: &[u8]) -> Result<GeoTiff, GeoTiffError> {
+    read_geo_tiff_from_reader(Cursor::new(bytes))
+}
+
+pub fn read_geo_tiff_from_reader<R: Read + Seek>(reader: R) -> Result<GeoTiff, GeoTiffError> {
+    let mut decoder = Decoder::new(reader)?;
 
     let (width, height) = decoder.dimensions()?;
 
@@ -600,7 +614,11 @@ async fn load_png_as_dem(path: &str) -> Result<Dem, DataProcessorError> {
 }
 
 fn load_asc_as_dem(path: &str) -> Result<Dem, DataProcessorError> {
-    let mut grid = EsriGrid::from_file(path)?;
+    let grid = EsriGrid::from_file(path)?;
+    Ok(esri_grid_to_dem(grid, path))
+}
+
+fn esri_grid_to_dem(mut grid: EsriGrid, source: &str) -> Dem {
     flip_rows_flat_vec(
         &mut grid.data,
         grid.header.ncols as u32,
@@ -623,15 +641,19 @@ fn load_asc_as_dem(path: &str) -> Result<Dem, DataProcessorError> {
         bounds,
         map_factor: 1.0,
         minimum_elevation: f32::INFINITY,
-        source: path.to_string(),
+        source: source.to_string(),
         projection: "unknown".to_string(),
     };
     dem.data = to_2d(&dem.data1d, dem.width, dem.height);
-    Ok(dem)
+    dem
 }
 
 fn load_tiff_as_dem(path: &str) -> Result<Dem, DataProcessorError> {
-    let mut tiff: GeoTiff = read_geo_tiff(path)?;
+    let tiff: GeoTiff = read_geo_tiff(path)?;
+    Ok(geo_tiff_to_dem(tiff, path))
+}
+
+fn geo_tiff_to_dem(mut tiff: GeoTiff, source: &str) -> Dem {
     tiff.flip_y();
     let mut dem = Dem {
         width: tiff.metadata.width as usize,
@@ -652,11 +674,11 @@ fn load_tiff_as_dem(path: &str) -> Result<Dem, DataProcessorError> {
         bounds: tiff.metadata.bounds,
         map_factor: 1.0,
         minimum_elevation: f32::INFINITY, // Will be calculated later
-        source: path.to_string(),
+        source: source.to_string(),
         projection: format!("EPSG:{}", tiff.metadata.epsg_code),
     };
     dem.data = to_2d(&dem.data1d, dem.width, dem.height);
-    Ok(dem)
+    dem
 }
 
 pub async fn load_release_areas(path: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
@@ -689,19 +711,60 @@ pub async fn load_release_areas(path: &str) -> Result<Vec<f32>, Box<dyn std::err
     Ok(data)
 }
 
+/// Loads release areas from raw bytes. `ext` selects the parser, e.g. "asc" or "tif".
+pub fn load_release_areas_from_bytes(
+    bytes: &[u8],
+    ext: &str,
+) -> Result<Vec<f32>, DataProcessorError> {
+    let data: Vec<f32> = match ext.to_lowercase().as_str() {
+        "asc" => {
+            let mut grid = EsriGrid::from_reader(Cursor::new(bytes))?;
+            grid.flip_y();
+            grid.data
+        }
+        "tif" | "tiff" => {
+            let mut tiff = read_geo_tiff_from_bytes(bytes)?;
+            tiff.flip_y();
+            tiff.data.as_f32()
+        }
+        _ => return Err(DataProcessorError::UnsupportedDemFormat(ext.to_string())),
+    };
+    Ok(data)
+}
+
 pub async fn load_dem(path: &str) -> Result<Dem, DataProcessorError> {
     let ext = std::path::Path::new(path)
         .extension()
         .and_then(|s| s.to_str())
         .unwrap_or("");
 
-    let mut dem: Dem = match ext.to_lowercase().as_str() {
+    let dem: Dem = match ext.to_lowercase().as_str() {
         "asc" => load_asc_as_dem(path)?,
         "png" => load_png_as_dem(path).await?,
         "tif" | "tiff" => load_tiff_as_dem(path)?,
         _ => return Err(DataProcessorError::UnsupportedDemFormat(ext.to_string())),
     };
 
+    finalize_dem(dem)
+}
+
+/// Loads a DEM from raw bytes. `ext` selects the parser, e.g. "asc" or "tif".
+pub fn load_dem_from_bytes(
+    bytes: &[u8],
+    ext: &str,
+    source: &str,
+) -> Result<Dem, DataProcessorError> {
+    let dem: Dem = match ext.to_lowercase().as_str() {
+        "asc" => esri_grid_to_dem(EsriGrid::from_reader(Cursor::new(bytes))?, source),
+        "tif" | "tiff" => geo_tiff_to_dem(read_geo_tiff_from_bytes(bytes)?, source),
+        _ => return Err(DataProcessorError::UnsupportedDemFormat(ext.to_string())),
+    };
+
+    finalize_dem(dem)
+}
+
+/// Masks values below the minimum elevation as NaN and validates the georeferenced bounds.
+fn finalize_dem(mut dem: Dem) -> Result<Dem, DataProcessorError> {
     dem.minimum_elevation = Dem::calculate_minimum_elevation(&dem.data1d);
 
     dem.data1d = dem
@@ -715,18 +778,19 @@ pub async fn load_dem(path: &str) -> Result<Dem, DataProcessorError> {
             }
         })
         .collect();
-    assert!(
-        dem.bounds.xmin < dem.bounds.xmax,
-        "xmin ({}) must be less than or equal to xmax ({})",
-        dem.bounds.xmin,
-        dem.bounds.xmax
-    );
-    assert!(
-        dem.bounds.ymin < dem.bounds.ymax,
-        "ymin ({}) must be less than or equal to ymax ({})",
-        dem.bounds.ymin,
-        dem.bounds.ymax
-    );
+
+    if dem.bounds.xmin >= dem.bounds.xmax {
+        return Err(DataProcessorError::DemError(format!(
+            "xmin ({}) must be less than xmax ({})",
+            dem.bounds.xmin, dem.bounds.xmax
+        )));
+    }
+    if dem.bounds.ymin >= dem.bounds.ymax {
+        return Err(DataProcessorError::DemError(format!(
+            "ymin ({}) must be less than ymax ({})",
+            dem.bounds.ymin, dem.bounds.ymax
+        )));
+    }
 
     Ok(dem)
 }
@@ -1297,6 +1361,74 @@ NODATA_value  -1
 
         assert_eq!(grid.header.get_xllcorner(), 48.75);
         assert_eq!(grid.header.get_yllcorner(), 48.75);
+    }
+
+    const ASC_SAMPLE: &str = "\
+ncols         3
+nrows         2
+xllcorner     100.0
+yllcorner     200.0
+cellsize      10.0
+NODATA_value  -9999
+1.0 2.0 3.0
+4.0 5.0 6.0";
+
+    #[test]
+    fn test_load_dem_from_bytes_asc_georeference_and_row_order() {
+        let dem = load_dem_from_bytes(ASC_SAMPLE.as_bytes(), "asc", "upload.asc").unwrap();
+
+        assert_eq!(dem.width, 3);
+        assert_eq!(dem.height, 2);
+        assert_eq!(dem.cell_size, 10.0);
+        assert_eq!(dem.bounds.xmin, 100.0);
+        assert_eq!(dem.bounds.xmax, 130.0);
+        assert_eq!(dem.bounds.ymin, 200.0);
+        assert_eq!(dem.bounds.ymax, 220.0);
+        assert_eq!(dem.source, "upload.asc");
+
+        // ESRI rows run north to south, so loading flips them to south-up.
+        assert_eq!(dem.data1d, vec![4.0, 5.0, 6.0, 1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn test_load_dem_from_bytes_matches_path_loader() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sample.asc");
+        std::fs::write(&path, ASC_SAMPLE).unwrap();
+
+        let from_path = pollster::block_on(load_dem(path.to_str().unwrap())).unwrap();
+        let from_bytes = load_dem_from_bytes(ASC_SAMPLE.as_bytes(), "asc", "sample.asc").unwrap();
+
+        assert_eq!(from_path.width, from_bytes.width);
+        assert_eq!(from_path.height, from_bytes.height);
+        assert_eq!(from_path.cell_size, from_bytes.cell_size);
+        assert_eq!(from_path.bounds.xmin, from_bytes.bounds.xmin);
+        assert_eq!(from_path.bounds.ymax, from_bytes.bounds.ymax);
+        assert_eq!(from_path.data1d, from_bytes.data1d);
+    }
+
+    #[test]
+    fn test_load_dem_from_bytes_rejects_unsupported_extension() {
+        let result = load_dem_from_bytes(b"irrelevant", "zarr", "store.zarr");
+        assert!(matches!(
+            result,
+            Err(DataProcessorError::UnsupportedDemFormat(ref ext)) if ext == "zarr"
+        ));
+    }
+
+    #[test]
+    fn test_load_release_areas_from_bytes_asc_is_flipped() {
+        let data = load_release_areas_from_bytes(ASC_SAMPLE.as_bytes(), "asc").unwrap();
+        assert_eq!(data, vec![4.0, 5.0, 6.0, 1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn test_load_release_areas_from_bytes_rejects_unsupported_extension() {
+        let result = load_release_areas_from_bytes(b"irrelevant", "png");
+        assert!(matches!(
+            result,
+            Err(DataProcessorError::UnsupportedDemFormat(ref ext)) if ext == "png"
+        ));
     }
 
     #[test]

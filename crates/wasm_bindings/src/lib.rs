@@ -1,4 +1,6 @@
 use compute_core::{TimestepData, settings::Settings};
+#[cfg(target_arch = "wasm32")]
+use js_sys::{Array, Object, Reflect, Uint8Array};
 use js_sys::{Float32Array, Uint32Array};
 use serde_wasm_bindgen::from_value;
 use simulation::{Simulation, init_logging};
@@ -24,6 +26,20 @@ pub fn main() {
 // Helper for error conversion to JS strings
 fn to_js_err<E: std::fmt::Display>(e: E) -> JsValue {
     JsValue::from_str(&e.to_string())
+}
+
+#[cfg(target_arch = "wasm32")]
+/// Decodes a blosc compressed Zarr chunk, including the bitshuffle filter.
+#[wasm_bindgen]
+pub fn decode_blosc_chunk(bytes: &[u8]) -> Result<Vec<u8>, JsValue> {
+    data_processor::blosc::decode_blosc(bytes).map_err(to_js_err)
+}
+
+#[cfg(target_arch = "wasm32")]
+/// Decodes a standalone zstd frame.
+#[wasm_bindgen]
+pub fn decode_zstd_chunk(bytes: &[u8]) -> Result<Vec<u8>, JsValue> {
+    data_processor::blosc::decode_zstd_frame(bytes).map_err(to_js_err)
 }
 
 pub fn base_url() -> &'static str {
@@ -138,7 +154,6 @@ impl Default for WasmSettings {
 pub struct WasmSimulation {
     inner: Simulation,
 }
-
 #[wasm_bindgen]
 impl WasmSimulation {
     pub async fn new() -> Result<WasmSimulation, JsValue> {
@@ -206,8 +221,91 @@ impl WasmSimulation {
         Ok(())
     }
 
+    /// Loads a DEM from an uploaded file. `ext` selects the parser, e.g. "asc" or "tif".
+    #[wasm_bindgen]
+    pub async fn load_dem_bytes(
+        &mut self,
+        bytes: &[u8],
+        ext: String,
+        source: String,
+    ) -> Result<(), JsValue> {
+        let dem = data_processor::load_dem_from_bytes(bytes, &ext, &source).map_err(to_js_err)?;
+        info!(
+            "Loaded DEM '{}' from bytes: {}x{} at {}m",
+            source, dem.width, dem.height, dem.cell_size
+        );
+        self.inner
+            .set_dem_with_bounds(
+                &dem.data1d,
+                dem.width,
+                dem.height,
+                dem.cell_size,
+                dem.bounds.xmin,
+                dem.bounds.xmax,
+                dem.bounds.ymin,
+                dem.bounds.ymax,
+                dem.map_factor,
+            )
+            .map_err(to_js_err)?;
+        Ok(())
+    }
+
+    /// Loads release areas from an uploaded file. Requires a DEM to be set first.
+    #[wasm_bindgen]
+    pub async fn load_release_areas_bytes(
+        &mut self,
+        bytes: &[u8],
+        ext: String,
+    ) -> Result<(), JsValue> {
+        let data = data_processor::load_release_areas_from_bytes(bytes, &ext).map_err(to_js_err)?;
+        self.inner.set_release_areas(&data).map_err(to_js_err)?;
+        Ok(())
+    }
+
+    #[wasm_bindgen]
+    pub async fn set_release_areas(&mut self, release_areas: &[f32]) -> Result<(), JsValue> {
+        self.inner
+            .set_release_areas(release_areas)
+            .map_err(to_js_err)?;
+        Ok(())
+    }
+
+    pub async fn prepare(&mut self) -> Result<(), JsValue> {
+        self.inner.prepare().await.map_err(to_js_err)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    /// Builds a Zarr store of the current results as `{ path, bytes }` entries.
+    ///
+    /// The browser cannot write files from Rust, so the caller persists them.
+    pub async fn save_results_zarr(&mut self) -> Result<Array, JsValue> {
+        let entries = self.inner.export_zarr_entries().await.map_err(to_js_err)?;
+
+        let files = Array::new();
+        for entry in entries {
+            let file = Object::new();
+            Reflect::set(&file, &"path".into(), &JsValue::from_str(&entry.path))?;
+            Reflect::set(&file, &"bytes".into(), &Uint8Array::from(&entry.bytes[..]))?;
+            files.push(&file);
+        }
+        Ok(files)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    /// Suggested folder name for the exported store.
+    #[wasm_bindgen(getter)]
+    pub fn result_store_name(&self) -> String {
+        format!("{}.zarr", self.inner.site_name())
+    }
+
     pub async fn run(&mut self) -> Result<(), JsValue> {
         self.inner.run().await.map_err(to_js_err)
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn bounds(&self) -> Float32Array {
+        let b = &self.inner.dem.bounds;
+        Float32Array::from(&[b.xmin, b.ymin, b.xmax, b.ymax][..])
     }
 
     #[wasm_bindgen(getter)]
@@ -268,6 +366,27 @@ impl WasmSimulation {
         Ok(())
     }
 
+    /// Reads the release areas into the cache. Requires `prepare` or `run` first.
+    pub async fn fetch_release_areas(&mut self) -> Result<(), JsValue> {
+        self.inner.fetch_release_areas().await.map_err(to_js_err)?;
+        Ok(())
+    }
+
+    /// Reads slope angle and aspect into the cache. Requires `prepare` or `run` first.
+    pub async fn fetch_slope(&mut self) -> Result<(), JsValue> {
+        self.inner.fetch_slope_texture().await.map_err(to_js_err)?;
+        Ok(())
+    }
+
+    /// Reads roughness into the cache. Requires `prepare` or `run` first.
+    pub async fn fetch_roughness(&mut self) -> Result<(), JsValue> {
+        self.inner
+            .fetch_roughness_texture()
+            .await
+            .map_err(to_js_err)?;
+        Ok(())
+    }
+
     pub async fn fetch_results(&mut self) -> Result<(), JsValue> {
         self.inner.fetch_results().await.map_err(to_js_err)?;
         Ok(())
@@ -275,37 +394,58 @@ impl WasmSimulation {
 
     #[wasm_bindgen(getter)]
     pub fn peak_velocity(&self) -> Float32Array {
-        unsafe { Float32Array::view(self.inner.gpu_cache.peak_velocity.as_ref().unwrap()) }
+        match self.inner.gpu_cache.peak_velocity.as_ref() {
+            Some(data) => unsafe { Float32Array::view(data) },
+            None => Float32Array::new_with_length(0),
+        }
     }
 
     #[wasm_bindgen(getter)]
     pub fn cell_count(&self) -> Uint32Array {
-        unsafe { Uint32Array::view(self.inner.gpu_cache.cell_count.as_ref().unwrap()) }
+        match self.inner.gpu_cache.cell_count.as_ref() {
+            Some(data) => unsafe { Uint32Array::view(data) },
+            None => Uint32Array::new_with_length(0),
+        }
     }
 
     #[wasm_bindgen(getter)]
     pub fn slope_aspect(&self) -> Float32Array {
-        unsafe { Float32Array::view(&self.inner.gpu_cache.slope.as_ref().unwrap().g) }
+        match self.inner.gpu_cache.slope.as_ref() {
+            Some(slope) => unsafe { Float32Array::view(&slope.g) },
+            None => Float32Array::new_with_length(0),
+        }
     }
 
     #[wasm_bindgen(getter)]
     pub fn slope_angle(&self) -> Float32Array {
-        unsafe { Float32Array::view(&self.inner.gpu_cache.slope.as_ref().unwrap().r) }
+        match self.inner.gpu_cache.slope.as_ref() {
+            Some(slope) => unsafe { Float32Array::view(&slope.r) },
+            None => Float32Array::new_with_length(0),
+        }
     }
 
     #[wasm_bindgen(getter)]
     pub fn roughness(&self) -> Float32Array {
-        unsafe { Float32Array::view(&self.inner.gpu_cache.roughness.as_ref().unwrap().r) }
+        match self.inner.gpu_cache.roughness.as_ref() {
+            Some(roughness) => unsafe { Float32Array::view(&roughness.r) },
+            None => Float32Array::new_with_length(0),
+        }
     }
 
     #[wasm_bindgen(getter)]
     pub fn release_areas(&self) -> Float32Array {
-        unsafe { Float32Array::view(&self.inner.gpu_cache.release_areas.as_ref().unwrap().r) }
+        match self.inner.gpu_cache.release_areas.as_ref() {
+            Some(release_areas) => unsafe { Float32Array::view(&release_areas.r) },
+            None => Float32Array::new_with_length(0),
+        }
     }
 
     #[wasm_bindgen(getter)]
     pub fn peak_flow_thickness(&self) -> Float32Array {
-        unsafe { Float32Array::view(self.inner.gpu_cache.peak_flow_thickness.as_ref().unwrap()) }
+        match self.inner.gpu_cache.peak_flow_thickness.as_ref() {
+            Some(data) => unsafe { Float32Array::view(data) },
+            None => Float32Array::new_with_length(0),
+        }
     }
 
     #[wasm_bindgen]

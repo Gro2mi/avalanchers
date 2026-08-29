@@ -502,7 +502,7 @@ mod tests {
             y: vec![0.0, 5.0],
             cell_size: 5.0,
             map_factor: 1.0,
-            minimum_elevation: 1.0,
+            minimum_elevation: -1.0,
             source: String::new(),
             projection: String::new(),
         };

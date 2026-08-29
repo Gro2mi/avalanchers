@@ -64,6 +64,7 @@ pub struct SimSettings {
     // Integers
     pub max_steps: u32,
     pub sim_model: u32,
+    pub flags: u32,
     pub friction_model: u32,
     pub released_particles_per_cell: u32,
     pub grid_shape_x: u32,
@@ -71,8 +72,7 @@ pub struct SimSettings {
     // Floats
     pub world_size_x: f32,
     pub world_size_y: f32,
-    pub density: f32,
-    pub slab_thickness_factor: f32,
+    pub velocity_threshold: f32,
     pub friction_coefficient: f32,
     pub drag_coefficient: f32,
     pub n0: f32,
@@ -84,12 +84,14 @@ pub struct SimSettings {
     pub basal_friction_angle: f32,
     pub cfl: f32,
     pub cell_size: f32,
+    // release
+    pub density: f32,
+    pub slab_thickness_factor: f32,
     pub min_slope_angle: f32,
     pub max_slope_angle: f32,
     pub release_min_elevation: f32,
-    pub velocity_threshold: f32,
+    pub release_max_elevation: f32,
     pub roughness_threshold: f32,
-    pub flags: u32,
 }
 
 impl Hash for SimSettings {
@@ -172,6 +174,7 @@ impl SimSettings {
             min_slope_angle: 28.0,
             max_slope_angle: 60.0,
             release_min_elevation: 1500.0,
+            release_max_elevation: 8848.0,
         }
     }
 
@@ -245,6 +248,9 @@ impl SimSettings {
         }
         if let Some(val) = patch.release_min_elevation {
             settings.release_min_elevation = val;
+        }
+        if let Some(val) = patch.release_max_elevation {
+            settings.release_max_elevation = val;
         }
         if let Some(val) = patch.velocity_threshold {
             settings.velocity_threshold = val;
@@ -485,6 +491,7 @@ pub struct Settings {
     pub min_slope_angle: Option<f32>,
     pub max_slope_angle: Option<f32>,
     pub release_min_elevation: Option<f32>,
+    pub release_max_elevation: Option<f32>,
     pub velocity_threshold: Option<f32>,
     pub roughness_threshold: Option<f32>,
 
@@ -565,6 +572,7 @@ mod tests {
         assert_eq!(settings.min_slope_angle, 28.0);
         assert_eq!(settings.max_slope_angle, 60.0);
         assert_eq!(settings.release_min_elevation, 1500.0);
+        assert_eq!(settings.release_max_elevation, 8848.0);
         assert_eq!(settings.velocity_threshold, 0.1);
         assert_eq!(settings.roughness_threshold, 0.01);
     }
@@ -614,6 +622,7 @@ mod tests {
             min_slope_angle: Some(10.0),
             max_slope_angle: Some(20.0),
             release_min_elevation: Some(100.0),
+            release_max_elevation: Some(200.0),
             velocity_threshold: Some(0.001),
             roughness_threshold: Some(0.002),
             dem_path: Some(String::from("dem.png")),
@@ -638,6 +647,7 @@ mod tests {
         assert_eq!(sim_settings.min_slope_angle, 10.0);
         assert_eq!(sim_settings.max_slope_angle, 20.0);
         assert_eq!(sim_settings.release_min_elevation, 100.0);
+        assert_eq!(sim_settings.release_max_elevation, 200.0);
         assert_eq!(sim_settings.velocity_threshold, 0.001);
         assert_eq!(sim_settings.roughness_threshold, 0.002);
         assert_eq!(sim_settings.grid_shape_x, dem.width as u32);
@@ -725,6 +735,10 @@ mod tests {
         assert_eq!(
             settings.release_min_elevation,
             deserialized.release_min_elevation
+        );
+        assert_eq!(
+            settings.release_max_elevation,
+            deserialized.release_max_elevation
         );
         assert_eq!(settings.velocity_threshold, deserialized.velocity_threshold);
         assert_eq!(

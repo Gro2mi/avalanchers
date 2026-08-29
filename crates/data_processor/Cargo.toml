@@ -36,8 +36,9 @@ futures = { workspace = true }
 ndarray = { workspace = true }
 bytes = { workspace = true }
 
-
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+# Pure-Rust zstd decoder, so blosc chunks can be read on wasm32 without a C toolchain.
+ruzstd = "0.9"
 web-sys = { workspace = true }
 
 [dev-dependencies]
