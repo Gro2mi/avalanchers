@@ -1086,6 +1086,7 @@ mod tests {
             min_slope_angle: Some(9.0),
             max_slope_angle: Some(10.0),
             release_min_elevation: Some(11.0),
+            release_max_elevation: Some(13.0),
             velocity_threshold: Some(12.0),
             roughness_threshold: Some(13.0),
             enable_curvature: Some(true),
@@ -1115,6 +1116,7 @@ mod tests {
         assert_eq!(loaded.min_slope_angle, Some(9.0));
         assert_eq!(loaded.max_slope_angle, Some(10.0));
         assert_eq!(loaded.release_min_elevation, Some(11.0));
+        assert_eq!(loaded.release_max_elevation, Some(13.0));
         assert_eq!(loaded.velocity_threshold, Some(12.0));
         assert_eq!(loaded.roughness_threshold, Some(13.0));
         assert_eq!(loaded.enable_curvature, Some(true));

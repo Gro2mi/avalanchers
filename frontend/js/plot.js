@@ -2,6 +2,8 @@ const outputPlot = document.getElementById('outputPlot');
 const demPlot = document.getElementById('demPlot');
 const histogramPlot = document.getElementById('histogramPlot');
 
+const mobilePlotMedia = window.matchMedia('(max-width: 991.98px)');
+
 const resetLighting = {
     ambient: 0.8,
     diffuse: 0.8,
@@ -11,7 +13,7 @@ const resetLighting = {
 }
 
 function resetPlots() {
-    ['outputPlot', 'demPlot', 'histogramPlot', 'timerPlot', 'debugPlot'].forEach(id => Plotly.purge(id));
+    ['outputPlot', 'demPlot', 'histogramPlot', 'timerPlot'].forEach(id => Plotly.purge(id));
 }
 
 function plotDem(sim) {
@@ -35,7 +37,7 @@ function plotDem(sim) {
             // cmax: 3000,
             contours: {
                 z: {
-                    show: true,
+                    show: !mobilePlotMedia.matches,
                     start: 0,
                     end: 4000,
                     size: 100,                 // Contours at 0, 100, 200, ..., 4000
@@ -95,10 +97,11 @@ function createRandomMatrix2D(width, height) {
 }
 
 function percentileForLegend(percentile, variable) {
-    const values = [...new Float32Array(sim[variable])].filter(v => v !== 0);
-    const p = [...values]
-        .sort((a, b) => a - b)[Math.floor(percentile * (values.length - 1))];
-    return Math.round(p);
+    const values = [...new Float32Array(sim[variable])]
+        .filter(value => Number.isFinite(value) && value > 0)
+        .sort((a, b) => a - b);
+    if (values.length === 0) return null;
+    return values[Math.floor(percentile * (values.length - 1))];
 }
 
 /** Loads the cached data a variable needs, tolerating stages where it does not exist yet. */
@@ -124,17 +127,20 @@ async function ensureVariableFetched(sim, variable) {
 }
 
 async function updatePlots(sim, selectedVariable) {
+    const showContours = !mobilePlotMedia.matches;
+
     if (selectedVariable === 'elevation') {
         Plotly.restyle(demPlot, {
             surfacecolor: [to2D(new Float32Array(sim.dem), sim.width, sim.height)],
-            colorscale: 'Earth',
+            colorscale: ['Earth'],
+            showscale: [true],
+            cauto: [false],
             cmin: [0],
             cmax: [4000],
-            colorbar: {
-                title: 'Elevation (m)'
-            },
-            lighting: resetLighting,
-        });
+            'colorbar.title.text': ['Elevation (m)'],
+            'contours.z.show': [showContours],
+            lighting: [resetLighting],
+        }, [0]);
         return;
     }
 
@@ -168,15 +174,18 @@ async function updatePlots(sim, selectedVariable) {
         cmin = 0;
     }
 
+    const hasFixedColorRange = Number.isFinite(cmin) && Number.isFinite(cmax) && cmax > cmin;
+
     var plotOptions = {
         surfacecolor: [to2D(values, sim.width, sim.height)],
-        showscale: true,
+        showscale: [true],
         colorscale: ['Portland'],
-        cmin: [cmin],
-        cmax: [cmax],
-        colorbar: {
-            title: selectedVariable,
-        },
+        cauto: [!hasFixedColorRange],
+        cmin: [hasFixedColorRange ? cmin : null],
+        cmax: [hasFixedColorRange ? cmax : null],
+        'colorbar.title.text': [selectedVariable],
+        'contours.z.show': [showContours],
+        lighting: [resetLighting],
     };
     const demValues = new Float32Array(sim.dem);
     traceHist.x = values.filter((val, index) => (demValues[index] > 0));
@@ -555,54 +564,3 @@ function plotHistogram() {
     Plotly.newPlot('histogramPlot', data, layout);
 }
 
-function plotDebug(gpx) {
-
-    const webMercatorCoords = gpx.map(pt => latLonToWebMercator(pt.lat, pt.lon)).map(pt => dem.interpolateElevation(pt));
-
-    const trace = {
-        x: webMercatorCoords.map(pt => pt.x),
-        y: webMercatorCoords.map(pt => pt.y),
-        mode: 'markers', // or 'lines' or 'lines+markers'
-        type: 'scatter',
-        marker: {
-            color: 'red',
-            size: 8
-        },
-        name: 'Data Points'
-    };
-
-    const layout = {
-        title: '2D Scatter Plot',
-        xaxis: {
-            title: 'X Axis',
-            autorange: 'reversed',
-            scaleanchor: 'y'
-        },
-        yaxis: {
-            title: 'Y Axis',
-            autorange: 'reversed',
-            scaleratio: 1,
-        }
-    };
-    const bbox = {
-        x: [dem.bounds.xmin, dem.bounds.xmax, dem.bounds.xmax, dem.bounds.xmin, dem.bounds.xmin],
-        y: [dem.bounds.ymin, dem.bounds.ymin, dem.bounds.ymax, dem.bounds.ymax, dem.bounds.ymin],
-        mode: 'lines', // or 'lines' or 'lines+markers'
-        type: 'scatter',
-
-    }
-    const xmin = {
-        x: [dem.bounds.xmin, dem.bounds.xmin],
-        y: [dem.bounds.ymin, dem.bounds.ymax],
-        mode: 'markers',
-        type: 'scatter',
-        marker: {
-            color: 'blue',
-            size: 8
-        },
-        name: 'xmin'
-    }
-
-    Plotly.newPlot('debugPlot', [trace, bbox, xmin], layout);
-}
-// plotDebug();

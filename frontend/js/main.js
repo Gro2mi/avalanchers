@@ -11,9 +11,13 @@ window.wasmDecoders = null;
 // ---------------------------------------------------------------------------
 
 const statusEl = document.getElementById('status');
+const loadingScreen = document.getElementById('loadingScreen');
+const loadingStatus = document.getElementById('loadingStatus');
+const loadingDetail = document.getElementById('loadingDetail');
 
 const demDropdown = document.getElementById('demDropdown');
 const runShortcutButton = document.getElementById('runShortcut');
+const demReleaseGroup = document.getElementById('demReleaseGroup');
 
 const demDirButton = document.getElementById('demDirButton');
 const demFileInput = document.getElementById('demFileInput');
@@ -62,6 +66,13 @@ const loadedDemLabel = document.getElementById('loadedDemLabel');
 const loadedReleaseLabel = document.getElementById('loadedReleaseLabel');
 
 const plotVariable = document.getElementById('plotVariable');
+const plotVariableAnchor = document.getElementById('plotVariableAnchor');
+const resultPlots = document.getElementById('resultPlots');
+const demPlotElement = document.getElementById('demPlot');
+const demPlotContainer = document.getElementById('demPlotContainer');
+const demPlotStickyHost = document.getElementById('demPlotStickyHost');
+const demPlotFlowHost = document.getElementById('demPlotFlowHost');
+const desktopLayout = window.matchMedia('(min-width: 1200px)');
 
 // ---------------------------------------------------------------------------
 // Workflow state
@@ -100,10 +111,51 @@ function setRunStatus(message, kind = 'idle') {
     if (kind === 'error') runStatusDot.classList.add('is-error');
 }
 
+function setLoadingScreenStatus(engineMessage, detailMessage) {
+    if (loadingStatus && typeof engineMessage === 'string') {
+        loadingStatus.textContent = engineMessage;
+    }
+    if (loadingDetail && typeof detailMessage === 'string') {
+        loadingDetail.textContent = detailMessage;
+    }
+}
+
+function hideLoadingScreen() {
+    if (!loadingScreen) return;
+    loadingScreen.classList.add('is-hidden');
+    loadingScreen.setAttribute('aria-busy', 'false');
+}
+
 function setCardStatus(element, message, kind = 'info') {
     element.textContent = message;
     element.className = 'source-summary ' +
         (kind === 'error' ? 'text-danger' : kind === 'ok' ? 'text-success' : 'text-secondary');
+}
+
+function resizePlotIfRendered(plotId) {
+    const element = document.getElementById(plotId);
+    if (element?.classList.contains('js-plotly-plot')) {
+        Plotly.Plots.resize(element);
+    }
+}
+
+function resizeVisibleResultPlots() {
+    ['demPlot', 'histogramPlot', 'outputPlot', 'timerPlot', 'debugPlot']
+        .forEach(resizePlotIfRendered);
+}
+
+function updateResultPlotsVisibility() {
+    if (!resultPlots) return;
+    const wasHidden = resultPlots.classList.contains('d-none');
+    resultPlots.classList.toggle('d-none', !state.hasResults);
+
+    if (wasHidden && state.hasResults) {
+        requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+                resizeVisibleResultPlots();
+            });
+        });
+    }
 }
 
 function describeDemSource(source) {
@@ -176,6 +228,7 @@ function refreshWorkflowState() {
         state.releaseSource ? 'ok' : 'info');
     loadedDemLabel.textContent = demDescription;
     loadedReleaseLabel.textContent = releaseDescription;
+    updateResultPlotsVisibility();
     setBusy(state.busy);
 }
 
@@ -243,7 +296,7 @@ function changeFrictionModel() {
 }
 
 function getSettings() {
-    const base = window.location.pathname.replace(/\/[^\/]+\.[^\/]+$/, "/") + "data/avaframe/";
+    const base = window.location.pathname.replace(/\/[^/]+\.[^/]+$/, "/") + "data/avaframe/";
     const simSettings = {
         dem_path: base + demDropdown.value + ".png",
         release_areas_path: base + demDropdown.value + "releaseTexture.png",
@@ -621,13 +674,17 @@ async function runSimulation() {
         await sim.fetch_results();
         simTimer.checkpoint('fetching data');
 
+        // Make containers visible before plotting so Plotly computes full widths.
+        state.hasResults = true;
+        updateResultPlotsVisibility();
+
         const timestepData = await sim.get_timestep_data();
         await plotTimestepData(timestepData);
         await plotTrajectory(timestepData);
         plotTimer();
 
         await showVariable('peak_velocity');
-        state.hasResults = true;
+        resizeVisibleResultPlots();
         setRunStatus('Simulation finished.', 'ready');
     }, null);
 }
@@ -699,10 +756,43 @@ function scrollToSimulationSection() {
     }
 }
 
+function collapseDemReleaseGroup() {
+    if (demReleaseGroup instanceof HTMLDetailsElement) {
+        demReleaseGroup.open = false;
+    }
+}
+
+function moveDemPlotTo(host) {
+    if (!host || !demPlotContainer || demPlotContainer.parentElement === host) return;
+    host.appendChild(demPlotContainer);
+    if (demPlotElement?.classList.contains('js-plotly-plot')) {
+        requestAnimationFrame(() => Plotly.Plots.resize(demPlotElement));
+    }
+}
+
+function updateDemPlotPlacement() {
+    if (!plotVariable || !demPlotStickyHost || !demPlotFlowHost) return;
+
+    if (!state.hasResults) {
+        moveDemPlotTo(demPlotStickyHost);
+        return;
+    }
+
+    const placementAnchor = plotVariableAnchor || plotVariable;
+    const plotControlsReached = placementAnchor.getBoundingClientRect().top < window.innerHeight;
+    moveDemPlotTo(!desktopLayout.matches || plotControlsReached
+        ? demPlotFlowHost
+        : demPlotStickyHost);
+}
+
 async function loadExampleCase(run) {
     await withBusy(async () => {
         const name = demDropdown.value;
         localStorage.setItem('demDropdown', name);
+
+        if (!run) {
+            setLoadingScreenStatus('Engine ready.', `Loading example "${name}"…`);
+        }
 
         resetDependentState();
         state.demSource = { kind: 'example', name };
@@ -713,6 +803,11 @@ async function loadExampleCase(run) {
         await applySources();
         plotDem(sim);
         setRunStatus('Example loaded.', 'ready');
+
+        if (!run) {
+            setLoadingScreenStatus('Engine ready.', `Example "${name}" loaded.`);
+            hideLoadingScreen();
+        }
     }, demStatus);
 
     if (run && state.demSource?.kind === 'example') {
@@ -726,6 +821,7 @@ async function loadExampleCase(run) {
 // ---------------------------------------------------------------------------
 
 runShortcutButton.addEventListener('click', async () => {
+    collapseDemReleaseGroup();
     scrollToSimulationSection();
     await loadExampleCase(true);
 });
@@ -792,6 +888,20 @@ document.addEventListener('keydown', async event => {
     if (event.key === 'r' && !state.busy) await runSimulation();
 });
 
+let plotPlacementFrame = null;
+function scheduleDemPlotPlacement() {
+    if (plotPlacementFrame !== null) return;
+    plotPlacementFrame = requestAnimationFrame(() => {
+        plotPlacementFrame = null;
+        updateDemPlotPlacement();
+    });
+}
+
+window.addEventListener('scroll', scheduleDemPlotPlacement, { passive: true });
+window.addEventListener('resize', scheduleDemPlotPlacement);
+desktopLayout.addEventListener('change', updateDemPlotPlacement);
+updateDemPlotPlacement();
+
 // ---------------------------------------------------------------------------
 // Startup
 // ---------------------------------------------------------------------------
@@ -813,13 +923,16 @@ function checkWebGPU() {
 
 async function loadEngine() {
     try {
+        setLoadingScreenStatus('Loading engine…', 'Waiting for WASM runtime.');
         statusEl.textContent = "Loading Engine...";
         window.wasm = await init();
         window.wasmDecoders = { blosc: decode_blosc_chunk, zstd: decode_zstd_chunk };
 
+        setLoadingScreenStatus('Creating simulation…', 'Allocating engine resources.');
         statusEl.textContent = "Creating Simulation...";
         window.sim = await withTimeout(WasmSimulation.new(), 5000, "WasmSimulation.new");
 
+        setLoadingScreenStatus('Engine ready.', 'Loading example…');
         statusEl.textContent = "Engine ready.";
         state.engineReady = true;
     } catch (err) {
@@ -827,6 +940,7 @@ async function loadEngine() {
         const msg = err instanceof Error ? err.message : String(err);
         statusEl.textContent = `Engine load failed: ${msg}, check console for details.`;
         statusEl.style.backgroundColor = "rgba(255, 0, 0, 0.8)";
+        setLoadingScreenStatus('Engine failed to load.', msg);
         setRunStatus('Engine failed to load.', 'error');
         throw err;
     }

@@ -1589,7 +1589,7 @@ mod tests {
     }
     #[test_log::test]
     fn test_load_release_areas_gar() {
-        let mut orchestrator =
+        let mut orchestrator: ComputeOrchestrator =
             block_on(ComputeOrchestrator::new()).expect("Failed to create ComputeOrchestrator");
         let (sim_settings, _dem, _outline) = block_on(
             data_processor::create_sim_settings_and_dem_from_path(GAR_PATH),

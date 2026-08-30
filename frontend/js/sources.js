@@ -15,7 +15,7 @@ const ZARR_DEM_ARRAY = 'dem';
 const ZARR_RELEASE_ARRAY = 'release_area';
 
 function fileExtension(name) {
-    const match = /\.([^.\/\\]+)$/.exec(name || '');
+    const match = /\.([^./\\]+)$/.exec(name || '');
     return match ? match[1].toLowerCase() : '';
 }
 

@@ -1,10 +1,14 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Avalanche Simulation with WebGPU</title>
-    <link rel="icon" type="image/x-icon" href="./favicon.ico">
+    <link rel="apple-touch-icon" sizes="180x180" href="icons/apple-touch-icon.png">
+    <link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="icons/favicon-16x16.png">
+    <link rel="manifest" href="/site.webmanifest">
     <!-- Include Bootstrap CSS -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha3/dist/css/bootstrap.min.css" rel="stylesheet">
     <!-- Include Bootstrap Dark Theme -->
@@ -46,7 +50,7 @@
             margin-bottom: 1rem;
         }
 
-        details.workflow-help > summary {
+        details.workflow-help>summary {
             list-style: none;
             cursor: pointer;
             user-select: none;
@@ -54,18 +58,18 @@
             color: var(--text-soft);
         }
 
-        details.workflow-help > summary::-webkit-details-marker {
+        details.workflow-help>summary::-webkit-details-marker {
             display: none;
         }
 
-        details.workflow-help > summary::before {
+        details.workflow-help>summary::before {
             content: "+ ";
             display: inline-block;
             width: 1.2rem;
             color: var(--brand-strong);
         }
 
-        details.workflow-help[open] > summary::before {
+        details.workflow-help[open]>summary::before {
             content: "− ";
         }
 
@@ -287,8 +291,15 @@
         }
 
         @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.25; }
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.25;
+            }
         }
 
         @media (max-width: 575.98px) {
@@ -296,10 +307,186 @@
                 min-width: 100%;
             }
         }
+
+        .loading-screen {
+            position: fixed;
+            inset: 0;
+            z-index: 2000;
+            display: flex;
+            align-items: flex-end;
+            justify-content: center;
+            background:
+                url('./icons/avalanchers_loading_screen.jpg') center center / cover no-repeat;
+            opacity: 1;
+            visibility: visible;
+            transition: opacity 0.35s ease, visibility 0.35s ease;
+            padding: clamp(1rem, 3vw, 2rem);
+        }
+
+        @media (orientation: portrait) {
+            .loading-screen {
+                background-image: url('./icons/avalanchers_loading_screen_portrait.jpg');
+            }
+        }
+
+        .loading-screen.is-hidden {
+            opacity: 0;
+            visibility: hidden;
+            pointer-events: none;
+        }
+
+        .loading-panel {
+            width: min(92vw, 560px);
+            border-radius: 1rem;
+            border: 1px solid rgba(140, 200, 255, 0.35);
+            background: rgba(10, 18, 30, 0.82);
+            box-shadow: 0 18px 46px rgba(4, 9, 15, 0.62);
+            backdrop-filter: blur(6px);
+            -webkit-backdrop-filter: blur(6px);
+            padding: 1.25rem 1.3rem;
+        }
+
+        .loading-title {
+            margin: 0;
+            font-size: 1.15rem;
+            font-weight: 700;
+            color: #eef6ff;
+        }
+
+        .loading-status {
+            margin-top: 0.6rem;
+            margin-bottom: 0;
+            color: #dce9fb;
+            font-weight: 600;
+        }
+
+        .loading-detail {
+            margin-top: 0.2rem;
+            margin-bottom: 0;
+            color: #b7c8e1;
+            font-size: 0.93rem;
+        }
+
+        details.collapsible-card>summary {
+            list-style: none;
+            cursor: pointer;
+            user-select: none;
+        }
+
+        details.collapsible-card>summary::-webkit-details-marker {
+            display: none;
+        }
+
+        details.collapsible-card>summary::after {
+            content: "▾";
+            margin-left: auto;
+            color: var(--text-soft);
+            transition: transform 0.2s ease;
+            font-size: 0.95rem;
+        }
+
+        details.collapsible-card:not([open])>summary::after {
+            transform: rotate(-90deg);
+        }
+
+        .collapse-summary-title {
+            margin: 0;
+            font-size: 1.05rem;
+            font-weight: 700;
+            color: var(--text);
+        }
+
+        .collapse-summary-subtitle {
+            margin: 0.15rem 0 0;
+            color: var(--text-muted);
+            font-size: 0.92rem;
+        }
+
+        .workflow-layout {
+            display: block;
+        }
+
+        .dem-plot-column {
+            margin-bottom: 1rem;
+        }
+
+        .dem-plot-sticky {
+            width: 100%;
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+        }
+
+        .plot-shell {
+            width: 100%;
+            border: 1px solid var(--panel-border);
+            border-radius: 0.75rem;
+            background: linear-gradient(180deg, rgba(18, 29, 45, 0.96), rgba(12, 21, 32, 0.98));
+            box-shadow: 0 10px 24px var(--shadow);
+            overflow: hidden;
+        }
+
+        .plot-shell--dem {
+            height: 80vh;
+        }
+
+        .plot-shell--regular {
+            height: 600px;
+        }
+
+        #resultPlots {
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+        }
+
+        #demPlotFlowHost .dem-plot-sticky {
+            height: auto;
+        }
+
+        @media (min-width: 1200px) {
+            .workflow-layout {
+                display: grid;
+                grid-template-columns: minmax(0, 7fr) minmax(420px, 5fr);
+                align-items: stretch;
+                gap: 1rem;
+            }
+
+            .dem-plot-column {
+                min-width: 0;
+                margin-bottom: 0;
+            }
+
+            .dem-plot-column .dem-plot-sticky {
+                position: sticky;
+                top: 1rem;
+                height: calc(100vh - 2rem);
+                min-height: 0;
+            }
+
+            .dem-plot-column #demPlot {
+                flex: 1 1 auto;
+                min-height: 0;
+                height: auto !important;
+            }
+
+            .dem-plot-column .plot-shell {
+                height: 100%;
+            }
+        }
     </style>
 </head>
+
 <body>
-    <div class="container my-4">
+    <div id="loadingScreen" class="loading-screen" role="status" aria-live="polite" aria-busy="true">
+        <div class="loading-panel">
+            <h2 class="loading-title">Preparing Avalanchers</h2>
+            <p class="loading-status" id="loadingStatus">Loading engine…</p>
+            <p class="loading-detail" id="loadingDetail">Loading example…</p>
+        </div>
+    </div>
+
+    <div class="container-fluid px-3 px-xl-4 my-4">
         <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
             <h1 class="mb-0">Avalanchers: GPU powered avalanche simulation</h1>
             <a href="https://github.com/Gro2mi/avalanchers" class="btn btn-secondary" target="_blank">View on GitHub</a>
@@ -316,13 +503,18 @@
                 <ol class="mb-0 ps-3 text-secondary">
                     <li><strong>Shortcut:</strong> pick one of the bundled AvaFrame examples and run it directly.</li>
                     <li><strong>Select DEM:</strong> upload a <code>.gpx</code>, <code>.tif</code>/<code>.tiff</code>,
-                        <code>.asc</code>, or a Zarr store directory. GPX tracks download matching elevation tiles in Austria,
-                        while Zarr stores let you choose a site from the uploaded store.</li>
-                    <li><strong>Select release areas:</strong> either calculate them from the terrain or upload a matching
+                        <code>.asc</code>, or a Zarr store directory. GPX tracks download matching elevation tiles in
+                        Austria,
+                        while Zarr stores let you choose a site from the uploaded store.
+                    </li>
+                    <li><strong>Select release areas:</strong> either calculate them from the terrain or upload a
+                        matching
                         release area raster. For Zarr stores, pick a scenario from the selected site.</li>
-                    <li><strong>Simulation settings:</strong> tune the model, friction, particle, and solver parameters.</li>
+                    <li><strong>Simulation settings:</strong> tune the model, friction, particle, and solver parameters.
+                    </li>
                     <li><strong>Run simulation:</strong> execute the model and inspect the generated plots.</li>
-                    <li><strong>Save results:</strong> download the simulation results as Zarr store. Only works for Chromium based browsers.</li>
+                    <li><strong>Save results:</strong> download the simulation results as Zarr store. Only works for
+                        Chromium based browsers.</li>
                 </ol>
                 <p class="text-secondary mt-3 mb-0">
                     Zarr stores are expected to follow the site/scenario layout produced by the data processor, and the
@@ -331,348 +523,405 @@
             </div>
         </details>
 
-        <!-- ---------------------------------------------------------------- -->
-        <!-- Shortcut                                                          -->
-        <!-- ---------------------------------------------------------------- -->
-        <div class="card step-card" id="shortcutCard">
-            <div class="card-body">
-                <div class="d-flex align-items-center gap-2 mb-3">
-                    <h5 class="card-title mb-0">Shortcut</h5>
-                    <span class="badge bg-secondary">Example cases</span>
-                </div>
-                <p class="card-text text-secondary">
-                    Run a bundled AvaFrame example with its predefined release areas. This replaces the DEM and release
-                    areas selected below.
-                </p>
-                <div class="row g-2 align-items-center">
-                    <div class="col-12 col-sm-auto">
-                        <label for="demDropdown" class="col-form-label">Example case:</label>
+        <div class="workflow-layout">
+            <main class="workflow-controls">
+
+                <!-- ---------------------------------------------------------------- -->
+                <!-- Shortcut                                                          -->
+                <!-- ---------------------------------------------------------------- -->
+                <details class="card step-card collapsible-card" id="shortcutCard" open>
+                    <summary class="card-body d-flex align-items-center gap-2 mb-0">
+                        <h5 class="card-title mb-0">Shortcut</h5>
+                        <span class="badge bg-secondary">Example cases</span>
+                    </summary>
+                    <div class="card-body pt-0">
+                        <div class="d-flex align-items-center gap-2 mb-3">
+                            <h6 class="mb-0 text-secondary">Quick start</h6>
+                        </div>
+                        <p class="card-text text-secondary">
+                            Run a bundled AvaFrame example with its predefined release areas. This replaces the DEM and
+                            release
+                            areas selected below.
+                        </p>
+                        <div class="row g-2 align-items-center">
+                            <div class="col-12 col-sm-auto">
+                                <label for="demDropdown" class="col-form-label">Example case:</label>
+                            </div>
+                            <div class="col-12 col-sm-auto flex-grow-1">
+                                <select id="demDropdown" class="form-select">
+                                    <option value="avaAlr">avaAlr</option>
+                                    <option value="avaArzlerUni">avaArzlerUni</option>
+                                    <option value="avaBowl">avaBowl</option>
+                                    <option value="avaDamBreak">avaDamBreak</option>
+                                    <option value="avaFlatPlane">avaFlatPlane</option>
+                                    <option value="avaFlowPy">avaFlowPy</option>
+                                    <option value="avaFPtest">avaFPtest</option>
+                                    <option value="avaGar" selected>avaGar</option>
+                                    <option value="avaHelix">avaHelix</option>
+                                    <option value="avaHelixChannel">avaHelixChannel</option>
+                                    <option value="avaHit">avaHit</option>
+                                    <option value="avaHockeyChannel">avaHockeyChannel</option>
+                                    <option value="avaHockeySmall">avaHockeySmall</option>
+                                    <option value="avaHof">avaHof</option>
+                                    <option value="avaInclinedPlane">avaInclinedPlane</option>
+                                    <option value="avaKot">avaKot</option>
+                                    <option value="avaMal">avaMal</option>
+                                    <option value="avaParabola">avaParabola</option>
+                                    <option value="avaPfa">avaPfa</option>
+                                    <option value="avaPyramid">avaPyramid</option>
+                                    <option value="avaPyramid45">avaPyramid45</option>
+                                    <option value="avaSimilaritySol">avaSimilaritySol</option>
+                                    <option value="avaSlide">avaSlide</option>
+                                    <option value="avaTripleBowl">avaTripleBowl</option>
+                                    <option value="avaWog">avaWog</option>
+                                </select>
+                            </div>
+                            <div class="col-12 col-sm-auto">
+                                <button id="runShortcut" class="btn btn-primary w-100" disabled>Load &amp; run
+                                    example</button>
+                            </div>
+                        </div>
                     </div>
-                    <div class="col-12 col-sm-auto flex-grow-1">
-                        <select id="demDropdown" class="form-select">
-                            <option value="avaAlr">avaAlr</option>
-                            <option value="avaArzlerUni">avaArzlerUni</option>
-                            <option value="avaBowl">avaBowl</option>
-                            <option value="avaDamBreak">avaDamBreak</option>
-                            <option value="avaFlatPlane">avaFlatPlane</option>
-                            <option value="avaFlowPy">avaFlowPy</option>
-                            <option value="avaFPtest">avaFPtest</option>
-                            <option value="avaGar" selected>avaGar</option>
-                            <option value="avaHelix">avaHelix</option>
-                            <option value="avaHelixChannel">avaHelixChannel</option>
-                            <option value="avaHit">avaHit</option>
-                            <option value="avaHockeyChannel">avaHockeyChannel</option>
-                            <option value="avaHockeySmall">avaHockeySmall</option>
-                            <option value="avaHof">avaHof</option>
-                            <option value="avaInclinedPlane">avaInclinedPlane</option>
-                            <option value="avaKot">avaKot</option>
-                            <option value="avaMal">avaMal</option>
-                            <option value="avaParabola">avaParabola</option>
-                            <option value="avaPfa">avaPfa</option>
-                            <option value="avaPyramid">avaPyramid</option>
-                            <option value="avaPyramid45">avaPyramid45</option>
-                            <option value="avaSimilaritySol">avaSimilaritySol</option>
-                            <option value="avaSlide">avaSlide</option>
-                            <option value="avaTripleBowl">avaTripleBowl</option>
-                            <option value="avaWog">avaWog</option>
+                </details>
+
+                <details class="card step-card collapsible-card" id="demReleaseGroup" open>
+                    <summary class="card-body d-flex align-items-center gap-2 mb-0">
+                        <div>
+                            <p class="collapse-summary-title">DEM and release setup</p>
+                            <p class="collapse-summary-subtitle">Select terrain and release areas</p>
+                        </div>
+                    </summary>
+                    <div class="card-body pt-0">
+
+                        <!-- ---------------------------------------------------------------- -->
+                        <!-- Step 1: DEM                                                       -->
+                        <!-- ---------------------------------------------------------------- -->
+                        <div class="card step-card" id="demCard">
+                            <div class="card-body">
+                                <div class="d-flex align-items-center gap-2 mb-3">
+                                    <span class="step-badge">1</span>
+                                    <h5 class="card-title mb-0">Select DEM</h5>
+                                </div>
+                                <p class="card-text text-secondary">
+                                    Upload a digital elevation model. Supported: <code>.gpx</code> (downloads elevation
+                                    tiles covering
+                                    the track), <code>.tif</code>/<code>.tiff</code>, <code>.asc</code>, or a Zarr store
+                                    directory.
+                                </p>
+
+                                <div class="upload-inline">
+                                    <div id="demDropZone" class="drop-zone" tabindex="0" role="button"
+                                        aria-label="Drag and drop a DEM file here">
+                                        Click or drag &amp; drop a <code>.gpx</code>, <code>.tif</code>,
+                                        <code>.asc</code> file or a
+                                        <code>.zarr</code> folder here
+                                    </div>
+                                    <button id="demDirButton" class="btn btn-outline-primary" type="button" disabled>
+                                        Upload Zarr store
+                                    </button>
+                                    <input type="file" id="demFileInput" accept=".gpx,.tif,.tiff,.asc" class="d-none">
+                                    <input type="file" id="demDirInput" webkitdirectory directory multiple
+                                        class="d-none">
+                                </div>
+
+                                <div class="mb-3 d-none" id="zarrSiteRow">
+                                    <label for="zarrSiteDropdown" class="form-label">Zarr site:</label>
+                                    <select id="zarrSiteDropdown" class="form-select"></select>
+                                </div>
+
+                                <div class="mb-3 d-none align-items-center flex-wrap gap-2" id="zoomLevelRow">
+                                    <label for="zoomLevelSlider" class="control-label mb-0">DEM zoom level:</label>
+                                    <input type="range" id="zoomLevelSlider" min="12" max="18" value="16" step="1"
+                                        class="form-range w-auto" style="max-width:200px;">
+                                    <input type="number" id="zoomLevelValue" min="12" max="18" step="1" value="16"
+                                        class="form-control slider-value-input">
+                                </div>
+
+                                <div class="source-summary text-secondary" id="demStatus">No DEM selected.</div>
+                            </div>
+                        </div>
+
+                        <!-- ---------------------------------------------------------------- -->
+                        <!-- Step 2: Release areas                                             -->
+                        <!-- ---------------------------------------------------------------- -->
+                        <div class="card step-card is-locked" id="releaseCard">
+                            <div class="card-body">
+                                <div class="d-flex align-items-center gap-2 mb-3">
+                                    <span class="step-badge">2</span>
+                                    <h5 class="card-title mb-0">Select release areas</h5>
+                                </div>
+                                <p class="card-text text-secondary">
+                                    Either let the model derive release areas from the terrain, or upload your own
+                                    release area raster.
+                                </p>
+
+                                <div class="mb-3">
+                                    <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
+                                        <label for="densitySlider" class="control-label mb-0">Density:</label>
+                                        <input type="range" id="densitySlider" min="50" max="500" value="200" step="5"
+                                            class="form-range w-auto" style="max-width:200px;">
+                                        <input type="number" id="densitySliderValue" min="50" max="500" step="5"
+                                            value="200" class="form-control slider-value-input">
+                                    </div>
+                                    <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
+                                        <label for="slabThicknessSlider" class="control-label mb-0">Slab thickness
+                                            factor:</label>
+                                        <input type="range" id="slabThicknessSlider" min="0.1" max="5" value="1"
+                                            step="0.05" class="form-range w-auto" style="max-width:200px;">
+                                        <input type="number" id="slabThicknessSliderValue" min="0.1" max="5" step="0.05"
+                                            value="1" class="form-control slider-value-input">
+                                    </div>
+                                    <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
+                                        <label for="minSlopeAngleSlider" class="control-label mb-0">Min slope angle
+                                            (°):</label>
+                                        <input type="range" id="minSlopeAngleSlider" min="0" max="60" value="28"
+                                            step="0.5" class="form-range w-auto" style="max-width:200px;">
+                                        <input type="number" id="minSlopeAngleSliderValue" min="0" max="60" step="0.5"
+                                            value="28" class="form-control slider-value-input">
+                                    </div>
+                                    <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
+                                        <label for="maxSlopeAngleSlider" class="control-label mb-0">Max slope angle
+                                            (°):</label>
+                                        <input type="range" id="maxSlopeAngleSlider" min="5" max="90" value="60"
+                                            step="0.5" class="form-range w-auto" style="max-width:200px;">
+                                        <input type="number" id="maxSlopeAngleSliderValue" min="5" max="90" step="0.5"
+                                            value="60" class="form-control slider-value-input">
+                                    </div>
+                                    <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
+                                        <label for="releaseMinElevationSlider" class="control-label mb-0">Release min
+                                            elevation:</label>
+                                        <input type="range" id="releaseMinElevationSlider" min="0" max="5000"
+                                            value="1500" step="10" class="form-range w-auto" style="max-width:200px;">
+                                        <input type="number" id="releaseMinElevationSliderValue" min="0" max="5000"
+                                            step="10" value="1500" class="form-control slider-value-input">
+                                    </div>
+                                    <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
+                                        <label for="releaseMaxElevationSlider" class="control-label mb-0">Release max
+                                            elevation:</label>
+                                        <input type="range" id="releaseMaxElevationSlider" min="0" max="9000"
+                                            value="8848" step="10" class="form-range w-auto" style="max-width:200px;">
+                                        <input type="number" id="releaseMaxElevationSliderValue" min="0" max="9000"
+                                            step="10" value="8848" class="form-control slider-value-input">
+                                    </div>
+                                    <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
+                                        <label for="roughnessThresholdSlider" class="control-label mb-0">Roughness
+                                            threshold:</label>
+                                        <input type="range" id="roughnessThresholdSlider" min="0.001" max="1"
+                                            value="0.01" step="0.001" class="form-range w-auto"
+                                            style="max-width:200px;">
+                                        <input type="number" id="roughnessThresholdSliderValue" min="0.001" max="1"
+                                            step="0.001" value="0.01" class="form-control slider-value-input">
+                                    </div>
+                                    <button id="calculateReleaseButton" class="btn btn-outline-success" type="button"
+                                        disabled>
+                                        Calculate release areas
+                                    </button>
+                                    <div class="form-text">
+                                        Derives release areas from the terrain, and from the GPX track when one is
+                                        loaded.
+                                    </div>
+                                </div>
+
+                                <hr>
+
+                                <div class="upload-inline">
+                                    <div id="releaseDropZone" class="drop-zone" tabindex="0" role="button"
+                                        aria-label="Drag and drop a release area file here">
+                                        Click or drag &amp; drop a <code>.gpx</code>, <code>.tif</code>,
+                                        <code>.asc</code> file or a
+                                        <code>.zarr</code> folder here
+                                    </div>
+                                    <button id="releaseDirButton" class="btn btn-outline-primary" type="button"
+                                        disabled>
+                                        Upload Zarr store
+                                    </button>
+                                    <input type="file" id="releaseFileInput" accept=".gpx,.tif,.tiff,.asc"
+                                        class="d-none">
+                                    <input type="file" id="releaseDirInput" webkitdirectory directory multiple
+                                        class="d-none">
+                                </div>
+
+                                <div class="mb-3 d-none" id="zarrScenarioRow">
+                                    <label for="zarrScenarioDropdown" class="form-label">Zarr scenario:</label>
+                                    <select id="zarrScenarioDropdown" class="form-select"></select>
+                                </div>
+
+                                <div class="source-summary text-secondary" id="releaseStatus">No release areas selected.
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </details>
+
+                <!-- ---------------------------------------------------------------- -->
+                <!-- Step 3: Simulation settings                                       -->
+                <!-- ---------------------------------------------------------------- -->
+                <div class="card step-card" id="settingsCard">
+                    <div class="card-body">
+                        <div class="d-flex align-items-center gap-2 mb-3">
+                            <span class="step-badge">3</span>
+                            <h5 class="card-title mb-0">Simulation settings</h5>
+                        </div>
+
+                        <div id="simSettingsDiv">
+                            <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
+                                <label for="enable_curvature" class="control-label mb-0">Curvature:</label>
+                                <input type="checkbox" id="enable_curvature" class="form-check-input mt-0" checked>
+                            </div>
+                            <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
+                                <label for="enable_particle_interaction" class="control-label mb-0">Particle
+                                    interaction:</label>
+                                <input type="checkbox" id="enable_particle_interaction" class="form-check-input mt-0"
+                                    checked>
+                            </div>
+                            <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
+                                <label for="enable_earth_pressure_coefficient" class="control-label mb-0">
+                                    Earth pressure coefficient:
+                                </label>
+                                <input type="checkbox" id="enable_earth_pressure_coefficient"
+                                    class="form-check-input mt-0" checked>
+                            </div>
+                            <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
+                                <label for="frictionModelDropdown" class="control-label mb-0">Friction model:</label>
+                                <select id="frictionModelDropdown" class="form-select w-auto">
+                                    <option value="coulomb">Coulomb</option>
+                                    <option value="voellmy" selected>Voellmy</option>
+                                    <option value="voellmyminshear">Voellmy Min Shear</option>
+                                    <option value="samosat">samosAT</option>
+                                </select>
+                            </div>
+                            <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
+                                <label for="stepSlider" class="control-label mb-0">Max steps:</label>
+                                <input type="range" id="stepSlider" min="1" max="10000" value="4000"
+                                    class="form-range w-auto" style="max-width:200px;">
+                                <input type="number" id="stepSliderValue" min="1" max="10000" step="1" value="4000"
+                                    class="form-control slider-value-input">
+                            </div>
+                            <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
+                                <label for="cflSlider" class="control-label mb-0">CFL:</label>
+                                <input type="range" id="cflSlider" min="0.1" max="1" value="0.5" step="0.05"
+                                    class="form-range w-auto" style="max-width:200px;">
+                                <input type="number" id="cflSliderValue" min="0.1" max="1" step="0.05" value="0.5"
+                                    class="form-control slider-value-input">
+                            </div>
+                            <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
+                                <label for="frictionCoefficientSlider" class="control-label mb-0">Friction
+                                    coefficient:</label>
+                                <input type="range" id="frictionCoefficientSlider" min="0.05" max="1" value="0.4663"
+                                    step="0.005" class="form-range w-auto" style="max-width:200px;">
+                                <input type="number" id="frictionCoefficientValue" min="0.05" max="1" step="0.005"
+                                    value="0.4663" class="form-control slider-value-input">
+                            </div>
+                            <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
+                                <label for="dragCoefficientSlider" class="control-label mb-0">Drag coefficient:</label>
+                                <input type="range" id="dragCoefficientSlider" min="50" max="10000" value="2000"
+                                    step="50" class="form-range w-auto" style="max-width:200px;">
+                                <input type="number" id="dragCoefficientValue" min="50" max="10000" step="50"
+                                    value="2000" class="form-control slider-value-input">
+                            </div>
+                            <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
+                                <label for="releasedParticlesPerCellSlider" class="control-label mb-0">
+                                    Released particles per cell:
+                                </label>
+                                <input type="range" id="releasedParticlesPerCellSlider" min="1" max="256" value="4"
+                                    step="1" class="form-range w-auto" style="max-width:200px;">
+                                <input type="number" id="releasedParticlesPerCellValue" min="1" max="256" step="1"
+                                    value="4" class="form-control slider-value-input">
+                            </div>
+                            <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
+                                <label for="internalFrictionAngleSlider" class="control-label mb-0">
+                                    Internal friction angle (°):
+                                </label>
+                                <input type="range" id="internalFrictionAngleSlider" min="0" max="60" value="35"
+                                    step="0.1" class="form-range w-auto" style="max-width:200px;">
+                                <input type="number" id="internalFrictionAngleValue" min="0" max="60" step="0.1"
+                                    value="35" class="form-control slider-value-input">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ---------------------------------------------------------------- -->
+                <!-- Step 4: Run                                                       -->
+                <!-- ---------------------------------------------------------------- -->
+                <div class="card step-card" id="runCard">
+                    <div class="card-body">
+                        <div class="d-flex align-items-center gap-2 mb-3">
+                            <span class="step-badge">4</span>
+                            <h5 class="card-title mb-0">Run simulation</h5>
+                        </div>
+                        <div class="mb-3 small text-secondary">
+                            <div class="mb-1"><strong>DEM:</strong> <span id="loadedDemLabel">No DEM selected.</span>
+                            </div>
+                            <div><strong>Release:</strong> <span id="loadedReleaseLabel">No release areas selected — the
+                                    engine will derive them.</span></div>
+                        </div>
+                        <div class="d-flex flex-wrap align-items-center gap-3">
+                            <button id="runSimulation" class="btn btn-primary" disabled>
+                                <span id="runSpinner" class="spinner-border spinner-border-sm d-none" role="status"
+                                    aria-hidden="true"></span>
+                                <span id="runButtonLabel">Run simulation</span>
+                            </button>
+                            <button id="prepareSimulation" class="btn btn-outline-secondary" disabled>Prepare
+                                only</button>
+                            <div class="d-flex align-items-center">
+                                <span class="status-dot" id="runStatusDot"></span>
+                                <span id="runStatus" class="text-secondary">Waiting for the engine.</span>
+                            </div>
+                        </div>
+
+                        <div class="mt-3">
+                            <button id="saveResults" class="btn btn-outline-primary" disabled>Save results as
+                                Zarr</button>
+                            <div class="form-text">
+                                Writes a <code>site/scenario</code> Zarr store to a folder you choose. The folder can be
+                                loaded
+                                again in step 1.
+                            </div>
+                            <div class="source-summary text-secondary mt-2" id="saveStatus"></div>
+                        </div>
+                    </div>
+                </div>
+            </main>
+
+            <aside class="dem-plot-column" id="demPlotStickyHost" aria-label="Terrain preview">
+                <div class="dem-plot-sticky" id="demPlotContainer">
+                    <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
+                        <label for="plotVariable" class="control-label mb-0">Plot variable:</label>
+                        <select id="plotVariable" class="form-select w-auto">
+                            <option value="peak_flow_thickness">Peak Flow Thickness</option>
+                            <option value="peak_velocity">Peak Flow Velocity</option>
+                            <option value="cell_count">Cell Count</option>
+                            <option value="release_areas">Release Area</option>
+                            <option value="roughness">Roughness</option>
+                            <option value="slope_angle">Slope Angle</option>
+                            <option value="slope_aspect">Slope Aspect</option>
+                            <option value="elevation">Elevation</option>
                         </select>
                     </div>
-                    <div class="col-12 col-sm-auto">
-                        <button id="runShortcut" class="btn btn-primary w-100" disabled>Load &amp; run example</button>
-                    </div>
+                    <div id="demPlot" class="plot-shell plot-shell--dem"></div>
                 </div>
-            </div>
-        </div>
-
-        <!-- ---------------------------------------------------------------- -->
-        <!-- Step 1: DEM                                                       -->
-        <!-- ---------------------------------------------------------------- -->
-        <div class="card step-card" id="demCard">
-            <div class="card-body">
-                <div class="d-flex align-items-center gap-2 mb-3">
-                    <span class="step-badge">1</span>
-                    <h5 class="card-title mb-0">Select DEM</h5>
-                </div>
-                <p class="card-text text-secondary">
-                    Upload a digital elevation model. Supported: <code>.gpx</code> (downloads elevation tiles covering
-                    the track), <code>.tif</code>/<code>.tiff</code>, <code>.asc</code>, or a Zarr store directory.
-                </p>
-
-                <div class="upload-inline">
-                    <div id="demDropZone" class="drop-zone" tabindex="0" role="button"
-                        aria-label="Drag and drop a DEM file here">
-                        Drag &amp; drop a <code>.gpx</code>, <code>.tif</code>, <code>.asc</code> file or a
-                        <code>.zarr</code> folder here
-                    </div>
-                    <button id="demDirButton" class="btn btn-outline-primary" type="button" disabled>
-                        Upload Zarr store
-                    </button>
-                    <input type="file" id="demFileInput" accept=".gpx,.tif,.tiff,.asc" class="d-none">
-                    <input type="file" id="demDirInput" webkitdirectory directory multiple class="d-none">
-                </div>
-
-                <div class="mb-3 d-none" id="zarrSiteRow">
-                    <label for="zarrSiteDropdown" class="form-label">Zarr site:</label>
-                    <select id="zarrSiteDropdown" class="form-select"></select>
-                </div>
-
-                <div class="mb-3 d-none align-items-center flex-wrap gap-2" id="zoomLevelRow">
-                    <label for="zoomLevelSlider" class="control-label mb-0">DEM zoom level:</label>
-                    <input type="range" id="zoomLevelSlider" min="12" max="18" value="16" step="1"
-                        class="form-range w-auto" style="max-width:200px;">
-                    <input type="number" id="zoomLevelValue" min="12" max="18" step="1" value="16"
-                        class="form-control slider-value-input">
-                </div>
-
-                <div class="source-summary text-secondary" id="demStatus">No DEM selected.</div>
-            </div>
-        </div>
-
-        <!-- ---------------------------------------------------------------- -->
-        <!-- Step 2: Release areas                                             -->
-        <!-- ---------------------------------------------------------------- -->
-        <div class="card step-card is-locked" id="releaseCard">
-            <div class="card-body">
-                <div class="d-flex align-items-center gap-2 mb-3">
-                    <span class="step-badge">2</span>
-                    <h5 class="card-title mb-0">Select release areas</h5>
-                </div>
-                <p class="card-text text-secondary">
-                    Either let the model derive release areas from the terrain, or upload your own release area raster.
-                </p>
-
-                <div class="mb-3">
-                    <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
-                        <label for="densitySlider" class="control-label mb-0">Density:</label>
-                        <input type="range" id="densitySlider" min="50" max="500" value="200" step="5"
-                            class="form-range w-auto" style="max-width:200px;">
-                        <input type="number" id="densitySliderValue" min="50" max="500" step="5" value="200"
-                            class="form-control slider-value-input">
-                    </div>
-                    <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
-                        <label for="slabThicknessSlider" class="control-label mb-0">Slab thickness factor:</label>
-                        <input type="range" id="slabThicknessSlider" min="0.1" max="5" value="1" step="0.05"
-                            class="form-range w-auto" style="max-width:200px;">
-                        <input type="number" id="slabThicknessSliderValue" min="0.1" max="5" step="0.05" value="1"
-                            class="form-control slider-value-input">
-                    </div>
-                    <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
-                        <label for="minSlopeAngleSlider" class="control-label mb-0">Min slope angle (°):</label>
-                        <input type="range" id="minSlopeAngleSlider" min="0" max="60" value="28" step="0.5"
-                            class="form-range w-auto" style="max-width:200px;">
-                        <input type="number" id="minSlopeAngleSliderValue" min="0" max="60" step="0.5" value="28"
-                            class="form-control slider-value-input">
-                    </div>
-                    <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
-                        <label for="maxSlopeAngleSlider" class="control-label mb-0">Max slope angle (°):</label>
-                        <input type="range" id="maxSlopeAngleSlider" min="5" max="90" value="60" step="0.5"
-                            class="form-range w-auto" style="max-width:200px;">
-                        <input type="number" id="maxSlopeAngleSliderValue" min="5" max="90" step="0.5" value="60"
-                            class="form-control slider-value-input">
-                    </div>
-                    <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
-                        <label for="releaseMinElevationSlider" class="control-label mb-0">Release min elevation:</label>
-                        <input type="range" id="releaseMinElevationSlider" min="0" max="5000" value="1500" step="10"
-                            class="form-range w-auto" style="max-width:200px;">
-                        <input type="number" id="releaseMinElevationSliderValue" min="0" max="5000" step="10" value="1500"
-                            class="form-control slider-value-input">
-                    </div>
-                    <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
-                        <label for="releaseMaxElevationSlider" class="control-label mb-0">Release max elevation:</label>
-                        <input type="range" id="releaseMaxElevationSlider" min="0" max="9000" value="8848" step="10"
-                            class="form-range w-auto" style="max-width:200px;">
-                        <input type="number" id="releaseMaxElevationSliderValue" min="0" max="9000" step="10" value="8848"
-                            class="form-control slider-value-input">
-                    </div>
-                    <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
-                        <label for="roughnessThresholdSlider" class="control-label mb-0">Roughness threshold:</label>
-                        <input type="range" id="roughnessThresholdSlider" min="0.001" max="1" value="0.01" step="0.001"
-                            class="form-range w-auto" style="max-width:200px;">
-                        <input type="number" id="roughnessThresholdSliderValue" min="0.001" max="1" step="0.001" value="0.01"
-                            class="form-control slider-value-input">
-                    </div>
-                    <button id="calculateReleaseButton" class="btn btn-outline-success" type="button" disabled>
-                        Calculate release areas
-                    </button>
-                    <div class="form-text">
-                        Derives release areas from the terrain, and from the GPX track when one is loaded.
-                    </div>
-                </div>
-
-                <hr>
-
-                <div class="upload-inline">
-                    <div id="releaseDropZone" class="drop-zone" tabindex="0" role="button"
-                        aria-label="Drag and drop a release area file here">
-                        Drag &amp; drop a <code>.gpx</code>, <code>.tif</code>, <code>.asc</code> file or a
-                        <code>.zarr</code> folder here
-                    </div>
-                    <button id="releaseDirButton" class="btn btn-outline-primary" type="button" disabled>
-                        Upload Zarr store
-                    </button>
-                    <input type="file" id="releaseFileInput" accept=".gpx,.tif,.tiff,.asc" class="d-none">
-                    <input type="file" id="releaseDirInput" webkitdirectory directory multiple class="d-none">
-                </div>
-
-                <div class="mb-3 d-none" id="zarrScenarioRow">
-                    <label for="zarrScenarioDropdown" class="form-label">Zarr scenario:</label>
-                    <select id="zarrScenarioDropdown" class="form-select"></select>
-                </div>
-
-                <div class="source-summary text-secondary" id="releaseStatus">No release areas selected.</div>
-            </div>
-        </div>
-
-        <!-- ---------------------------------------------------------------- -->
-        <!-- Step 3: Simulation settings                                       -->
-        <!-- ---------------------------------------------------------------- -->
-        <div class="card step-card" id="settingsCard">
-            <div class="card-body">
-                <div class="d-flex align-items-center gap-2 mb-3">
-                    <span class="step-badge">3</span>
-                    <h5 class="card-title mb-0">Simulation settings</h5>
-                </div>
-
-                <div id="simSettingsDiv">
-                    <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
-                        <label for="enable_curvature" class="control-label mb-0">Curvature:</label>
-                        <input type="checkbox" id="enable_curvature" class="form-check-input mt-0" checked>
-                    </div>
-                    <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
-                        <label for="enable_particle_interaction" class="control-label mb-0">Particle interaction:</label>
-                        <input type="checkbox" id="enable_particle_interaction" class="form-check-input mt-0" checked>
-                    </div>
-                    <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
-                        <label for="enable_earth_pressure_coefficient" class="control-label mb-0">
-                            Earth pressure coefficient:
-                        </label>
-                        <input type="checkbox" id="enable_earth_pressure_coefficient" class="form-check-input mt-0"
-                            checked>
-                    </div>
-                    <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
-                        <label for="frictionModelDropdown" class="control-label mb-0">Friction model:</label>
-                        <select id="frictionModelDropdown" class="form-select w-auto">
-                            <option value="coulomb">Coulomb</option>
-                            <option value="voellmy" selected>Voellmy</option>
-                            <option value="voellmyminshear">Voellmy Min Shear</option>
-                            <option value="samosat">samosAT</option>
-                        </select>
-                    </div>
-                    <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
-                        <label for="stepSlider" class="control-label mb-0">Max steps:</label>
-                        <input type="range" id="stepSlider" min="1" max="10000" value="4000" class="form-range w-auto"
-                            style="max-width:200px;">
-                        <input type="number" id="stepSliderValue" min="1" max="10000" step="1" value="4000"
-                            class="form-control slider-value-input">
-                    </div>
-                    <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
-                        <label for="cflSlider" class="control-label mb-0">CFL:</label>
-                        <input type="range" id="cflSlider" min="0.1" max="1" value="0.5" step="0.05"
-                            class="form-range w-auto" style="max-width:200px;">
-                        <input type="number" id="cflSliderValue" min="0.1" max="1" step="0.05" value="0.5"
-                            class="form-control slider-value-input">
-                    </div>
-                    <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
-                        <label for="frictionCoefficientSlider" class="control-label mb-0">Friction coefficient:</label>
-                        <input type="range" id="frictionCoefficientSlider" min="0.05" max="1" value="0.4663" step="0.005"
-                            class="form-range w-auto" style="max-width:200px;">
-                        <input type="number" id="frictionCoefficientValue" min="0.05" max="1" step="0.005" value="0.4663"
-                            class="form-control slider-value-input">
-                    </div>
-                    <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
-                        <label for="dragCoefficientSlider" class="control-label mb-0">Drag coefficient:</label>
-                        <input type="range" id="dragCoefficientSlider" min="50" max="10000" value="2000" step="50"
-                            class="form-range w-auto" style="max-width:200px;">
-                        <input type="number" id="dragCoefficientValue" min="50" max="10000" step="50" value="2000"
-                            class="form-control slider-value-input">
-                    </div>
-                    <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
-                        <label for="releasedParticlesPerCellSlider" class="control-label mb-0">
-                            Released particles per cell:
-                        </label>
-                        <input type="range" id="releasedParticlesPerCellSlider" min="1" max="256" value="4" step="1"
-                            class="form-range w-auto" style="max-width:200px;">
-                        <input type="number" id="releasedParticlesPerCellValue" min="1" max="256" step="1" value="4"
-                            class="form-control slider-value-input">
-                    </div>
-                    <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
-                        <label for="internalFrictionAngleSlider" class="control-label mb-0">
-                            Internal friction angle (°):
-                        </label>
-                        <input type="range" id="internalFrictionAngleSlider" min="0" max="60" value="35" step="0.1"
-                            class="form-range w-auto" style="max-width:200px;">
-                        <input type="number" id="internalFrictionAngleValue" min="0" max="60" step="0.1" value="35"
-                            class="form-control slider-value-input">
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <!-- ---------------------------------------------------------------- -->
-        <!-- Step 4: Run                                                       -->
-        <!-- ---------------------------------------------------------------- -->
-        <div class="card step-card" id="runCard">
-            <div class="card-body">
-                <div class="d-flex align-items-center gap-2 mb-3">
-                    <span class="step-badge">4</span>
-                    <h5 class="card-title mb-0">Run simulation</h5>
-                </div>
-                <div class="mb-3 small text-secondary">
-                    <div class="mb-1"><strong>DEM:</strong> <span id="loadedDemLabel">No DEM selected.</span></div>
-                    <div><strong>Release:</strong> <span id="loadedReleaseLabel">No release areas selected — the engine will derive them.</span></div>
-                </div>
-                <div class="d-flex flex-wrap align-items-center gap-3">
-                    <button id="runSimulation" class="btn btn-primary" disabled>
-                        <span id="runSpinner" class="spinner-border spinner-border-sm d-none" role="status"
-                            aria-hidden="true"></span>
-                        <span id="runButtonLabel">Run simulation</span>
-                    </button>
-                    <button id="prepareSimulation" class="btn btn-outline-secondary" disabled>Prepare only</button>
-                    <div class="d-flex align-items-center">
-                        <span class="status-dot" id="runStatusDot"></span>
-                        <span id="runStatus" class="text-secondary">Waiting for the engine.</span>
-                    </div>
-                </div>
-
-                <div class="mt-3">
-                    <button id="saveResults" class="btn btn-outline-primary" disabled>Save results as Zarr</button>
-                    <div class="form-text">
-                        Writes a <code>site/scenario</code> Zarr store to a folder you choose. The folder can be loaded
-                        again in step 1.
-                    </div>
-                    <div class="source-summary text-secondary mt-2" id="saveStatus"></div>
-                </div>
-            </div>
+            </aside>
         </div>
     </div>
 
     <div class="container-fluid">
-        <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
-            <label for="plotVariable" class="control-label mb-0">Plot variable:</label>
-            <select id="plotVariable" class="form-select w-auto">
-                <option value="peak_flow_thickness">Peak Flow Thickness</option>
-                <option value="peak_velocity">Peak Flow Velocity</option>
-                <option value="cell_count">Cell Count</option>
-                <option value="release_areas">Release Area</option>
-                <option value="roughness">Roughness</option>
-                <option value="slope_angle">Slope Angle</option>
-                <option value="slope_aspect">Slope Aspect</option>
-                <option value="elevation">Elevation</option>
-            </select>
+        <div id="plotVariableAnchor" class="mb-3"></div>
+        <div id="resultPlots">
+            <div id="demPlotFlowHost"></div>
+            <div id="histogramPlot" class="plot-shell plot-shell--regular"></div>
+            <div id="outputPlot" class="plot-shell plot-shell--regular"></div>
+            <h5 class="mt-3">Computation Timer</h5>
+            <div id="timerPlot" class="plot-shell plot-shell--regular"></div>
         </div>
-        <div id="demPlot" style="width: 100%; height: 80vh; border: 1px solid grey;"></div>
-        <div id="histogramPlot" style="width: 100%; height: 600px; border: 1px solid grey;"></div>
-        <div id="outputPlot" style="width: 100%; height: 600px; border: 1px solid grey;"></div>
-        <h5 class="mt-3">Computation Timer</h5>
-        <div id="timerPlot" style="width: 100%; height: 600px; border: 1px solid grey;"></div>
-        <div id="debugPlot" style="width: 100%; height: 600px; border: 1px solid grey;"></div>
     </div>
 
-    <div class="container my-4">
+    <div class="container-fluid px-3 px-xl-4 my-4 text-start">
         <h5>Data Sources:</h5>
         <ul>
             <li>
-                The source of the elevation data is <a href="https://www.basemap.at/" target="_blank">basemap.at</a>
+                The source of the elevation data for GPX files is <a href="https://www.basemap.at/"
+                    target="_blank">basemap.at</a>
                 which is licensed under the <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank">CC BY
                     4.0</a> license.
             </li>
@@ -684,12 +933,13 @@
                 The source for the test data is <a href="https://avaframe.org/" target="_blank">avaframe.org</a> which
                 is licensed under the <a href="https://eupl.eu/1.2/en/" target="_blank">EUPL-1.2 license </a> license.
             </li>
-            <li>
+            <!-- <li>
                 The source for the forest data is <a
                     href="https://land.copernicus.eu/en/products/clc-backbone/clcplus-backbone-2023-raster-10-m-europe-2-yearly"
                     target="_blank">CLCplus Backbone 2023</a> which is free to use for any individual.
-            </li>
+            </li> -->
         </ul>
     </div>
 </body>
+
 </html>
