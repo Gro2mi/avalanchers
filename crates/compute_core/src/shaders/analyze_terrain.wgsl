@@ -1,16 +1,15 @@
 @group(0) @binding(1) var dem_texture: texture_2d<f32>;
-@group(0) @binding(2) var wind_shelter_texture: texture_2d<f32>;
-
-@group(0) @binding(3) var normals_texture: texture_storage_2d<rgba32float, write>;
-@group(0) @binding(4) var slope_texture: texture_storage_2d<rgba32float, write>;
-@group(0) @binding(5) var curvature_texture: texture_storage_2d<rgba32float, write>;
+@group(0) @binding(2) var terrain_geometry_texture: texture_storage_2d<rgba32float, write>;
+@group(0) @binding(3) var curvature_texture: texture_storage_2d<rgba32float, write>;
+@group(0) @binding(4) var<storage, read_write> slope_angle_buffer: array<f32>;
+@group(0) @binding(5) var<storage, read_write> slope_aspect_buffer: array<f32>;
 @group(0) @binding(6) var<storage, read_write> debug: array<f32>;
 
 
 @compute @workgroup_size(WG_SIZE_2D, WG_SIZE_2D, 1)
 fn analyze_terrain(@builtin(global_invocation_id) cell: vec3<u32>) {
-    // exit if thread cell is out of the image dimensions (i.e. thread is not supposed to be doing any work)
-    if (cell.x >= sim_settings.grid_shape.x || cell.y >= sim_settings.grid_shape.y) {
+    // boundary guard
+    if cell.x < 1 || cell.x >= sim_settings.grid_shape.x - 1 || cell.y < 1 || cell.y >= sim_settings.grid_shape.y - 1 {
         return;
     }
 
@@ -44,21 +43,34 @@ fn analyze_terrain(@builtin(global_invocation_id) cell: vec3<u32>) {
     let p = dx;
     let q = dy;
     let profile_curvature = select((dxx*dx*dx + 2.0*dxy*dx*dy + dyy*dy*dy) / denom, 0.0, cell.x==0 || cell.x==sim_settings.grid_shape.x - 1 || cell.y==0 || cell.y==sim_settings.grid_shape.y - 1);
+    let plan_curvature = select((dxx*dy*dy - 2.0*dxy*dx*dy + dyy*dx*dx) / denom, 0.0, cell.x==0 || cell.x==sim_settings.grid_shape.x - 1 || cell.y==0 || cell.y==sim_settings.grid_shape.y - 1);
     // let planCurvature    = (dxx*dy*dy - 2.0*dxy*dx*dy + dyy*dx*dx) / denom;
     // let meanCurvature = ((1.0 + dy*dy)*dxx - 2.0*dx*dy*dxy + (1.0 + dx*dx)*dyy) / (2.0 * pow(1.0 + dx*dx + dy*dy, 1.5));
     // let normal_f16: vec4<f16> = vec4<f16>(
     //     f16(normal.x), f16(normal.y), f16(normal.z), f16(1.0)
     // );
     // textureStore(normalsTexture, coord, normal_f16);
-    textureStore(normals_texture, coord, vec4f(normal, profile_curvature));
-    textureStore(curvature_texture, coord, vec4f(dxx, dxy, dyy, 0.0));
+    textureStore(terrain_geometry_texture, coord, vec4f(normal, profile_curvature));
+    textureStore(curvature_texture, coord, vec4f(dxx, dxy, dyy, plan_curvature));
 
     let slope_angle = degrees(acos(normal.z));
-    let slope_aspect = (degrees(atan2(normal.x, normal.y)) + 360.0) % 360.0;
-    // let slopeAngle = normal.z;
-    // let slopeAspect = 2.3;
-    let wind_shelter_index = textureLoad(wind_shelter_texture, coord, 0).r;
-    textureStore(slope_texture, coord, vec4f(slope_angle, slope_aspect, wind_shelter_index, 0f));
+
+    var slope_aspect_deg = 0.0;
+    if length(vec2f(dx, dy)) > 1e-5 {
+        // Match the curvilinear shader convention: aspect is measured clockwise from north,
+        // using the terrain gradient direction, not the opposite-facing surface normal.
+        let aspect_rad = atan2(dy, dx);
+        slope_aspect_deg = 90.0 - degrees(aspect_rad);
+        if slope_aspect_deg < 0.0 {
+            slope_aspect_deg += 360.0;
+        }
+    } else {
+        slope_aspect_deg = -1.0;
+    }
+
+    let index = xy_to_idx(cell.xy);
+    slope_angle_buffer[index] = slope_angle;
+    slope_aspect_buffer[index] = slope_aspect_deg;
 
     if(cell.x == 0 && cell.y == 0) {
         debug[0] = normal.x;
@@ -77,7 +89,7 @@ fn analyze_terrain(@builtin(global_invocation_id) cell: vec3<u32>) {
         debug[13] = down;
         debug[14] = center;
         debug[15] = slope_angle;
-        debug[16] = slope_aspect;
+        debug[16] = slope_aspect_deg;
         debug[17] = up_right;
         debug[18] = down_right;
         debug[19] = up_left;
@@ -96,26 +108,16 @@ const g: f32 = 9.81;
 const MAX_VELOCITY_FACTOR: f32 = 1e7; // u32 limit is 430 m/s
 const MASS_FACTOR: f32 = 1e1; // u32 limit is 4.3t thickness
 const H_FACTOR: f32 = 1e6;
-const MOMENTUM_FACTOR: f32 = 1e2; 
+// TODO calculate momentum factor 
+// 2147483647.0 / (120.0 * 100.0 * 25 * 200)
+// use override
+const MOMENTUM_FACTOR: f32 =  1e-2; 
 const INV_MAX_VELOCITY_FACTOR: f32 = 1 / MAX_VELOCITY_FACTOR; // u32 limit is 430 m/s
 const INV_MASS_FACTOR: f32 = 1 / MASS_FACTOR; // u32 limit is 4.3km thickness
 const INV_H_FACTOR: f32 = 1 / H_FACTOR; 
 const INV_MOMENTUM_FACTOR: f32 = 1 / MOMENTUM_FACTOR;
 
 // TODO precompute often used values on the cpu and pass them as uniforms to avoid redundant calculations on the gpu
-
-struct Particle {
-    position: vec3f,
-    mass: f32,
-    velocity: vec3f,
-    stopped: u32,
-    travel_length: f32,
-};
-
-struct ParticleAlpha {
-    alpha: f32,
-    start_elevation: f32,
-};
 
 struct SimInfo {
     timestep: u32,
@@ -162,12 +164,13 @@ struct SimSettings {
     velocity_threshold: f32,
     roughness_threshold: f32,
     flags: u32,
+    release_max_elevation: f32,
 };
 
 struct AtomicValues {
     peak_velocity: atomic<u32>,
     peak_flow_thickness: atomic<u32>,
-    alpha: atomic<u32>,
+    expected_max_velocity: atomic<u32>,
     travel_length: atomic<u32>,
     release_volume: atomic<u32>,
     number_release_cells: atomic<u32>,
@@ -175,7 +178,27 @@ struct AtomicValues {
     stopped_particles: atomic<u32>,
 };
 
+struct G2PUpdate {
+    velocity: vec2f,
+    affine_matrix: mat2x2<f32>,
+};
+
 @group(0) @binding(0) var<uniform> sim_settings: SimSettings;
+
+fn is_nan(x: f32) -> bool {
+    let bits: u32 = bitcast<u32>(x);
+    return (bits & 0x7F800000u) == 0x7F800000u
+          && (bits & 0x007FFFFFu) != 0u;
+}
+
+fn is_inf(x: f32) -> bool {
+    let bits: u32 = bitcast<u32>(x);
+    return (bits == 0x7F800000u || bits == 0xFF800000u);
+}
+
+fn is_finite(x: f32) -> bool {
+    return !is_nan(x) && !is_inf(x);
+}
 
 fn cell_to_uv(cell: vec2u) -> vec2f {
     return (vec2f(cell) + 0.5) / vec2f(sim_settings.grid_shape);
@@ -187,7 +210,11 @@ fn cellf_to_uv(cell: vec2f) -> vec2f {
     return (cell + 0.5) / vec2f(sim_settings.grid_shape);
 }
 
-fn position_to_cell(position: vec3f) -> vec2u {
+fn position3_to_cell(position: vec3f) -> vec2u {
+    return position_to_cell(position.xy);
+}
+
+fn position_to_cell(position: vec2f) -> vec2u {
     return vec2u(
         floor(position.xy / sim_settings.cell_size)
     );
@@ -197,28 +224,42 @@ fn cell_center_xy(cell: vec2u) -> vec2f {
     return (vec2f(cell) + 0.5) * sim_settings.cell_size;
 }
 
-fn position_to_uv(position: vec3f) -> vec2f {
-    return (position.xy + 0.5 * sim_settings.cell_size) / (vec2f(sim_settings.world_size)); // add some padding to ensure particles outside the world bounds are still captured in the simulation info
+fn position_to_uv(position: vec2f) -> vec2f {
+    return (position.xy) / (vec2f(sim_settings.world_size)); // add some padding to ensure particles outside the world bounds are still captured in the simulation info
 }
 
-fn position_to_cell_index(position: vec3f) -> u32 {
+fn position_to_idx(position: vec2f) -> u32 {
     let uv = position_to_uv(position);
-    return uv_to_cell_index(uv);
+    return uv_to_idx(uv);
 }
 
 fn uv_to_cell(uv: vec2f) -> vec2u {
-    return vec2u(clamp(uv * vec2f(sim_settings.grid_shape), vec2f(0.0), vec2f(sim_settings.grid_shape - 1u)));
+    let epsilon = 1e-5f; // A tiny offset to counteract negative rounding bias
+    let scaled_uv = uv * vec2f(sim_settings.grid_shape) + epsilon;
+    let max_bound = vec2f(sim_settings.grid_shape - 1u);
+
+    return vec2u(clamp(scaled_uv, vec2f(0.0), max_bound));
 }
 
-fn uv_to_cell_index(uv: vec2f) -> u32 {
+fn uv_to_idx(uv: vec2f) -> u32 {
     let cell = uv_to_cell(uv);
     // return cell.x * sim_settings.grid_shape.y + cell.y;
     return (cell.y % sim_settings.grid_shape.y * sim_settings.grid_shape.x +
               (cell.x % sim_settings.grid_shape.x));
 }
 
-fn xy_to_idx(x: u32, y: u32) -> u32 {
+fn x_y_to_idx(x: u32, y: u32) -> u32 {
     return y * sim_settings.grid_shape.x + x;
+}
+
+fn xy_to_idx(xy: vec2<u32>) -> u32 {
+    return xy.y * sim_settings.grid_shape.x + xy.x;
+}
+
+fn idx_to_xy(idx: u32) -> vec2<u32> {
+    let x = idx % sim_settings.grid_shape.x;
+    let y = idx / sim_settings.grid_shape.x;
+    return vec2u(x, y);
 }
 
 fn quadratic_weight(d: f32) -> f32 {
@@ -231,13 +272,16 @@ fn quadratic_weight(d: f32) -> f32 {
     return 0.0;
 }
 
-fn calculate_weight(particle_position: vec2f, node_position: vec2i) -> f32 {
-    let dist = particle_position - vec2f(node_position);
-    return quadratic_weight(dist.x) * quadratic_weight(dist.y);
+fn calculate_weight(distance: vec2f) -> f32 {
+    return quadratic_weight(distance.x) * quadratic_weight(distance.y);
 }
 
-fn get_base_node(grid_pos: vec2f) -> vec2i {
-    return vec2i(floor(grid_pos - vec2f(0.5)));
+fn calculate_distance_to_node(particle_position: vec2f, node_position: vec2u) -> vec2f {
+    return particle_position - vec2f(node_position);
+}
+
+fn get_base_node(grid_pos: vec2f) -> vec2u {
+    return vec2u(floor(grid_pos - vec2f(0.5)));
 }
 
 fn compute_centroid(points: ptr<function, array<vec2<f32>, 256>>, count: u32) -> vec2<f32> {

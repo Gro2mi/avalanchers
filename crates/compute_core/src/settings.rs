@@ -64,7 +64,6 @@ pub struct SimSettings {
     // Integers
     pub max_steps: u32,
     pub sim_model: u32,
-    pub flags: u32,
     pub friction_model: u32,
     pub released_particles_per_cell: u32,
     pub grid_shape_x: u32,
@@ -72,7 +71,8 @@ pub struct SimSettings {
     // Floats
     pub world_size_x: f32,
     pub world_size_y: f32,
-    pub velocity_threshold: f32,
+    pub density: f32,
+    pub slab_thickness_factor: f32,
     pub friction_coefficient: f32,
     pub drag_coefficient: f32,
     pub n0: f32,
@@ -84,14 +84,13 @@ pub struct SimSettings {
     pub basal_friction_angle: f32,
     pub cfl: f32,
     pub cell_size: f32,
-    // release
-    pub density: f32,
-    pub slab_thickness_factor: f32,
     pub min_slope_angle: f32,
     pub max_slope_angle: f32,
     pub release_min_elevation: f32,
-    pub release_max_elevation: f32,
+    pub velocity_threshold: f32,
     pub roughness_threshold: f32,
+    pub flags: u32,
+    pub release_max_elevation: f32,
 }
 
 impl Hash for SimSettings {
@@ -145,7 +144,7 @@ impl SimSettings {
     pub fn new() -> Self {
         Self {
             max_steps: 6000,
-            sim_model: SimModel::ParticleInteraction.as_int(),
+            sim_model: SimModel::Particle.as_int(),
             friction_model: FrictionModel::Voellmy.as_int(),
             released_particles_per_cell: 8,
             grid_shape_x: 1,
@@ -385,26 +384,23 @@ impl<'de> Deserialize<'de> for FrictionModel {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SimModel {
-    Block,
-    ParticleInteraction,
+    Particle,
     MPM,
 }
 
 impl SimModel {
     pub fn from_int(value: u32) -> Option<Self> {
         match value {
-            0 => Some(Self::Block),
-            1 => Some(Self::ParticleInteraction),
-            2 => Some(Self::MPM),
+            0 => Some(Self::Particle),
+            1 => Some(Self::MPM),
             _ => None,
         }
     }
 
     pub fn as_int(&self) -> u32 {
         match self {
-            Self::Block => 0,
-            Self::ParticleInteraction => 1,
-            Self::MPM => 2,
+            Self::Particle => 0,
+            Self::MPM => 1,
         }
     }
 }
@@ -414,8 +410,7 @@ impl FromStr for SimModel {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value.to_lowercase().as_str() {
-            "block" => Ok(Self::Block),
-            "particle-interaction" | "particleinteraction" => Ok(Self::ParticleInteraction),
+            "particle" => Ok(Self::Particle),
             "mpm" => Ok(Self::MPM),
             _ => Err(format!("unknown simulation model: {value}")),
         }
@@ -425,8 +420,7 @@ impl FromStr for SimModel {
 impl fmt::Display for SimModel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::Block => "block",
-            Self::ParticleInteraction => "particle-interaction",
+            Self::Particle => "particle",
             Self::MPM => "mpm",
         })
     }
@@ -556,7 +550,7 @@ mod tests {
     fn test_simsettings_new_defaults() {
         let settings = SimSettings::new();
         assert_eq!(settings.max_steps, 6000);
-        assert_eq!(settings.sim_model, SimModel::ParticleInteraction.as_int());
+        assert_eq!(settings.sim_model, SimModel::Particle.as_int());
         assert_eq!(settings.friction_model, FrictionModel::Voellmy.as_int());
         assert_eq!(settings.released_particles_per_cell, 8);
         assert_eq!(settings.grid_shape_x, 1);
@@ -603,7 +597,7 @@ mod tests {
             outlines_path: Some("path/to/outlines".to_string()),
             outlines_padding: Some(10.0),
             max_steps: Some(42),
-            sim_model: Some(SimModel::ParticleInteraction),
+            sim_model: Some(SimModel::MPM),
             friction_model: Some(FrictionModel::VoellmyMinShear),
             released_particles_per_cell: Some(3),
             density: Some(123.4),
@@ -778,11 +772,7 @@ mod tests {
 
     #[test]
     fn sim_model_int_roundtrip() {
-        let models = [
-            SimModel::Block,
-            SimModel::ParticleInteraction,
-            SimModel::MPM,
-        ];
+        let models = [SimModel::Particle, SimModel::MPM];
 
         for model in models {
             let value = model.as_int();
@@ -794,21 +784,16 @@ mod tests {
 
     #[test]
     fn sim_model_from_int() {
-        assert_eq!(SimModel::from_int(0), Some(SimModel::Block));
-        assert_eq!(SimModel::from_int(1), Some(SimModel::ParticleInteraction));
-        assert_eq!(SimModel::from_int(2), Some(SimModel::MPM));
+        assert_eq!(SimModel::from_int(0), Some(SimModel::Particle));
+        assert_eq!(SimModel::from_int(1), Some(SimModel::MPM));
 
-        assert_eq!(SimModel::from_int(3), None);
+        assert_eq!(SimModel::from_int(2), None);
         assert_eq!(SimModel::from_int(u32::MAX), None);
     }
 
     #[test]
     fn sim_model_string_roundtrip() {
-        let models = [
-            (SimModel::Block, "block"),
-            (SimModel::ParticleInteraction, "particle-interaction"),
-            (SimModel::MPM, "mpm"),
-        ];
+        let models = [(SimModel::Particle, "particle"), (SimModel::MPM, "mpm")];
 
         for (model, string) in models {
             assert_eq!(model.to_string(), string);
@@ -818,12 +803,9 @@ mod tests {
 
     #[test]
     fn sim_model_string_aliases() {
-        assert_eq!(
-            SimModel::from_str("particleinteraction"),
-            Ok(SimModel::ParticleInteraction)
-        );
+        assert_eq!(SimModel::from_str("particle"), Ok(SimModel::Particle));
 
-        assert_eq!(SimModel::from_str("BLOCK"), Ok(SimModel::Block));
+        assert_eq!(SimModel::from_str("PARTICLE"), Ok(SimModel::Particle));
         assert_eq!(SimModel::from_str("MPM"), Ok(SimModel::MPM));
     }
 

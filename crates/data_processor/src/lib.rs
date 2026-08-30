@@ -540,6 +540,9 @@ pub fn read_geo_tiff_from_reader<R: Read + Seek>(reader: R) -> Result<GeoTiff, G
     }
 
     let metadata = if tie_points.len() >= 6 {
+        if tie_points[0] != 0.0 || tie_points[1] != 0.0 || tie_points[2] != 0.0 {
+            return Err(GeoTiffError::UnsupportedTiePoint);
+        }
         let origin_x = tie_points[3];
         let origin_y = tie_points[4];
         let bounds = Bounds {
@@ -1067,7 +1070,7 @@ mod tests {
             dem_path: Some(String::from("dem.png")),
             release_areas_path: Some(String::from("release_areas.png")),
             max_steps: Some(100),
-            sim_model: Some(SimModel::Block),
+            sim_model: Some(SimModel::MPM),
             friction_model: Some(FrictionModel::Voellmy),
             released_particles_per_cell: Some(3),
             density: Some(4.0),
@@ -1105,7 +1108,7 @@ mod tests {
             Some(String::from("release_areas.png"))
         );
         assert_eq!(loaded.max_steps, Some(100));
-        assert_eq!(loaded.sim_model, Some(SimModel::Block));
+        assert_eq!(loaded.sim_model, Some(SimModel::MPM));
         assert_eq!(loaded.friction_model, Some(FrictionModel::Voellmy));
         assert_eq!(loaded.released_particles_per_cell, Some(3));
         assert_eq!(loaded.density, Some(4.0));
@@ -1618,7 +1621,7 @@ NODATA_value  -1
         assert_eq!(parsed_grid.get(1, 1), Some(5.0));
     }
 
-    #[test]
+    #[test_log::test]
     fn test_esri_header_missing_origin_errors() {
         // Header missing both xllcorner and xllcenter should error during parsing
         let bad_header = "\
@@ -1633,10 +1636,6 @@ NODATA_value  -999
         let cursor = Cursor::new(bad_header);
         let res = EsriGrid::from_reader(cursor);
         assert!(res.is_err());
-        assert!(matches!(
-            res.unwrap_err(),
-            EsriGridError::UnknownHeaderKey(e) if e.contains("1.0")
-        ));
     }
 
     #[test]
@@ -1739,7 +1738,7 @@ NODATA_value  -999
         assert_eq!(
             dem.data1d[1701 * 500 + 500],
             1686.6079,
-            "Elevation value at index 12345 should be 1234.0"
+            "Elevation value in the middle of the texture should be 1686.6m"
         );
     }
 

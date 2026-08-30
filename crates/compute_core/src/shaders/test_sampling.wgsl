@@ -1,47 +1,67 @@
+struct DiagnosticInput {
+    physical_position: vec3f,
+    target_cell: vec2u,
+};
 
-@group(0) @binding(1) var<storage, read_write> sim_info: SimInfo;
-@group(0) @binding(2) var<storage, read_write> atomic_values: AtomicValues;
-@group(0) @binding(3) var<storage, read_write> new_cells_rolling_window: array<u32>;
+struct TestSamplingOutput {
+    position_x: f32,
+    position_y: f32,
+    u: f32,
+    v: f32,
+    cell_x: u32,
+    cell_y: u32,
+    
+    // Continuous sampled data (Filtered via sampler)
+    dem_sampled: f32,
+    dem_sampled_as_expected: i32,
+    
+    // Exact cell data (Unfiltered via textureLoad)
+    dem_loaded: f32,
+    dem_loaded_as_expected: i32,
+};
 
-@compute @workgroup_size(1, 1, 1)
-fn update_sim_info(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    if atomicLoad(&atomic_values.stopped_particles) == sim_info.number_particles {
-        sim_info.flags = sim_info.flags | SIM_INFO_ALL_PARTICLES_STOPPED;
-        sim_info.flags = sim_info.flags | SIM_INFO_STOPPED;
-        return;
-    }
-    var sum_new_cells: u32 = 0u;
-    for (var i: u32 = 0u; i < 40u; i = i + 1u) {
-        sum_new_cells = sum_new_cells + new_cells_rolling_window[i];
-    }
-    if sum_new_cells < 4u {
-        sim_info.flags = sim_info.flags | SIM_INFO_NO_NEW_CELLS;
-        sim_info.flags = sim_info.flags | SIM_INFO_STOPPED;
-        return;
-    } 
+@group(0) @binding(1) var dem_texture: texture_2d<f32>;
+@group(0) @binding(2) var tex_sampler: sampler;
+@group(0) @binding(3) var<storage, read_write> test_outputs: array<TestSamplingOutput>;
 
-    let max_flow_thickness = bitcast<f32>(atomicLoad(&atomic_values.peak_flow_thickness));
-    sim_info.timestep = sim_info.timestep + 1u;
-    new_cells_rolling_window[sim_info.timestep % 40u] = 0u; // reset the count for the new cells in the current timestep
-    sim_info.max_velocity = bitcast<f32>(atomicLoad(&atomic_values.peak_velocity));
-    // MPM case
-    var expected_max_velocity = bitcast<f32>(atomicLoad(&atomic_values.expected_max_velocity));
-    // Particle case
-    if expected_max_velocity < 1e-6 {
-        expected_max_velocity = sim_info.max_velocity + sqrt(g * max_flow_thickness);
-        atomicStore(&atomic_values.expected_max_velocity, bitcast<u32>(expected_max_velocity));
-    }
-    let expected_dt = max(0.01, sim_settings.cfl * sim_settings.cell_size / expected_max_velocity);
-    if !is_finite(expected_dt) {
-        sim_info.dt = 0.05;
-    } else {
-        sim_info.dt = expected_dt;
-    }
-    sim_info.elapsed_time = sim_info.elapsed_time + sim_info.dt;
-    sim_info.max_flow_thickness = max_flow_thickness;
+
+@compute @workgroup_size(64)
+fn test_sampling(@builtin(global_invocation_id) id: vec3u) {
+    let idx = id.x;
+    // Assuming array size check is handled host-side or via dynamic array length
+    if (idx > sim_settings.grid_shape.x * sim_settings.model_type) { return; }
+
+    
+    var output: TestSamplingOutput;
+    output.dem_loaded_as_expected = -1;
+    output.dem_sampled_as_expected = -1;
+    
+    // --- METHOD A: Continuous Sampling (Good for moving particles) ---
+    // Map physical positions straight to UV without arbitrary half-cell padding additions
+    let step = 1.0 / f32(sim_settings.model_type) * sim_settings.cell_size; // arbitrary small step to test sampling around the position
+    let position = vec2f(step * f32(idx), 0.0);
+    let uv = position_to_uv(position);
+    output.position_x = position.x;
+    output.position_y = position.y;
+    output.u = uv.x;
+    output.v = uv.y;
+    
+    output.dem_sampled = textureSampleLevel(dem_texture, tex_sampler, uv, 0.0).x;
+    
+    // --- METHOD B: Discrete Loading (Good for grid-locked cellular updates) ---
+    // Directly target integer pixel units without interpolation artifacts
+    let cell_idx = uv_to_cell(uv);
+    output.cell_x = cell_idx.x;
+    output.cell_y = cell_idx.y;
+    
+    // textureLoad takes absolute integer coordinates (vec2u/vec2i) and an explicit mip level (0)
+    output.dem_loaded = textureLoad(dem_texture, cell_idx, 0).x;
+    
+    // Write back findings to CPU-readable buffer
+    test_outputs[idx] = output;
 }
 
-// import utils.wgsl;
+// import utils.wgsl
 // BEGIN utils.wgsl
 const WG_SIZE_2D: u32 = 16u;
 

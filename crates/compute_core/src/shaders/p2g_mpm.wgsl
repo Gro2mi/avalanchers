@@ -1,45 +1,75 @@
-
 @group(0) @binding(1) var<storage, read_write> sim_info: SimInfo;
-@group(0) @binding(2) var<storage, read_write> atomic_values: AtomicValues;
-@group(0) @binding(3) var<storage, read_write> new_cells_rolling_window: array<u32>;
+@group(0) @binding(2) var<storage> particles_position: array<vec2<f32>>;
+@group(0) @binding(3) var<storage> particles_velocity: array<vec2<f32>>;
+@group(0) @binding(4) var<storage> particles_mass: array<f32>;
+// atomic_float @group(0) @binding(5) var<storage, read_write> grid_mass_atomic: array<atomic<f32>>;
+// atomic_float @group(0) @binding(6) var<storage, read_write> grid_momentum_atomic: array<atomic<f32>>; 
+@group(0) @binding(5) var<storage, read_write> grid_mass_atomic: array<atomic<u32>>;  // no_atomic_float 
+@group(0) @binding(6) var<storage, read_write> grid_momentum_atomic: array<atomic<i32>>;  // no_atomic_float 
 
-@compute @workgroup_size(1, 1, 1)
-fn update_sim_info(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    if atomicLoad(&atomic_values.stopped_particles) == sim_info.number_particles {
-        sim_info.flags = sim_info.flags | SIM_INFO_ALL_PARTICLES_STOPPED;
-        sim_info.flags = sim_info.flags | SIM_INFO_STOPPED;
+@group(0) @binding(7) var<storage> particles_affine_matrix: array<mat2x2<f32>>;
+
+override WG_SIZE_1D: u32 = 1u;
+@compute @workgroup_size(WG_SIZE_1D, 1, 1)
+fn p2g_mpm(@builtin(global_invocation_id) id: vec3u) {
+    if id.x >= sim_info.number_particles {
         return;
     }
-    var sum_new_cells: u32 = 0u;
-    for (var i: u32 = 0u; i < 40u; i = i + 1u) {
-        sum_new_cells = sum_new_cells + new_cells_rolling_window[i];
-    }
-    if sum_new_cells < 4u {
-        sim_info.flags = sim_info.flags | SIM_INFO_NO_NEW_CELLS;
-        sim_info.flags = sim_info.flags | SIM_INFO_STOPPED;
+    if sim_info.flags >= SIM_INFO_STOPPED {
         return;
-    } 
+    }
+    let cell = position_to_cell(particles_position[id.x]);
+    if cell.x < 1 || cell.x >= (sim_settings.grid_shape.x - 1) || cell.y < 1 || cell.y >= (sim_settings.grid_shape.y - 1) {
+        return;
+    }
 
-    let max_flow_thickness = bitcast<f32>(atomicLoad(&atomic_values.peak_flow_thickness));
-    sim_info.timestep = sim_info.timestep + 1u;
-    new_cells_rolling_window[sim_info.timestep % 40u] = 0u; // reset the count for the new cells in the current timestep
-    sim_info.max_velocity = bitcast<f32>(atomicLoad(&atomic_values.peak_velocity));
-    // MPM case
-    var expected_max_velocity = bitcast<f32>(atomicLoad(&atomic_values.expected_max_velocity));
-    // Particle case
-    if expected_max_velocity < 1e-6 {
-        expected_max_velocity = sim_info.max_velocity + sqrt(g * max_flow_thickness);
-        atomicStore(&atomic_values.expected_max_velocity, bitcast<u32>(expected_max_velocity));
-    }
-    let expected_dt = max(0.01, sim_settings.cfl * sim_settings.cell_size / expected_max_velocity);
-    if !is_finite(expected_dt) {
-        sim_info.dt = 0.05;
-    } else {
-        sim_info.dt = expected_dt;
-    }
-    sim_info.elapsed_time = sim_info.elapsed_time + sim_info.dt;
-    sim_info.max_flow_thickness = max_flow_thickness;
+    transfer_p2g(id.x);
 }
+
+// import transfer_p2g.wgsl;
+// BEGIN transfer_p2g.wgsl
+fn quantize_momentum_component(value: f32) -> i32 {
+    // Keep conversion inside i32 range before atomicAdd.
+    let i32_max_f = 2147483647.0;
+    let clamped = clamp(value, -i32_max_f, i32_max_f);
+    return i32(round(clamped));
+}
+
+fn transfer_p2g(p_idx: u32) {
+    // the stencil is offset by half a cell as it is in the middle of the cell
+    let grid_pos = particles_position[p_idx] / sim_settings.cell_size - vec2f(0.5);
+    let base_node = vec2u(floor(grid_pos - vec2f(0.5)));
+    
+    let p_mass = particles_mass[p_idx];
+    let p_velocity = particles_velocity[p_idx];
+    // let affine_matrix = particles_affine_matrix[p_idx];
+
+    for (var i: u32 = 0; i < 3; i++) {
+        for (var j: u32 = 0; j < 3; j++) {
+            let node_coords = base_node + vec2u(i, j);
+            let distance = calculate_distance_to_node(grid_pos, node_coords);
+            let weight = calculate_weight(distance);
+            let idx = xy_to_idx(node_coords);
+            // let affine_velocity = p_velocity + (affine_matrix * distance);
+
+            
+            
+            // atomic_float atomicAdd(&grid_mass_atomic[idx], p_mass * weight);
+            // atomic_float atomicAdd(&grid_momentum_atomic[idx * 2u], p_mass * p_velocity.x * weight);
+            // atomic_float atomicAdd(&grid_momentum_atomic[idx * 2u + 1u], p_mass * p_velocity.y * weight);
+            // for affine transfer
+            // atomicAdd(&grid_momentum_atomic[idx * 2u], p_mass * affine_velocity.x * weight);
+            // atomicAdd(&grid_momentum_atomic[idx * 2u + 1u], p_mass * affine_velocity.y * weight);
+
+            atomicAdd(&grid_mass_atomic[idx], u32(round(p_mass * weight * MASS_FACTOR))); // no_atomic_float 
+            let momentum_x = p_mass * p_velocity.x * weight * MOMENTUM_FACTOR; // no_atomic_float 
+            let momentum_y = p_mass * p_velocity.y * weight * MOMENTUM_FACTOR; // no_atomic_float 
+            atomicAdd(&grid_momentum_atomic[idx * 2u], quantize_momentum_component(momentum_x)); // no_atomic_float 
+            atomicAdd(&grid_momentum_atomic[idx * 2u + 1u], quantize_momentum_component(momentum_y)); // no_atomic_float 
+        }
+    }
+}
+// END transfer_p2g.wgsl
 
 // import utils.wgsl;
 // BEGIN utils.wgsl

@@ -1,47 +1,57 @@
-
-@group(0) @binding(1) var<storage, read_write> sim_info: SimInfo;
+@group(0) @binding(1) var<storage, read_write> test_output: array<f32>;
 @group(0) @binding(2) var<storage, read_write> atomic_values: AtomicValues;
-@group(0) @binding(3) var<storage, read_write> new_cells_rolling_window: array<u32>;
 
-@compute @workgroup_size(1, 1, 1)
-fn update_sim_info(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    if atomicLoad(&atomic_values.stopped_particles) == sim_info.number_particles {
-        sim_info.flags = sim_info.flags | SIM_INFO_ALL_PARTICLES_STOPPED;
-        sim_info.flags = sim_info.flags | SIM_INFO_STOPPED;
-        return;
-    }
-    var sum_new_cells: u32 = 0u;
-    for (var i: u32 = 0u; i < 40u; i = i + 1u) {
-        sum_new_cells = sum_new_cells + new_cells_rolling_window[i];
-    }
-    if sum_new_cells < 4u {
-        sim_info.flags = sim_info.flags | SIM_INFO_NO_NEW_CELLS;
-        sim_info.flags = sim_info.flags | SIM_INFO_STOPPED;
-        return;
-    } 
 
-    let max_flow_thickness = bitcast<f32>(atomicLoad(&atomic_values.peak_flow_thickness));
-    sim_info.timestep = sim_info.timestep + 1u;
-    new_cells_rolling_window[sim_info.timestep % 40u] = 0u; // reset the count for the new cells in the current timestep
-    sim_info.max_velocity = bitcast<f32>(atomicLoad(&atomic_values.peak_velocity));
-    // MPM case
-    var expected_max_velocity = bitcast<f32>(atomicLoad(&atomic_values.expected_max_velocity));
-    // Particle case
-    if expected_max_velocity < 1e-6 {
-        expected_max_velocity = sim_info.max_velocity + sqrt(g * max_flow_thickness);
-        atomicStore(&atomic_values.expected_max_velocity, bitcast<u32>(expected_max_velocity));
-    }
-    let expected_dt = max(0.01, sim_settings.cfl * sim_settings.cell_size / expected_max_velocity);
-    if !is_finite(expected_dt) {
-        sim_info.dt = 0.05;
-    } else {
-        sim_info.dt = expected_dt;
-    }
-    sim_info.elapsed_time = sim_info.elapsed_time + sim_info.dt;
-    sim_info.max_flow_thickness = max_flow_thickness;
+@compute @workgroup_size(1)
+fn test_utils(@builtin(global_invocation_id) id: vec3u) {
+    let nan = bitcast<f32>(0x7F800001u);
+    let neg_nan = bitcast<f32>(0xFF800001u);
+    let inf = bitcast<f32>(0x7F800000u);
+    let neg_inf = bitcast<f32>(0xFF800000u);
+    let low_val: f32 = 3.1415;
+    let high_val: f32 = 42.0;
+    atomicStore(&atomic_values.peak_velocity, bitcast<u32>(low_val));
+    test_output[0] = bitcast<f32>(atomicLoad(&atomic_values.peak_velocity));
+    atomicMax(&atomic_values.peak_velocity, bitcast<u32>(high_val));
+    test_output[1] = bitcast<f32>(atomicLoad(&atomic_values.peak_velocity));
+    atomicMax(&atomic_values.peak_velocity, bitcast<u32>(low_val));
+    test_output[2] = bitcast<f32>(atomicLoad(&atomic_values.peak_velocity));
+
+    // is_nan tests
+    test_output[3] = f32(is_nan(nan)); // NaN -> true
+    test_output[4] = f32(is_nan(neg_nan)); // -NaN -> true
+    test_output[5] = f32(is_nan(inf)); // Inf -> false
+    test_output[6] = f32(is_nan(neg_inf)); // -Inf -> false
+    test_output[7] = f32(is_nan(1.2345)); // valid f32 -> false
+
+    // is_inf tests
+    test_output[8] = f32(is_inf(inf)); // Inf -> true
+    test_output[9] = f32(is_inf(neg_inf)); // -Inf -> true
+    test_output[10] = f32(is_inf(nan)); // NaN -> false
+    test_output[11] = f32(is_inf(neg_nan)); // -NaN -> false
+    test_output[12] = f32(is_inf(1.2345)); // valid f32 -> false
+
+    // is_finite tests
+    test_output[13] = f32(is_finite(nan)); // NaN -> false
+    test_output[14] = f32(is_finite(neg_nan)); // -NaN -> false
+    test_output[15] = f32(is_finite(inf)); // Inf -> false
+    test_output[16] = f32(is_finite(neg_inf)); // -Inf -> false
+    test_output[17] = f32(is_finite(1.2345)); // valid f32 -> true
+
+    
+    atomicStore(&atomic_values.peak_flow_thickness, bitcast<u32>(2.71828));
+    atomicStore(&atomic_values.expected_max_velocity, bitcast<u32>(1.618));
+    atomicStore(&atomic_values.peak_velocity, bitcast<u32>(1.4142));
+    atomicStore(&atomic_values.travel_length, bitcast<u32>(1.732));
+
+    atomicStore(&atomic_values.release_volume, 73u);
+    atomicStore(&atomic_values.number_release_cells, 37u);
+    atomicStore(&atomic_values.number_release_particles, 42u);
+    atomicStore(&atomic_values.stopped_particles, 99u);
+
 }
 
-// import utils.wgsl;
+// import utils.wgsl
 // BEGIN utils.wgsl
 const WG_SIZE_2D: u32 = 16u;
 

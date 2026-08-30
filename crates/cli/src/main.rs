@@ -268,8 +268,7 @@ fn main() -> Result<()> {
         .expect("Failed to load settings from JSON file");
     args.apply_overrides(&mut settings)?;
 
-    let mut simulation: Simulation = block_on(Simulation::new())?;
-    block_on(simulation.create(settings.clone()))?;
+    let mut simulation: Simulation = block_on(Simulation::new_with_settings(settings.clone()))?;
 
     block_on(simulation.run())?;
     timer_checkpoint("Fetch data from GPU");
@@ -278,8 +277,6 @@ fn main() -> Result<()> {
 
     block_on(simulation.fetch_peak_flow_thickness()).expect("Failed to get peak flow thickness");
 
-    block_on(simulation.fetch_cell_count()).expect("Failed to get cell count");
-
     let peak_velocity: Vec<f32> = block_on(simulation.fetch_peak_velocity())
         .expect("Failed to get peak velocity")
         .to_vec();
@@ -287,77 +284,54 @@ fn main() -> Result<()> {
         "Peak velocity during simulation: {:.2} m/s",
         peak_velocity.max_value().unwrap(),
     );
-    // timer_checkpoint("Write data to disk");
-    // let bytes_v: &[u8] = unsafe {
-    //     std::slice::from_raw_parts(
-    //         peak_velocity.as_ptr() as *const u8,
-    //         peak_velocity.len() * std::mem::size_of::<f32>(),
-    //     )
-    // };
-    // data_processor::write_bin(Path::new("peak_velocity.bin"), bytes_v);
-    // let peak_flow_thickness = block_on(simulation.fetch_peak_flow_thickness()).expect("Failed to get peak flow thickness");
-    // let bytes_f: &[u8] = unsafe {
-    //     std::slice::from_raw_parts(
-    //         peak_flow_thickness.as_ptr() as *const u8,
-    //         peak_flow_thickness.len() * std::mem::size_of::<f32>(),
-    //     )
-    // };
-    // data_processor::write_bin(Path::new("peak_flow_thickness.bin"), bytes_f);
-
-    // let cell_count = block_on(simulation.fetch_cell_count()).expect("Failed to get cell count");
-    // let bytes_c: &[u8] = unsafe {
-    //     std::slice::from_raw_parts(
-    //         cell_count.as_ptr() as *const u8,
-    //         cell_count.len() * std::mem::size_of::<f32>(),
-    //     )
-    // };
-    // data_processor::write_bin(Path::new("cell_count.bin"), bytes_c);
 
     // info!("{}", timer_get_summary());
 
-    let particles = block_on(simulation.fetch_particles()).expect("Failed to get final positions");
-    for particle in particles
-        .iter()
-        .filter(|p| p.velocity[0].is_nan() || p.velocity[1].is_nan() || p.velocity[2].is_nan())
     {
-        info!(
-            "Out of bounds particle: Position = ({:.2}, {:.2}, {:.2}), mass: {:.2}, velocity: ({:.2}, {:.2}, {:.2}), stopped: {}",
-            // particle[0].stopped,
-            particle.position[0],
-            particle.position[1],
-            particle.position[2],
-            particle.mass,
-            particle.velocity[0],
-            particle.velocity[1],
-            particle.velocity[2],
-            particle.stopped
+        let vel = block_on(simulation.fetch_particles_velocity())
+            .unwrap()
+            .clone();
+        let pos = block_on(simulation.fetch_particles_position())
+            .unwrap()
+            .clone();
+        let stopped = block_on(simulation.fetch_particles_stopped())
+            .unwrap()
+            .clone();
+        let max_speed = vel
+            .iter()
+            .map(|v| (v[0] * v[0] + v[1] * v[1]).sqrt())
+            .fold(0.0f32, f32::max);
+        debug!("DBG max particle speed: {}", max_speed);
+        debug!("DBG first positions: {:?}", &pos[..5.min(pos.len())]);
+        debug!("DBG first velocities: {:?}", &vel[..5.min(vel.len())]);
+        let n_stopped = stopped.iter().filter(|&&s| s != 0).count();
+        let max_stop_step = stopped.iter().copied().max().unwrap_or(0);
+        debug!(
+            "DBG stopped {} / {}, max stop marker {}",
+            n_stopped,
+            stopped.len(),
+            max_stop_step
+        );
+        debug!(
+            "DBG sim_info {:?}",
+            block_on(simulation.fetch_sim_info()).unwrap()
+        );
+        debug!(
+            "DBG atomics {:?}",
+            block_on(simulation.fetch_atomic_values()).unwrap()
+        );
+        debug!(
+            "DBG debug buffer {:?}",
+            &block_on(simulation.get_compute_particles_debug()).unwrap()[..20]
         );
     }
-    let out_of_bounds_count = particles.iter().filter(|p| p.stopped > 100000).count();
-    if out_of_bounds_count > 0 {
-        warn!("{} particles stopped out of bounds.", out_of_bounds_count);
-    }
-    // for particle in particles.iter().filter(|p| p.stopped > 100000) {
-    //     info!(
-    //         "Out of bounds particle: Position = ({:.2}, {:.2}, {:.2}), mass: {:.2}, velocity: ({:.2}, {:.2}, {:.2}), stopped: {}",
-    //         // particle[0].stopped,
-    //         particle.position[0],
-    //         particle.position[1],
-    //         particle.position[2],
-    //         particle.mass,
-    //         particle.velocity[0],
-    //         particle.velocity[1],
-    //         particle.velocity[2],
-    //         particle.stopped
-    //     );
-    // }
     info!(
         "Total mass of particles: {:.2} kg",
-        block_on(simulation.get_release_mass()).unwrap()
+        block_on(simulation.get_total_mass()).unwrap()
     );
     info!(
         "Total release volume: {:.2} m3",
-        block_on(simulation.get_release_volume()).unwrap()
+        block_on(simulation.get_total_volume()).unwrap()
     );
     simulation.print_grid(&peak_velocity, 20, 20);
     block_on(simulation.save()).expect("Failed to save simulation");
@@ -377,7 +351,7 @@ mod tests {
         let mut settings = Settings::default();
         settings.max_steps = Some(10);
         settings.density = Some(123.4);
-        settings.sim_model = Some(SimModel::ParticleInteraction);
+        settings.sim_model = Some(SimModel::Particle);
         settings.friction_model = Some(FrictionModel::Voellmy);
         settings.enable_curvature = Some(false);
 
@@ -386,7 +360,7 @@ mod tests {
             about: false,
             list_devices: false,
             max_steps: Some(42),
-            sim_model: Some(SimModel::Block),
+            sim_model: Some(SimModel::Particle),
             friction_model: Some(FrictionModel::Coulomb),
             density: Some(456.7),
             enable_curvature: Some(true),
@@ -423,7 +397,7 @@ mod tests {
 
         assert_eq!(settings.max_steps, Some(42));
         assert_eq!(settings.density, Some(456.7));
-        assert_eq!(settings.sim_model, Some(SimModel::Block));
+        assert_eq!(settings.sim_model, Some(SimModel::Particle));
         assert_eq!(settings.friction_model, Some(FrictionModel::Coulomb));
         assert_eq!(settings.enable_curvature, Some(true));
     }

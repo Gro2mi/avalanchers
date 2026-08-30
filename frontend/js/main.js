@@ -39,6 +39,7 @@ const releaseStatus = document.getElementById('releaseStatus');
 const zarrScenarioRow = document.getElementById('zarrScenarioRow');
 const zarrScenarioDropdown = document.getElementById('zarrScenarioDropdown');
 
+const simModelDropdown = document.getElementById('simModelDropdown');
 const frictionModelDropdown = document.getElementById('frictionModelDropdown');
 const densitySlider = document.getElementById('densitySlider');
 const slabThicknessSlider = document.getElementById('slabThicknessSlider');
@@ -301,7 +302,7 @@ function getSettings() {
         dem_path: base + demDropdown.value + ".png",
         release_areas_path: base + demDropdown.value + "releaseTexture.png",
         max_steps: parseInt(stepSlider.value),
-        sim_model: 0,
+        sim_model: simModelDropdown.value,
         friction_model: frictionModelDropdown.selectedIndex,
         density: parseFloat(densitySlider.value),
         slab_thickness_factor: parseFloat(slabThicknessSlider.value),
@@ -679,8 +680,8 @@ async function runSimulation() {
         updateResultPlotsVisibility();
 
         const timestepData = await sim.get_timestep_data();
-        await plotTimestepData(timestepData);
-        await plotTrajectory(timestepData);
+        // await plotTimestepData(timestepData);
+        // await plotTrajectory(timestepData);
         plotTimer();
 
         await showVariable('peak_velocity');

@@ -1,44 +1,120 @@
+@group(0) @binding(1) var dem_texture: texture_2d<f32>;
+// metrics: vec4<f32>,   // x = l_x, y = l_y, z = J, w = g_y
+@group(0) @binding(2) var terrain_geometry_texture: texture_storage_2d<rgba32float, write>;
+// dynamics: vec4<f32>,  // x = K_xx, y = K_yy, z = K_xy, w = g_x
+@group(0) @binding(3) var curvature_texture: texture_storage_2d<rgba32float, write>;
+@group(0) @binding(4) var<storage, read_write> slope_angle_buffer: array<f32>;
+@group(0) @binding(5) var<storage, read_write> slope_aspect_buffer: array<f32>;
+@group(0) @binding(6) var<storage, read_write> debug: array<f32>;
 
-@group(0) @binding(1) var<storage, read_write> sim_info: SimInfo;
-@group(0) @binding(2) var<storage, read_write> atomic_values: AtomicValues;
-@group(0) @binding(3) var<storage, read_write> new_cells_rolling_window: array<u32>;
-
-@compute @workgroup_size(1, 1, 1)
-fn update_sim_info(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    if atomicLoad(&atomic_values.stopped_particles) == sim_info.number_particles {
-        sim_info.flags = sim_info.flags | SIM_INFO_ALL_PARTICLES_STOPPED;
-        sim_info.flags = sim_info.flags | SIM_INFO_STOPPED;
+@compute @workgroup_size(WG_SIZE_2D, WG_SIZE_2D, 1)
+fn analyze_terrain_curvilinear(@builtin(global_invocation_id) id: vec3<u32>) {
+    // boundary guard
+    if id.x < 1 || id.x >= sim_settings.grid_shape.x - 1 || id.y < 1 || id.y >= sim_settings.grid_shape.y - 1 {
         return;
     }
-    var sum_new_cells: u32 = 0u;
-    for (var i: u32 = 0u; i < 40u; i = i + 1u) {
-        sum_new_cells = sum_new_cells + new_cells_rolling_window[i];
-    }
-    if sum_new_cells < 4u {
-        sim_info.flags = sim_info.flags | SIM_INFO_NO_NEW_CELLS;
-        sim_info.flags = sim_info.flags | SIM_INFO_STOPPED;
-        return;
-    } 
 
-    let max_flow_thickness = bitcast<f32>(atomicLoad(&atomic_values.peak_flow_thickness));
-    sim_info.timestep = sim_info.timestep + 1u;
-    new_cells_rolling_window[sim_info.timestep % 40u] = 0u; // reset the count for the new cells in the current timestep
-    sim_info.max_velocity = bitcast<f32>(atomicLoad(&atomic_values.peak_velocity));
-    // MPM case
-    var expected_max_velocity = bitcast<f32>(atomicLoad(&atomic_values.expected_max_velocity));
-    // Particle case
-    if expected_max_velocity < 1e-6 {
-        expected_max_velocity = sim_info.max_velocity + sqrt(g * max_flow_thickness);
-        atomicStore(&atomic_values.expected_max_velocity, bitcast<u32>(expected_max_velocity));
-    }
-    let expected_dt = max(0.01, sim_settings.cfl * sim_settings.cell_size / expected_max_velocity);
-    if !is_finite(expected_dt) {
-        sim_info.dt = 0.05;
+    let dx = sim_settings.cell_size;
+    let dy = sim_settings.cell_size;
+    let coords = vec2<i32>(id.xy);
+
+    // 2. Fetch 9-Point Stencil Neighborhood
+    let z_cc = textureLoad(dem_texture, coords, 0).r;
+
+    let z_l = textureLoad(dem_texture, coords + vec2<i32>(-1, 0), 0).r;
+    let z_r = textureLoad(dem_texture, coords + vec2<i32>(1, 0), 0).r;
+    let z_d = textureLoad(dem_texture, coords + vec2<i32>(0, -1), 0).r;
+    let z_u = textureLoad(dem_texture, coords + vec2<i32>(0, 1), 0).r;
+
+    let z_lu = textureLoad(dem_texture, coords + vec2<i32>(-1, 1), 0).r;
+    let z_ru = textureLoad(dem_texture, coords + vec2<i32>(1, 1), 0).r;
+    let z_ld = textureLoad(dem_texture, coords + vec2<i32>(-1, -1), 0).r;
+    let z_rd = textureLoad(dem_texture, coords + vec2<i32>(1, -1), 0).r;
+
+    // 3. First Derivatives (Slopes)
+    let dB_dx = (z_r - z_l) / (2.0 * dx);
+    let dB_dy = (z_u - z_d) / (2.0 * dy);
+
+    // 4. Metric Coefficients & Surface Jacobian
+    let l_x = sqrt(1.0 + dB_dx * dB_dx);
+    let l_y = sqrt(1.0 + dB_dy * dB_dy);
+    let J = sqrt(1.0 + dB_dx * dB_dx + dB_dy * dB_dy);
+
+    // 5. Second Derivatives (Hessian Matrix)
+    let dB_dx2 = (z_r - 2.0 * z_cc + z_l) / (dx * dx);
+    let dB_dy2 = (z_u - 2.0 * z_cc + z_d) / (dy * dy);
+    let dB_dxdy = (z_ru + z_ld - z_lu - z_rd) / (4.0 * dx * dy);
+
+    // 6. Curvatures
+    let K_xx = dB_dx2 / J;
+    let K_yy = dB_dy2 / J;
+    let K_xy = dB_dxdy / J;
+
+    // 7. Slope-parallel Driving Gravity Forces (m/s^2)
+    let g_x = -g * dB_dx / l_x;
+    let g_y = -g * dB_dy / l_y;
+
+    // 8. --- CALCULATE SLOPE ANGLE & ASPECT IN DEGREES ---
+
+    // Magnitude of the terrain gradient vector
+    let slope_magnitude = sqrt(dB_dx * dB_dx + dB_dy * dB_dy);
+
+    // Angle computation: atan(gradient)
+    let slope_angle_deg = degrees(atan(slope_magnitude));
+
+    var slope_aspect_deg = 0.0;
+
+    // Safety check: prevent division/undefined states on perfectly flat terrain
+    if slope_magnitude > 1e-5 {
+        // atan2(y, x) returns the math angle counter-clockwise from East (+x)
+        let aspect_rad = atan2(dB_dy, dB_dx);
+
+        // Convert counter-clockwise from East to clockwise from North
+        slope_aspect_deg = 90.0 - degrees(aspect_rad);
+
+        // Wrap negative angles back into the positive 0° - 360° compass range
+        if slope_aspect_deg < 0.0 {
+            slope_aspect_deg += 360.0;
+        }
     } else {
-        sim_info.dt = expected_dt;
+        // GIS convention representation for flat terrain (Aspect = -1)
+        slope_aspect_deg = -1.0;
     }
-    sim_info.elapsed_time = sim_info.elapsed_time + sim_info.dt;
-    sim_info.max_flow_thickness = max_flow_thickness;
+
+    // 9. Write everything to WebGPU Storage Buffers
+    let index = xy_to_idx(id.xy);
+
+    // Curvilinear physics buffer
+    textureStore(curvature_texture, coords, vec4f(K_xx, K_yy, K_xy, g_x));
+    textureStore(terrain_geometry_texture, coords, vec4f(l_x, l_y, J, g_y));
+
+    // New analysis buffers
+    slope_angle_buffer[index] = slope_angle_deg;
+    slope_aspect_buffer[index] = slope_aspect_deg;
+
+    // if(cell.x == 0 && cell.y == 0) {
+    //     debug[0] = normal.x;
+    //     debug[1] = normal.y;
+    //     debug[2] = normal.z;
+    //     debug[3] = resolution;
+    //     debug[4] = dx;
+    //     debug[5] = dy;
+    //     debug[6] = dxx;
+    //     debug[7] = dyy;
+    //     debug[8] = dxy;
+    //     debug[9] = profile_curvature;
+    //     debug[10] = left;
+    //     debug[11] = right;
+    //     debug[12] = up;
+    //     debug[13] = down;
+    //     debug[14] = center;
+    //     debug[15] = slope_angle;
+    //     debug[16] = slope_aspect;
+    //     debug[17] = up_right;
+    //     debug[18] = down_right;
+    //     debug[19] = up_left;
+    //     debug[20] = down_left;
+    // }
 }
 
 // import utils.wgsl;

@@ -27,7 +27,7 @@ data/snow/
 frontend/data/gpx
 .qlty/
 dtm_cache/
-shader_report.html
+shader_report*
 data/avalanche_outlines_switzerland_2018/
 data/single_avalanche_outlines_switzerland_2018/
 test.zarr/

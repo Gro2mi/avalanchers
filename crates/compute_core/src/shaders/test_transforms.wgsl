@@ -1,47 +1,87 @@
+struct CellTestData {
+    idx_from_uv: u32,
+    idx_from_xy: u32,
+    idx_from_x_y: u32,
+    error_code: i32,     // -1 = Pass, 0 = didnt run, 1 = Index Flatten, 2 = Round-trip, 3 = Position
 
-@group(0) @binding(1) var<storage, read_write> sim_info: SimInfo;
-@group(0) @binding(2) var<storage, read_write> atomic_values: AtomicValues;
-@group(0) @binding(3) var<storage, read_write> new_cells_rolling_window: array<u32>;
+    cell_x: u32,
+    cell_y: u32,
+    rt_cell_x: u32,
+    rt_cell_y: u32,
 
-@compute @workgroup_size(1, 1, 1)
-fn update_sim_info(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    if atomicLoad(&atomic_values.stopped_particles) == sim_info.number_particles {
-        sim_info.flags = sim_info.flags | SIM_INFO_ALL_PARTICLES_STOPPED;
-        sim_info.flags = sim_info.flags | SIM_INFO_STOPPED;
-        return;
-    }
-    var sum_new_cells: u32 = 0u;
-    for (var i: u32 = 0u; i < 40u; i = i + 1u) {
-        sum_new_cells = sum_new_cells + new_cells_rolling_window[i];
-    }
-    if sum_new_cells < 4u {
-        sim_info.flags = sim_info.flags | SIM_INFO_NO_NEW_CELLS;
-        sim_info.flags = sim_info.flags | SIM_INFO_STOPPED;
-        return;
-    } 
-
-    let max_flow_thickness = bitcast<f32>(atomicLoad(&atomic_values.peak_flow_thickness));
-    sim_info.timestep = sim_info.timestep + 1u;
-    new_cells_rolling_window[sim_info.timestep % 40u] = 0u; // reset the count for the new cells in the current timestep
-    sim_info.max_velocity = bitcast<f32>(atomicLoad(&atomic_values.peak_velocity));
-    // MPM case
-    var expected_max_velocity = bitcast<f32>(atomicLoad(&atomic_values.expected_max_velocity));
-    // Particle case
-    if expected_max_velocity < 1e-6 {
-        expected_max_velocity = sim_info.max_velocity + sqrt(g * max_flow_thickness);
-        atomicStore(&atomic_values.expected_max_velocity, bitcast<u32>(expected_max_velocity));
-    }
-    let expected_dt = max(0.01, sim_settings.cfl * sim_settings.cell_size / expected_max_velocity);
-    if !is_finite(expected_dt) {
-        sim_info.dt = 0.05;
-    } else {
-        sim_info.dt = expected_dt;
-    }
-    sim_info.elapsed_time = sim_info.elapsed_time + sim_info.dt;
-    sim_info.max_flow_thickness = max_flow_thickness;
+    mock_pos_x: f32,
+    mock_pos_y: f32,
+    computed_idx: u32,
+    expected_idx: u32,
 }
 
-// import utils.wgsl;
+@group(0) @binding(1) var<storage, read_write> test_results: array<CellTestData>;
+
+@compute @workgroup_size(16, 16, 1)
+fn test_transforms(@builtin(global_invocation_id) global_id: vec3u) {
+    if (global_id.x >= sim_settings.grid_shape.x || global_id.y >= sim_settings.grid_shape.y) {
+        return;
+    }
+
+    let cell = global_id.xy;
+    let linear_idx = xy_to_idx(cell);
+    let uv = cell_to_uv(cell);
+
+    // Prepare our diagnostic snapshot
+    var data: CellTestData;
+    data.cell_x = cell.x;
+    data.cell_y = cell.y;
+    data.error_code = -1i;
+
+    // -------------------------------------------------------------------------
+    // TEST 1: Index Flattening
+    // -------------------------------------------------------------------------
+    data.idx_from_uv  = uv_to_idx(uv);
+    data.idx_from_xy  = xy_to_idx(cell);
+    data.idx_from_x_y = x_y_to_idx(cell.x, cell.y);
+
+    if (data.idx_from_uv != data.idx_from_xy || data.idx_from_xy != data.idx_from_x_y) {
+        data.error_code = 1i;
+        test_results[linear_idx] = data;
+        return;
+    }
+
+    // -------------------------------------------------------------------------
+    // TEST 2: Round-Tripping Cell
+    // -------------------------------------------------------------------------
+    let cell_roundtrip = uv_to_cell(uv);
+    data.rt_cell_x = cell_roundtrip.x;
+    data.rt_cell_y = cell_roundtrip.y;
+
+    if (any(cell != cell_roundtrip)) {
+        data.error_code = 2i;
+        test_results[linear_idx] = data;
+        return;
+    }
+
+    // -------------------------------------------------------------------------
+    // TEST 3: Position Index Routing
+    // -------------------------------------------------------------------------
+    let mock_world_pos = (vec2f(cell) + 0.5) * sim_settings.cell_size;
+    data.mock_pos_x    = mock_world_pos.x;
+    data.mock_pos_y    = mock_world_pos.y;
+    
+    data.computed_idx  = position_to_idx(mock_world_pos);
+    
+    let shifted_uv     = position_to_uv(mock_world_pos);
+    data.expected_idx  = uv_to_idx(shifted_uv);
+
+    if (data.computed_idx != data.expected_idx) {
+        data.error_code = 3i;
+        test_results[linear_idx] = data;
+        return;
+    }
+
+    // Write out the pristine passing state
+    test_results[linear_idx] = data;
+}
+
+// import utils.wgsl
 // BEGIN utils.wgsl
 const WG_SIZE_2D: u32 = 16u;
 

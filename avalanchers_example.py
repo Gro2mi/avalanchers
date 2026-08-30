@@ -8,10 +8,12 @@ start = time.time()
 example_case = "avaWog"
 # example_case = "avaMal"
 # example_case = "avaKot"
+# example_case = "avaParabola"
 # example_case = "avaInclinedPlane"
 # example_case = "avaFlatPlane"
 # example_case = "avaHockeyChannel"
 # example_case = "avaHelixChannel"
+# example_case = "avaPyramid"
 
 settings = {
     # mandatory: path to the DEM, currently only custom encoded png files are supported
@@ -48,7 +50,7 @@ sim.create(settings)
 # or easier for examples
 # sim.create_example("frontend/data/avaframe/avaMal.png")
 sim.run()
-positions = sim.positions
+positions = sim.particles_position
 
 end = time.time()
 
@@ -64,5 +66,5 @@ avalanchers.plot3d(sim, "peak_velocity", blur_passes=3)
 avalanchers.plot_overview(sim)
 
 # avalanchers.plot2d(sim, "peak_flow_thickness")
-# avalanchers.plot2d(sim, "peak_velocity")
+# avalanchers.plot2d(sim, "peak_velocity", particles=True)
 # avalanchers.plot2d(sim, "normals_x")
