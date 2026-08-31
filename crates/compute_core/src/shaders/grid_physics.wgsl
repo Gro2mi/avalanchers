@@ -15,7 +15,7 @@ fn grid_physics(@builtin(global_invocation_id) id: vec3u) {
     if id.x >= sim_settings.grid_shape.x || id.y >= sim_settings.grid_shape.y {
         return;
     }
-    if sim_info.flags >= SIM_INFO_STOPPED {
+    if (sim_info.flags & SIM_INFO_STOPPED) != 0u {
         return;
     }
 

@@ -15,7 +15,7 @@ fn p2g_mpm(@builtin(global_invocation_id) id: vec3u) {
     if id.x >= sim_info.number_particles {
         return;
     }
-    if sim_info.flags >= SIM_INFO_STOPPED {
+    if (sim_info.flags & SIM_INFO_STOPPED) != 0u {
         return;
     }
     let cell = position_to_cell(particles_position[id.x]);

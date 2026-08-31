@@ -21,7 +21,7 @@ fn grid_physics_mpm(@builtin(global_invocation_id) id: vec3u) {
     if id.x < 1 || id.x >= (sim_settings.grid_shape.x - 1) || id.y < 1 || id.y >= (sim_settings.grid_shape.y - 1) {
         return;
     }
-    if sim_info.flags >= SIM_INFO_STOPPED {
+    if (sim_info.flags & SIM_INFO_STOPPED) != 0u {
         return;
     }
 

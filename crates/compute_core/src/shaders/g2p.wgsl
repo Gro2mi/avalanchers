@@ -49,7 +49,7 @@ fn g2p(
     if particleId >= sim_info.number_particles {
         return;
     }
-    if sim_info.flags >= SIM_INFO_STOPPED {
+    if (sim_info.flags & SIM_INFO_STOPPED) != 0u {
         return;
     }
     if particles_stopped[particleId] != 0u {

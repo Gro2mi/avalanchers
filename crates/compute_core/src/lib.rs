@@ -3,10 +3,11 @@ use crate::buffers::{
 };
 use crate::shaders::{ComputeShaderConfig, ShaderName, generate_shader_report};
 use crate::utils::timer_checkpoint;
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use std::cmp::min;
 use std::collections::HashMap;
 use std::hash::Hash;
+use std::mem::size_of;
 use wgpu::{
     Adapter, BufferUsages, CommandEncoderDescriptor, ComputePassDescriptor, Device,
     DeviceDescriptor, Extent3d, Features, Instance, InstanceDescriptor, Limits, PowerPreference,
@@ -217,14 +218,14 @@ impl TimestepData {
 
         for item in aos_data {
             let velocity_magnitude = magnitude(&item.velocity);
-            if velocity_magnitude < 1e-5 {
-                break;
-            }
             soa.velocity_magnitude.push(velocity_magnitude);
             soa.velocity.push(item.velocity);
             soa.dt.push(item.dt);
             soa.position.push(item.position);
             soa.uv.push(item.uv);
+        }
+        if soa.position.is_empty() {
+            return soa;
         }
         // first time step
         soa.time.push(0.0);
@@ -243,8 +244,11 @@ impl TimestepData {
             soa.step_distance2d.push(dist);
             soa.travel_distance2d
                 .push(soa.travel_distance2d[n - 1] + dist);
-            soa.cfl
-                .push(soa.velocity_magnitude[n] * soa.dt[n] / cell_size);
+            soa.cfl.push(if cell_size > 0.0 {
+                soa.velocity_magnitude[n] * soa.dt[n] / cell_size
+            } else {
+                0.0
+            });
         }
 
         soa
@@ -256,7 +260,7 @@ fn magnitude(v: &[f32; 3]) -> f32 {
 }
 
 fn magnitude_diff(a: &[f32; 3], b: &[f32; 3]) -> f32 {
-    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt()
 }
 
 use std::collections::BTreeMap;
@@ -381,6 +385,8 @@ pub struct ComputeOrchestrator {
     dispatch_number_workgroups_x_2d: u32,
     dispatch_number_workgroups_y_2d: u32,
     dispatch_number_workgroups_1d: u32,
+    prepared_max_steps: Option<u32>,
+    prepared_model: Option<u32>,
     has_float32_filterable: bool,
     has_float32_atomic: bool,
 }
@@ -473,7 +479,8 @@ impl ComputeOrchestrator {
                     .await;
             }
 
-            fallback_adapter.expect("Failed to find any suitable GPU adapter")
+            fallback_adapter
+                .map_err(|error| anyhow!("Failed to find any suitable GPU adapter: {error}"))?
         };
 
         // let adapter = adapter.expect("Failed to find any suitable GPU adapter");
@@ -533,7 +540,14 @@ impl ComputeOrchestrator {
         let buffer_limit = max_storage_buffer_binding_size / bytes_per_particle as u64;
         let compute_limit =
             limits.max_compute_workgroups_per_dimension * max_compute_invocations_per_workgroup;
-        let max_particles = min(buffer_limit, compute_limit as u64);
+        // TODO estimate the limit based on the number of storage buffers used in the shaders, since each buffer has a limit of max_storage_buffer_binding_size
+        let position_limit = max_storage_buffer_binding_size / size_of::<[f32; 2]>() as u64;
+        let scalar_limit = max_storage_buffer_binding_size / size_of::<f32>() as u64;
+        let affine_limit = max_storage_buffer_binding_size / size_of::<[[f32; 2]; 2]>() as u64;
+        let max_particles = min(
+            min(position_limit, scalar_limit),
+            min(affine_limit, compute_limit as u64),
+        );
         info!(
             "Maximum number of particles that can be simulated with current GPU: {} (limited by {})",
             max_particles,
@@ -546,7 +560,7 @@ impl ComputeOrchestrator {
         trace!(
             "Maximum number of cells that can be simulated with current GPU: {}, every {}th cell can have a single particle",
             max_texture_size * max_texture_size,
-            (max_texture_size * max_texture_size) as f32 / max_particles as f32
+            (max_texture_size as u64 * max_texture_size as u64) as f32 / max_particles as f32
         );
 
         let mut required_features = Features::empty();
@@ -592,7 +606,10 @@ impl ComputeOrchestrator {
                     max_compute_invocations_per_workgroup,
                     max_storage_buffer_binding_size,
                     max_buffer_size,
-                    max_storage_buffers_per_shader_stage: 13,
+                    max_storage_buffers_per_shader_stage: min(
+                        13,
+                        limits.max_storage_buffers_per_shader_stage,
+                    ),
                     ..Limits::default()
                 },
                 experimental_features: wgpu::ExperimentalFeatures::default(),
@@ -600,7 +617,7 @@ impl ComputeOrchestrator {
                 trace: wgpu::Trace::Off,
             })
             .await
-            .expect("Failed to create device and queue");
+            .context("Failed to create device and queue")?;
         device.set_device_lost_callback(move |reason, message| {
             error!("Device lost! Reason: {:?}, Message: {}", reason, message);
         });
@@ -630,6 +647,8 @@ impl ComputeOrchestrator {
             dispatch_number_workgroups_x_2d: 0,
             dispatch_number_workgroups_y_2d: 0,
             dispatch_number_workgroups_1d: 0,
+            prepared_max_steps: None,
+            prepared_model: None,
             has_float32_filterable,
             batch_compute_steps: 200,
             has_float32_atomic,
@@ -667,18 +686,17 @@ impl ComputeOrchestrator {
         dispatch_number_workgroups_y: u32,
         dispatch_number_workgroups_z: u32,
     ) -> Result<()> {
-        assert_ne!(
-            dispatch_number_workgroups_x, 0,
-            "dispatch_number_workgroups_x must be greater than 0, check your settings"
-        );
-        assert_ne!(
-            dispatch_number_workgroups_y, 0,
-            "dispatch_number_workgroups_y must be greater than 0, check your settings"
-        );
-        assert_ne!(
-            dispatch_number_workgroups_z, 0,
-            "dispatch_number_workgroups_z must be greater than 0, check your settings"
-        );
+        if dispatch_number_workgroups_x == 0
+            || dispatch_number_workgroups_y == 0
+            || dispatch_number_workgroups_z == 0
+        {
+            return Err(anyhow!(
+                "Dispatch dimensions must be greater than zero: {}x{}x{}",
+                dispatch_number_workgroups_x,
+                dispatch_number_workgroups_y,
+                dispatch_number_workgroups_z
+            ));
+        }
         let config = self
             .shader_configs
             .get(shader_name)
@@ -722,7 +740,7 @@ impl ComputeOrchestrator {
             &self.device,
             self.texture_size,
             self.has_float32_filterable,
-        );
+        )?;
         Ok(())
     }
 
@@ -731,14 +749,25 @@ impl ComputeOrchestrator {
         sim_settings: &settings::SimSettings,
         dem: &Dem,
     ) -> Result<()> {
-        assert!(
-            sim_settings.grid_shape_x <= self.max_texture_size
-                && sim_settings.grid_shape_y <= self.max_texture_size,
-            "Grid shape ({}, {}) exceeds max texture size of {}. Consider reducing the grid shape or using a GPU with larger max texture size.",
-            sim_settings.grid_shape_x,
-            sim_settings.grid_shape_y,
-            self.max_texture_size
-        );
+        if sim_settings.grid_shape_x == 0 || sim_settings.grid_shape_y == 0 {
+            return Err(anyhow!("Grid dimensions must be greater than zero"));
+        }
+        if sim_settings.grid_shape_x > self.max_texture_size
+            || sim_settings.grid_shape_y > self.max_texture_size
+        {
+            return Err(anyhow!(
+                "Grid shape ({}, {}) exceeds max texture size of {}",
+                sim_settings.grid_shape_x,
+                sim_settings.grid_shape_y,
+                self.max_texture_size
+            ));
+        }
+        if sim_settings.sim_model > 1 {
+            return Err(anyhow!(
+                "Unsupported simulation model: {}",
+                sim_settings.sim_model
+            ));
+        }
         self.texture_size = Extent3d {
             width: sim_settings.grid_shape_x,
             height: sim_settings.grid_shape_y,
@@ -754,7 +783,7 @@ impl ComputeOrchestrator {
             &self.device,
             self.texture_size,
             self.has_float32_filterable,
-        );
+        )?;
 
         self.resources.write_buffer(
             &self.queue,
@@ -764,17 +793,15 @@ impl ComputeOrchestrator {
 
         let texture_usage_input = TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST;
 
-        self.resources
-            .add_texture_with_data(
-                &self.device,
-                &self.queue,
-                dem.data1d.as_slice(),
-                TextureName::Dem,
-                self.texture_size,
-                TextureFormat::R32Float,
-                texture_usage_input,
-            )
-            .expect("Failed to add texture with data");
+        self.resources.add_texture_with_data(
+            &self.device,
+            &self.queue,
+            dem.data1d.as_slice(),
+            TextureName::Dem,
+            self.texture_size,
+            TextureFormat::R32Float,
+            texture_usage_input,
+        )?;
         match sim_settings.sim_model {
             0 => self.run_shader(
                 &ShaderName::AnalyzeTerrain,
@@ -788,7 +815,12 @@ impl ComputeOrchestrator {
                 self.dispatch_number_workgroups_y_2d,
                 1,
             ),
-            2_u32..=u32::MAX => todo!(),
+            2_u32..=u32::MAX => {
+                return Err(anyhow!(
+                    "Unsupported simulation model: {}",
+                    sim_settings.sim_model
+                ));
+            }
         }
         .await?;
         Ok(())
@@ -832,8 +864,9 @@ impl ComputeOrchestrator {
 
         let number_release_cells: u32 = self
             .read_buffer::<buffers::AtomicValues>(BufferName::AtomicValues)
-            .await
-            .expect("Failed to read number_release_cells buffer")[0]
+            .await?
+            .first()
+            .ok_or_else(|| anyhow!("AtomicValues buffer was empty"))?
             .number_release_cells;
 
         Ok(number_release_cells)
@@ -844,16 +877,35 @@ impl ComputeOrchestrator {
         sim_settings: &settings::SimSettings,
         number_release_particles: u32,
     ) -> Result<u32> {
-        let particle_buffer_size_single_value = number_release_particles as usize * 4;
-        let grid_buffer_size_vec2 = sim_settings.grid_shape_x as usize
-            * sim_settings.grid_shape_y as usize
-            * size_of::<[f32; 2]>();
-        assert!(
-            number_release_particles as u64 <= self.max_particles,
-            "Number of particles {} exceeds the limit of {}. Consider reducing the number of particles or using a GPU with more memory.",
-            number_release_particles,
-            self.max_particles
-        );
+        if sim_settings.sim_model > 1 {
+            return Err(anyhow!(
+                "Unsupported simulation model: {}",
+                sim_settings.sim_model
+            ));
+        }
+        if number_release_particles as u64 > self.max_particles {
+            return Err(anyhow!(
+                "Number of particles {} exceeds the limit of {}",
+                number_release_particles,
+                self.max_particles
+            ));
+        }
+        let particle_count = usize::try_from(number_release_particles)
+            .context("Particle count does not fit in usize")?;
+        let particle_buffer_size_single_value = particle_count
+            .checked_mul(size_of::<f32>())
+            .ok_or_else(|| anyhow!("Particle buffer size overflow"))?;
+        let grid_cell_count = usize::try_from(sim_settings.grid_shape_x)
+            .ok()
+            .and_then(|width| {
+                usize::try_from(sim_settings.grid_shape_y)
+                    .ok()
+                    .and_then(|height| width.checked_mul(height))
+            })
+            .ok_or_else(|| anyhow!("Grid buffer size overflow"))?;
+        let grid_buffer_size_vec2 = grid_cell_count
+            .checked_mul(size_of::<[f32; 2]>())
+            .ok_or_else(|| anyhow!("Grid buffer size overflow"))?;
         self.resources.write_buffer(
             &self.queue,
             BufferName::SimSettings,
@@ -926,7 +978,12 @@ impl ComputeOrchestrator {
                     BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
                 );
             }
-            2_u32..=u32::MAX => todo!(),
+            2_u32..=u32::MAX => {
+                return Err(anyhow!(
+                    "Unsupported simulation model: {}",
+                    sim_settings.sim_model
+                ));
+            }
         }
 
         self.run_shader(
@@ -938,9 +995,11 @@ impl ComputeOrchestrator {
         .await?;
 
         let estimated_release_volume: u32 = self
-            .read_buffer::<u32>(BufferName::AtomicValues)
-            .await
-            .expect("Failed to read release volume buffer")[4];
+            .read_buffer::<AtomicValues>(BufferName::AtomicValues)
+            .await?
+            .first()
+            .ok_or_else(|| anyhow!("AtomicValues buffer was empty"))?
+            .estimated_release_volume;
         info!("Estimated release volume: {}", estimated_release_volume);
         Ok(estimated_release_volume)
     }
@@ -952,9 +1011,24 @@ impl ComputeOrchestrator {
         minimum_dem_elevation: f32,
     ) -> Result<()> {
         debug!("Start simulation");
+        if sim_settings.max_steps == 0 {
+            return Err(anyhow!("max_steps must be greater than zero"));
+        }
+        if number_release_particles == 0 {
+            return Err(anyhow!(
+                "number_release_particles must be greater than zero"
+            ));
+        }
+        let timestep_count = usize::try_from(sim_settings.max_steps)
+            .context("max_steps does not fit in usize")?
+            .checked_mul(3)
+            .ok_or_else(|| anyhow!("Timestep buffer size overflow"))?;
+        let timestep_bytes = timestep_count
+            .checked_mul(size_of::<TimestepDataAoS>())
+            .ok_or_else(|| anyhow!("Timestep buffer size overflow"))?;
         self.add_buffer(
             BufferName::TimestepData,
-            size_of::<TimestepDataAoS>() * sim_settings.max_steps as usize * 3,
+            timestep_bytes,
             BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
         );
 
@@ -978,6 +1052,8 @@ impl ComputeOrchestrator {
             sim_settings.as_bytes(),
         )?;
 
+        self.prepared_max_steps = Some(sim_settings.max_steps);
+        self.prepared_model = Some(sim_settings.sim_model);
         Ok(())
     }
 
@@ -1002,17 +1078,43 @@ impl ComputeOrchestrator {
         grid_physics_shader: ShaderName,
         particle_update_shader: ShaderName,
     ) -> Result<SimInfo> {
+        let prepared_model = self
+            .prepared_model
+            .ok_or_else(|| anyhow!("Simulation has not been prepared"))?;
+        let expected_model = match p2g_shader {
+            ShaderName::P2G => 0,
+            ShaderName::P2GMPM => 1,
+            _ => return Err(anyhow!("Invalid particle-to-grid shader: {p2g_shader}")),
+        };
+        if prepared_model != expected_model {
+            return Err(anyhow!(
+                "Simulation was prepared for model {prepared_model}, not model {expected_model}"
+            ));
+        }
+        let current_info = self
+            .read_buffer::<SimInfo>(BufferName::SimInfo)
+            .await?
+            .first()
+            .copied()
+            .ok_or_else(|| anyhow!("SimInfo buffer was empty"))?;
+        let max_steps = self
+            .prepared_max_steps
+            .ok_or_else(|| anyhow!("Simulation has not been prepared"))?;
+        let completed_steps = current_info.timestep.saturating_sub(1);
+        let remaining_steps = max_steps.saturating_sub(completed_steps);
+        if steps > remaining_steps {
+            return Err(anyhow!(
+                "Requested {steps} steps, but only {remaining_steps} steps remain"
+            ));
+        }
         if steps == 0 {
-            return Ok(self
-                .read_buffer::<SimInfo>(BufferName::SimInfo)
-                .await
-                .expect("Failed to read SimInfo buffer")[0]);
+            return Ok(current_info);
         }
 
         let update_sim_info_config = self
             .shader_configs
             .get(&ShaderName::UpdateSimInfo)
-            .expect("UpdateSimInfo shader config not found");
+            .ok_or_else(|| anyhow!("UpdateSimInfo shader config not found"))?;
 
         let update_sim_info_bindgroup =
             update_sim_info_config.create_bind_group(&self.device, &self.resources)?;
@@ -1043,7 +1145,7 @@ impl ComputeOrchestrator {
         let reset_grid_config = self
             .shader_configs
             .get(&ShaderName::ResetGrid)
-            .expect("ResetGrid shader config not found");
+            .ok_or_else(|| anyhow!("ResetGrid shader config not found"))?;
 
         let reset_grid_bind_group =
             reset_grid_config.create_bind_group(&self.device, &self.resources)?;
@@ -1092,10 +1194,11 @@ impl ComputeOrchestrator {
         }
         self.queue.submit(Some(command_encoder.finish()));
 
-        Ok(self
-            .read_buffer::<SimInfo>(BufferName::SimInfo)
-            .await
-            .expect("Failed to read SimInfo buffer")[0])
+        self.read_buffer::<SimInfo>(BufferName::SimInfo)
+            .await?
+            .first()
+            .copied()
+            .ok_or_else(|| anyhow!("SimInfo buffer was empty"))
     }
 
     pub async fn step_compute_particles(&mut self, steps: u32) -> Result<SimInfo> {
@@ -1114,6 +1217,9 @@ impl ComputeOrchestrator {
         number_release_particles: u32,
         minimum_dem_elevation: f32,
     ) -> Result<()> {
+        if self.batch_compute_steps == 0 {
+            return Err(anyhow!("batch_compute_steps must be greater than zero"));
+        }
         self.prepare_compute_particles(
             sim_settings,
             number_release_particles,
@@ -1160,20 +1266,32 @@ impl ComputeOrchestrator {
                 )
                 .await?
             }
-            2_u32..=u32::MAX => todo!(),
+            2_u32..=u32::MAX => {
+                return Err(anyhow!(
+                    "Unsupported simulation model: {}",
+                    sim_settings.sim_model
+                ));
+            }
         }
 
         let atomic_values = self
             .read_buffer::<AtomicValues>(BufferName::AtomicValues)
-            .await
-            .expect("Failed to read AtomicValues buffer")[0];
+            .await?
+            .first()
+            .copied()
+            .ok_or_else(|| anyhow!("AtomicValues buffer was empty"))?;
         let sim_info = self
             .read_buffer::<SimInfo>(BufferName::SimInfo)
-            .await
-            .expect("Failed to read SimInfo buffer")[0];
+            .await?
+            .first()
+            .copied()
+            .ok_or_else(|| anyhow!("SimInfo buffer was empty"))?;
         info!("{:#?}", sim_info);
         info!("{:#?}", atomic_values);
-        if sim_info.flags < SimInfoFlags::ALL_PARTICLES_STOPPED.bits() {
+        if !sim_info
+            .parsed_flags()
+            .contains(SimInfoFlags::ALL_PARTICLES_STOPPED)
+        {
             warn!(
                 "Simulation reached max steps without all particles stopping. Consider increasing max_steps or checking for issues in the simulation."
             );
@@ -1211,6 +1329,9 @@ impl ComputeOrchestrator {
         number_release_particles: u32,
         minimum_dem_elevation: f32,
     ) -> Result<()> {
+        if self.batch_compute_steps == 0 {
+            return Err(anyhow!("batch_compute_steps must be greater than zero"));
+        }
         self.prepare_mpm(
             sim_settings,
             number_release_particles,

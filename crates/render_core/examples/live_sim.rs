@@ -20,11 +20,18 @@ use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
-use winit::window::{Window, WindowId};
+use winit::window::{Icon, Window, WindowId};
 
 const ORBIT_SPEED: f32 = 0.005;
 const ZOOM_SPEED: f32 = 0.1;
 const DEFAULT_DEM: &str = "data/avaframe/avaAlr.png";
+const WINDOW_ICON: &[u8] = include_bytes!("../../../frontend/icons/android-chrome-512x512.png");
+
+fn window_icon() -> anyhow::Result<Icon> {
+    let image = image::load_from_memory(WINDOW_ICON)?.into_rgba8();
+    let (width, height) = image.dimensions();
+    Ok(Icon::from_rgba(image.into_raw(), width, height)?)
+}
 
 #[derive(Clone, Copy, PartialEq)]
 enum Overlay {
@@ -318,10 +325,20 @@ impl ApplicationHandler for Viewer {
             return;
         }
 
+        let icon = match window_icon() {
+            Ok(icon) => Some(icon),
+            Err(error) => {
+                tracing::warn!("failed to load window icon: {error}");
+                None
+            }
+        };
         let window = Arc::new(
             event_loop
                 .create_window(
-                    Window::default_attributes().with_title("Avalanchers - Live Simulation"),
+                    Window::default_attributes()
+                        .with_title("Avalanchers - Live Simulation")
+                        .with_window_icon(icon)
+                        .with_maximized(true),
                 )
                 .expect("failed to create window"),
         );
@@ -354,6 +371,9 @@ impl ApplicationHandler for Viewer {
             config,
             renderer,
         });
+        if let Some(view) = self.window.as_ref() {
+            view.window.request_redraw();
+        }
 
         self.apply_overlay();
         self.apply_particles();
@@ -447,6 +467,14 @@ impl ApplicationHandler for Viewer {
                 }
             }
             WindowEvent::RedrawRequested => {
+                if let Some(view) = self.window.as_ref() {
+                    let title = if self.sim.running.load(Ordering::Relaxed) {
+                        "Avalanchers - Live Simulation"
+                    } else {
+                        "Avalanchers - Simulation Finished"
+                    };
+                    view.window.set_title(title);
+                }
                 let device = self.sim.device.clone();
                 let queue = self.sim.queue.clone();
                 let Some(view) = self.window.as_mut() else {
@@ -476,6 +504,12 @@ impl ApplicationHandler for Viewer {
                 view.window.request_redraw();
             }
             _ => {}
+        }
+    }
+
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        if let Some(view) = self.window.as_ref() {
+            view.window.request_redraw();
         }
     }
 }

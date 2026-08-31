@@ -222,18 +222,19 @@ impl GpuResources {
         total_allocated_memory as f64 / (1024.0 * 1024.0)
     }
 
-    fn poll(&self, device: &Device) {
+    fn poll(&self, device: &Device) -> Result<()> {
         #[cfg(not(target_arch = "wasm32"))]
         device
             .poll(wgpu::PollType::Wait {
                 submission_index: None,
                 timeout: None,
             })
-            .expect("Failed to poll device");
+            .map_err(|error| anyhow!("Failed to poll device: {error:?}"))?;
         #[cfg(target_arch = "wasm32")]
         device
             .poll(wgpu::PollType::Poll)
-            .expect("Failed to poll device");
+            .map_err(|error| anyhow!("Failed to poll device: {error:?}"))?;
+        Ok(())
     }
 
     pub fn get_sampler(&self, name: &str) -> Option<&Sampler> {
@@ -329,11 +330,11 @@ impl GpuResources {
         let (sender, receiver) = futures_intrusive::channel::shared::oneshot_channel();
 
         buffer_slice.map_async(MapMode::Read, move |result| {
-            sender.send(result).unwrap();
+            let _ = sender.send(result);
         });
 
         // Poll again to ensure the map_async callback is processed
-        self.poll(device);
+        self.poll(device)?;
 
         // Await the mapping result
         receiver
@@ -422,7 +423,7 @@ impl GpuResources {
         let view = texture.create_view(&TextureViewDescriptor::default());
         let bytes_per_pixel = format
             .block_copy_size(None)
-            .expect("msg: Unsupported texture format for copying");
+            .ok_or_else(|| anyhow!("Unsupported texture format for copying: {format:?}"))?;
         let unpadded_bytes_per_row = texture_size.width * bytes_per_pixel;
         let padded_bytes_per_row = align_up(unpadded_bytes_per_row, COPY_BYTES_PER_ROW_ALIGNMENT);
 
@@ -542,10 +543,10 @@ impl GpuResources {
         let buffer_slice = staging_buffer.slice(..);
         let (sender, receiver) = futures_intrusive::channel::shared::oneshot_channel();
         buffer_slice.map_async(MapMode::Read, move |res| {
-            sender.send(res).unwrap();
+            let _ = sender.send(res);
         });
 
-        self.poll(device);
+        self.poll(device)?;
         receiver
             .receive()
             .await
@@ -608,7 +609,7 @@ impl GpuResources {
         // Calculate how many bytes one row of pixels actually takes in memory
         let bytes_per_pixel = format
             .block_copy_size(None)
-            .expect("Unsupported texture format");
+            .ok_or_else(|| anyhow!("Unsupported texture format: {format:?}"))?;
         let bytes_per_row = size.width * bytes_per_pixel;
 
         queue.write_texture(
@@ -653,7 +654,7 @@ pub fn create_buffers_and_texture_descriptions(
     device: &Device,
     texture_size: Extent3d,
     has_float32_filterable: bool,
-) -> GpuResources {
+) -> Result<GpuResources> {
     let mut gpu_resources = GpuResources::default();
     let filter_mode = if has_float32_filterable {
         wgpu::FilterMode::Linear
@@ -690,7 +691,15 @@ pub fn create_buffers_and_texture_descriptions(
     // let texture_usage_output =
     //     TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_SRC | TextureUsages::STORAGE_BINDING;
     let buffer_usage_output = BufferUsages::STORAGE | BufferUsages::COPY_SRC;
-    let grid_bytes_size = (texture_size.width * texture_size.height * 4) as usize;
+    let grid_bytes_size = usize::try_from(texture_size.width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(texture_size.height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .and_then(|cells| cells.checked_mul(size_of::<f32>()))
+        .ok_or_else(|| anyhow!("Grid buffer size overflow"))?;
 
     gpu_resources.add_texture(
         device,
@@ -797,7 +806,7 @@ pub fn create_buffers_and_texture_descriptions(
         BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
     );
 
-    gpu_resources
+    Ok(gpu_resources)
 }
 
 #[cfg(test)]

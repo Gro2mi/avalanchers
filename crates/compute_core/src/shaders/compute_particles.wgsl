@@ -53,7 +53,7 @@ fn compute_particles(
     if particleId >= sim_info.number_particles {
         return;
     }
-    if sim_info.flags >= SIM_INFO_STOPPED {
+    if (sim_info.flags & SIM_INFO_STOPPED) != 0u {
         return;
     }
     var stopped = particles_stopped[particleId];
