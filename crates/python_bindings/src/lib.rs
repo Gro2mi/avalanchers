@@ -240,6 +240,26 @@ impl PySimulation {
         self.inner.run().block_on().map_runtime_err()
     }
 
+    /// Advance the simulation by a fixed number of steps.
+    pub fn run_n_steps<'py>(
+        &mut self,
+        py: Python<'py>,
+        steps: u32,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let sim_info = self.inner.run_n_steps(steps).block_on().map_runtime_err()?;
+
+        let dict = PyDict::new(py);
+        dict.set_item("timestep", sim_info.timestep)?;
+        dict.set_item("dt", sim_info.dt)?;
+        dict.set_item("elapsed_time", sim_info.elapsed_time)?;
+        dict.set_item("number_particles", sim_info.number_particles)?;
+        dict.set_item("elevation_threshold", sim_info.elevation_threshold)?;
+        dict.set_item("max_velocity", sim_info.max_velocity)?;
+        dict.set_item("max_flow_thickness", sim_info.max_flow_thickness)?;
+        dict.set_item("flags", sim_info.flags)?;
+        Ok(dict)
+    }
+
     /// Run post-processing steps after the simulation finishes.
     pub fn post_process(&mut self) -> PyResult<()> {
         self.inner.post_process().block_on().map_runtime_err()

@@ -107,3 +107,19 @@ def test_simulation_binding_smoke():
     assert np.all(np.isfinite(np_velocity))
     assert np.all(np.isfinite(np_position))
     assert np.all(np.isfinite(np_dt))
+
+
+def test_simulation_run_n_steps():
+    sim = avalanchers.PySimulation.new()
+    sim.create_example("data/avaframe/avaParabola.png")
+
+    initial = sim.run_n_steps(0)
+    assert initial["timestep"] == 1
+    assert initial["number_particles"] > 0
+    assert sim.state == "Running"
+
+    advanced = sim.run_n_steps(1)
+    assert advanced["timestep"] >= initial["timestep"]
+    assert isinstance(advanced["dt"], float)
+    assert isinstance(advanced["elapsed_time"], float)
+    assert isinstance(advanced["flags"], int)

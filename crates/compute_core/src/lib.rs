@@ -945,7 +945,7 @@ impl ComputeOrchestrator {
         Ok(estimated_release_volume)
     }
 
-    pub async fn run_compute_particles(
+    async fn prepare_simulation(
         &mut self,
         sim_settings: &settings::SimSettings,
         number_release_particles: u32,
@@ -958,7 +958,7 @@ impl ComputeOrchestrator {
             BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
         );
 
-        let mut sim_info: SimInfo = SimInfo {
+        let sim_info = SimInfo {
             timestep: 1,
             number_particles: number_release_particles,
             // estimated timestep for a 60 degree slope
@@ -977,6 +977,37 @@ impl ComputeOrchestrator {
             BufferName::SimSettings,
             sim_settings.as_bytes(),
         )?;
+
+        Ok(())
+    }
+
+    pub async fn prepare_compute_particles(
+        &mut self,
+        sim_settings: &settings::SimSettings,
+        number_release_particles: u32,
+        minimum_dem_elevation: f32,
+    ) -> Result<()> {
+        self.prepare_simulation(
+            sim_settings,
+            number_release_particles,
+            minimum_dem_elevation,
+        )
+        .await
+    }
+
+    async fn step_simulation(
+        &self,
+        steps: u32,
+        p2g_shader: ShaderName,
+        grid_physics_shader: ShaderName,
+        particle_update_shader: ShaderName,
+    ) -> Result<SimInfo> {
+        if steps == 0 {
+            return Ok(self
+                .read_buffer::<SimInfo>(BufferName::SimInfo)
+                .await
+                .expect("Failed to read SimInfo buffer")[0]);
+        }
 
         let update_sim_info_config = self
             .shader_configs
@@ -988,117 +1019,120 @@ impl ComputeOrchestrator {
 
         let p2g_config = self
             .shader_configs
-            .get(&ShaderName::P2G)
-            .expect("P2G shader config not found");
+            .get(&p2g_shader)
+            .ok_or_else(|| anyhow!("{} shader config not found", p2g_shader))?;
 
         let p2g_bindgroup = p2g_config.create_bind_group(&self.device, &self.resources)?;
 
         let grid_physics_config = self
             .shader_configs
-            .get(&ShaderName::GridPhysics)
-            .expect("GridPhysics shader config not found");
+            .get(&grid_physics_shader)
+            .ok_or_else(|| anyhow!("{} shader config not found", grid_physics_shader))?;
 
         let grid_physics_bindgroup =
             grid_physics_config.create_bind_group(&self.device, &self.resources)?;
 
-        // Compute Particles Bind Group
-        let compute_particles_config = self
+        let particle_update_config = self
             .shader_configs
-            .get(&ShaderName::ComputeParticles)
-            .expect("ComputeParticles shader config not found");
+            .get(&particle_update_shader)
+            .ok_or_else(|| anyhow!("{} shader config not found", particle_update_shader))?;
 
-        let compute_particles_bindgroup =
-            compute_particles_config.create_bind_group(&self.device, &self.resources)?;
+        let particle_update_bindgroup =
+            particle_update_config.create_bind_group(&self.device, &self.resources)?;
 
         let reset_grid_config = self
             .shader_configs
             .get(&ShaderName::ResetGrid)
             .expect("ResetGrid shader config not found");
 
-        // Reset Grid Bind Group
         let reset_grid_bind_group =
             reset_grid_config.create_bind_group(&self.device, &self.resources)?;
-        let mut current_step = 0;
-        while current_step < sim_settings.max_steps {
-            // Determine how many steps to run in this specific hardware batch
-            let steps_to_run = std::cmp::min(
-                self.batch_compute_steps,
-                sim_settings.max_steps - current_step,
-            );
 
-            // 1. Create a fresh command encoder for this batch
-            let mut command_encoder =
-                self.device
-                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some(&format!(
-                            "Compute Particles Compute Encoder - Batch Starting Step {}",
-                            current_step
-                        )),
-                    });
+        let mut command_encoder =
+            self.device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("Simulation Step Encoder"),
+                });
+        {
+            let mut compute_pass =
+                command_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("Simulation Step Pass"),
+                    timestamp_writes: None,
+                });
 
-            // 2. Open the compute pass and run the sub-steps
-            {
-                let mut compute_pass =
-                    command_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                        label: Some("Compute Particles Compute Pass Batch"),
-                        timestamp_writes: None,
-                    });
+            for _ in 0..steps {
+                compute_pass.set_pipeline(&reset_grid_config.pipeline);
+                compute_pass.set_bind_group(0, &reset_grid_bind_group, &[]);
+                compute_pass.dispatch_workgroups(
+                    self.dispatch_number_workgroups_x_2d,
+                    self.dispatch_number_workgroups_y_2d,
+                    1,
+                );
 
-                for _i in 0..steps_to_run {
-                    // --- resetGrid ---
-                    compute_pass.set_pipeline(&reset_grid_config.pipeline);
-                    compute_pass.set_bind_group(0, &reset_grid_bind_group, &[]);
-                    compute_pass.dispatch_workgroups(
-                        self.dispatch_number_workgroups_x_2d,
-                        self.dispatch_number_workgroups_y_2d,
-                        1,
-                    );
-                    // --- P2G ---
-                    compute_pass.set_pipeline(&p2g_config.pipeline);
-                    compute_pass.set_bind_group(0, &p2g_bindgroup, &[]);
-                    compute_pass.dispatch_workgroups(self.dispatch_number_workgroups_1d, 1, 1);
+                compute_pass.set_pipeline(&p2g_config.pipeline);
+                compute_pass.set_bind_group(0, &p2g_bindgroup, &[]);
+                compute_pass.dispatch_workgroups(self.dispatch_number_workgroups_1d, 1, 1);
 
-                    // --- Grid Physics ---
-                    compute_pass.set_pipeline(&grid_physics_config.pipeline);
-                    compute_pass.set_bind_group(0, &grid_physics_bindgroup, &[]);
-                    compute_pass.dispatch_workgroups(
-                        self.dispatch_number_workgroups_x_2d,
-                        self.dispatch_number_workgroups_y_2d,
-                        1,
-                    );
+                compute_pass.set_pipeline(&grid_physics_config.pipeline);
+                compute_pass.set_bind_group(0, &grid_physics_bindgroup, &[]);
+                compute_pass.dispatch_workgroups(
+                    self.dispatch_number_workgroups_x_2d,
+                    self.dispatch_number_workgroups_y_2d,
+                    1,
+                );
 
-                    // --- computeParticles ---
-                    compute_pass.set_pipeline(&compute_particles_config.pipeline);
-                    compute_pass.set_bind_group(0, &compute_particles_bindgroup, &[]);
-                    compute_pass.dispatch_workgroups(self.dispatch_number_workgroups_1d, 1, 1);
+                compute_pass.set_pipeline(&particle_update_config.pipeline);
+                compute_pass.set_bind_group(0, &particle_update_bindgroup, &[]);
+                compute_pass.dispatch_workgroups(self.dispatch_number_workgroups_1d, 1, 1);
 
-                    // --- updateSimInfo ---
-                    compute_pass.set_pipeline(&update_sim_info_config.pipeline);
-                    compute_pass.set_bind_group(0, &update_sim_info_bindgroup, &[]);
-                    compute_pass.dispatch_workgroups(1, 1, 1);
-                }
+                compute_pass.set_pipeline(&update_sim_info_config.pipeline);
+                compute_pass.set_bind_group(0, &update_sim_info_bindgroup, &[]);
+                compute_pass.dispatch_workgroups(1, 1, 1);
             }
+        }
+        self.queue.submit(Some(command_encoder.finish()));
 
-            // 3. Submit the batch to execution right now
-            self.queue.submit(Some(command_encoder.finish()));
-            current_step += steps_to_run;
+        Ok(self
+            .read_buffer::<SimInfo>(BufferName::SimInfo)
+            .await
+            .expect("Failed to read SimInfo buffer")[0])
+    }
 
-            sim_info = self
-                .read_buffer::<SimInfo>(BufferName::SimInfo)
-                .await
-                .expect("Failed to read SimInfo buffer")[0];
-            // info!("{:#?},", sim_info);
+    pub async fn step_compute_particles(&mut self, steps: u32) -> Result<SimInfo> {
+        self.step_simulation(
+            steps,
+            ShaderName::P2G,
+            ShaderName::GridPhysics,
+            ShaderName::ComputeParticles,
+        )
+        .await
+    }
+
+    pub async fn run_compute_particles(
+        &mut self,
+        sim_settings: &settings::SimSettings,
+        number_release_particles: u32,
+        minimum_dem_elevation: f32,
+    ) -> Result<()> {
+        self.prepare_compute_particles(
+            sim_settings,
+            number_release_particles,
+            minimum_dem_elevation,
+        )
+        .await?;
+
+        let mut steps_run = 0;
+        while steps_run < sim_settings.max_steps {
+            let steps = self
+                .batch_compute_steps
+                .min(sim_settings.max_steps - steps_run);
+            let sim_info = self.step_compute_particles(steps).await?;
+            steps_run += steps;
             let flags = sim_info.parsed_flags();
-            debug!("Flags at step {}: {:?}", current_step, flags);
+            debug!("Flags after {} submitted steps: {:?}", steps_run, flags);
             if flags.contains(SimInfoFlags::SIM_STOPPED) {
                 break;
             }
-            // else {
-            //     trace!(
-            //         "Step {}. Time: {:.4}, dt: {:.4}, Max velocity: {:.4}, Max flow thickness: {:.4}, stopped particles: {}, total particles: {}",
-            //         current_step, sim_info.elapsed_time, sim_info.dt, sim_info.max_velocity, sim_info.max_flow_thickness, atomic_values.stopped_particles, number_release_particles
-            //     );
-            // }
         }
         Ok(())
     }
@@ -1109,32 +1143,6 @@ impl ComputeOrchestrator {
         number_release_particles: u32,
         minimum_dem_elevation: f32,
     ) -> Result<()> {
-        debug!("Start simulation");
-        self.add_buffer(
-            BufferName::TimestepData,
-            size_of::<TimestepDataAoS>() * sim_settings.max_steps as usize * 3,
-            BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
-        );
-
-        let sim_info: SimInfo = SimInfo {
-            timestep: 1,
-            number_particles: number_release_particles,
-            // estimated timestep for a 60 degree slope
-            dt: (2.0 * sim_settings.cfl * sim_settings.cell_size / (9.81 * 0.866) as f32).sqrt(),
-            elevation_threshold: minimum_dem_elevation - 0.1,
-            ..Default::default()
-        };
-        self.resources.write_buffer(
-            &self.queue,
-            BufferName::SimInfo,
-            bytemuck::bytes_of(&sim_info),
-        )?;
-
-        self.resources.write_buffer(
-            &self.queue,
-            BufferName::SimSettings,
-            sim_settings.as_bytes(),
-        )?;
         match sim_settings.sim_model {
             0 => {
                 self.run_compute_particles(
@@ -1144,7 +1152,14 @@ impl ComputeOrchestrator {
                 )
                 .await?
             }
-            1 => self.run_mpm(sim_settings).await?,
+            1 => {
+                self.run_mpm(
+                    sim_settings,
+                    number_release_particles,
+                    minimum_dem_elevation,
+                )
+                .await?
+            }
             2_u32..=u32::MAX => todo!(),
         }
 
@@ -1166,127 +1181,55 @@ impl ComputeOrchestrator {
         Ok(())
     }
 
-    pub async fn run_mpm(&mut self, sim_settings: &settings::SimSettings) -> Result<()> {
-        let update_sim_info_config = self
-            .shader_configs
-            .get(&ShaderName::UpdateSimInfo)
-            .expect("UpdateSimInfo shader config not found");
+    pub async fn prepare_mpm(
+        &mut self,
+        sim_settings: &settings::SimSettings,
+        number_release_particles: u32,
+        minimum_dem_elevation: f32,
+    ) -> Result<()> {
+        self.prepare_simulation(
+            sim_settings,
+            number_release_particles,
+            minimum_dem_elevation,
+        )
+        .await
+    }
 
-        let update_sim_info_bindgroup =
-            update_sim_info_config.create_bind_group(&self.device, &self.resources)?;
+    pub async fn step_mpm(&mut self, steps: u32) -> Result<SimInfo> {
+        self.step_simulation(
+            steps,
+            ShaderName::P2GMPM,
+            ShaderName::GridPhysicsMPM,
+            ShaderName::G2P,
+        )
+        .await
+    }
 
-        let p2g_config = self
-            .shader_configs
-            .get(&ShaderName::P2GMPM)
-            .expect("P2G shader config not found");
+    pub async fn run_mpm(
+        &mut self,
+        sim_settings: &settings::SimSettings,
+        number_release_particles: u32,
+        minimum_dem_elevation: f32,
+    ) -> Result<()> {
+        self.prepare_mpm(
+            sim_settings,
+            number_release_particles,
+            minimum_dem_elevation,
+        )
+        .await?;
 
-        let p2g_bindgroup = p2g_config.create_bind_group(&self.device, &self.resources)?;
-
-        let grid_physics_config = self
-            .shader_configs
-            .get(&ShaderName::GridPhysicsMPM)
-            .expect("GridPhysics shader config not found");
-
-        let grid_physics_bindgroup =
-            grid_physics_config.create_bind_group(&self.device, &self.resources)?;
-
-        // Compute Particles Bind Group
-        let g2p_config = self
-            .shader_configs
-            .get(&ShaderName::G2P)
-            .expect("G2P shader config not found");
-
-        let g2p_bindgroup = g2p_config.create_bind_group(&self.device, &self.resources)?;
-
-        let reset_grid_config = self
-            .shader_configs
-            .get(&ShaderName::ResetGrid)
-            .expect("ResetGrid shader config not found");
-
-        // Reset Grid Bind Group
-        let reset_grid_bind_group =
-            reset_grid_config.create_bind_group(&self.device, &self.resources)?;
-        let mut current_step = 0;
-        while current_step < sim_settings.max_steps {
-            // Determine how many steps to run in this specific hardware batch
-            let steps_to_run = std::cmp::min(
-                self.batch_compute_steps,
-                sim_settings.max_steps - current_step,
-            );
-
-            // 1. Create a fresh command encoder for this batch
-            let mut command_encoder =
-                self.device
-                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some(&format!(
-                            "Compute Particles Compute Encoder - Batch Starting Step {}",
-                            current_step
-                        )),
-                    });
-
-            // 2. Open the compute pass and run the sub-steps
-            {
-                let mut compute_pass =
-                    command_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                        label: Some("Compute Particles Compute Pass Batch"),
-                        timestamp_writes: None,
-                    });
-
-                for _i in 0..steps_to_run {
-                    // --- resetGrid ---
-                    compute_pass.set_pipeline(&reset_grid_config.pipeline);
-                    compute_pass.set_bind_group(0, &reset_grid_bind_group, &[]);
-                    compute_pass.dispatch_workgroups(
-                        self.dispatch_number_workgroups_x_2d,
-                        self.dispatch_number_workgroups_y_2d,
-                        1,
-                    );
-                    // --- P2G ---
-                    compute_pass.set_pipeline(&p2g_config.pipeline);
-                    compute_pass.set_bind_group(0, &p2g_bindgroup, &[]);
-                    compute_pass.dispatch_workgroups(self.dispatch_number_workgroups_1d, 1, 1);
-
-                    // --- Grid Physics ---
-                    compute_pass.set_pipeline(&grid_physics_config.pipeline);
-                    compute_pass.set_bind_group(0, &grid_physics_bindgroup, &[]);
-                    compute_pass.dispatch_workgroups(
-                        self.dispatch_number_workgroups_x_2d,
-                        self.dispatch_number_workgroups_y_2d,
-                        1,
-                    );
-
-                    // --- computeParticles ---
-                    compute_pass.set_pipeline(&g2p_config.pipeline);
-                    compute_pass.set_bind_group(0, &g2p_bindgroup, &[]);
-                    compute_pass.dispatch_workgroups(self.dispatch_number_workgroups_1d, 1, 1);
-
-                    // --- updateSimInfo ---
-                    compute_pass.set_pipeline(&update_sim_info_config.pipeline);
-                    compute_pass.set_bind_group(0, &update_sim_info_bindgroup, &[]);
-                    compute_pass.dispatch_workgroups(1, 1, 1);
-                }
-            }
-
-            // 3. Submit the batch to execution right now
-            self.queue.submit(Some(command_encoder.finish()));
-            current_step += steps_to_run;
-
-            let sim_info = self
-                .read_buffer::<SimInfo>(BufferName::SimInfo)
-                .await
-                .expect("Failed to read SimInfo buffer")[0];
-            // info!("{:#?},", sim_info);
+        let mut steps_run = 0;
+        while steps_run < sim_settings.max_steps {
+            let steps = self
+                .batch_compute_steps
+                .min(sim_settings.max_steps - steps_run);
+            let sim_info = self.step_mpm(steps).await?;
+            steps_run += steps;
             let flags = sim_info.parsed_flags();
-            debug!("Flags at step {}: {:?}", current_step, flags);
+            debug!("Flags after {} submitted steps: {:?}", steps_run, flags);
             if flags.contains(SimInfoFlags::SIM_STOPPED) {
                 break;
             }
-            // else {
-            //     trace!(
-            //         "Step {}. Time: {:.4}, dt: {:.4}, Max velocity: {:.4}, Max flow thickness: {:.4}, stopped particles: {}, total particles: {}",
-            //         current_step, sim_info.elapsed_time, sim_info.dt, sim_info.max_velocity, sim_info.max_flow_thickness, atomic_values.stopped_particles, number_release_particles
-            //     );
-            // }
         }
         Ok(())
     }

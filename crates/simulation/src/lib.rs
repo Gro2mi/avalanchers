@@ -1,6 +1,6 @@
 use anyhow::{Result, bail};
 use compute_core::{
-    ComputeOrchestrator, GpuCache, SimInfo, TextureRgba, TimestepData,
+    ComputeOrchestrator, GpuCache, SimInfo, SimInfoFlags, TextureRgba, TimestepData,
     buffers::{AtomicValues, BufferName, TextureName},
     dem::{Bounds, Dem},
     post_processing::*,
@@ -371,6 +371,53 @@ impl Simulation {
         let _ = self.load_release_areas().await?;
         self.initialize_particles().await?;
         Ok(())
+    }
+
+    pub async fn run_n_steps(&mut self, steps: u32) -> Result<SimInfo> {
+        if self.state != SimulationState::Running {
+            self.prepare().await?;
+            match self.settings.sim_model {
+                model if model == SimModel::Particle.as_int() => {
+                    self.orchestrator
+                        .prepare_compute_particles(
+                            &self.settings,
+                            self.number_particles,
+                            self.dem.minimum_elevation,
+                        )
+                        .await?;
+                }
+                model if model == SimModel::MPM.as_int() => {
+                    self.orchestrator
+                        .prepare_mpm(
+                            &self.settings,
+                            self.number_particles,
+                            self.dem.minimum_elevation,
+                        )
+                        .await?;
+                }
+                _ => bail!("Unsupported simulation model: {}", self.settings.sim_model),
+            }
+            self.state = SimulationState::Running;
+        }
+
+        self.gpu_cache.reset_simulation_result();
+        self.sim_info = match self.settings.sim_model {
+            model if model == SimModel::Particle.as_int() => {
+                self.orchestrator.step_compute_particles(steps).await?
+            }
+            model if model == SimModel::MPM.as_int() => self.orchestrator.step_mpm(steps).await?,
+            _ => bail!("Unsupported simulation model: {}", self.settings.sim_model),
+        };
+
+        if self
+            .sim_info
+            .parsed_flags()
+            .contains(SimInfoFlags::SIM_STOPPED)
+        {
+            self.state = SimulationState::Finished;
+        }
+
+        Ok(self.sim_info)
     }
 
     pub async fn run(&mut self) -> Result<()> {
@@ -2059,6 +2106,26 @@ mod tests {
             unique_values as f32 / positions.len() as f32 > 0.98,
             "Duplicate position found in vector"
         );
+    }
+
+    #[test_log::test]
+    fn test_run_n_steps_prepares_and_resumes() {
+        let mut sim = setup_simple_sim(40.0, 3.0);
+
+        let initial = block_on(sim.run_n_steps(0)).expect("Failed to prepare simulation");
+        assert_eq!(initial.timestep, 1);
+        assert_eq!(sim.state, SimulationState::Running);
+
+        let advanced = block_on(sim.run_n_steps(1)).expect("Failed to advance simulation");
+        assert_eq!(advanced.timestep, 2);
+        assert_eq!(sim.state, SimulationState::Running);
+
+        let finished = block_on(sim.run_n_steps(1)).expect("Failed to resume simulation");
+        assert_eq!(finished.timestep, advanced.timestep);
+        assert_eq!(sim.state, SimulationState::Finished);
+
+        let atomics = block_on(sim.fetch_atomic_values()).expect("Failed to fetch atomic values");
+        assert_eq!(atomics.stopped_particles, sim.number_particles);
     }
 
     // Ensure set_release_areas returns an error when the provided array length
