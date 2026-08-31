@@ -174,6 +174,10 @@ impl Simulation {
         self.output_path = data
             .output_path
             .unwrap_or_else(|| "avalanchers.zarr".to_string());
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.output = None;
+        }
         self.release_areas_path = data.release_areas_path;
 
         self.gpu_cache.reset_all();
@@ -307,6 +311,34 @@ impl Simulation {
         bounds_ymax: f32,
         map_factor: f32,
     ) -> Result<()> {
+        let expected_len = width
+            .checked_mul(height)
+            .ok_or_else(|| anyhow::anyhow!("DEM dimensions overflow usize"))?;
+        if width == 0 || height == 0 {
+            bail!("DEM width and height must be greater than zero");
+        }
+        if dem_data.len() != expected_len {
+            bail!(
+                "DEM array length ({}) does not match dimensions ({}x{}={})",
+                dem_data.len(),
+                width,
+                height,
+                expected_len
+            );
+        }
+        if !cell_size.is_finite() || cell_size <= 0.0 {
+            bail!("cell_size must be finite and greater than zero");
+        }
+        if !map_factor.is_finite() || map_factor <= 0.0 {
+            bail!("map_factor must be finite and greater than zero");
+        }
+        if !bounds_xmin.is_finite()
+            || !bounds_xmax.is_finite()
+            || !bounds_ymin.is_finite()
+            || !bounds_ymax.is_finite()
+        {
+            bail!("DEM bounds must be finite");
+        }
         if bounds_xmin >= bounds_xmax {
             bail!(
                 "xmin ({}) must be less than xmax ({})",
@@ -397,7 +429,21 @@ impl Simulation {
                 }
                 _ => bail!("Unsupported simulation model: {}", self.settings.sim_model),
             }
+            self.sim_info = self.fetch_sim_info().await?;
             self.state = SimulationState::Running;
+        }
+
+        let remaining_steps = self
+            .settings
+            .max_steps
+            .saturating_sub(self.sim_info.timestep);
+        if remaining_steps == 0 {
+            self.state = SimulationState::Finished;
+            return Ok(self.sim_info);
+        }
+        let steps = steps.min(remaining_steps);
+        if steps == 0 {
+            return Ok(self.sim_info);
         }
 
         self.gpu_cache.reset_simulation_result();
@@ -409,10 +455,11 @@ impl Simulation {
             _ => bail!("Unsupported simulation model: {}", self.settings.sim_model),
         };
 
-        if self
-            .sim_info
-            .parsed_flags()
-            .contains(SimInfoFlags::SIM_STOPPED)
+        if self.sim_info.timestep >= self.settings.max_steps
+            || self
+                .sim_info
+                .parsed_flags()
+                .contains(SimInfoFlags::SIM_STOPPED)
         {
             self.state = SimulationState::Finished;
         }
@@ -426,7 +473,7 @@ impl Simulation {
         let _ = self.load_release_areas().await?;
         timer_checkpoint("Release areas loaded");
         if self.number_particles == 0 {
-            warn!("No particles to simulate! Check if release areas are correctly defined.");
+            bail!("No particles to simulate! Check if release areas are correctly defined.");
         } else {
             self.initialize_particles().await?;
             timer_checkpoint("Particles initialized");
@@ -442,14 +489,14 @@ impl Simulation {
     }
 
     pub async fn post_process(&mut self) -> Result<()> {
-        assert!(
-            self.state >= SimulationState::Finished,
-            "Simulation must be finished before post-processing results"
-        );
+        if self.state < SimulationState::Finished {
+            bail!("Simulation must be finished before post-processing results");
+        }
         let threshold = 0.01;
+        let dem_width = self.dem.width;
         let (peak_flow_thickness, ava_mask) = mask_threshold_and_biggest_blob(
-            &self.fetch_peak_flow_thickness().await?,
-            self.dem.width,
+            self.fetch_peak_flow_thickness().await?,
+            dem_width,
             threshold,
         );
         self.ava_mask = ava_mask;
@@ -464,10 +511,9 @@ impl Simulation {
     }
 
     pub async fn evaluate(&mut self) -> Result<(f32, f32, f32, f32)> {
-        assert!(
-            self.state >= SimulationState::PostProcessed,
-            "Simulation must be post-processed before evaluation"
-        );
+        if self.state < SimulationState::PostProcessed {
+            bail!("Simulation must be post-processed before evaluation");
+        }
         let iou = 0.0;
         let (horizontal_distance, vertical_drop) = self
             .dem
@@ -479,7 +525,10 @@ impl Simulation {
     }
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn save_with_path(&mut self, path: &str) -> Result<()> {
-        self.output_path = path.to_string();
+        if self.output_path != path {
+            self.output = None;
+            self.output_path = path.to_string();
+        }
         self.save().await
     }
 
@@ -532,7 +581,7 @@ impl Simulation {
         let site_name = self.site_name();
         let scenario_name = self.scenario_name();
 
-        let release_areas = self.fetch_release_areas().await?;
+        let release_areas = self.fetch_release_areas().await?.to_vec();
         self.fetch_peak_velocity().await?;
         self.fetch_peak_flow_thickness().await?;
 
@@ -592,15 +641,17 @@ impl Simulation {
         if self.output.is_none() {
             self.output = Some(data_processor::output::Output::new(&self.output_path)?);
         }
-        let release_areas = self.fetch_release_areas().await?;
+        let release_areas = self.fetch_release_areas().await?.to_vec();
 
         self.fetch_peak_velocity().await?;
         self.fetch_peak_flow_thickness().await?;
+        let release_volume = self.get_total_volume().await?;
+        let origin_x = self.dem.bounds.xmin;
+        let origin_y = self.dem.bounds.ymin;
+        let timestep_data = self.fetch_timestep_data().await?;
+        let (center_of_mass_x, center_of_mass_y, travel_length, travel_angle) =
+            trajectory_summary(timestep_data, origin_x, origin_y);
         timer_checkpoint("Peak data fetched");
-        let travel_length = 1000.0;
-        let travel_angle = 25.0;
-        let center_of_mass_x = vec![1000.0, 1100.0, 900.0];
-        let center_of_mass_y = vec![1000.0, 1100.0, 900.0];
 
         let output = self.output.as_mut().unwrap();
         if !output.site_exists(&site_name) {
@@ -616,8 +667,8 @@ impl Simulation {
                 10000, // number runs
                 self.settings.max_steps as u64,
                 &release_areas,
-                20.0,    //aspect_release_value: f32,
-                10000.0, //release_volume: f32,
+                f32::NAN, // Release aspect is not currently calculated.
+                release_volume,
                 self.dem.y.clone(),
                 &self.dem.x,
             )?;
@@ -659,10 +710,9 @@ impl Simulation {
     }
 
     async fn analyze_terrain(&mut self) -> Result<()> {
-        assert!(
-            self.state >= SimulationState::DemLoaded,
-            "DEM and settings must be loaded before running normals shader"
-        );
+        if self.state < SimulationState::DemLoaded {
+            bail!("DEM and settings must be loaded before running normals shader");
+        }
         self.gpu_cache.reset_all();
         self.orchestrator
             .run_analyze_terrain(&self.settings, &self.dem)
@@ -672,10 +722,9 @@ impl Simulation {
     }
 
     async fn load_release_areas(&mut self) -> Result<u32> {
-        assert!(
-            self.state >= SimulationState::TerrainAnalyzed,
-            "Terrain must be analyzed before loading release areas"
-        );
+        if self.state < SimulationState::TerrainAnalyzed {
+            bail!("Terrain must be analyzed before loading release areas");
+        }
         self.orchestrator
             .write_buffer(BufferName::SimSettings, self.settings.as_bytes())
             .await?;
@@ -687,7 +736,8 @@ impl Simulation {
                 info!("Loading release areas from path: {}", path);
                 let data = data_processor::load_release_areas(path)
                     .await
-                    .expect("Failed to read PNG at release areas path");
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                self.validate_release_areas_len(&data)?;
                 self.orchestrator
                     .write_buffer(BufferName::ReleaseAreas, &data)
                     .await?;
@@ -696,6 +746,7 @@ impl Simulation {
             None => match &self.release_areas_array {
                 Some(data) => {
                     info!("Loading release areas from provided array");
+                    self.validate_release_areas_len(data)?;
                     self.orchestrator
                         .write_buffer(BufferName::ReleaseAreas, data)
                         .await?;
@@ -712,7 +763,10 @@ impl Simulation {
                 }
             },
         };
-        self.number_particles = number_release_cells * self.settings.released_particles_per_cell;
+        self.number_particles = checked_particle_count(
+            number_release_cells,
+            self.settings.released_particles_per_cell,
+        )?;
         self.state = SimulationState::ReleaseAreasComputed;
         info!(
             "Number of release cells: {} of {} ({:.1}%)",
@@ -721,6 +775,24 @@ impl Simulation {
             (number_release_cells as f64 / (self.dem.width * self.dem.height) as f64 * 100.0)
         );
         Ok(number_release_cells)
+    }
+
+    fn validate_release_areas_len(&self, release_areas: &[f32]) -> Result<()> {
+        let expected_len = self
+            .dem
+            .width
+            .checked_mul(self.dem.height)
+            .ok_or_else(|| anyhow::anyhow!("DEM dimensions overflow usize"))?;
+        if release_areas.len() != expected_len {
+            bail!(
+                "Release areas array length ({}) does not match DEM dimensions ({}x{}={})",
+                release_areas.len(),
+                self.dem.width,
+                self.dem.height,
+                expected_len
+            );
+        }
+        Ok(())
     }
 
     async fn initialize_particles(&mut self) -> Result<()> {
@@ -743,10 +815,9 @@ impl Simulation {
     /// [`Simulation::run`] it leaves the existing GPU buffers in place so anything already
     /// bound to them stays valid.
     pub async fn compute_particles(&mut self) -> Result<()> {
-        assert!(
-            self.state >= SimulationState::ParticlesInitialized,
-            "Particles must be initialized before running particle simulation"
-        );
+        if self.state < SimulationState::ParticlesInitialized {
+            bail!("Particles must be initialized before running particle simulation");
+        }
         self.gpu_cache.reset_simulation_result();
         self.orchestrator
             .run_sim(
@@ -755,7 +826,8 @@ impl Simulation {
                 self.dem.minimum_elevation,
             )
             .await?;
-        self.state = SimulationState::Running;
+        self.sim_info = self.fetch_sim_info().await?;
+        self.state = SimulationState::Finished;
         info!(
             "Allocated GPU Memory: {:.1} MB",
             self.orchestrator.resources.get_total_allocated_memory_mb()
@@ -768,18 +840,14 @@ impl Simulation {
         name: TextureName,
     ) -> Result<TextureRgba<T>> {
         Ok(TextureRgba::from(
-            self.orchestrator
-                .read_texture(name)
-                .await
-                .expect("Failed to read texture"),
+            self.orchestrator.read_texture(name).await?,
         ))
     }
 
     pub async fn fetch_roughness(&mut self) -> Result<&Vec<f32>> {
-        assert!(
-            self.state >= SimulationState::ReleaseAreasComputed,
-            "Release areas must be computed before reading roughness texture"
-        );
+        if self.state < SimulationState::ReleaseAreasComputed {
+            bail!("Release areas must be computed before reading roughness texture");
+        }
         if self.gpu_cache.roughness.is_none() {
             self.gpu_cache.read_count += 1;
             self.gpu_cache.roughness =
@@ -788,11 +856,10 @@ impl Simulation {
         Ok(self.gpu_cache.roughness.as_ref().unwrap())
     }
 
-    pub async fn fetch_peak_flow_thickness(&mut self) -> Result<Vec<f32>> {
-        assert!(
-            self.state >= SimulationState::Finished,
-            "Simulation must be finished before reading peak flow thickness buffer"
-        );
+    pub async fn fetch_peak_flow_thickness(&mut self) -> Result<&[f32]> {
+        if self.state < SimulationState::Finished {
+            bail!("Simulation must be finished before reading peak flow thickness buffer");
+        }
         if self.gpu_cache.peak_flow_thickness.is_none() {
             self.gpu_cache.read_count += 1;
             self.gpu_cache.peak_flow_thickness = Some(
@@ -801,10 +868,10 @@ impl Simulation {
                     .await?,
             );
         }
-        Ok(self.gpu_cache.peak_flow_thickness.clone().unwrap())
+        Ok(self.gpu_cache.peak_flow_thickness.as_deref().unwrap())
     }
 
-    pub async fn fetch_slope_angle(&mut self) -> Result<Vec<f32>> {
+    pub async fn fetch_slope_angle(&mut self) -> Result<&[f32]> {
         if self.state < SimulationState::TerrainAnalyzed {
             bail!("Terrain metrics must be computed before reading slope texture");
         }
@@ -816,10 +883,10 @@ impl Simulation {
                     .await?,
             );
         }
-        Ok(self.gpu_cache.slope_angle.clone().unwrap())
+        Ok(self.gpu_cache.slope_angle.as_deref().unwrap())
     }
 
-    pub async fn fetch_slope_aspect(&mut self) -> Result<Vec<f32>> {
+    pub async fn fetch_slope_aspect(&mut self) -> Result<&[f32]> {
         if self.state < SimulationState::TerrainAnalyzed {
             bail!("Terrain metrics must be computed before reading slope aspect texture");
         }
@@ -831,14 +898,13 @@ impl Simulation {
                     .await?,
             );
         }
-        Ok(self.gpu_cache.slope_aspect.clone().unwrap())
+        Ok(self.gpu_cache.slope_aspect.as_deref().unwrap())
     }
 
     async fn fetch_terrain_geometry_texture(&mut self) -> Result<&TextureRgba<f32>> {
-        assert!(
-            self.state >= SimulationState::TerrainAnalyzed,
-            "Terrain geometry must be computed before reading terrain geometry texture"
-        );
+        if self.state < SimulationState::TerrainAnalyzed {
+            bail!("Terrain geometry must be computed before reading terrain geometry texture");
+        }
         if self.gpu_cache.terrain_geometry.is_none() {
             self.gpu_cache.read_count += 1;
             self.gpu_cache.terrain_geometry =
@@ -882,7 +948,7 @@ impl Simulation {
         Ok(self.fetch_terrain_geometry_texture().await?.b.clone())
     }
 
-    pub async fn fetch_release_areas(&mut self) -> Result<Vec<f32>> {
+    pub async fn fetch_release_areas(&mut self) -> Result<&[f32]> {
         if self.state < SimulationState::ReleaseAreasComputed {
             bail!("Release areas must be computed before reading release areas texture");
         }
@@ -894,14 +960,13 @@ impl Simulation {
                     .await?,
             );
         }
-        Ok(self.gpu_cache.release_areas.clone().unwrap())
+        Ok(self.gpu_cache.release_areas.as_deref().unwrap())
     }
 
     pub async fn fetch_peak_velocity(&mut self) -> Result<&Vec<f32>> {
-        assert!(
-            self.state >= SimulationState::Finished,
-            "Simulation must be finished before reading peak velocity"
-        );
+        if self.state < SimulationState::Finished {
+            bail!("Simulation must be finished before reading peak velocity");
+        }
         if self.gpu_cache.peak_velocity.is_none() {
             self.gpu_cache.read_count += 1;
             self.gpu_cache.peak_velocity = Some(
@@ -914,10 +979,9 @@ impl Simulation {
     }
 
     pub async fn fetch_timestep_data(&mut self) -> Result<&TimestepData> {
-        assert!(
-            self.state >= SimulationState::Finished,
-            "Simulation must run and be finished before reading timestep data"
-        );
+        if self.state < SimulationState::Finished {
+            bail!("Simulation must run and be finished before reading timestep data");
+        }
         if self.gpu_cache.timestep_data.is_none() {
             self.gpu_cache.read_count += 1;
             let full_data = self
@@ -972,12 +1036,13 @@ impl Simulation {
             if self.settings.sim_model == SimModel::MPM.as_int() {
                 self.gpu_cache.particles_velocity_z =
                     Some(vec![0.0; self.number_particles as usize]);
+            } else {
+                self.gpu_cache.particles_velocity_z = Some(
+                    self.orchestrator
+                        .read_buffer(BufferName::ParticlesVelocityZ)
+                        .await?,
+                );
             }
-            self.gpu_cache.particles_velocity_z = Some(
-                self.orchestrator
-                    .read_buffer(BufferName::ParticlesVelocityZ)
-                    .await?,
-            );
         }
         Ok(self.gpu_cache.particles_velocity_z.as_ref().unwrap())
     }
@@ -1047,10 +1112,9 @@ impl Simulation {
     }
 
     pub async fn get_compute_particles_debug(&self) -> Result<Vec<f32>> {
-        assert!(
-            self.state >= SimulationState::Finished,
-            "Simulation must be finished before reading cell count grid"
-        );
+        if self.state < SimulationState::Finished {
+            bail!("Simulation must be finished before reading cell count grid");
+        }
         self.orchestrator.read_buffer(BufferName::Debug).await
     }
 
@@ -1075,7 +1139,24 @@ impl Simulation {
         Ok(())
     }
 
-    pub fn print_grid(&self, grid: &[f32], max_w: usize, max_h: usize) {
+    pub fn print_grid(&self, grid: &[f32], max_w: usize, max_h: usize) -> Result<()> {
+        if max_w == 0 || max_h == 0 {
+            bail!("Maximum grid width and height must be greater than zero");
+        }
+        let expected_len = self
+            .dem
+            .width
+            .checked_mul(self.dem.height)
+            .ok_or_else(|| anyhow::anyhow!("DEM dimensions overflow usize"))?;
+        if grid.len() != expected_len {
+            bail!(
+                "Grid length ({}) does not match DEM dimensions ({}x{}={})",
+                grid.len(),
+                self.dem.width,
+                self.dem.height,
+                expected_len
+            );
+        }
         // 1. Calculate dynamic strides to fit within max_w and max_h
         let stride_w = self.dem.width.div_ceil(max_w);
         let stride_h = self.dem.height.div_ceil(max_h);
@@ -1110,7 +1191,57 @@ impl Simulation {
             }
             println!();
         }
+        Ok(())
     }
+}
+
+fn checked_particle_count(release_cells: u32, particles_per_cell: u32) -> Result<u32> {
+    release_cells
+        .checked_mul(particles_per_cell)
+        .ok_or_else(|| anyhow::anyhow!("Particle count exceeds u32 capacity"))
+}
+
+fn trajectory_summary(
+    timestep_data: &TimestepData,
+    origin_x: f32,
+    origin_y: f32,
+) -> (Vec<f32>, Vec<f32>, f32, f32) {
+    let center_of_mass_x: Vec<_> = timestep_data
+        .position
+        .iter()
+        .map(|position| origin_x + position[0])
+        .collect();
+    let center_of_mass_y: Vec<_> = timestep_data
+        .position
+        .iter()
+        .map(|position| origin_y + position[1])
+        .collect();
+    let travel_length = timestep_data
+        .position
+        .windows(2)
+        .map(|positions| {
+            let dx = positions[1][0] - positions[0][0];
+            let dy = positions[1][1] - positions[0][1];
+            dx.hypot(dy)
+        })
+        .sum::<f32>();
+    let vertical_drop = timestep_data
+        .position
+        .first()
+        .zip(timestep_data.position.last())
+        .map_or(0.0, |(first, last)| first[2] - last[2]);
+    let travel_angle = if travel_length > 0.0 {
+        vertical_drop.atan2(travel_length).to_degrees()
+    } else {
+        0.0
+    };
+
+    (
+        center_of_mass_x,
+        center_of_mass_y,
+        travel_length,
+        travel_angle,
+    )
 }
 
 #[cfg(test)]
@@ -1134,6 +1265,75 @@ mod tests {
 
         // Call it again - it should not panic or error because of .call_once()
         init_logging();
+    }
+
+    #[test]
+    fn test_trajectory_summary_uses_simulation_data() {
+        let timestep_data = TimestepData {
+            velocity: Vec::new(),
+            position: vec![[0.0, 0.0, 10.0], [3.0, 4.0, 5.0]],
+            dt: Vec::new(),
+            uv: Vec::new(),
+            velocity_magnitude: Vec::new(),
+            time: Vec::new(),
+            step_distance2d: Vec::new(),
+            travel_distance2d: Vec::new(),
+            cfl: Vec::new(),
+        };
+        let (x, y, length, angle) = trajectory_summary(&timestep_data, 100.0, 300.0);
+
+        assert_eq!(x, vec![100.0, 103.0]);
+        assert_eq!(y, vec![300.0, 304.0]);
+        assert!((length - 5.0).abs() < f32::EPSILON);
+        assert!((angle - 45.0).abs() < f32::EPSILON);
+    }
+
+    #[test_log::test]
+    fn test_set_dem_rejects_invalid_inputs() {
+        let mut sim = block_on(Simulation::new()).expect("Failed to create Simulation");
+
+        assert!(sim.set_dem(&[1.0, 2.0, 3.0], 2, 2, 1.0).is_err());
+        assert!(sim.set_dem(&[], 0, 0, 1.0).is_err());
+        assert!(sim.set_dem(&[1.0], 1, 1, 0.0).is_err());
+        assert!(sim.set_dem(&[1.0], 1, 1, f32::NAN).is_err());
+        assert!(
+            sim.set_dem_with_bounds(&[1.0], 1, 1, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0)
+                .is_err()
+        );
+        assert!(
+            sim.set_dem_with_bounds(&[1.0], 1, 1, 1.0, f32::NEG_INFINITY, 1.0, 0.0, 1.0, 1.0,)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_checked_particle_count_rejects_overflow() {
+        assert_eq!(checked_particle_count(12, 8).unwrap(), 96);
+        assert!(checked_particle_count(u32::MAX, 2).is_err());
+    }
+
+    #[test_log::test]
+    fn test_release_area_validation_tracks_current_dem() {
+        let mut sim = block_on(Simulation::new()).expect("Failed to create Simulation");
+        sim.set_dem(&[0.0; 4], 2, 2, 1.0).unwrap();
+        sim.set_release_areas(&[1.0; 4]).unwrap();
+        sim.set_dem(&[0.0; 9], 3, 3, 1.0).unwrap();
+
+        assert!(
+            sim.validate_release_areas_len(sim.release_areas_array.as_ref().unwrap())
+                .is_err()
+        );
+    }
+
+    #[test_log::test]
+    fn test_lifecycle_preconditions_return_errors() {
+        let mut sim = block_on(Simulation::new()).expect("Failed to create Simulation");
+
+        assert!(block_on(sim.post_process()).is_err());
+        assert!(block_on(sim.evaluate()).is_err());
+        assert!(block_on(sim.compute_particles()).is_err());
+        assert!(block_on(sim.fetch_peak_velocity()).is_err());
+        assert!(block_on(sim.fetch_timestep_data()).is_err());
     }
 
     #[test_log::test]
@@ -1729,6 +1929,29 @@ mod tests {
         }
     }
 
+    #[test_log::test]
+    fn test_compute_particles_finishes_direct_run() {
+        let mut sim = setup_simple_sim(40.0, 3.0);
+        block_on(sim.prepare()).expect("Failed to prepare simulation");
+
+        block_on(sim.compute_particles()).expect("Failed to run simulation");
+
+        assert_eq!(sim.state, SimulationState::Finished);
+        block_on(sim.fetch_peak_velocity()).expect("Failed to fetch finished results");
+    }
+
+    #[test_log::test]
+    fn test_run_without_particles_returns_error() {
+        let mut sim = block_on(Simulation::new()).expect("Failed to create Simulation");
+        sim.set_dem(&create_slope(6, 6, 3.0, 40.0), 6, 6, 3.0)
+            .expect("Failed to set DEM");
+        sim.set_release_areas(&[0.0; 36])
+            .expect("Failed to set release areas");
+
+        assert!(block_on(sim.run()).is_err());
+        assert_ne!(sim.state, SimulationState::Finished);
+    }
+
     fn log_debug_buffer(buffer: &[f32]) {
         info!("Debug buffer length: {}", buffer.len());
         for (i, value) in buffer.iter().enumerate() {
@@ -1800,9 +2023,12 @@ mod tests {
             .expect("Failed to set release areas");
         sim.settings.sim_model = 1;
         block_on(sim.prepare()).expect("Failed to prepare simulation");
-        let slope_angle = block_on(sim.fetch_slope_angle()).expect("Failed to fetch slope angle");
-        let slope_aspect =
-            block_on(sim.fetch_slope_aspect()).expect("Failed to fetch slope aspect");
+        let slope_angle = block_on(sim.fetch_slope_angle())
+            .expect("Failed to fetch slope angle")
+            .to_vec();
+        let slope_aspect = block_on(sim.fetch_slope_aspect())
+            .expect("Failed to fetch slope aspect")
+            .to_vec();
         let l_x = block_on(sim.get_terrain_geometry_x()).expect("Failed to get terrain metric l_x");
         let l_y = block_on(sim.get_terrain_geometry_y()).expect("Failed to get terrain metric l_y");
         let jacobian =
@@ -1938,9 +2164,12 @@ mod tests {
             .expect("Failed to set release areas");
         sim.settings.sim_model = 0;
         block_on(sim.prepare()).expect("Failed to prepare simulation");
-        let slope_angle = block_on(sim.fetch_slope_angle()).expect("Failed to fetch slope angle");
-        let slope_aspect =
-            block_on(sim.fetch_slope_aspect()).expect("Failed to fetch slope aspect");
+        let slope_angle = block_on(sim.fetch_slope_angle())
+            .expect("Failed to fetch slope angle")
+            .to_vec();
+        let slope_aspect = block_on(sim.fetch_slope_aspect())
+            .expect("Failed to fetch slope aspect")
+            .to_vec();
         let normals_x =
             block_on(sim.get_terrain_geometry_x()).expect("Failed to get terrain metric l_x");
         let normals_y =
@@ -2128,6 +2357,31 @@ mod tests {
         assert_eq!(atomics.stopped_particles, sim.number_particles);
     }
 
+    #[test_log::test]
+    fn test_run_n_steps_clamps_to_max_steps() {
+        let mut sim = setup_simple_sim(40.0, 3.0);
+        sim.settings.max_steps = 2;
+
+        let result = block_on(sim.run_n_steps(u32::MAX)).expect("Failed to advance simulation");
+
+        assert_eq!(result.timestep, 2);
+        assert_eq!(sim.state, SimulationState::Finished);
+    }
+
+    #[test_log::test]
+    fn test_mpm_velocity_z_is_synthetic_zero() {
+        let mut sim = setup_simple_sim(40.0, 3.0);
+        sim.settings.sim_model = SimModel::MPM.as_int();
+        block_on(sim.prepare()).expect("Failed to prepare MPM simulation");
+        let number_particles = sim.number_particles as usize;
+
+        let velocity_z = block_on(sim.fetch_particles_velocity_z())
+            .expect("Failed to fetch MPM vertical velocity");
+
+        assert_eq!(velocity_z.len(), number_particles);
+        assert!(velocity_z.iter().all(|velocity| *velocity == 0.0));
+    }
+
     // Ensure set_release_areas returns an error when the provided array length
     // does not match DEM dimensions.
     #[test_log::test]
@@ -2152,7 +2406,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fetch_peak_flow_before_finish_panics() {
+    fn test_fetch_peak_flow_before_finish_returns_error() {
         let mut sim = block_on(Simulation::new()).expect("Failed to create Simulation");
         // Do not run simulation; directly call fetch_peak_flow_thickness and expect assertion
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -2162,7 +2416,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fetch_timestep_data_before_finish_panics() {
+    fn test_fetch_timestep_data_before_finish_returns_error() {
         let mut sim = block_on(Simulation::new()).expect("Failed to create Simulation");
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             block_on(sim.fetch_timestep_data()).unwrap();
@@ -2242,7 +2496,13 @@ mod tests {
         ];
         let width = 6;
         let height = 6;
-        sim.print_grid(&grid, width, height);
+        sim.print_grid(&grid, width, height)
+            .expect("Failed to print grid");
+        assert!(sim.print_grid(&grid, 0, height).is_err());
+        assert!(
+            sim.print_grid(&grid[..grid.len() - 1], width, height)
+                .is_err()
+        );
     }
 
     #[test_log::test]
@@ -2312,8 +2572,9 @@ mod tests {
         ))
         .expect("Failed to read out_debug_normals_buffer");
         log_debug_buffer(&debug_buffer);
-        let peak_flow_thickness =
-            block_on(sim.fetch_peak_flow_thickness()).expect("Failed to fetch peak flow thickness");
+        let peak_flow_thickness = block_on(sim.fetch_peak_flow_thickness())
+            .expect("Failed to fetch peak flow thickness")
+            .to_vec();
 
         let x_start = 100usize;
         let x = 900usize;

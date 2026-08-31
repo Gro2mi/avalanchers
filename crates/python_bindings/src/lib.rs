@@ -452,8 +452,9 @@ impl PySimulation {
             .inner
             .fetch_release_areas()
             .block_on()
-            .map_runtime_err()?;
-        self.get_layer_f32(py, data.to_vec())
+            .map_runtime_err()?
+            .to_vec();
+        self.get_layer_f32(py, data)
     }
 
     #[getter]
@@ -465,8 +466,9 @@ impl PySimulation {
             .inner
             .fetch_peak_flow_thickness()
             .block_on()
-            .map_runtime_err()?;
-        self.get_layer_f32(py, data.to_vec())
+            .map_runtime_err()?
+            .to_vec();
+        self.get_layer_f32(py, data)
     }
 
     #[getter]

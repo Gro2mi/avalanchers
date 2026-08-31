@@ -333,7 +333,7 @@ fn main() -> Result<()> {
         "Total release volume: {:.2} m3",
         block_on(simulation.get_total_volume()).unwrap()
     );
-    simulation.print_grid(&peak_velocity, 20, 20);
+    simulation.print_grid(&peak_velocity, 20, 20)?;
     block_on(simulation.save()).expect("Failed to save simulation");
     let duration = start.elapsed();
 
