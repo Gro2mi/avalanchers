@@ -60,10 +60,7 @@ fn analyze_terrain(@builtin(global_invocation_id) cell: vec3<u32>) {
         // Match the curvilinear shader convention: aspect is measured clockwise from north,
         // using the terrain gradient direction, not the opposite-facing surface normal.
         let aspect_rad = atan2(dy, dx);
-        slope_aspect_deg = 90.0 - degrees(aspect_rad);
-        if slope_aspect_deg < 0.0 {
-            slope_aspect_deg += 360.0;
-        }
+            slope_aspect_deg = ((90.0 - degrees(aspect_rad)) % 360.0 + 360.0) % 360.0;
     } else {
         slope_aspect_deg = -1.0;
     }

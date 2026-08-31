@@ -53,7 +53,6 @@ cargo install cargo-tarpaulin
 python -m venv .venv
 .venv\Scripts\Activate.ps1  
 python -m pip install maturin
-
 ```
 
 ### Linux
@@ -154,9 +153,11 @@ Install `pip install ruff`
 ```
 cargo fmt
 cargo clippy -- -D warnings
-cargo test -p compute_core -p data_processor -p simulation
+cargo test -p compute_core -p data_processor -p simulation -p cli -p render_core
 ruff check ./python_module
 pytest python_module
+cd crates/wasm_bindings
+wasm-pack test --headless --chrome
 ```
 
 ## Data Sources

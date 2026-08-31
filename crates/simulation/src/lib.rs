@@ -1492,14 +1492,16 @@ mod tests {
         let settings = Settings::default();
         block_on(sim.create(settings)).expect("Failed to create simulation");
         sim.set_dem(
-            &create_slope(4, 4, cell_size, slope_angle), // dem_data
-            4,                                           // width
-            4,                                           // height
+            &create_slope(6, 6, cell_size, slope_angle), // dem_data
+            6,                                           // width
+            6,                                           // height
             cell_size,                                   // cell_size
         )
         .expect("Failed to set DEM");
         sim.set_release_areas(&[
-            0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0,
         ])
         .expect("Failed to set release areas");
         sim
@@ -1527,12 +1529,16 @@ mod tests {
         let sim_info = block_on(sim.fetch_sim_info()).expect("Failed to fetch sim info");
         info!("Sim info: {:?}", sim_info);
         assert_eq!(sim.elevation_threshold(), 99.9);
-        assert!(sim_info.timestep < 10);
+        assert!(sim_info.timestep < 6);
         let atomics = block_on(sim.fetch_atomic_values()).expect("Failed to fetch sim info");
         info!("Atomic values: {:?}", atomics);
         assert_eq!(atomics.number_release_particles, 16);
         assert_eq!(atomics.stopped_particles, 16);
         let stopped = block_on(sim.fetch_particles_stopped()).expect("Failed to fetch particles");
+        println!(
+            "Particles stopped at step 0: {}",
+            stopped.iter().filter(|&&x| x == 0).count()
+        );
         assert_eq!(stopped.iter().filter(|&&x| x > 10).count(), 0);
         assert_eq!(stopped.iter().filter(|&&x| x == 0).count(), 0);
         for p in stopped.iter() {
@@ -1636,8 +1642,8 @@ mod tests {
             "Max velocity after simulation: {:.2} m/s",
             max_velocity.max_value().unwrap(),
         );
-        assert!(max_velocity.max_value().unwrap() > 41.0);
-        assert!(max_velocity.max_value().unwrap() < 42.0);
+        assert!(max_velocity.max_value().unwrap() > 25.0);
+        assert!(max_velocity.max_value().unwrap() < 30.0);
 
         let max_steps = sim.settings.max_steps as usize;
         let timestep_data =
@@ -2164,9 +2170,11 @@ mod tests {
         let sim = setup_simple_sim(40.0, 4.0);
         let grid = vec![
             0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0,
+            0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0,
+            0.0, 1.0, 2.0, 3.0,
         ];
-        let width = 4;
-        let height = 4;
+        let width = 6;
+        let height = 6;
         sim.print_grid(&grid, width, height);
     }
 
@@ -2205,7 +2213,63 @@ mod tests {
     #[test_log::test]
     fn test_release_hash() {
         let sim = setup_simple_sim(40.0, 4.0);
-        let release_hash = sim.release_hash();
-        assert_eq!(release_hash, 8163359721371807571);
+        assert_eq!(sim.release_hash(), 8805650549818317918);
+    }
+
+    #[test_log::test]
+    fn test_internal_force() {
+        if std::env::var("GITHUB_ACTIONS").is_ok() {
+            println!("Skipping heavy GPU test on CI (macOS/Windows)");
+            return;
+        }
+        let mut sim: Simulation = block_on(Simulation::new()).expect("Failed to create Simulation");
+        let settings = Settings {
+            dem_path: Some(INCLINED_PLANE_PATH.to_string()),
+            release_areas_path: Some(
+                INCLINED_PLANE_PATH
+                    .to_string()
+                    .replace(".png", "releaseTexture.png"),
+            ),
+            cfl: Some(0.5),
+            max_steps: Some(6000),
+            sim_model: Some(SimModel::Particle),
+            ..Default::default()
+        };
+        block_on(sim.create(settings)).expect("Failed to create simulation");
+        // block_on(sim.create_example(dem_path))
+        block_on(sim.run()).expect("Failed to run simulation");
+        let debug_buffer: Vec<f32> = block_on(sim.orchestrator.resources.read_buffer(
+            &sim.orchestrator.device,
+            &sim.orchestrator.queue,
+            BufferName::Debug,
+        ))
+        .expect("Failed to read out_debug_normals_buffer");
+        log_debug_buffer(&debug_buffer);
+        let peak_flow_thickness =
+            block_on(sim.fetch_peak_flow_thickness()).expect("Failed to fetch peak flow thickness");
+
+        let x_start = 100usize;
+        let x = 900usize;
+        let width = sim.dem.width;
+        let height = sim.dem.height;
+        assert!(x < width, "x={} is out of bounds for width={}", x, width);
+
+        let cells_above_threshold_start = (0..height)
+            .filter(|&y| peak_flow_thickness[y * width + x_start] > 0.1)
+            .count();
+        let cells_above_threshold = (0..height)
+            .filter(|&y| peak_flow_thickness[y * width + x] > 0.1)
+            .count();
+
+        println!(
+            "peak_flow_thickness cells > 0.1 at x={} across y: {}\npeak_flow_thickness cells > 0.1 at x={} across y: {}",
+            x_start, cells_above_threshold_start, x, cells_above_threshold
+        );
+        assert!(
+            cells_above_threshold_start < cells_above_threshold,
+            "Expected less cells above threshold at x={} than at x={}",
+            x_start,
+            x
+        );
     }
 }

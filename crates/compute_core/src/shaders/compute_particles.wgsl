@@ -36,7 +36,7 @@ struct TimestepData {
 
 @group(0) @binding(14) var curvature_texture: texture_2d<f32>;
 @group(0) @binding(15) var<storage, read_write> out_debug: array<f32>;
-@group(0) @binding(16) var<storage, read_write> grid_mass_atomic: array<f32>; // no_atomic_float
+@group(0) @binding(16) var<storage, read_write> grid_mass_atomic: array<u32>; // no_atomic_float
 // atomic_float @group(0) @binding(16) var<storage, read_write> grid_mass_atomic: array<f32>; // atomic_float
 @group(0) @binding(17) var<storage, read> grad_h: array<vec2f>;
 // @group(0) @binding(11) var<storage, read_write> atomicBuffer: AtomicData;
@@ -99,7 +99,7 @@ fn compute_particles(
     let effective_acceleration_normal = max(0f, centrifugal_acceleration + length(acceleration_normal));
 
     // pressure acceleration, G2P step, TODO account for slope angle in P2G and G2P
-    var interpolated_f = vec2f(0.0);
+    var interpolated_grad_h = vec2f(0.0);
     var interpolated_h = 0.0;
 
     let cell_pos = position.xy / sim_settings.cell_size;
@@ -111,27 +111,26 @@ fn compute_particles(
         let safe_normal_z = max(1e-3, normal.z);
         let grid_pos = position.xy / sim_settings.cell_size - vec2f(0.5);
         let base_node = vec2u(floor(grid_pos - vec2f(0.5)));
+        let inv_factor = 1 / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size) * safe_normal_z;
         for (var i: u32 = 0; i < 3; i++) {
             for (var j: u32 = 0; j < 3; j++) {
                 let node_coords = base_node + vec2u(i, j);
                 let distance = calculate_distance_to_node(grid_pos, node_coords);
                 let weight = calculate_weight(distance);
                 let node_idx = xy_to_idx(node_coords);
-                interpolated_f += weight * grad_h[node_idx];
-                // interpolated_h += weight * f32(atomicLoad(&grid_mass_atomic[node_idx])) * INV_MASS_FACTOR / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size);
-
-                interpolated_h += weight * grid_mass_atomic[node_idx] / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size) * normal.z;
-                // no_atomic_float interpolated_h += weight * f32(grid_mass_atomic[node_idx]) * INV_MASS_FACTOR / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size) * safe_normal_z;
+                interpolated_grad_h += weight * grad_h[node_idx];
+                
+                interpolated_mass += weight * f32(grid_mass_atomic[node_idx]) * INV_MASS_FACTOR; // no_atomic_float
+                // atomic_float interpolated_h += weight * grid_mass_atomic[node_idx];
             }
         }
         interpolated_h = interpolated_mass / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size) * safe_normal_z;
+        accel_lateral = vec3f(interpolated_grad_h.x, interpolated_grad_h.y, (normal.x * interpolated_grad_h.x + normal.y * interpolated_grad_h.y) / safe_normal_z) * min(g*normal.z, effective_acceleration_normal);
+        // accel_lateral = vec3f(interpolated_grad_h.x, interpolated_grad_h.y, (normal.x * interpolated_grad_h.x + normal.y * interpolated_grad_h.y) / safe_normal_z);
 
-        accel_lateral = vec3f(interpolated_f.x, interpolated_f.y, (normal.x * interpolated_f.x + normal.y * interpolated_f.y) / safe_normal_z) * min(g*normal.z, effective_acceleration_normal);
-        // accel_lateral = vec3f(interpolated_f.x, interpolated_f.y, (normal.x * interpolated_f.x + normal.y * interpolated_f.y) / safe_normal_z);
 
-
-        // accel_lateral = force_local_to_world(interpolated_f, normal) * effective_acceleration_normal;
-        // accel_lateral = vec3interpolated_f * effective_acceleration_normal;
+        // accel_lateral = force_local_to_world(interpolated_grad_h, normal) * effective_acceleration_normal;
+        // accel_lateral = vec3interpolated_grad_h * effective_acceleration_normal;
         // accel_lateral = (accel_lateral - dot(accel_lateral, normal) * normal);
     }
     // var dt = sim_settings.cfl * sim_settings.cell_size / (sim_info.max_velocity + sim_settings.velocity_threshold);
@@ -240,7 +239,7 @@ fn compute_particles(
 
     // stop criterion friction
     if stopped != 0u || length(velocity) < sim_settings.velocity_threshold {
-        particles_stopped[particleId] = sim_info.timestep;
+        stopped = sim_info.timestep;
         atomicAdd(&atomic_values.stopped_particles, 1u);
         update_particle(particleId, position, velocity, stopped);
         return;
@@ -250,7 +249,7 @@ fn compute_particles(
         || position.x > sim_settings.world_size.x - 2.1 * sim_settings.cell_size
         || position.y < 2.1 * sim_settings.cell_size 
         || position.y > sim_settings.world_size.y - 2.1 * sim_settings.cell_size {//|| elevation < sim_info.elevation_threshold {
-        particles_stopped[particleId] = sim_info.timestep;
+        stopped = sim_info.timestep;
         atomicAdd(&atomic_values.stopped_particles, 1u);
         update_particle(particleId, position, velocity, stopped);
         sim_info.flags |= SIM_INFO_OUT_OF_BOUNDS;
@@ -295,6 +294,7 @@ fn force_local_to_world(
 
 fn update_particle(particleId: u32, position: vec3f, velocity: vec3f, stopped: u32) {
     particles_position[particleId] = position.xy;
+    particles_elevation[particleId] = position.z;
     particles_velocity[particleId] = velocity.xy;
     particles_velocity_z[particleId] = velocity.z;
     particles_stopped[particleId] = stopped;

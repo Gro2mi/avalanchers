@@ -5,7 +5,7 @@
 @group(0) @binding(4) var<storage, read_write> peak_flow_thickness: array<f32>;
 @group(0) @binding(5) var<storage, read_write> atomic_values: AtomicValues;
 @group(0) @binding(6) var<storage> grid_momentum_atomic: array<i32>; // no_atomic_float
-// atomic_float @group(0) @binding(6) var<storage, read_write> grid_momentum_atomic: array<f32>; // Combined u, v
+// atomic_float @group(0) @binding(6) var<storage> grid_momentum_atomic: array<f32>; // Combined u, v
 @group(0) @binding(7) var<storage, read_write> new_cells_rolling_window: array<u32>;
 @group(0) @binding(8) var<storage, read_write> sim_info: SimInfo;
 @group(0) @binding(9) var<storage, read_write> grid_velocity: array<vec2f>;
@@ -52,8 +52,8 @@ fn grid_physics_mpm(@builtin(global_invocation_id) id: vec3u) {
     var u = f32(grid_momentum_atomic[idx * 2]) * INV_MOMENTUM_FACTOR / (mass + 1e-6); // no_atomic_float 
     var v = f32(grid_momentum_atomic[idx * 2 + 1]) * INV_MOMENTUM_FACTOR / (mass + 1e-6); // no_atomic_float 
     // atomic_float let mass = grid_mass_atomic[idx];
-    // atomic_float let u = grid_momentum_atomic[idx * 2] / mass;
-    // atomic_float let v = grid_momentum_atomic[idx * 2 + 1] / mass;
+    // atomic_float var u = grid_momentum_atomic[idx * 2] / mass;
+    // atomic_float var v = grid_momentum_atomic[idx * 2 + 1] / mass;
     let h = mass / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size * J);
     let current_peak_flow_thickness = peak_flow_thickness[idx];
     if current_peak_flow_thickness < h {

@@ -4,7 +4,7 @@
 @group(0) @binding(4) var<storage> grid_mass_atomic: array<u32>; // no_atomic_float
 // atomic_float @group(0) @binding(4) var<storage> grid_mass_atomic: array<f32>;
 @group(0) @binding(5) var<storage> grid_momentum_atomic: array<i32>; // no_atomic_float
-// atomic_float @group(0) @binding(5) var<storage, read_write> grid_momentum_atomic: array<f32>;
+// atomic_float @group(0) @binding(5) var<storage> grid_momentum_atomic: array<f32>;
 @group(0) @binding(6) var<storage, read_write> grad_h_buffer: array<vec2f>;
 @group(0) @binding(7) var<storage, read_write> peak_flow_thickness: array<f32>;
 @group(0) @binding(8) var<storage, read_write> atomic_values: AtomicValues;

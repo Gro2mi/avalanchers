@@ -71,11 +71,10 @@ fn analyze_terrain_curvilinear(@builtin(global_invocation_id) id: vec3<u32>) {
 
         // Convert counter-clockwise from East to clockwise from North
         slope_aspect_deg = 90.0 - degrees(aspect_rad);
-
-        // Wrap negative angles back into the positive 0° - 360° compass range
-        if slope_aspect_deg < 0.0 {
-            slope_aspect_deg += 360.0;
-        }
+        // Match the curvilinear shader convention: aspect is measured clockwise from north,
+        // using the terrain gradient direction, not the opposite-facing surface normal.
+        slope_aspect_deg = atan2(dy, dx);
+            slope_aspect_deg = ((90.0 - degrees(aspect_rad)) % 360.0 + 360.0) % 360.0;
     } else {
         // GIS convention representation for flat terrain (Aspect = -1)
         slope_aspect_deg = -1.0;

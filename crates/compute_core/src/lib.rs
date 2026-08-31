@@ -28,15 +28,47 @@ use tracing::{debug, error, info, trace, warn};
 use bitflags::bitflags;
 
 bitflags! {
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[derive(Clone, Copy, PartialEq, Eq)]
     pub struct SimInfoFlags: u32 {
-        const OUT_OF_BOUNDS          = 1 << 0;
-        const CFL_EXCEEDED           = 1 << 1;
-        const IS_NAN                 = 1 << 2;
-        const PARTICLE_OUT_OF_DEM    = 1 << 3;
-        const STOPPED                = 1 << 31;
-        const PARTICLES_STOPPED = 1 << 30;
-        const NO_NEW_CELLS  = 1 << 29;
+        const OUT_OF_BOUNDS            = 1 << 0;
+        const CFL_EXCEEDED             = 1 << 1;
+        const IS_NAN                   = 1 << 2;
+        const PARTICLE_OUT_OF_DEM_DATA = 1 << 3;
+        const NO_NEW_CELLS             = 1 << 29;
+        const ALL_PARTICLES_STOPPED    = 1 << 30;
+        const SIM_STOPPED              = 1 << 31;
+    }
+}
+
+impl From<u32> for SimInfoFlags {
+    fn from(flags: u32) -> Self {
+        Self::from_bits_retain(flags)
+    }
+}
+
+impl std::fmt::Display for SimInfoFlags {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_empty() {
+            return formatter.write_str("NONE");
+        }
+
+        let mut separator = "";
+        for (name, _) in self.iter_names() {
+            write!(formatter, "{separator}{name}")?;
+            separator = " | ";
+        }
+
+        let unknown = self.bits() & !Self::all().bits();
+        if unknown != 0 {
+            write!(formatter, "{separator}UNKNOWN({unknown:#010x})")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for SimInfoFlags {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, formatter)
     }
 }
 
@@ -102,7 +134,7 @@ impl GpuCache {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct SimInfo {
     pub timestep: u32,
     pub dt: f32,
@@ -114,6 +146,27 @@ pub struct SimInfo {
     pub flags: u32,
 }
 
+impl SimInfo {
+    pub fn parsed_flags(&self) -> SimInfoFlags {
+        self.flags.into()
+    }
+}
+
+impl std::fmt::Debug for SimInfo {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SimInfo")
+            .field("timestep", &self.timestep)
+            .field("dt", &self.dt)
+            .field("elapsed_time", &self.elapsed_time)
+            .field("number_particles", &self.number_particles)
+            .field("elevation_threshold", &self.elevation_threshold)
+            .field("max_velocity", &self.max_velocity)
+            .field("max_flow_thickness", &self.max_flow_thickness)
+            .field("flags", &self.parsed_flags())
+            .finish()
+    }
+}
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct TimestepDataAoS {
@@ -792,6 +845,9 @@ impl ComputeOrchestrator {
         number_release_particles: u32,
     ) -> Result<u32> {
         let particle_buffer_size_single_value = number_release_particles as usize * 4;
+        let grid_buffer_size_vec2 = sim_settings.grid_shape_x as usize
+            * sim_settings.grid_shape_y as usize
+            * size_of::<[f32; 2]>();
         assert!(
             number_release_particles as u64 <= self.max_particles,
             "Number of particles {} exceeds the limit of {}. Consider reducing the number of particles or using a GPU with more memory.",
@@ -859,7 +915,7 @@ impl ComputeOrchestrator {
                 );
                 self.add_buffer(
                     BufferName::GridForces,
-                    particle_buffer_size_single_value * 2,
+                    grid_buffer_size_vec2,
                     BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
                 );
             }
@@ -1032,29 +1088,9 @@ impl ComputeOrchestrator {
                 .await
                 .expect("Failed to read SimInfo buffer")[0];
             // info!("{:#?},", sim_info);
-            let flags = SimInfoFlags::from_bits_retain(sim_info.flags);
-            if flags.contains(SimInfoFlags::STOPPED) {
-                let reason = match flags {
-                    _ if flags.contains(SimInfoFlags::PARTICLES_STOPPED) => {
-                        "all particles have stopped moving"
-                    }
-                    _ if flags.contains(SimInfoFlags::NO_NEW_CELLS) => {
-                        "no new cells were conquered by particles"
-                    }
-                    _ => "unknown reason",
-                };
-                info!(
-                    "Simulation finished at step {} because {}.",
-                    sim_info.timestep, reason
-                );
-
-                break;
-            }
-            if flags.contains(SimInfoFlags::NO_NEW_CELLS) {
-                info!(
-                    "Simulation finished early at step {} as no new cells were conquered by particles!",
-                    current_step
-                );
+            let flags = sim_info.parsed_flags();
+            debug!("Flags at step {}: {:?}", current_step, flags);
+            if flags.contains(SimInfoFlags::SIM_STOPPED) {
                 break;
             }
             // else {
@@ -1063,25 +1099,6 @@ impl ComputeOrchestrator {
             //         current_step, sim_info.elapsed_time, sim_info.dt, sim_info.max_velocity, sim_info.max_flow_thickness, atomic_values.stopped_particles, number_release_particles
             //     );
             // }
-        }
-        // info!("{:?}", new_cells);
-
-        info!(
-            "New cells conquered in the last 100 steps: {:?}",
-            self.read_buffer::<u32>(BufferName::NewCellsRollingWindow)
-                .await
-                .expect("Failed to read AtomicValues buffer")
-        );
-        let atomic_values = self
-            .read_buffer::<AtomicValues>(BufferName::AtomicValues)
-            .await
-            .expect("Failed to read AtomicValues buffer")[0];
-        info!("{:#?}", sim_info);
-        info!("{:#?}", atomic_values);
-        if sim_info.flags < SimInfoFlags::PARTICLES_STOPPED.bits() {
-            warn!(
-                "Simulation reached max steps without all particles stopping. Consider increasing max_steps or checking for issues in the simulation."
-            );
         }
         Ok(())
     }
@@ -1131,14 +1148,6 @@ impl ComputeOrchestrator {
             2_u32..=u32::MAX => todo!(),
         }
 
-        // info!("{:?}", new_cells);
-
-        info!(
-            "New cells conquered in the last 100 steps: {:?}",
-            self.read_buffer::<u32>(BufferName::NewCellsRollingWindow)
-                .await
-                .expect("Failed to read AtomicValues buffer")
-        );
         let atomic_values = self
             .read_buffer::<AtomicValues>(BufferName::AtomicValues)
             .await
@@ -1149,7 +1158,7 @@ impl ComputeOrchestrator {
             .expect("Failed to read SimInfo buffer")[0];
         info!("{:#?}", sim_info);
         info!("{:#?}", atomic_values);
-        if sim_info.flags < SimInfoFlags::PARTICLES_STOPPED.bits() {
+        if sim_info.flags < SimInfoFlags::ALL_PARTICLES_STOPPED.bits() {
             warn!(
                 "Simulation reached max steps without all particles stopping. Consider increasing max_steps or checking for issues in the simulation."
             );
@@ -1267,28 +1276,10 @@ impl ComputeOrchestrator {
                 .await
                 .expect("Failed to read SimInfo buffer")[0];
             // info!("{:#?},", sim_info);
-            let flags = SimInfoFlags::from_bits_retain(sim_info.flags);
-            let mut reason = String::new();
-            if flags.contains(SimInfoFlags::STOPPED) {
-                if flags.contains(SimInfoFlags::PARTICLES_STOPPED) {
-                    reason.push_str("all particles have stopped moving");
-                } else if flags.contains(SimInfoFlags::NO_NEW_CELLS) {
-                    reason.push_str("no new cells were conquered by particles");
-                } else {
-                    reason.push_str("unknown reason");
-                }
-                info!(
-                    "Simulation finished at step {} because {}.",
-                    sim_info.timestep, reason
-                );
+            let flags = sim_info.parsed_flags();
+            debug!("Flags at step {}: {:?}", current_step, flags);
+            if flags.contains(SimInfoFlags::SIM_STOPPED) {
                 break;
-            }
-            if flags.contains(SimInfoFlags::NO_NEW_CELLS) {
-                info!(
-                    "Simulation finished early at step {} as no new cells were conquered by particles!",
-                    current_step
-                );
-                // break;
             }
             // else {
             //     trace!(
@@ -1360,6 +1351,40 @@ mod tests {
     use super::*;
     use bytemuck::{Pod, Zeroable};
     use pollster::block_on;
+
+    #[test]
+    fn sim_info_flags_pretty_print_known_flags() {
+        let flags = SimInfoFlags::from(
+            SimInfoFlags::OUT_OF_BOUNDS.bits()
+                | SimInfoFlags::PARTICLE_OUT_OF_DEM_DATA.bits()
+                | SimInfoFlags::SIM_STOPPED.bits(),
+        );
+
+        assert_eq!(
+            flags.to_string(),
+            "OUT_OF_BOUNDS | PARTICLE_OUT_OF_DEM_DATA | SIM_STOPPED"
+        );
+        assert_eq!(format!("{flags:?}"), flags.to_string());
+    }
+
+    #[test]
+    fn sim_info_flags_pretty_print_empty_and_unknown_flags() {
+        assert_eq!(SimInfoFlags::from(0).to_string(), "NONE");
+        assert_eq!(
+            SimInfoFlags::from(1 << 12).to_string(),
+            "UNKNOWN(0x00001000)"
+        );
+    }
+
+    #[test]
+    fn sim_info_debug_prints_parsed_flags() {
+        let sim_info = SimInfo {
+            flags: SimInfoFlags::CFL_EXCEEDED.bits() | SimInfoFlags::IS_NAN.bits(),
+            ..SimInfo::default()
+        };
+
+        assert!(format!("{sim_info:#?}").contains("flags: CFL_EXCEEDED | IS_NAN"));
+    }
 
     #[test_log::test]
     fn test_shader_report_generation_sim_model_0() {
