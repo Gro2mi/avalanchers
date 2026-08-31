@@ -118,6 +118,16 @@ impl Simulation {
         self.state
     }
 
+    /// GPU device, queue and buffers backing the simulation. A renderer can bind these
+    /// directly to visualise the simulation without copying data back to the CPU.
+    pub fn orchestrator(&self) -> &ComputeOrchestrator {
+        &self.orchestrator
+    }
+
+    pub fn number_particles(&self) -> u32 {
+        self.number_particles
+    }
+
     pub fn release_hash(&self) -> u64 {
         let mut s = DefaultHasher::new();
         if let Some(release_areas_array) = &self.release_areas_array {
@@ -683,7 +693,10 @@ impl Simulation {
         Ok(())
     }
 
-    async fn compute_particles(&mut self) -> Result<()> {
+    /// Advances the particle simulation. Requires [`Simulation::prepare`] first, and unlike
+    /// [`Simulation::run`] it leaves the existing GPU buffers in place so anything already
+    /// bound to them stays valid.
+    pub async fn compute_particles(&mut self) -> Result<()> {
         assert!(
             self.state >= SimulationState::ParticlesInitialized,
             "Particles must be initialized before running particle simulation"

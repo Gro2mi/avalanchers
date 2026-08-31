@@ -5,6 +5,7 @@ members = [
     "crates/wasm_bindings", 
     "crates/compute_core", 
     "crates/python_bindings", 
+    "crates/render_core", 
     "crates/simulation"
 ]
 resolver = "3"
@@ -28,7 +29,9 @@ pollster = "0.4" # For async execution in native
 
 simulation = { path = "crates/simulation" }
 compute_core = { path = "crates/compute_core" }
+render_core = { path = "crates/render_core" }
 wgpu = "30.0"
+winit = "0.30"
 regex = "1.11"
 rand = "0.10"
 bytemuck = { version = "1.25", features = ["derive"] }

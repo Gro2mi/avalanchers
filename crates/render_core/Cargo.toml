@@ -1,0 +1,31 @@
+[package]
+name = "render_core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+wgpu = { workspace = true }
+bytemuck = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+pollster = { workspace = true }
+winit = { workspace = true }
+data_processor = { workspace = true }
+simulation = { workspace = true }
+compute_core = { workspace = true }
+tracing-subscriber = { workspace = true }
+image = { workspace = true }
+bytemuck = { workspace = true }
+
+[[example]]
+name = "dem_viewer"
+
+[[example]]
+name = "dem_snapshot"
+
+[[example]]
+name = "live_sim"
