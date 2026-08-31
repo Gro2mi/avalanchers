@@ -21,12 +21,12 @@ fn test_transfer(@builtin(global_invocation_id) gid: vec3<u32>) {
     transfer_p2g(0u);
 
     for (var i: u32 = 0; i < sim_settings.grid_shape.x * sim_settings.grid_shape.y; i++) {
-        // atomic_float let mass = atomicLoad(&grid_mass_atomic[i]);
+        // atomic_float let mass = atomicLoad(&grid_mass_atomic[idx]);
         let mass = f32(atomicLoad(&grid_mass_atomic[idx])) * INV_MASS_FACTOR; // no_atomic_float 
-        // atomic_float let u = atomicLoad(&grid_momentum_atomic[i * 2]) / (mass + 1e-6);
-        // atomic_float let v = atomicLoad(&grid_momentum_atomic[i * 2 + 1]) / (mass + 1e-6);
-        let u = f32(atomicLoad(&grid_momentum_atomic[idx * 2])) * INV_MOMENTUM_FACTOR / (mass + 1e-6);
-        let v = f32(atomicLoad(&grid_momentum_atomic[idx * 2 + 1])) * INV_MOMENTUM_FACTOR / (mass + 1e-6);
+        // atomic_float let u = atomicLoad(&grid_momentum_atomic[idx * 2]) / (mass + 1e-6);
+        // atomic_float let v = atomicLoad(&grid_momentum_atomic[idx * 2 + 1]) / (mass + 1e-6);
+        let u = f32(atomicLoad(&grid_momentum_atomic[idx * 2])) * INV_MOMENTUM_FACTOR / (mass + 1e-6); // no_atomic_float 
+        let v = f32(atomicLoad(&grid_momentum_atomic[idx * 2 + 1])) * INV_MOMENTUM_FACTOR / (mass + 1e-6); // no_atomic_float 
         grid_velocity[i] = vec2f(u, v);
     }
     // atomic_float let mass = atomicLoad(&grid_mass_atomic[i]);
