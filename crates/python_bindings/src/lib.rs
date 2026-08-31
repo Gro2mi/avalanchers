@@ -143,6 +143,11 @@ impl PySimulation {
         Ok(())
     }
 
+    pub fn set_max_timesteps(&mut self, max_timesteps: u32) -> PyResult<()> {
+        self.inner.settings.max_steps = max_timesteps;
+        Ok(())
+    }
+
     /// Initialize the simulation from the bundled example digital elevation model.
     pub fn create_example(&mut self, dem_path: String) -> PyResult<()> {
         self.inner
@@ -475,6 +480,34 @@ impl PySimulation {
             .inner
             .fetch_particles_position()
             .block_on()
+            .map_runtime_err()?
+            .to_vec();
+        let elevation = self
+            .inner
+            .fetch_particles_elevation()
+            .block_on()
+            .map_runtime_err()?
+            .to_vec();
+        let mut flat_positions: Vec<f32> = Vec::with_capacity(positions.len() * 3);
+        for ([x, y], z) in positions.iter().zip(elevation.iter()) {
+            flat_positions.push(*x);
+            flat_positions.push(*y);
+            flat_positions.push(*z);
+        }
+
+        // Convert the flat Vec into an Nx3 NumPy Array
+        flat_positions.to_pyarray(py).reshape([positions.len(), 3])
+    }
+
+    #[getter]
+    fn get_particles_position_xy<'py>(
+        &mut self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        let positions = self
+            .inner
+            .fetch_particles_position()
+            .block_on()
             .map_runtime_err()?;
         let mut flat_positions: Vec<f32> = Vec::with_capacity(positions.len() * 2);
         for [x, y] in positions {
@@ -482,12 +515,42 @@ impl PySimulation {
             flat_positions.push(*y);
         }
 
-        // Convert the flat Vec into an Nx2 NumPy Array
+        // Convert the flat Vec into an Nx3 NumPy Array
         flat_positions.to_pyarray(py).reshape([positions.len(), 2])
     }
 
     #[getter]
     fn get_particles_velocity<'py>(
+        &mut self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        let velocities = self
+            .inner
+            .fetch_particles_velocity()
+            .block_on()
+            .map_runtime_err()?
+            .to_vec();
+        let vel_z = self
+            .inner
+            .fetch_particles_velocity_z()
+            .block_on()
+            .map_runtime_err()?
+            .to_vec();
+        let mut flat_velocities: Vec<f32> = Vec::with_capacity(velocities.len() * 3);
+        for ([x, y], z) in velocities.iter().zip(vel_z.iter()) {
+            flat_velocities.push(*x);
+            flat_velocities.push(*y);
+            flat_velocities.push(*z);
+        }
+
+        // Convert the flat Vec into an Nx2 NumPy Array
+        flat_velocities
+            .to_pyarray(py)
+            .reshape([velocities.len(), 3])
+    }
+
+    #[getter]
+    fn get_particles_velocity_xy<'py>(
         &mut self,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyArray2<f32>>> {
@@ -513,12 +576,12 @@ impl PySimulation {
         &mut self,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyArray1<f32>>> {
-        let stopped = self
+        let elevation = self
             .inner
             .fetch_particles_elevation()
             .block_on()
             .map_runtime_err()?;
-        Ok(stopped.to_pyarray(py))
+        Ok(elevation.to_pyarray(py))
     }
 
     #[getter]

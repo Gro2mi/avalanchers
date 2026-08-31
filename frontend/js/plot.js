@@ -108,8 +108,8 @@ function percentileForLegend(percentile, variable) {
 async function ensureVariableFetched(sim, variable) {
     const fetchers = {
         release_areas: () => sim.fetch_release_areas(),
-        slope_angle: () => sim.fetch_slope(),
-        slope_aspect: () => sim.fetch_slope(),
+        slope_angle: () => sim.fetch_slope_angle(),
+        slope_aspect: () => sim.fetch_slope_aspect(),
         roughness: () => sim.fetch_roughness(),
         peak_velocity: () => sim.fetch_peak_velocity(),
         peak_flow_thickness: () => sim.fetch_peak_flow_thickness(),
@@ -227,10 +227,10 @@ async function plotTrajectory(timestepData) {
     const lineTrace = {
         type: 'scatter3d',
         mode: 'line+markers',
-        x: timestepData.position.filter((_, i) => i % 3 === 0).map(val => val * mapFactor + xminBounds),
-        y: timestepData.position.filter((_, i) => i % 3 === 1).map(val => val * mapFactor + yminBounds),
+        x: new Float32Array(timestepData.position.filter((_, i) => i % 3 === 0).map(val => val * mapFactor + xminBounds)),
+        y: new Float32Array(timestepData.position.filter((_, i) => i % 3 === 1).map(val => val * mapFactor + yminBounds)),
         // Offset elevation by 5 units to visually separate the trajectory from the DEM surface
-        z: timestepData.elevation.map((val) => (val + 5)),
+        z: new Float32Array(timestepData.position.filter((_, i) => i % 3 === 2).map(val => val + 5)),
         marker: {
             size: 3,
             color: timestepData.velocityMagnitude,
@@ -310,19 +310,18 @@ async function plotTimestepData(timestepData) {
         name: 'Position Z',
         visible: 'legendonly',
     };
-
+    const elevation = new Float32Array(timestepData.position.filter((_, i) => i % 3 === 2));
     const traceElevation = {
         type: 'scatter',
         mode: 'lines',
         x: x.slice(0, n - 3),
-        // last elevation point is outside the domain
-        y: new Float32Array(timestepData.elevation),
+        y: elevation,
         name: 'Elevation',
         visible: 'legendonly',
     };
     const positionZError = new Float32Array(n);
     for (let i = 1; i < n; i++) {
-        positionZError[i] = timestepData.elevation[i] - timestepData.position[i * 3 + 2];
+        positionZError[i] = elevation[i] - timestepData.position[i * 3 + 2];
     }
     const tracePositionZError = {
         type: 'scatter',
@@ -335,7 +334,7 @@ async function plotTimestepData(timestepData) {
 
     const diffElevation = new Float32Array(n);
     for (let i = 1; i < n; i++) {
-        diffElevation[i] = timestepData.elevation[i] - timestepData.elevation[i - 1];
+        diffElevation[i] = elevation[i] - elevation[i - 1];
     }
     const traceDiffElevation = {
         type: 'scatter',

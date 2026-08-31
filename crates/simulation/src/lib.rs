@@ -4,7 +4,7 @@ use compute_core::{
     buffers::{AtomicValues, BufferName, TextureName},
     dem::{Bounds, Dem},
     post_processing::*,
-    settings::{Settings, SimSettings},
+    settings::{Settings, SimModel, SimSettings},
     utils::*,
 };
 #[cfg(target_arch = "wasm32")]
@@ -641,7 +641,6 @@ impl Simulation {
                 let data = data_processor::load_release_areas(path)
                     .await
                     .expect("Failed to read PNG at release areas path");
-                self.print_grid(&data, 60, 30);
                 self.orchestrator
                     .write_buffer(BufferName::ReleaseAreas, &data)
                     .await?;
@@ -915,6 +914,25 @@ impl Simulation {
             );
         }
         Ok(self.gpu_cache.particles_velocity.as_ref().unwrap())
+    }
+
+    pub async fn fetch_particles_velocity_z(&mut self) -> Result<&Vec<f32>> {
+        if self.state < SimulationState::ParticlesInitialized {
+            bail!("Simulation must be initialized before reading particles");
+        }
+        if self.gpu_cache.particles_velocity_z.is_none() {
+            self.gpu_cache.read_count += 1;
+            if self.settings.sim_model == SimModel::MPM.as_int() {
+                self.gpu_cache.particles_velocity_z =
+                    Some(vec![0.0; self.number_particles as usize]);
+            }
+            self.gpu_cache.particles_velocity_z = Some(
+                self.orchestrator
+                    .read_buffer(BufferName::ParticlesVelocityZ)
+                    .await?,
+            );
+        }
+        Ok(self.gpu_cache.particles_velocity_z.as_ref().unwrap())
     }
 
     pub async fn fetch_particles_mass(&mut self) -> Result<&Vec<f32>> {

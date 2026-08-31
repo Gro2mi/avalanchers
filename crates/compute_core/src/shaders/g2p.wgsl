@@ -3,11 +3,18 @@ struct TimestepDataArray {
 };
 
 struct TimestepData {
-    velocity: vec2f,                        // 8 bytes      8
-    position: vec2f,                        // 8 bytes     16
-    uv: vec2f,                              // 8 bytes     24
-    dt: f32,                                //  4 bytes    28
-    // padding                                  4 bytes    32
+    velocity: vec3f,
+    dt: f32,
+    acceleration_tangential: vec3f,
+    acceleration_friction_magnitude: f32,
+    position: vec3f,
+    elevation: f32,
+    normal: vec3f,
+    g_eff: f32,
+    acceleration_normal: vec3f,
+    _pad1: f32,
+    uv: vec2f,
+    _pad2: vec2f,
 };
 
 // @group(0) @binding(0) var<uniform> sim_settings: sim_settings;
@@ -25,6 +32,9 @@ struct TimestepData {
 // @group(0) @binding(10) var velocity_stretch_factor_texture: texture_2d<f32>;
 @group(0) @binding(10) var<storage, read_write> out_debug: array<f32>;
 @group(0) @binding(11) var<storage, read_write> particles_affine_matrix: array<mat2x2<f32>>;
+
+@group(0) @binding(12) var dem_texture: texture_2d<f32>;
+@group(0) @binding(13) var<storage, read_write> particles_elevation: array<f32>;
 
 const density: f32 = 200.0;
 override WG_SIZE_1D: u32 = 1u;
@@ -88,16 +98,27 @@ fn g2p(
 
     particles_position[particleId] = position;
     particles_velocity[particleId] = new_velocity;
+    let uv_new = position_to_uv(position);
+    let elevation = get_elevation(uv_new);
+    particles_elevation[particleId] = elevation;
 
     // affine transfer
     // particles_affine_matrix[particleId] = new_affine_matrix;
 
     if particleId == sim_info.number_particles / 2u {
         var current: TimestepData;
-        current.position = position;
-        current.velocity = new_velocity;
+        current.position = vec3f(position, elevation);
+        current.velocity = vec3f(new_velocity, 0.0);
         current.uv = uv;
         current.dt = dt;
+        current.acceleration_tangential = vec3f(0.0);
+        current.acceleration_friction_magnitude = 0.0;
+        current.elevation = 0.0;
+        current.normal = vec3f(0.0, 0.0, 0.0);
+        current.g_eff = 0.0;
+        current.acceleration_normal = vec3f(0.0);
+        current._pad1 = 0.0;
+        current._pad2 = vec2f(0.0);
         update_output_data(0u, sim_info.timestep - 1, current);
 
         // out_debug[2] = f32(p.position.x);
@@ -117,7 +138,7 @@ fn g2p(
         out_debug[11] = f32(sim_settings.world_size.y);
         out_debug[12] = f32(sim_settings.friction_coefficient);
     }
-
+    
     // if dot(interpolated_velocity, interpolated_velocity) < sim_settings.velocity_threshold * sim_settings.velocity_threshold {
     //     particles_stopped[particleId] = sim_info.timestep;
     //     atomicAdd(&atomic_values.stopped_particles, 1u);
@@ -150,6 +171,10 @@ fn g2p(
     }
 }
 
+fn get_elevation(uv: vec2f) -> f32 {
+    // TODO: fix interpolation at the edges of the texture
+    return textureSampleLevel(dem_texture, tex_sampler, uv, 0).x;
+}
 fn update_output_data(trajectory: u32, timestep: u32, timestep_data: TimestepData) {
     out_timestep_data[timestep].trajectories[trajectory] = timestep_data;
 }

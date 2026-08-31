@@ -165,13 +165,13 @@ fn compute_particles(
 
     // --- update position ---
     var relative_trajectory = (velocity + v_prev) * 0.5 * dt;
-    var new_position = position + relative_trajectory;
+    var new_position = p_star + relative_trajectory;
     var new_uv = position_to_uv(new_position.xy);
-    new_position = p_star;
+    // new_position = p_star;
     var elevation = get_elevation(new_uv);
     position = new_position;
     // TODO more sophisticated projection methods
-    // position.z = elevation;
+    position.z = elevation;
 
     if particleId == sim_info.number_particles / 2u {
         var current: TimestepData;

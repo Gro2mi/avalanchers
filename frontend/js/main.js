@@ -680,8 +680,8 @@ async function runSimulation() {
         updateResultPlotsVisibility();
 
         const timestepData = await sim.get_timestep_data();
-        // await plotTimestepData(timestepData);
-        // await plotTrajectory(timestepData);
+        await plotTimestepData(timestepData);
+        await plotTrajectory(timestepData);
         plotTimer();
 
         await showVariable('peak_velocity');

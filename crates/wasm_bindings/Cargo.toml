@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 name = "avalanchers"
 
 [dependencies]
@@ -24,3 +24,6 @@ getrandom = { version = "0.4", features = ["wasm_js"] }
 tracing-wasm = { workspace = true }
 tracing = { workspace = true }
 serde-wasm-bindgen = { workspace = true }
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"

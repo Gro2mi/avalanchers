@@ -3,24 +3,30 @@ use js_sys::Float32Array;
 #[cfg(target_arch = "wasm32")]
 use js_sys::{Array, Object, Reflect, Uint8Array};
 use serde_wasm_bindgen::from_value;
-use simulation::{Simulation, init_logging};
+use simulation::Simulation;
+use simulation::init_logging;
 use std::sync::OnceLock;
+#[allow(unused_imports)]
 use tracing::{info, trace};
 use wasm_bindgen::prelude::*;
+#[cfg(target_arch = "wasm32")]
 use web_sys::window;
 static BASE_URL: OnceLock<String> = OnceLock::new();
 
 #[wasm_bindgen(start)]
-pub fn main() {
+pub fn init() {
     std::panic::set_hook(Box::new(console_error_panic_hook::hook));
     tracing_wasm::set_as_global_default();
     init_logging();
-    let window = window().expect("no global window");
-    let location = window.location();
-    let origin = location.origin().unwrap_or_default() + "/";
-    trace!("Base URI: {}", origin);
-    trace!("Full URI: {}", location.href().unwrap_or_default());
-    BASE_URL.set(location.href().unwrap_or_default()).ok();
+    #[cfg(target_arch = "wasm32")]
+    {
+        let window = window().expect("no global window");
+        let location = window.location();
+        let origin = location.origin().unwrap_or_default() + "/";
+        trace!("Base URI: {}", origin);
+        trace!("Full URI: {}", location.href().unwrap_or_default());
+        BASE_URL.set(location.href().unwrap_or_default()).ok();
+    }
 }
 
 // Helper for error conversion to JS strings
@@ -68,11 +74,6 @@ impl WasmTimestepData {
         unsafe { Float32Array::view(&self.inner.dt) }
     }
 
-    // #[wasm_bindgen(getter, js_name = elevation)]
-    // pub fn elevation(&self) -> Float32Array {
-    //     unsafe { Float32Array::view(&self.inner.elevation) }
-    // }
-
     #[wasm_bindgen(getter, js_name = velocityMagnitude)]
     pub fn velocity_magnitude(&self) -> Float32Array {
         unsafe { Float32Array::view(&self.inner.velocity_magnitude) }
@@ -114,7 +115,7 @@ impl WasmSettings {
     }
 
     pub fn from_json(json: &str) -> Result<WasmSettings, JsValue> {
-        let settings = Settings::from_json(json).map_err(to_js_err)?;
+        let settings = Settings::loads(json).map_err(to_js_err)?;
         Ok(WasmSettings { inner: settings })
     }
 
@@ -355,6 +356,16 @@ impl WasmSimulation {
     /// Reads roughness into the cache. Requires `prepare` or `run` first.
     pub async fn fetch_roughness(&mut self) -> Result<(), JsValue> {
         self.inner.fetch_roughness().await.map_err(to_js_err)?;
+        Ok(())
+    }
+
+    pub async fn fetch_slope_angle(&mut self) -> Result<(), JsValue> {
+        self.inner.fetch_slope_angle().await.map_err(to_js_err)?;
+        Ok(())
+    }
+
+    pub async fn fetch_slope_aspect(&mut self) -> Result<(), JsValue> {
+        self.inner.fetch_slope_aspect().await.map_err(to_js_err)?;
         Ok(())
     }
 

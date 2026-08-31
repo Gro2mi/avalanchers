@@ -823,6 +823,26 @@ pub fn create_shader_configs(
                         min_binding_size: None,
                     },
                 ),
+                // Binding 12:
+                (
+                    TextureName::Dem.to_string(),
+                    BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float {
+                            filterable: has_float32_filterable,
+                        },
+                    },
+                ),
+                // Binding 13:
+                (
+                    BufferName::ParticlesElevation.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
             ],
             &[("WG_SIZE_1D", max_compute_invocations_per_workgroup as f64)],
         )?,

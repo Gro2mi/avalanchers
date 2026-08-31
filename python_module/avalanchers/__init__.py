@@ -91,9 +91,7 @@ def plot3d(
     if particles:
         # add particles
         
-        positions_xy = sim.particles_position.copy()
-        z = sim.particles_elevation.copy()
-        positions = np.column_stack([positions_xy, z])
+        positions = sim.particles_position.copy()
         positions[:, 2] *= 1.3
         poly = pv.PolyData(positions)
         plotter.add_mesh(

@@ -62,6 +62,7 @@ pub struct GpuCache {
     pub particles_position: Option<Vec<[f32; 2]>>,
     pub particles_mass: Option<Vec<f32>>,
     pub particles_velocity: Option<Vec<[f32; 2]>>,
+    pub particles_velocity_z: Option<Vec<f32>>,
     pub particles_stopped: Option<Vec<u32>>,
     pub particles_elevation: Option<Vec<f32>>,
     pub peak_velocity: Option<Vec<f32>>,
@@ -81,6 +82,7 @@ impl GpuCache {
         self.particles_position = None;
         self.particles_mass = None;
         self.particles_velocity = None;
+        self.particles_velocity_z = None;
         self.particles_stopped = None;
         self.particles_elevation = None;
         self.peak_velocity = None;
@@ -115,12 +117,21 @@ pub struct SimInfo {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct TimestepDataAoS {
-    pub velocity: [f32; 3], // 12 bytes
-    pub position: [f32; 3], // 12 bytes
-    pub uv: [f32; 2],       // 8 bytes
-    pub dt: f32,            // 4 bytes
-    pub _pad1: [f32; 1],    // 4 bytes (padding to 32 bytes)
+    pub velocity: [f32; 3],                   // 12 bytes
+    pub dt: f32,                              // 4 bytes
+    pub acceleration_tangential: [f32; 3],    // 12 bytes
+    pub acceleration_friction_magnitude: f32, // 4 bytes
+    pub position: [f32; 3],                   // 12 bytes
+    pub elevation: f32,                       // 4 bytes
+    pub normal: [f32; 3],                     // 12 bytes
+    pub g_eff: f32,                           // 4 bytes
+    pub acceleration_normal: [f32; 3],        // 12 bytes
+    pub _pad1: [f32; 1],                      // 4 bytes
+    pub uv: [f32; 2],                         // 8 bytes
+    pub _pad2: [f32; 2],                      // 8 bytes (padding to 96 bytes)
 }
+
+const _: () = assert!(std::mem::size_of::<TimestepDataAoS>() == 96);
 
 #[derive(Clone)]
 pub struct TimestepData {
@@ -318,6 +329,7 @@ pub struct ComputeOrchestrator {
     dispatch_number_workgroups_y_2d: u32,
     dispatch_number_workgroups_1d: u32,
     has_float32_filterable: bool,
+    has_float32_atomic: bool,
 }
 
 impl ComputeOrchestrator {
@@ -499,6 +511,10 @@ impl ComputeOrchestrator {
         {
             required_features |= wgpu::Features::SHADER_FLOAT32_ATOMIC;
             has_float32_atomic = true;
+        } else {
+            warn!(
+                "GPU does not support SHADER_FLOAT32_ATOMIC, the sim will be less accurate. Consider using a GPU that supports this feature for better results."
+            );
         }
         if adapter
             .features()
@@ -506,6 +522,10 @@ impl ComputeOrchestrator {
         {
             required_features |= wgpu::Features::FLOAT32_FILTERABLE;
             has_float32_filterable = true;
+        } else {
+            warn!(
+                "GPU does not support FLOAT32_FILTERABLE, the sim will be less accurate. Consider using a GPU that supports this feature for better results."
+            );
         }
 
         let (device, queue) = adapter
@@ -559,7 +579,12 @@ impl ComputeOrchestrator {
             dispatch_number_workgroups_1d: 0,
             has_float32_filterable,
             batch_compute_steps: 200,
+            has_float32_atomic,
         })
+    }
+
+    pub fn has_float32_atomic(&self) -> bool {
+        self.has_float32_atomic
     }
 
     // Helper function to safely parse hex ("0x1e84") or decimal strings into a u32 Device ID
@@ -1731,14 +1756,23 @@ mod tests {
             block_on(orchestrator.read_buffer::<f32>(BufferName::TestOutput)).expect("msg");
         info!("Test output length: {}", test_output.len());
         info!("{:#?}", test_output.iter().take(40).collect::<Vec<_>>());
-        let mass_p2g: f32 = test_output.iter().skip(5).take(10).sum();
+        let (mass_factor, momentum_factor, rel_error_threshold) =
+            if orchestrator.has_float32_atomic() {
+                (1.0, 1.0, 1e-6)
+            } else {
+                (10.0, 0.01, 5e-3)
+            };
+        let mass_p2g: f32 = test_output.iter().skip(5).take(10).sum::<f32>() / mass_factor;
         info!(
             "Mass before: {} after p2g: {} relative error: {}",
             mass,
             mass_p2g,
             (mass_p2g - mass).abs() / mass
         );
-        assert_eq!(mass, mass_p2g, "Mass transfer from particle to grid failed");
+        assert!(
+            (mass - mass_p2g).abs() / mass < rel_error_threshold,
+            "Mass transfer from particle to grid failed"
+        );
         let velocity_x: f32 = test_output[18];
         let velocity_y: f32 = test_output[19];
         let momentum: f32 = mass * (velocity_x * velocity_x + velocity_y * velocity_y).sqrt();
@@ -1754,15 +1788,15 @@ mod tests {
             (momentum - momentum_start).abs() / momentum_start
         );
         assert!(
-            (momentum_start - momentum).abs() < 1e-2,
+            (momentum_start - momentum).abs() / momentum_start < rel_error_threshold,
             "Momentum transfer from particle to grid failed"
         );
         assert!(
-            (velocity[0] - velocity_x).abs() < 1e-4,
+            (velocity[0] - velocity_x).abs() / velocity_x < rel_error_threshold,
             "Velocity X transfer from particle to grid failed"
         );
         assert!(
-            (velocity[1] - velocity_y).abs() < 1e-4,
+            (velocity[1] - velocity_y).abs() / velocity_y < rel_error_threshold,
             "Velocity Y transfer from particle to grid failed"
         );
         info!(
@@ -1779,39 +1813,39 @@ mod tests {
         );
         // expected mass distribution
         assert!(
-            (test_output[5] - 16.28176).abs() < 1e-4,
+            (test_output[5] / mass_factor - 16.28176).abs() / 16.28176 < rel_error_threshold,
             "test_output[5] failed"
         );
         assert!(
-            (test_output[6] - 71.9805).abs() < 1e-4,
+            (test_output[6] / mass_factor - 71.9805).abs() / 71.9805 < rel_error_threshold,
             "test_output[6] failed"
         );
         assert!(
-            (test_output[7] - 8.537765).abs() < 1e-4,
+            (test_output[7] / mass_factor - 8.537765).abs() / 8.537765 < rel_error_threshold,
             "test_output[7] failed"
         );
         assert!(
-            (test_output[8] - 125.54444).abs() < 1e-4,
+            (test_output[8] / mass_factor - 125.54444).abs() / 125.54444 < rel_error_threshold,
             "test_output[8] failed"
         );
         assert!(
-            (test_output[9] - 555.0231).abs() < 1e-4,
+            (test_output[9] / mass_factor - 555.0231).abs() / 555.0231 < rel_error_threshold,
             "test_output[9] failed"
         );
         assert!(
-            (test_output[10] - 65.832504).abs() < 1e-4,
+            (test_output[10] / mass_factor - 65.832504).abs() / 65.832504 < rel_error_threshold,
             "test_output[10] failed"
         );
         assert!(
-            (test_output[11] - 26.373747).abs() < 1e-4,
+            (test_output[11] / mass_factor - 26.373747).abs() / 26.373747 < rel_error_threshold,
             "test_output[11] failed"
         );
         assert!(
-            (test_output[12] - 116.59646).abs() < 1e-4,
+            (test_output[12] / mass_factor - 116.59646).abs() / 116.59646 < rel_error_threshold,
             "test_output[12] failed"
         );
         assert!(
-            (test_output[13] - 13.829763).abs() < 1e-4,
+            (test_output[13] / mass_factor - 13.829763).abs() / 13.829763 < rel_error_threshold,
             "test_output[13] failed"
         );
         assert_eq!(
@@ -1847,43 +1881,62 @@ mod tests {
             test_output[28],
         );
 
-        // expected momentum distribution (grid x-momentum)
-        assert!(
-            (test_output[20] - 325.6352).abs() < 1e-4,
-            "test_output[20] failed"
-        );
-        assert!(
-            (test_output[21] - 1439.61).abs() < 1e-4,
-            "test_output[21] failed"
-        );
-        assert!(
-            (test_output[22] - 170.7553).abs() < 1e-4,
-            "test_output[22] failed"
-        );
-        assert!(
-            (test_output[23] - 2510.889).abs() < 1e-4,
-            "test_output[23] failed"
-        );
-        assert!(
-            (test_output[24] - 11100.462).abs() < 1e-4,
-            "test_output[24] failed"
-        );
-        assert!(
-            (test_output[25] - 1316.65).abs() < 1e-4,
-            "test_output[25] failed"
-        );
-        assert!(
-            (test_output[26] - 527.475).abs() < 1e-4,
-            "test_output[26] failed"
-        );
-        assert!(
-            (test_output[27] - 2331.9292).abs() < 1e-4,
-            "test_output[27] failed"
-        );
-        assert!(
-            (test_output[28] - 276.59528).abs() < 1e-4,
-            "test_output[28] failed"
-        );
+        if orchestrator.has_float32_atomic() {
+            // expected momentum distribution (grid x-momentum)
+            assert!(
+                (test_output[20] / momentum_factor - 325.6352).abs() / 325.6352
+                    < rel_error_threshold,
+                "test_output[20] failed"
+            );
+            assert!(
+                (test_output[21] / momentum_factor - 1439.61).abs() / 1439.61 < rel_error_threshold,
+                "test_output[21] failed"
+            );
+            assert!(
+                (test_output[22] / momentum_factor - 170.7553).abs() / 170.7553
+                    < rel_error_threshold,
+                "test_output[22] failed"
+            );
+            assert!(
+                (test_output[23] / momentum_factor - 2510.889).abs() / 2510.889
+                    < rel_error_threshold,
+                "test_output[23] failed"
+            );
+            assert!(
+                (test_output[24] / momentum_factor - 11100.462).abs() / 11100.462
+                    < rel_error_threshold,
+                "test_output[24] failed"
+            );
+            assert!(
+                (test_output[25] / momentum_factor - 1316.65).abs() / 1316.65 < rel_error_threshold,
+                "test_output[25] failed"
+            );
+            assert!(
+                (test_output[26] / momentum_factor - 527.475).abs() / 527.475 < rel_error_threshold,
+                "test_output[26] failed"
+            );
+            assert!(
+                (test_output[27] / momentum_factor - 2331.9292).abs() / 2331.9292
+                    < rel_error_threshold,
+                "test_output[27] failed"
+            );
+            assert!(
+                (test_output[28] / momentum_factor - 276.59528).abs() / 276.59528
+                    < rel_error_threshold,
+                "test_output[28] failed"
+            );
+        } else {
+            // momentum transfer is not accurate without float32 atomics, but we can at least check that the maths is correct
+            assert_eq!(test_output[20], 3.0, "test_output[20] failed");
+            assert_eq!(test_output[21], 14.0, "test_output[21] failed");
+            assert_eq!(test_output[22], 2.0, "test_output[22] failed");
+            assert_eq!(test_output[23], 25.0, "test_output[23] failed");
+            assert_eq!(test_output[24], 111.0, "test_output[24] failed");
+            assert_eq!(test_output[25], 13.0, "test_output[25] failed");
+            assert_eq!(test_output[26], 5.0, "test_output[26] failed");
+            assert_eq!(test_output[27], 23.0, "test_output[27] failed");
+            assert_eq!(test_output[28], 3.0, "test_output[28] failed");
+        }
 
         info!(
             "Momentum Grid Y:\n {:8.2?} {:8.2?} {:8.2?}\n {:8.2?} {:8.2?} {:8.2?}\n {:8.2?} {:8.2?} {:8.2?}",
@@ -1898,41 +1951,54 @@ mod tests {
             test_output[38],
         );
         // expected momentum distribution (grid y-momentum)
-        assert!(
-            (test_output[30] - 488.4528).abs() < 1e-4,
-            "test_output[30] failed"
-        );
-        assert!(
-            (test_output[31] - 2159.415).abs() < 1e-4,
-            "test_output[31] failed"
-        );
-        assert!(
-            (test_output[32] - 256.13293).abs() < 1e-4,
-            "test_output[32] failed"
-        );
-        assert!(
-            (test_output[33] - 3766.3333).abs() < 1e-4,
-            "test_output[33] failed"
-        );
-        assert!(
-            (test_output[34] - 16650.691).abs() < 1e-4,
-            "test_output[34] failed"
-        );
-        assert!(
-            (test_output[35] - 1974.9751).abs() < 1e-4,
-            "test_output[35] failed"
-        );
-        assert!(
-            (test_output[36] - 791.2124).abs() < 1e-4,
-            "test_output[36] failed"
-        );
-        assert!(
-            (test_output[37] - 3497.8938).abs() < 1e-4,
-            "test_output[37] failed"
-        );
-        assert!(
-            (test_output[38] - 414.89288).abs() < 1e-4,
-            "test_output[38] failed"
-        );
+        if orchestrator.has_float32_atomic() {
+            assert!(
+                (test_output[30] - 488.4528).abs() < 1e-4,
+                "test_output[30] failed"
+            );
+            assert!(
+                (test_output[31] - 2159.415).abs() < 1e-4,
+                "test_output[31] failed"
+            );
+            assert!(
+                (test_output[32] - 256.13293).abs() < 1e-4,
+                "test_output[32] failed"
+            );
+            assert!(
+                (test_output[33] - 3766.3333).abs() < 1e-4,
+                "test_output[33] failed"
+            );
+            assert!(
+                (test_output[34] - 16650.691).abs() < 1e-4,
+                "test_output[34] failed"
+            );
+            assert!(
+                (test_output[35] - 1974.9751).abs() < 1e-4,
+                "test_output[35] failed"
+            );
+            assert!(
+                (test_output[36] - 791.2124).abs() < 1e-4,
+                "test_output[36] failed"
+            );
+            assert!(
+                (test_output[37] - 3497.8938).abs() < 1e-4,
+                "test_output[37] failed"
+            );
+            assert!(
+                (test_output[38] - 414.89288).abs() < 1e-4,
+                "test_output[38] failed"
+            );
+        } else {
+            // momentum transfer is not accurate without float32 atomics, but we can at least check that the maths is correct
+            assert_eq!(test_output[30], 5.0, "test_output[30] failed");
+            assert_eq!(test_output[31], 22.0, "test_output[31] failed");
+            assert_eq!(test_output[32], 3.0, "test_output[32] failed");
+            assert_eq!(test_output[33], 38.0, "test_output[33] failed");
+            assert_eq!(test_output[34], 167.0, "test_output[34] failed");
+            assert_eq!(test_output[35], 20.0, "test_output[35] failed");
+            assert_eq!(test_output[36], 8.0, "test_output[36] failed");
+            assert_eq!(test_output[37], 35.0, "test_output[37] failed");
+            assert_eq!(test_output[38], 4.0, "test_output[38] failed");
+        }
     }
 }

@@ -195,6 +195,19 @@ jobs:
       - name: Build WASM (Ubuntu Only)
         if: matrix.os == 'ubuntu-latest'
         run: wasm-pack build crates/wasm_bindings --target web --release --out-dir wasm_dist
+
+      - name: Install WASM Browser Test Dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get install -y -qq chromium chromium-driver
+
+      - name: Test WASM Bindings (Chrome)
+        if: matrix.os == 'ubuntu-latest'
+        env:
+          WGPU_BACKEND: vulkan
+          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
+        run: |
+          cd crates/wasm_bindings
+          wasm-pack test --headless --chrome
         
 
       # --- UPLOAD ---

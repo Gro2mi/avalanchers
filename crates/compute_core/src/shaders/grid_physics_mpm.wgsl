@@ -11,6 +11,11 @@
 @group(0) @binding(9) var<storage, read_write> grid_velocity: array<vec2f>;
 @group(0) @binding(10) var<storage, read_write> grid_peak_velocity: array<f32>;
 
+@group(0) @binding(11) var dem_texture: texture_2d<f32>;
+@group(0) @binding(12) var tex_sampler: sampler;
+@group(0) @binding(13) var<storage, read_write> particles_elevation: array<f32>;
+
+
 @compute @workgroup_size(WG_SIZE_2D, WG_SIZE_2D, 1)
 fn grid_physics_mpm(@builtin(global_invocation_id) id: vec3u) {
     if id.x < 1 || id.x >= (sim_settings.grid_shape.x - 1) || id.y < 1 || id.y >= (sim_settings.grid_shape.y - 1) {
