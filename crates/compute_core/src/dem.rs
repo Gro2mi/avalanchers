@@ -1,5 +1,40 @@
 use crate::utils::*;
-use std::hash::{DefaultHasher, Hash, Hasher};
+use std::hash::{Hash, Hasher};
+
+#[derive(Default)]
+struct StableHasher(u64);
+
+impl Hasher for StableHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        if self.0 == 0 {
+            self.0 = 0xcbf29ce484222325;
+        }
+        for byte in bytes {
+            self.0 ^= u64::from(*byte);
+            self.0 = self.0.wrapping_mul(0x100000001b3);
+        }
+    }
+
+    fn write_u8(&mut self, value: u8) {
+        self.write(&[value]);
+    }
+
+    fn write_u32(&mut self, value: u32) {
+        self.write(&value.to_le_bytes());
+    }
+
+    fn write_u64(&mut self, value: u64) {
+        self.write(&value.to_le_bytes());
+    }
+
+    fn write_usize(&mut self, value: usize) {
+        self.write_u64(value as u64);
+    }
+}
 
 #[derive(Default, Debug, PartialEq, Clone)]
 pub struct Bounds {
@@ -51,6 +86,7 @@ impl Hash for Dem {
         self.cell_size.to_bits().hash(state);
         self.map_factor.to_bits().hash(state);
         self.minimum_elevation.to_bits().hash(state);
+        self.projection.hash(state);
     }
 }
 
@@ -80,28 +116,35 @@ impl Default for Dem {
 
 impl Dem {
     pub fn calculate_hash(&self) -> u64 {
-        let mut s = DefaultHasher::new();
-        self.hash(&mut s);
-        s.finish()
+        // Content identity excludes `source` and the duplicate row-oriented `data`.
+        let mut hasher = StableHasher::default();
+        self.hash(&mut hasher);
+        hasher.finish()
     }
     pub fn calculate_minimum_elevation(data1d: &[f32]) -> f32 {
         data1d
             .iter()
-            .filter(|&&v| v > 0.1)
+            .filter(|value| value.is_finite())
             .min_by(|a: &&f32, b: &&f32| a.total_cmp(b))
-            .copied() // Convert Option<&f32> to Option<f32>
-            .unwrap_or(0.0) // Provide a default if no value matches the filter
+            .copied()
+            .unwrap_or(0.0)
     }
 
-    pub fn get_index(&self, pt: &Point) -> (f32, f32) {
-        let dx = (pt.x - self.bounds.xmin) / (self.cell_size * self.map_factor);
-        let dy = (pt.y - self.bounds.ymin) / (self.cell_size * self.map_factor);
-        (dx, dy)
+    pub fn get_index(&self, pt: &Point) -> Option<(f32, f32)> {
+        let scale = self.cell_size * self.map_factor;
+        if !scale.is_finite() || scale <= 0.0 {
+            return None;
+        }
+        Some((
+            (pt.x - self.bounds.xmin) / scale,
+            (pt.y - self.bounds.ymin) / scale,
+        ))
     }
 
     pub fn interpolate_elevation(&self, pt: &Point) -> Point {
-        let (x, y) = self.get_index(pt);
-        let z = bilinear_interpolate(x, y, &self.data);
+        let z = self
+            .get_index(pt)
+            .and_then(|(x, y)| bilinear_interpolate(x, y, &self.data));
         Point {
             x: pt.x,
             y: pt.y,
@@ -109,27 +152,37 @@ impl Dem {
         }
     }
     pub fn parse_bounds_lines<I: Iterator<Item = String>>(lines: I) -> Option<Bounds> {
-        let vals: Vec<f32> = lines.filter_map(|l| l.trim().parse::<f32>().ok()).collect();
-        if vals.len() == 4 {
-            Some(Bounds {
-                xmin: vals[0],
-                xmax: vals[2],
-                ymin: vals[1],
-                ymax: vals[3],
-            })
-        } else {
-            None
+        let values = lines
+            .map(|line| line.trim().parse::<f32>())
+            .collect::<Result<Vec<_>, _>>()
+            .ok()?;
+        let [xmin, ymin, xmax, ymax] = values.as_slice() else {
+            return None;
+        };
+        if !values.iter().all(|value| value.is_finite()) || xmin >= xmax || ymin >= ymax {
+            return None;
         }
+        Some(Bounds {
+            xmin: *xmin,
+            xmax: *xmax,
+            ymin: *ymin,
+            ymax: *ymax,
+        })
     }
 
-    fn get_elevation_extrema_points(&self, mask: &[bool]) -> ((usize, usize), (usize, usize)) {
-        assert_eq!(self.data1d.len(), mask.len());
+    fn get_elevation_extrema_points(
+        &self,
+        mask: &[bool],
+    ) -> Option<((usize, usize), (usize, usize))> {
+        if self.width == 0 || self.data1d.len() != mask.len() {
+            return None;
+        }
 
         let mut min_idx = None;
         let mut max_idx = None;
 
         for (i, (&elevation, &valid)) in self.data1d.iter().zip(mask.iter()).enumerate() {
-            if !valid || elevation.is_nan() {
+            if !valid || !elevation.is_finite() {
                 continue;
             }
 
@@ -142,25 +195,25 @@ impl Dem {
             }
         }
 
-        let min_idx = min_idx.expect("No valid DEM pixels found");
-        let max_idx = max_idx.expect("No valid DEM pixels found");
+        let min_idx = min_idx?;
+        let max_idx = max_idx?;
 
         let min_point = (min_idx / self.width, min_idx % self.width);
         let max_point = (max_idx / self.width, max_idx % self.width);
 
-        (min_point, max_point)
+        Some((min_point, max_point))
     }
 
     #[allow(dead_code)]
-    fn get_elevation_extrema(&self, mask: &[bool]) -> (f32, f32) {
-        let (min_point, max_point) = self.get_elevation_extrema_points(mask);
+    fn get_elevation_extrema(&self, mask: &[bool]) -> Option<(f32, f32)> {
+        let (min_point, max_point) = self.get_elevation_extrema_points(mask)?;
         let min_elevation = self.data1d[min_point.0 * self.width + min_point.1];
         let max_elevation = self.data1d[max_point.0 * self.width + max_point.1];
-        (min_elevation, max_elevation)
+        Some((min_elevation, max_elevation))
     }
 
-    pub fn get_elevation_extrema_distance_and_drop(&self, mask: &[bool]) -> (f32, f32) {
-        let (min_point, max_point) = self.get_elevation_extrema_points(mask);
+    pub fn get_elevation_extrema_distance_and_drop(&self, mask: &[bool]) -> Option<(f32, f32)> {
+        let (min_point, max_point) = self.get_elevation_extrema_points(mask)?;
         let min_elevation = self.data1d[min_point.0 * self.width + min_point.1];
         let max_elevation = self.data1d[max_point.0 * self.width + max_point.1];
 
@@ -170,7 +223,7 @@ impl Dem {
 
         let drop = max_elevation - min_elevation;
 
-        (distance2d, drop)
+        Some((distance2d, drop))
     }
 }
 
@@ -199,10 +252,15 @@ pub struct GeoTiff {
 
 impl GeoTiff {
     /// Calculate the world coordinates of a specific cell (row, col)
-    pub fn cell_to_world(&self, col: u32, row: u32) -> (f64, f64) {
-        let x = self.metadata.tiepoints[3] + (col as f64 * self.metadata.pixel_scale[0]);
-        let y = self.metadata.tiepoints[4] - (row as f64 * self.metadata.pixel_scale[1]);
-        (x, y)
+    pub fn cell_to_world(&self, col: u32, row: u32) -> Option<(f64, f64)> {
+        let tiepoint = self.metadata.tiepoints.get(..6)?;
+        let x = tiepoint[3] + (f64::from(col) - tiepoint[0]) * self.metadata.pixel_scale[0];
+        let y = tiepoint[4] - (f64::from(row) - tiepoint[1]) * self.metadata.pixel_scale[1];
+        if x.is_finite() && y.is_finite() {
+            Some((x, y))
+        } else {
+            None
+        }
     }
     pub fn get_f32(&self, col: usize, row: usize) -> Option<f32> {
         if col >= self.metadata.width as usize || row >= self.metadata.height as usize {
@@ -245,7 +303,10 @@ impl TiffData {
         }
     }
     pub fn get_f32(&self, col: usize, row: usize, width: usize) -> Option<f32> {
-        let index = row * width + col;
+        if width == 0 || col >= width {
+            return None;
+        }
+        let index = row.checked_mul(width)?.checked_add(col)?;
 
         match self {
             TiffData::U8(v) => v.get(index).map(|&val| val as f32),
@@ -323,17 +384,17 @@ mod tests {
             true, true, true, // Row 2
         ];
 
-        let (min_point, max_point) = dem.get_elevation_extrema_points(&mask);
+        let (min_point, max_point) = dem.get_elevation_extrema_points(&mask).unwrap();
         assert_eq!(min_point, (0, 1)); // Elevation of 1.0 at (row=1,col=1)
         assert_eq!(max_point, (2, 2)); // Elevation of 9.0 at (row=2,col=2)
-        let (min_elevation, max_elevation) = dem.get_elevation_extrema(&mask);
+        let (min_elevation, max_elevation) = dem.get_elevation_extrema(&mask).unwrap();
         println!(
             "Min elevation: {}, Max elevation: {}",
             min_elevation, max_elevation
         );
         assert_eq!(min_elevation, 2.0); // The minimum in the masked area is 2.0
         assert_eq!(max_elevation, 9.0); // The maximum is 9.0
-        let (distance2d, drop) = dem.get_elevation_extrema_distance_and_drop(&mask);
+        let (distance2d, drop) = dem.get_elevation_extrema_distance_and_drop(&mask).unwrap();
         println!("Distance: {}, Drop: {}", distance2d, drop);
         assert!((distance2d - 4.472136).abs() < 1e-3); // Distance between (0,1) and (2,2) in pixel space is sqrt(2^2 + 1^2) = sqrt(5) ~ 2.236, but scaled by cell_size=2.0 gives ~4.472
         assert_eq!(drop, 7.0); // Drop from 9.0 to 2.0 is 7.0
@@ -364,13 +425,13 @@ mod tests {
         };
 
         // Origin (0,0) should match tiepoint (500, 1000)
-        let (x0, y0) = geotiff.cell_to_world(0, 0);
+        let (x0, y0) = geotiff.cell_to_world(0, 0).unwrap();
         assert_eq!(x0, 500.0);
         assert_eq!(y0, 1000.0);
 
         // Move 2 pixels right (2 * 10.0) and 3 pixels down (3 * 10.0)
         // Note: Y usually decreases as row index increases in GeoTIFFs
-        let (x1, y1) = geotiff.cell_to_world(2, 3);
+        let (x1, y1) = geotiff.cell_to_world(2, 3).unwrap();
         assert_eq!(x1, 520.0);
         assert_eq!(y1, 970.0);
     }
@@ -429,6 +490,81 @@ mod tests {
         // Test getting value through the high-level GeoTiff struct
         assert_eq!(geotiff.get_f32(1, 1), Some(400.0));
         assert_eq!(geotiff.get_f32(2, 0), None); // OOB width
+    }
+
+    #[test]
+    fn minimum_elevation_preserves_finite_low_values() {
+        assert_eq!(
+            Dem::calculate_minimum_elevation(&[2.0, 0.0, -3.0, f32::NAN]),
+            -3.0
+        );
+        assert_eq!(
+            Dem::calculate_minimum_elevation(&[f32::NAN, f32::INFINITY]),
+            0.0
+        );
+    }
+
+    #[test]
+    fn extrema_return_none_without_valid_cells() {
+        let dem = Dem {
+            width: 2,
+            height: 1,
+            data1d: vec![1.0, 2.0],
+            ..Dem::default()
+        };
+        assert_eq!(dem.get_elevation_extrema_points(&[false, false]), None);
+        assert_eq!(dem.get_elevation_extrema_points(&[true]), None);
+    }
+
+    #[test]
+    fn invalid_spatial_scale_cannot_produce_an_index() {
+        let dem = Dem {
+            cell_size: 0.0,
+            ..Dem::default()
+        };
+        let point = Point {
+            x: 1.0,
+            y: 1.0,
+            z: None,
+        };
+        assert_eq!(dem.get_index(&point), None);
+        assert_eq!(dem.interpolate_elevation(&point).z, None);
+    }
+
+    #[test]
+    fn bounds_parser_rejects_malformed_values() {
+        let lines = ["0", "1", "2", "3"].map(str::to_string).into_iter();
+        assert_eq!(
+            Dem::parse_bounds_lines(lines),
+            Some(Bounds {
+                xmin: 0.0,
+                ymin: 1.0,
+                xmax: 2.0,
+                ymax: 3.0
+            })
+        );
+        assert!(
+            Dem::parse_bounds_lines(["0", "bad", "2", "3"].map(str::to_string).into_iter())
+                .is_none()
+        );
+        assert!(
+            Dem::parse_bounds_lines(["2", "1", "0", "3"].map(str::to_string).into_iter()).is_none()
+        );
+    }
+
+    #[test]
+    fn geotiff_access_rejects_malformed_metadata_and_indices() {
+        let mut metadata = create_mock_metadata(2, 2);
+        metadata.tiepoints.clear();
+        let geotiff = GeoTiff {
+            metadata,
+            data: TiffData::U8(vec![1; 4]),
+        };
+        assert_eq!(geotiff.cell_to_world(0, 0), None);
+
+        let data = TiffData::U8(vec![1; 4]);
+        assert_eq!(data.get_f32(2, 0, 2), None);
+        assert_eq!(data.get_f32(0, usize::MAX, 2), None);
     }
 
     #[test]

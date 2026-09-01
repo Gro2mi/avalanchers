@@ -597,10 +597,15 @@ async fn load_png_as_dem(path: &str) -> Result<Dem, DataProcessorError> {
     bounds.xmax += 0.5 * cell_size;
     bounds.ymin -= 0.5 * cell_size;
     bounds.ymax += 0.5 * cell_size;
+    let data1d = rgba_bytes_to_f32(&rgba)
+        .into_iter()
+        .map(|value| if value == 0.0 { f32::NAN } else { value })
+        .collect();
     let mut dem = Dem {
         width,
         height,
-        data1d: rgba_bytes_to_f32(&rgba),
+        // Legacy float-PNG DEMs use an all-zero pixel as their NoData sentinel.
+        data1d,
         data: Vec::new(),
         // TODO bounds were exported wrong. Rework when png files get metadata embedded.
         x: linspace(bounds.xmin, bounds.xmax, width),
@@ -633,6 +638,13 @@ fn esri_grid_to_dem(mut grid: EsriGrid, source: &str) -> Dem {
         ymin: grid.header.get_yllcorner(),
         ymax: grid.header.get_yllcorner() + grid.header.nrows as f32 * grid.header.cellsize,
     };
+    if let Some(nodata) = grid.header.nodata_value {
+        for value in &mut grid.data {
+            if *value == nodata {
+                *value = f32::NAN;
+            }
+        }
+    }
     let mut dem = Dem {
         width: grid.header.ncols,
         height: grid.header.nrows,
@@ -658,10 +670,23 @@ fn load_tiff_as_dem(path: &str) -> Result<Dem, DataProcessorError> {
 
 fn geo_tiff_to_dem(mut tiff: GeoTiff, source: &str) -> Dem {
     tiff.flip_y();
+    let nodata = tiff.metadata.nodata.map(|value| value as f32);
+    let data1d = tiff
+        .data
+        .as_f32()
+        .into_iter()
+        .map(|value| {
+            if nodata.is_some_and(|nodata| value == nodata || nodata.is_nan() && value.is_nan()) {
+                f32::NAN
+            } else {
+                value
+            }
+        })
+        .collect();
     let mut dem = Dem {
         width: tiff.metadata.width as usize,
         height: tiff.metadata.height as usize,
-        data1d: tiff.data.as_f32(),
+        data1d,
         data: Vec::new(),
         x: linspace(
             tiff.metadata.bounds.xmin,
@@ -766,21 +791,22 @@ pub fn load_dem_from_bytes(
     finalize_dem(dem)
 }
 
-/// Masks values below the minimum elevation as NaN and validates the georeferenced bounds.
+/// Validates the DEM and synchronizes its flat and row-oriented representations.
 fn finalize_dem(mut dem: Dem) -> Result<Dem, DataProcessorError> {
+    let expected_len = dem
+        .width
+        .checked_mul(dem.height)
+        .ok_or_else(|| DataProcessorError::DemError("DEM dimensions overflow".to_string()))?;
+    if dem.data1d.len() != expected_len {
+        return Err(DataProcessorError::DemError(format!(
+            "DEM data length {} does not match dimensions {}x{}",
+            dem.data1d.len(),
+            dem.width,
+            dem.height
+        )));
+    }
     dem.minimum_elevation = Dem::calculate_minimum_elevation(&dem.data1d);
-
-    dem.data1d = dem
-        .data1d
-        .into_iter()
-        .map(|v| {
-            if v >= dem.minimum_elevation {
-                v
-            } else {
-                f32::NAN
-            }
-        })
-        .collect();
+    dem.data = to_2d(&dem.data1d, dem.width, dem.height);
 
     if dem.bounds.xmin >= dem.bounds.xmax {
         return Err(DataProcessorError::DemError(format!(
@@ -964,7 +990,7 @@ mod tests {
             y: 800.0,
             z: Some(0.0),
         };
-        let (dx, dy) = dem.get_index(&pt);
+        let (dx, dy) = dem.get_index(&pt).expect("DEM scale should be valid");
         assert_eq!(dx, 73.3139648);
         assert_eq!(dy, 146.627930);
     }
@@ -1396,6 +1422,26 @@ NODATA_value  -9999
     }
 
     #[test]
+    fn test_load_dem_preserves_low_elevations_and_masks_explicit_nodata() {
+        let source = "\
+ncols 2
+nrows 2
+xllcorner 0
+yllcorner 0
+cellsize 1
+NODATA_value -9999
+-3.0 0.0
+-9999 2.0";
+        let dem = load_dem_from_bytes(source.as_bytes(), "asc", "low.asc").unwrap();
+
+        assert_eq!(dem.minimum_elevation, -3.0);
+        assert!(dem.data1d[0].is_nan());
+        assert_eq!(&dem.data1d[1..], &[2.0, -3.0, 0.0]);
+        assert!(dem.data[0][0].is_nan());
+        assert_eq!(dem.data[1], vec![-3.0, 0.0]);
+    }
+
+    #[test]
     fn test_load_dem_from_bytes_matches_path_loader() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sample.asc");
@@ -1517,10 +1563,13 @@ NODATA_value  -999
         assert_eq!(png_dem.height, asc_dem.height);
         assert_eq!(png_dem.cell_size, asc_dem.cell_size);
         assert_eq!(png_dem.bounds, asc_dem.bounds);
-        assert!(compute_core::utils::vecs_are_equal(
-            &png_dem.data1d,
-            &asc_dem.data1d
-        ));
+        let mismatch = png_dem
+            .data1d
+            .iter()
+            .zip(&asc_dem.data1d)
+            .enumerate()
+            .find(|(_, (png, asc))| png != asc && !(png.is_nan() && asc.is_nan()));
+        assert!(mismatch.is_none(), "first DEM mismatch: {mismatch:?}");
     }
 
     #[test]
