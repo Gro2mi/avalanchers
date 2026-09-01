@@ -118,6 +118,17 @@ impl Simulation {
         self.state
     }
 
+    /// Resets simulation progress while preserving the loaded DEM and settings.
+    pub fn reset(&mut self) {
+        self.gpu_cache.reset_all();
+        self.sim_info = SimInfo::default();
+        self.state = if self.dem.data1d.is_empty() {
+            SimulationState::DemMissing
+        } else {
+            SimulationState::DemLoaded
+        };
+    }
+
     /// GPU device, queue and buffers backing the simulation. A renderer can bind these
     /// directly to visualise the simulation without copying data back to the CPU.
     pub fn orchestrator(&self) -> &ComputeOrchestrator {
@@ -406,8 +417,15 @@ impl Simulation {
     }
 
     pub async fn run_n_steps(&mut self, steps: u32) -> Result<SimInfo> {
-        if self.state != SimulationState::Running {
+        if self.state >= SimulationState::Finished {
+            return Ok(self.sim_info);
+        }
+
+        if self.state < SimulationState::ParticlesInitialized {
             self.prepare().await?;
+        }
+
+        if self.state != SimulationState::Running {
             match self.settings.sim_model {
                 model if model == SimModel::Particle.as_int() => {
                     self.orchestrator

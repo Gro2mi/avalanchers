@@ -1,8 +1,7 @@
 //! Live avalanche simulation viewer.
 //!
-//! The simulation runs on a worker thread while the main thread renders. Both share one
-//! wgpu device, and the renderer binds the simulation's own storage buffers, so particle
-//! and grid state is displayed as it is produced - nothing is copied back to the CPU.
+//! Each redraw advances the simulation by one step and then renders the simulation's own
+//! storage buffers on the same wgpu queue. No particle or grid data is copied to the CPU.
 //!
 //! Usage: `cargo run -p render_core --example live_sim -- [data/avaframe/avaAlr.png] [exaggeration]`
 //!
@@ -11,11 +10,11 @@
 //! `P` toggles particles.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
-use compute_core::buffers::BufferName;
+use compute_core::{SimInfo, buffers::BufferName};
 use render_core::{OverlayRange, ParticleBuffers, Renderer, TerrainData};
-use simulation::Simulation;
+use simulation::{Simulation, SimulationState};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -24,6 +23,8 @@ use winit::window::{Icon, Window, WindowId};
 
 const ORBIT_SPEED: f32 = 0.005;
 const ZOOM_SPEED: f32 = 0.1;
+const STEPS_PER_FRAME: u32 = 1;
+const DEFAULT_SIM_SPEED: f32 = 4.0;
 const DEFAULT_DEM: &str = "data/avaframe/avaAlr.png";
 const WINDOW_ICON: &[u8] = include_bytes!("../../../frontend/icons/android-chrome-512x512.png");
 
@@ -71,10 +72,10 @@ impl Overlay {
     }
 }
 
-/// Handles to the simulation's GPU state, cloned before the simulation moves to its
-/// worker thread. wgpu resources are reference counted, so these keep pointing at the
-/// buffers the simulation keeps writing to.
+/// The simulation and cloned handles to its GPU state. wgpu resources are reference
+/// counted, so the renderer observes the buffers `run_n_steps` keeps writing to.
 struct SimulationView {
+    simulation: Simulation,
     device: wgpu::Device,
     queue: wgpu::Queue,
     adapter: wgpu::Adapter,
@@ -83,7 +84,12 @@ struct SimulationView {
     grids: Vec<(BufferName, wgpu::Buffer)>,
     particles: [wgpu::Buffer; 3],
     particle_count: u32,
-    running: Arc<AtomicBool>,
+    info: SimInfo,
+    failed: bool,
+    final_info_reported: bool,
+    step_timings: Vec<(u32, Duration)>,
+    sim_speed: f32,
+    next_step_at: Instant,
 }
 
 impl SimulationView {
@@ -95,13 +101,152 @@ impl SimulationView {
             .expect("grid buffer was cloned at startup")
             .1
     }
+
+    fn advance_frame(&mut self) {
+        if self.failed || self.simulation.get_state() >= SimulationState::Finished {
+            self.report_final_info();
+            return;
+        }
+        let now = Instant::now();
+        if now < self.next_step_at {
+            return;
+        }
+
+        let scheduled_step_at = self.next_step_at;
+        let previous_timestep = self.info.timestep;
+        let started = Instant::now();
+        match pollster::block_on(self.simulation.run_n_steps(STEPS_PER_FRAME)) {
+            Ok(info) => {
+                self.info = info;
+                self.record_step_timing(previous_timestep, started.elapsed());
+                if self.simulation.get_state() < SimulationState::Finished {
+                    let interval = (self.info.dt / self.sim_speed).max(0.001);
+                    self.next_step_at = scheduled_step_at + Duration::from_secs_f32(interval);
+                }
+                self.report_final_info();
+            }
+            Err(error) => {
+                self.failed = true;
+                tracing::error!("simulation step failed: {error}");
+            }
+        }
+    }
+
+    fn adjust_speed(&mut self, factor: f32) {
+        self.sim_speed = (self.sim_speed * factor).clamp(0.25, 256.0);
+        self.next_step_at = Instant::now();
+        tracing::info!("simulation speed: {:.2}x", self.sim_speed);
+    }
+
+    fn restart(&mut self) -> anyhow::Result<()> {
+        self.simulation.reset();
+        self.info = pollster::block_on(self.simulation.run_n_steps(0))?;
+
+        let orchestrator = self.simulation.orchestrator();
+        let clone_buffer = |name: BufferName| -> anyhow::Result<wgpu::Buffer> {
+            orchestrator
+                .resources
+                .get_buffer(&name)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("simulation buffer '{name}' is missing"))
+        };
+        self.grids = [
+            BufferName::GridPeakVelocity,
+            BufferName::GridPeakFlowThickness,
+            BufferName::GridMass,
+        ]
+        .into_iter()
+        .map(|name| Ok((name.clone(), clone_buffer(name)?)))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+        self.particles = [
+            clone_buffer(BufferName::ParticlesPosition)?,
+            clone_buffer(BufferName::ParticlesVelocity)?,
+            clone_buffer(BufferName::ParticlesStopped)?,
+        ];
+        self.particle_count = self.info.number_particles;
+        self.failed = false;
+        self.final_info_reported = false;
+        self.step_timings.clear();
+        self.next_step_at = Instant::now();
+        tracing::info!("simulation restarted");
+        Ok(())
+    }
+
+    fn run_to_completion(&mut self) -> anyhow::Result<()> {
+        while self.simulation.get_state() < SimulationState::Finished {
+            let previous_timestep = self.info.timestep;
+            let started = Instant::now();
+            self.info = pollster::block_on(self.simulation.run_n_steps(256))?;
+            self.record_step_timing(previous_timestep, started.elapsed());
+        }
+        self.report_final_info();
+        Ok(())
+    }
+
+    fn record_step_timing(&mut self, previous_timestep: u32, duration: Duration) {
+        let steps = self.info.timestep.saturating_sub(previous_timestep);
+        if steps == 0 {
+            return;
+        }
+        tracing::info!(
+            "simulation step {} (+{}) took {:.3} ms",
+            self.info.timestep,
+            steps,
+            duration.as_secs_f64() * 1000.0
+        );
+        self.step_timings.push((steps, duration));
+    }
+
+    fn report_final_info(&mut self) {
+        if !self.final_info_reported && self.simulation.get_state() >= SimulationState::Finished {
+            tracing::info!("simulation finished: {:?}", self.info);
+            self.report_timing_summary();
+            self.final_info_reported = true;
+        }
+    }
+
+    fn report_timing_summary(&self) {
+        if self.step_timings.is_empty() {
+            tracing::info!("simulation timing summary: no steps completed");
+            return;
+        }
+
+        let total_steps: u32 = self.step_timings.iter().map(|(steps, _)| steps).sum();
+        let total_duration: Duration = self
+            .step_timings
+            .iter()
+            .map(|(_, duration)| *duration)
+            .sum();
+        let min_duration = self
+            .step_timings
+            .iter()
+            .map(|(_, duration)| *duration)
+            .min()
+            .unwrap();
+        let max_duration = self
+            .step_timings
+            .iter()
+            .map(|(_, duration)| *duration)
+            .max()
+            .unwrap();
+        let total_seconds = total_duration.as_secs_f64();
+        let average_ms_per_step = total_seconds * 1000.0 / f64::from(total_steps);
+        let steps_per_second = f64::from(total_steps) / total_seconds.max(f64::EPSILON);
+
+        tracing::info!(
+            "simulation timing summary: {} steps in {} batches, total {:.3} s, average {:.3} ms/step, min batch {:.3} ms, max batch {:.3} ms, {:.2} steps/s",
+            total_steps,
+            self.step_timings.len(),
+            total_seconds,
+            average_ms_per_step,
+            min_duration.as_secs_f64() * 1000.0,
+            max_duration.as_secs_f64() * 1000.0,
+            steps_per_second,
+        );
+    }
 }
 
-fn start_simulation(
-    dem_path: &str,
-    exaggeration: f32,
-    live: bool,
-) -> anyhow::Result<SimulationView> {
+fn start_simulation(dem_path: &str, exaggeration: f32) -> anyhow::Result<SimulationView> {
     let mut sim = pollster::block_on(Simulation::new())?;
     pollster::block_on(sim.create_example(dem_path))?;
     tracing::info!(
@@ -111,9 +256,6 @@ fn start_simulation(
         sim.dem.cell_size
     );
 
-    // Allocates and fills the particle buffers; they must exist before we clone the handles.
-    pollster::block_on(sim.prepare())?;
-
     let terrain = TerrainData::new(
         sim.dem.width as u32,
         sim.dem.height as u32,
@@ -122,6 +264,8 @@ fn start_simulation(
     )?
     .with_vertical_exaggeration(exaggeration);
 
+    // Lazily prepares the simulation and incremental pipelines without advancing time.
+    let info = pollster::block_on(sim.run_n_steps(0))?;
     let orchestrator = sim.orchestrator();
     let clone_buffer = |name: BufferName| -> anyhow::Result<wgpu::Buffer> {
         orchestrator
@@ -146,49 +290,28 @@ fn start_simulation(
         clone_buffer(BufferName::ParticlesStopped)?,
     ];
 
-    let view = SimulationView {
-        device: orchestrator.device.clone(),
-        queue: orchestrator.queue.clone(),
-        adapter: orchestrator.adapter.clone(),
-        instance: orchestrator.instance.clone(),
+    let device = orchestrator.device.clone();
+    let queue = orchestrator.queue.clone();
+    let adapter = orchestrator.adapter.clone();
+    let instance = orchestrator.instance.clone();
+
+    Ok(SimulationView {
+        simulation: sim,
+        device,
+        queue,
+        adapter,
+        instance,
         terrain,
         grids,
         particles,
-        particle_count: sim.number_particles(),
-        running: Arc::new(AtomicBool::new(true)),
-    };
-
-    let running = view.running.clone();
-    if live {
-        std::thread::spawn(move || {
-            if let Err(e) = pollster::block_on(sim.compute_particles()) {
-                tracing::error!("simulation failed: {e}");
-            }
-            running.store(false, Ordering::Relaxed);
-            tracing::info!("simulation finished");
-        });
-    } else {
-        pollster::block_on(sim.compute_particles())?;
-        running.store(false, Ordering::Relaxed);
-
-        let positions = pollster::block_on(
-            sim.orchestrator()
-                .read_buffer::<[f32; 2]>(BufferName::ParticlesPosition),
-        )?;
-        let (mut min_x, mut max_x, mut min_y, mut max_y) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
-        for p in positions.iter().take(view.particle_count as usize) {
-            min_x = min_x.min(p[0]);
-            max_x = max_x.max(p[0]);
-            min_y = min_y.min(p[1]);
-            max_y = max_y.max(p[1]);
-        }
-        tracing::info!(
-            "particle positions: x {min_x}..{max_x} y {min_y}..{max_y} (of {} read)",
-            positions.len()
-        );
-    }
-
-    Ok(view)
+        particle_count: info.number_particles,
+        info,
+        failed: false,
+        final_info_reported: false,
+        step_timings: Vec::new(),
+        sim_speed: DEFAULT_SIM_SPEED,
+        next_step_at: Instant::now(),
+    })
 }
 
 fn write_snapshot(sim: &SimulationView, overlay: Overlay, path: &str) -> anyhow::Result<()> {
@@ -220,25 +343,7 @@ fn write_snapshot(sim: &SimulationView, overlay: Overlay, path: &str) -> anyhow:
     renderer.particles_mut().set_max_velocity(30.0);
     renderer
         .particles_mut()
-        .set_radius(sim.terrain.cell_size() * 6.0);
-
-    let (min_e, max_e) = sim.terrain.elevation_range();
-    let vp = renderer.camera.view_projection();
-    let samples = sim.terrain.fit_samples();
-    let max_ndc = samples
-        .iter()
-        .map(|p| {
-            let n = render_core::math::transform_point(vp, *p);
-            n.x.abs().max(n.y.abs())
-        })
-        .fold(0.0f32, f32::max);
-    tracing::info!(
-        "terrain extent {:?} elevation {min_e}..{max_e} target {:?} distance {} samples {} max_ndc {max_ndc}",
-        sim.terrain.extent(),
-        renderer.camera.target,
-        renderer.camera.distance,
-        samples.len(),
-    );
+        .set_radius(sim.terrain.cell_size() * 0.9);
 
     let pixels = render_core::capture::render_to_rgba8(
         &sim.device,
@@ -455,6 +560,20 @@ impl ApplicationHandler for Viewer {
                         self.show_particles = !self.show_particles;
                         self.apply_particles();
                     }
+                    Key::Character("+") => self.sim.adjust_speed(2.0),
+                    Key::Character("-") => self.sim.adjust_speed(0.5),
+                    Key::Character("v" | "V") => {
+                        if let Err(error) = self.sim.restart() {
+                            self.sim.failed = true;
+                            tracing::error!("simulation restart failed: {error}");
+                        } else {
+                            self.apply_overlay();
+                            self.apply_particles();
+                            if let Some(view) = self.window.as_ref() {
+                                view.window.request_redraw();
+                            }
+                        }
+                    }
                     Key::Character("r" | "R") => {
                         if let Some(view) = self.window.as_mut() {
                             let aspect =
@@ -467,14 +586,6 @@ impl ApplicationHandler for Viewer {
                 }
             }
             WindowEvent::RedrawRequested => {
-                if let Some(view) = self.window.as_ref() {
-                    let title = if self.sim.running.load(Ordering::Relaxed) {
-                        "Avalanchers - Live Simulation"
-                    } else {
-                        "Avalanchers - Simulation Finished"
-                    };
-                    view.window.set_title(title);
-                }
                 let device = self.sim.device.clone();
                 let queue = self.sim.queue.clone();
                 let Some(view) = self.window.as_mut() else {
@@ -496,6 +607,21 @@ impl ApplicationHandler for Viewer {
                     }
                 };
 
+                self.sim.advance_frame();
+                let title = if self.sim.failed {
+                    "Avalanchers - Simulation Failed".to_string()
+                } else if self.sim.simulation.get_state() < SimulationState::Finished {
+                    format!(
+                        "Avalanchers - step {} - {:.2} s - {:.2}x",
+                        self.sim.info.timestep, self.sim.info.elapsed_time, self.sim.sim_speed
+                    )
+                } else {
+                    format!(
+                        "Avalanchers - Simulation Finished - step {} - {:.2} s - {:.2}x",
+                        self.sim.info.timestep, self.sim.info.elapsed_time, self.sim.sim_speed
+                    )
+                };
+                view.window.set_title(&title);
                 let target = frame
                     .texture
                     .create_view(&wgpu::TextureViewDescriptor::default());
@@ -531,9 +657,10 @@ fn main() -> anyhow::Result<()> {
         snapshot
     );
 
-    let sim = start_simulation(&dem_path, exaggeration, snapshot.is_none())?;
+    let mut sim = start_simulation(&dem_path, exaggeration)?;
 
     if let Some(path) = snapshot {
+        sim.run_to_completion()?;
         write_snapshot(&sim, Overlay::PeakFlowVelocity, &path)?;
         return Ok(());
     }
