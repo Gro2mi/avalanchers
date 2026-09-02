@@ -7,14 +7,17 @@
 //!
 //! Controls: left drag orbits, right drag pans, scroll zooms, `R` resets the view,
 //! `0` hides the overlay, `1` peak flow velocity, `2` peak flow thickness, `3` grid mass,
-//! `P` toggles particles.
+//! `4` release areas, `5` slope angle, `6` slope aspect, `7` roughness, `P` toggles
+//! particles. The egui panel switches the simulation model (particle/mpm).
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use compute_core::{SimInfo, buffers::BufferName};
+use compute_core::settings::{Settings, SimModel};
+use compute_core::{ComputeOrchestrator, SimInfo, buffers::BufferName};
 use render_core::{OverlayRange, ParticleBuffers, Renderer, TerrainData};
 use simulation::{Simulation, SimulationState};
+use wgpu::util::DeviceExt;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -28,6 +31,17 @@ const DEFAULT_SIM_SPEED: f32 = 4.0;
 const DEFAULT_DEM: &str = "data/avaframe/avaAlr.png";
 const WINDOW_ICON: &[u8] = include_bytes!("../../../frontend/icons/android-chrome-512x512.png");
 
+/// Grid buffers cloned from the simulation, both at startup and after a restart.
+const GRID_BUFFERS: [BufferName; 7] = [
+    BufferName::GridPeakVelocity,
+    BufferName::GridPeakFlowThickness,
+    BufferName::GridMass,
+    BufferName::ReleaseAreas,
+    BufferName::SlopeAngle,
+    BufferName::SlopeAspect,
+    BufferName::Roughness,
+];
+
 fn window_icon() -> anyhow::Result<Icon> {
     let image = image::load_from_memory(WINDOW_ICON)?.into_rgba8();
     let (width, height) = image.dimensions();
@@ -40,6 +54,10 @@ enum Overlay {
     PeakFlowVelocity,
     PeakFlowThickness,
     GridMass,
+    ReleaseAreas,
+    SlopeAngle,
+    SlopeAspect,
+    Roughness,
 }
 
 impl Overlay {
@@ -49,17 +67,40 @@ impl Overlay {
             Overlay::PeakFlowVelocity => Some(BufferName::GridPeakVelocity),
             Overlay::PeakFlowThickness => Some(BufferName::GridPeakFlowThickness),
             Overlay::GridMass => Some(BufferName::GridMass),
+            Overlay::ReleaseAreas => Some(BufferName::ReleaseAreas),
+            Overlay::SlopeAngle => Some(BufferName::SlopeAngle),
+            Overlay::SlopeAspect => Some(BufferName::SlopeAspect),
+            Overlay::Roughness => Some(BufferName::Roughness),
         }
     }
 
-    /// Colour ramp bounds in the units of each field.
+    /// Colour ramp bounds in the units of each field, plus the legend label.
     fn range(self) -> OverlayRange {
-        match self {
+        let range = match self {
             Overlay::None => OverlayRange::default(),
-            Overlay::PeakFlowVelocity => OverlayRange::new(0.0, 30.0).with_threshold(0.1),
-            Overlay::PeakFlowThickness => OverlayRange::new(0.0, 3.0).with_threshold(0.01),
-            Overlay::GridMass => OverlayRange::new(0.0, 5_000.0).with_threshold(1.0),
-        }
+            Overlay::PeakFlowVelocity => OverlayRange::new(0.0, 40.0)
+                .with_threshold(0.1)
+                .with_unit("m/s"),
+            Overlay::PeakFlowThickness => OverlayRange::new(0.0, 10.0)
+                .with_threshold(0.01)
+                .with_unit("m"),
+            Overlay::GridMass => OverlayRange::new(0.0, 5_000.0)
+                .with_threshold(1.0)
+                .with_unit("kg"),
+            // Slab thickness in metres; release textures typically hold 1.0 m.
+            Overlay::ReleaseAreas => OverlayRange::new(0.0, 2.0)
+                .with_threshold(0.01)
+                .with_unit("m"),
+            // Degrees; steeper than the default 60° release window saturates hot.
+            Overlay::SlopeAngle => OverlayRange::new(0.0, 60.0).with_unit("deg"),
+            // Degrees clockwise from north; flat cells hold -1 and stay bare.
+            Overlay::SlopeAspect => OverlayRange::new(0.0, 360.0)
+                .with_threshold(-0.5)
+                .with_unit("deg"),
+            // Dimensionless, 0 (smooth) to 1 (rough); border cells are forced to 1.
+            Overlay::Roughness => OverlayRange::new(0.0, 1.0),
+        };
+        range.with_label(self.label())
     }
 
     fn label(self) -> &'static str {
@@ -68,8 +109,46 @@ impl Overlay {
             Overlay::PeakFlowVelocity => "peak flow velocity",
             Overlay::PeakFlowThickness => "peak flow thickness",
             Overlay::GridMass => "grid mass",
+            Overlay::ReleaseAreas => "release areas",
+            Overlay::SlopeAngle => "slope angle",
+            Overlay::SlopeAspect => "slope aspect",
+            Overlay::Roughness => "roughness",
         }
     }
+}
+
+/// Clones the particle buffers the renderer binds. MPM keeps no vertical velocity
+/// buffer, so it gets a zero-filled stand-in and colouring falls back to horizontal
+/// speed; every other particle buffer exists for both models.
+fn clone_particle_buffers(
+    orchestrator: &ComputeOrchestrator,
+    particle_count: u32,
+) -> anyhow::Result<[wgpu::Buffer; 4]> {
+    let clone_buffer = |name: BufferName| -> anyhow::Result<wgpu::Buffer> {
+        orchestrator
+            .resources
+            .get_buffer(&name)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("simulation buffer '{name}' is missing"))
+    };
+
+    let velocity_z = clone_buffer(BufferName::ParticlesVelocityZ).unwrap_or_else(|_| {
+        tracing::debug!("no vertical velocity buffer; colouring by horizontal speed");
+        orchestrator
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Zero Vertical Velocity"),
+                contents: bytemuck::cast_slice(&vec![0.0f32; particle_count as usize]),
+                usage: wgpu::BufferUsages::STORAGE,
+            })
+    });
+
+    Ok([
+        clone_buffer(BufferName::ParticlesPosition)?,
+        clone_buffer(BufferName::ParticlesVelocity)?,
+        velocity_z,
+        clone_buffer(BufferName::ParticlesStopped)?,
+    ])
 }
 
 /// The simulation and cloned handles to its GPU state. wgpu resources are reference
@@ -82,9 +161,11 @@ struct SimulationView {
     instance: wgpu::Instance,
     terrain: TerrainData,
     grids: Vec<(BufferName, wgpu::Buffer)>,
-    particles: [wgpu::Buffer; 3],
+    particles: [wgpu::Buffer; 4],
     particle_count: u32,
     info: SimInfo,
+    dem_path: String,
+    release_areas_path: String,
     failed: bool,
     final_info_reported: bool,
     step_timings: Vec<(u32, Duration)>,
@@ -100,6 +181,10 @@ impl SimulationView {
             .find(|(n, _)| n == name)
             .expect("grid buffer was cloned at startup")
             .1
+    }
+
+    fn current_model(&self) -> SimModel {
+        SimModel::from_int(self.simulation.settings.sim_model).unwrap_or(SimModel::Particle)
     }
 
     fn advance_frame(&mut self) {
@@ -138,37 +223,53 @@ impl SimulationView {
         tracing::info!("simulation speed: {:.2}x", self.sim_speed);
     }
 
-    fn restart(&mut self) -> anyhow::Result<()> {
-        self.simulation.reset();
-        self.info = pollster::block_on(self.simulation.run_n_steps(0))?;
-
+    /// Re-clones the GPU buffers after the simulation was reset or rebuilt. Model
+    /// switches change which buffers exist, so this must run after every rebuild.
+    fn refresh_buffers(&mut self) -> anyhow::Result<()> {
         let orchestrator = self.simulation.orchestrator();
-        let clone_buffer = |name: BufferName| -> anyhow::Result<wgpu::Buffer> {
+        let clone_grid = |name: BufferName| -> anyhow::Result<(BufferName, wgpu::Buffer)> {
             orchestrator
                 .resources
                 .get_buffer(&name)
                 .cloned()
+                .map(|buffer| (name.clone(), buffer))
                 .ok_or_else(|| anyhow::anyhow!("simulation buffer '{name}' is missing"))
         };
-        self.grids = [
-            BufferName::GridPeakVelocity,
-            BufferName::GridPeakFlowThickness,
-            BufferName::GridMass,
-        ]
-        .into_iter()
-        .map(|name| Ok((name.clone(), clone_buffer(name)?)))
-        .collect::<anyhow::Result<Vec<_>>>()?;
-        self.particles = [
-            clone_buffer(BufferName::ParticlesPosition)?,
-            clone_buffer(BufferName::ParticlesVelocity)?,
-            clone_buffer(BufferName::ParticlesStopped)?,
-        ];
+        self.grids = GRID_BUFFERS
+            .into_iter()
+            .map(clone_grid)
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        self.particles = clone_particle_buffers(orchestrator, self.info.number_particles)?;
         self.particle_count = self.info.number_particles;
         self.failed = false;
         self.final_info_reported = false;
         self.step_timings.clear();
         self.next_step_at = Instant::now();
+        Ok(())
+    }
+
+    fn restart(&mut self) -> anyhow::Result<()> {
+        self.simulation.reset();
+        self.info = pollster::block_on(self.simulation.run_n_steps(0))?;
+        self.refresh_buffers()?;
         tracing::info!("simulation restarted");
+        Ok(())
+    }
+
+    /// Rebuilds the simulation with a different model. Settings are baked in when the
+    /// simulation prepares, so a model change means a full recreate; the DEM is re-read
+    /// from disk as part of that.
+    fn apply_model(&mut self, model: SimModel) -> anyhow::Result<()> {
+        let settings = Settings {
+            dem_path: Some(self.dem_path.clone()),
+            release_areas_path: Some(self.release_areas_path.clone()),
+            sim_model: Some(model),
+            ..Settings::default()
+        };
+        pollster::block_on(self.simulation.create(settings))?;
+        self.info = pollster::block_on(self.simulation.run_n_steps(0))?;
+        self.refresh_buffers()?;
+        tracing::info!("simulation rebuilt with the {model} model");
         Ok(())
     }
 
@@ -248,7 +349,20 @@ impl SimulationView {
 
 fn start_simulation(dem_path: &str, exaggeration: f32) -> anyhow::Result<SimulationView> {
     let mut sim = pollster::block_on(Simulation::new())?;
-    pollster::block_on(sim.create_example(dem_path))?;
+    // Same setup as `Simulation::create_example`, kept explicit so the paths can be
+    // stored for model rebuilds.
+    let release_areas_path = dem_path.replace(".png", "releaseTexture.png");
+    let model = std::env::var("LIVE_SIM_MODEL")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(SimModel::Particle);
+    let settings = Settings {
+        dem_path: Some(dem_path.to_string()),
+        release_areas_path: Some(release_areas_path.clone()),
+        sim_model: Some(model),
+        ..Settings::default()
+    };
+    pollster::block_on(sim.create(settings))?;
     tracing::info!(
         "Loaded DEM {}x{} at {} m resolution",
         sim.dem.width,
@@ -275,20 +389,12 @@ fn start_simulation(dem_path: &str, exaggeration: f32) -> anyhow::Result<Simulat
             .ok_or_else(|| anyhow::anyhow!("simulation buffer '{name}' is missing"))
     };
 
-    let grids = [
-        BufferName::GridPeakVelocity,
-        BufferName::GridPeakFlowThickness,
-        BufferName::GridMass,
-    ]
-    .into_iter()
-    .map(|name| Ok((name.clone(), clone_buffer(name)?)))
-    .collect::<anyhow::Result<Vec<_>>>()?;
+    let grids = GRID_BUFFERS
+        .into_iter()
+        .map(|name| Ok((name.clone(), clone_buffer(name)?)))
+        .collect::<anyhow::Result<Vec<_>>>()?;
 
-    let particles = [
-        clone_buffer(BufferName::ParticlesPosition)?,
-        clone_buffer(BufferName::ParticlesVelocity)?,
-        clone_buffer(BufferName::ParticlesStopped)?,
-    ];
+    let particles = clone_particle_buffers(orchestrator, info.number_particles)?;
 
     let device = orchestrator.device.clone();
     let queue = orchestrator.queue.clone();
@@ -306,6 +412,8 @@ fn start_simulation(dem_path: &str, exaggeration: f32) -> anyhow::Result<Simulat
         particles,
         particle_count: info.number_particles,
         info,
+        dem_path: dem_path.to_string(),
+        release_areas_path,
         failed: false,
         final_info_reported: false,
         step_timings: Vec::new(),
@@ -336,7 +444,8 @@ fn write_snapshot(sim: &SimulationView, overlay: Overlay, path: &str) -> anyhow:
         (std::env::var("LIVE_SIM_NO_PARTICLES").is_err()).then_some(ParticleBuffers {
             position: &sim.particles[0],
             velocity: &sim.particles[1],
-            stopped: &sim.particles[2],
+            velocity_z: &sim.particles[2],
+            stopped: &sim.particles[3],
         }),
     );
     renderer.particles_mut().set_count(sim.particle_count);
@@ -362,6 +471,8 @@ struct ViewerWindow {
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
     renderer: Renderer,
+    egui_state: egui_winit::State,
+    egui_renderer: egui_wgpu::Renderer,
 }
 
 struct Viewer {
@@ -372,11 +483,14 @@ struct Viewer {
     panning: bool,
     overlay: Overlay,
     show_particles: bool,
+    /// Model selected in the settings panel; applied on the button click.
+    ui_model: SimModel,
 }
 
 impl Viewer {
     fn new(sim: SimulationView) -> Self {
         Self {
+            ui_model: sim.current_model(),
             sim,
             window: None,
             cursor: None,
@@ -404,9 +518,26 @@ impl Viewer {
         let buffers = self.show_particles.then(|| ParticleBuffers {
             position: &self.sim.particles[0],
             velocity: &self.sim.particles[1],
-            stopped: &self.sim.particles[2],
+            velocity_z: &self.sim.particles[2],
+            stopped: &self.sim.particles[3],
         });
         view.renderer.set_particles(&self.sim.device, buffers);
+    }
+
+    /// Rebuilds the simulation with the selected model and rebinds every buffer the
+    /// renderer watches.
+    fn rebuild_with_model(&mut self, model: SimModel) -> anyhow::Result<()> {
+        self.ui_model = model;
+        self.sim.apply_model(model)?;
+        self.apply_overlay();
+        self.apply_particles();
+        if let Some(view) = self.window.as_mut() {
+            view.renderer
+                .particles_mut()
+                .set_count(self.sim.particle_count);
+            view.window.request_redraw();
+        }
+        Ok(())
     }
 
     fn resize(&mut self, width: u32, height: u32) {
@@ -470,11 +601,28 @@ impl ApplicationHandler for Viewer {
             &self.sim.terrain,
         );
 
+        let egui_ctx = egui::Context::default();
+        let egui_state = egui_winit::State::new(
+            egui_ctx,
+            egui::ViewportId::ROOT,
+            window.as_ref(),
+            None,
+            None,
+            None,
+        );
+        let egui_renderer = egui_wgpu::Renderer::new(
+            &self.sim.device,
+            config.format,
+            egui_wgpu::RendererOptions::default(),
+        );
+
         self.window = Some(ViewerWindow {
             window,
             surface,
             config,
             renderer,
+            egui_state,
+            egui_renderer,
         });
         if let Some(view) = self.window.as_ref() {
             view.window.request_redraw();
@@ -491,6 +639,25 @@ impl ApplicationHandler for Viewer {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        // egui sees every event first. Pointer events consumed by egui (over the panel)
+        // must not drive the camera, but keyboard focus alone must not swallow the
+        // viewer's single-key shortcuts: egui grabs focus from any click on the panel
+        // and keeps it, so keys are only consumed while a popup is open or a text
+        // field is focused.
+        if let Some(view) = self.window.as_mut() {
+            let response = view.egui_state.on_window_event(&view.window, &event);
+            let egui_needs_keys = view.egui_state.egui_ctx().any_popup_open()
+                || view.egui_state.egui_ctx().text_edit_focused();
+            let consumed = match event {
+                WindowEvent::KeyboardInput { .. } => response.consumed && egui_needs_keys,
+                _ => response.consumed,
+            };
+            if consumed {
+                return;
+            }
+        }
+
+        let mut pending_model: Option<SimModel> = None;
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => self.resize(size.width, size.height),
@@ -556,13 +723,29 @@ impl ApplicationHandler for Viewer {
                         self.overlay = Overlay::GridMass;
                         self.apply_overlay();
                     }
+                    Key::Character("4") => {
+                        self.overlay = Overlay::ReleaseAreas;
+                        self.apply_overlay();
+                    }
+                    Key::Character("5") => {
+                        self.overlay = Overlay::SlopeAngle;
+                        self.apply_overlay();
+                    }
+                    Key::Character("6") => {
+                        self.overlay = Overlay::SlopeAspect;
+                        self.apply_overlay();
+                    }
+                    Key::Character("7") => {
+                        self.overlay = Overlay::Roughness;
+                        self.apply_overlay();
+                    }
                     Key::Character("p" | "P") => {
                         self.show_particles = !self.show_particles;
                         self.apply_particles();
                     }
                     Key::Character("+") => self.sim.adjust_speed(2.0),
                     Key::Character("-") => self.sim.adjust_speed(0.5),
-                    Key::Character("v" | "V") => {
+                    Key::Character("r" | "R") => {
                         if let Err(error) = self.sim.restart() {
                             self.sim.failed = true;
                             tracing::error!("simulation restart failed: {error}");
@@ -574,7 +757,7 @@ impl ApplicationHandler for Viewer {
                             }
                         }
                     }
-                    Key::Character("r" | "R") => {
+                    Key::Character("v" | "V") => {
                         if let Some(view) = self.window.as_mut() {
                             let aspect =
                                 view.config.width as f32 / view.config.height.max(1) as f32;
@@ -608,16 +791,17 @@ impl ApplicationHandler for Viewer {
                 };
 
                 self.sim.advance_frame();
+                let overlay = self.overlay.label();
                 let title = if self.sim.failed {
-                    "Avalanchers - Simulation Failed".to_string()
+                    format!("Avalanchers - Simulation Failed - overlay: {overlay}")
                 } else if self.sim.simulation.get_state() < SimulationState::Finished {
                     format!(
-                        "Avalanchers - step {} - {:.2} s - {:.2}x",
+                        "Avalanchers - step {} - {:.2} s - {:.2}x - overlay: {overlay}",
                         self.sim.info.timestep, self.sim.info.elapsed_time, self.sim.sim_speed
                     )
                 } else {
                     format!(
-                        "Avalanchers - Simulation Finished - step {} - {:.2} s - {:.2}x",
+                        "Avalanchers - Simulation Finished - step {} - {:.2} s - {:.2}x - overlay: {overlay}",
                         self.sim.info.timestep, self.sim.info.elapsed_time, self.sim.sim_speed
                     )
                 };
@@ -626,10 +810,116 @@ impl ApplicationHandler for Viewer {
                     .texture
                     .create_view(&wgpu::TextureViewDescriptor::default());
                 view.renderer.render(&device, &queue, &target);
+
+                // Settings panel, painted over the scene in the same frame.
+                let current = self.sim.current_model();
+                let (timestep, elapsed) = (self.sim.info.timestep, self.sim.info.elapsed_time);
+                let mut draft = self.ui_model;
+                let egui_ctx = view.egui_state.egui_ctx().clone();
+                let input = view.egui_state.take_egui_input(&view.window);
+                // `run_ui` (not bare `begin_pass`) so egui knows the root UI covers the
+                // viewport; otherwise it treats the whole background as an egui surface
+                // and consumes every mouse event meant for the camera.
+                let mut full_output = egui_ctx.run_ui(input, |root| {
+                    // Anchored top-right so the panel stays clear of the terrain drag area.
+                    egui::Window::new("Simulation")
+                        .pivot(egui::Align2::RIGHT_TOP)
+                        .default_pos(
+                            root.ctx().viewport_rect().right_top() + egui::vec2(-16.0, 16.0),
+                        )
+                        .default_width(240.0)
+                        .show(root.ctx(), |ui| {
+                            ui.label(format!("step {timestep} — {elapsed:.2} s"));
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                ui.label("model");
+                                egui::ComboBox::from_id_salt("sim_model")
+                                    .selected_text(draft.to_string())
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(
+                                            &mut draft,
+                                            SimModel::Particle,
+                                            "particle",
+                                        );
+                                        ui.selectable_value(&mut draft, SimModel::MPM, "mpm");
+                                    });
+                            });
+                            ui.add_enabled_ui(draft != current, |ui| {
+                                if ui.button("apply & restart").clicked() {
+                                    pending_model = Some(draft);
+                                }
+                            });
+                        });
+                });
+                view.egui_state
+                    .handle_platform_output(&view.window, full_output.platform_output);
+                self.ui_model = draft;
+
+                let pixels_per_point = egui_ctx.pixels_per_point();
+                let screen_descriptor = egui_wgpu::ScreenDescriptor {
+                    size_in_pixels: [view.config.width, view.config.height],
+                    pixels_per_point,
+                };
+                let paint_jobs = egui_ctx.tessellate(full_output.shapes, pixels_per_point);
+                for (id, deltas) in &full_output.textures_delta.set {
+                    for delta in deltas {
+                        view.egui_renderer
+                            .update_texture(&device, &queue, *id, delta);
+                    }
+                }
+                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("egui Encoder"),
+                });
+                view.egui_renderer.update_buffers(
+                    &device,
+                    &queue,
+                    &mut encoder,
+                    &paint_jobs,
+                    &screen_descriptor,
+                );
+                {
+                    let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("egui Pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &target,
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+                    view.egui_renderer.render(
+                        &mut pass.forget_lifetime(),
+                        &paint_jobs,
+                        &screen_descriptor,
+                    );
+                }
+                queue.submit(Some(encoder.finish()));
+                for id in &full_output.textures_delta.free {
+                    view.egui_renderer.free_texture(id);
+                }
+                // Mark the deltas as handled; epaint panics on drop otherwise.
+                full_output.textures_delta.clear();
+
                 queue.present(frame);
                 view.window.request_redraw();
             }
             _ => {}
+        }
+
+        // Model switches rebuild the simulation; running after the frame means the
+        // fresh buffers are only drawn on the next redraw.
+        if let Some(model) = pending_model {
+            if let Err(error) = self.rebuild_with_model(model) {
+                self.sim.failed = true;
+                tracing::error!("model rebuild failed: {error}");
+            }
         }
     }
 

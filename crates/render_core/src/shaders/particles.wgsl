@@ -18,6 +18,7 @@ struct Uniforms {
 @group(0) @binding(2) var<storage, read> velocities: array<vec2<f32>>;
 @group(0) @binding(3) var<storage, read> stopped: array<u32>;
 @group(0) @binding(4) var heightmap: texture_2d<f32>;
+@group(0) @binding(5) var<storage, read> velocities_z: array<f32>;
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -73,7 +74,9 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     var out: VertexOutput;
     out.clip_position = u.view_proj * vec4<f32>(world, 1.0);
     out.offset = offset;
-    out.speed = length(velocities[index]);
+    // Vertical velocity is zero for models without a z component, so the ramp still
+    // shows horizontal speed there.
+    out.speed = length(vec3<f32>(velocities[index], velocities_z[index]));
     out.moving = select(1.0, 0.0, stopped[index] != 0u);
     return out;
 }

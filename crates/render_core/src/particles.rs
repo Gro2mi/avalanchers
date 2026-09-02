@@ -8,8 +8,11 @@ use crate::camera::OrbitCamera;
 pub struct ParticleBuffers<'a> {
     /// `array<vec2<f32>>` of positions in the DEM plane, in metres.
     pub position: &'a wgpu::Buffer,
-    /// `array<vec2<f32>>` of velocities, used for colouring.
+    /// `array<vec2<f32>>` of horizontal velocities, used for colouring.
     pub velocity: &'a wgpu::Buffer,
+    /// `array<f32>` of vertical velocities, used for colouring. Models without one
+    /// (MPM) can pass a zero-filled buffer to colour by horizontal speed only.
+    pub velocity_z: &'a wgpu::Buffer,
     /// `array<u32>` where a non-zero entry marks a stopped particle.
     pub stopped: &'a wgpu::Buffer,
 }
@@ -107,6 +110,7 @@ impl ParticleRenderer {
                     },
                     count: None,
                 },
+                storage_entry(5),
             ],
         });
 
@@ -194,6 +198,10 @@ impl ParticleRenderer {
                     wgpu::BindGroupEntry {
                         binding: 4,
                         resource: wgpu::BindingResource::TextureView(&self.heightmap),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: buffers.velocity_z.as_entire_binding(),
                     },
                 ],
             })

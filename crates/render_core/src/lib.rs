@@ -6,6 +6,7 @@
 pub mod camera;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod capture;
+mod colorbar;
 pub mod math;
 pub mod particles;
 pub mod terrain;
@@ -16,6 +17,8 @@ pub use particles::{ParticleBuffers, ParticleRenderer};
 pub use terrain::{OverlayRange, TerrainData, TerrainRenderer};
 
 use anyhow::Result;
+
+use colorbar::ColorbarRenderer;
 
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
@@ -83,6 +86,7 @@ pub struct Renderer {
     pub clear_color: wgpu::Color,
     terrain: TerrainRenderer,
     particles: ParticleRenderer,
+    colorbar: ColorbarRenderer,
     depth_view: wgpu::TextureView,
     color_format: wgpu::TextureFormat,
     width: u32,
@@ -108,6 +112,7 @@ impl Renderer {
             terrain_renderer.heightmap_view().clone(),
             terrain,
         );
+        let colorbar = ColorbarRenderer::new(device, queue, color_format);
 
         Self {
             camera: OrbitCamera::framing(terrain, width as f32 / height as f32),
@@ -119,6 +124,7 @@ impl Renderer {
             },
             terrain: terrain_renderer,
             particles,
+            colorbar,
             depth_view: create_depth_view(device, width, height),
             color_format,
             width,
@@ -132,7 +138,8 @@ impl Renderer {
 
     /// Tints the terrain with a scalar simulation grid such as peak flow velocity,
     /// peak flow thickness or grid mass. The buffer must hold `width * height` `f32`
-    /// values indexed as `y * width + x` and live on the same device.
+    /// values indexed as `y * width + x` and live on the same device. While a buffer
+    /// is attached, a colour bar legend for `range` is drawn at the right edge.
     pub fn set_grid_overlay(
         &mut self,
         device: &wgpu::Device,
@@ -140,6 +147,7 @@ impl Renderer {
         range: OverlayRange,
     ) {
         self.terrain.set_overlay(device, buffer, range);
+        self.colorbar.set_enabled_range(buffer.is_some(), range);
     }
 
     /// Attaches the simulation's particle buffers. Passing `None` hides the particles.
@@ -150,6 +158,7 @@ impl Renderer {
     /// Rescales the overlay colour ramp, for example as the simulation's peak values grow.
     pub fn set_overlay_range(&mut self, range: OverlayRange) {
         self.terrain.set_overlay_range(range);
+        self.colorbar.set_range(range);
     }
 
     pub fn particles_mut(&mut self) -> &mut ParticleRenderer {
@@ -179,6 +188,7 @@ impl Renderer {
     ) {
         self.terrain.update_camera(queue, &self.camera);
         self.particles.update_camera(queue, &self.camera);
+        self.colorbar.prepare(queue, self.width, self.height);
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Render Encoder"),
@@ -209,6 +219,7 @@ impl Renderer {
             });
             self.terrain.draw(&mut pass);
             self.particles.draw(&mut pass);
+            self.colorbar.draw(&mut pass);
         }
         queue.submit(Some(encoder.finish()));
     }

@@ -198,6 +198,10 @@ pub struct OverlayRange {
     pub max: f32,
     /// Cells at or below this value stay bare terrain.
     pub threshold: f32,
+    /// Variable name rendered along the colour bar legend, e.g. "peak flow velocity".
+    pub label: &'static str,
+    /// Unit suffix rendered beside the colour bar legend, e.g. "m/s".
+    pub unit: &'static str,
 }
 
 impl Default for OverlayRange {
@@ -206,6 +210,8 @@ impl Default for OverlayRange {
             min: 0.0,
             max: 1.0,
             threshold: 0.0,
+            label: "",
+            unit: "",
         }
     }
 }
@@ -216,11 +222,23 @@ impl OverlayRange {
             min,
             max,
             threshold: min,
+            label: "",
+            unit: "",
         }
     }
 
     pub fn with_threshold(mut self, threshold: f32) -> Self {
         self.threshold = threshold;
+        self
+    }
+
+    pub fn with_label(mut self, label: &'static str) -> Self {
+        self.label = label;
+        self
+    }
+
+    pub fn with_unit(mut self, unit: &'static str) -> Self {
+        self.unit = unit;
         self
     }
 }

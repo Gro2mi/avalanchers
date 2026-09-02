@@ -237,31 +237,40 @@ fn particles_are_drawn_on_top_of_the_terrain() {
     let velocities: Vec<[f32; 2]> = (0..count).map(|i| [i as f32, 0.0]).collect();
     let stopped = vec![0u32; count as usize];
 
-    let with_particles = render_with(&ctx, &terrain, |renderer, device| {
-        let position = storage_buffer(device, &positions);
-        let velocity = storage_buffer(device, &velocities);
-        let stopped = storage_buffer(device, &stopped);
+    let render_particles = |velocities_z: &[f32]| {
+        render_with(&ctx, &terrain, |renderer, device| {
+            let position = storage_buffer(device, &positions);
+            let velocity = storage_buffer(device, &velocities);
+            let velocity_z = storage_buffer(device, velocities_z);
+            let stopped = storage_buffer(device, &stopped);
 
-        renderer.set_particles(
-            device,
-            Some(ParticleBuffers {
-                position: &position,
-                velocity: &velocity,
-                stopped: &stopped,
-            }),
-        );
-        renderer.particles_mut().set_count(count);
-        renderer.particles_mut().set_max_velocity(count as f32);
-    });
+            renderer.set_particles(
+                device,
+                Some(ParticleBuffers {
+                    position: &position,
+                    velocity: &velocity,
+                    velocity_z: &velocity_z,
+                    stopped: &stopped,
+                }),
+            );
+            renderer.particles_mut().set_count(count);
+            renderer.particles_mut().set_max_velocity(count as f32);
+        })
+    };
 
-    let changed = plain
-        .iter()
-        .zip(&with_particles)
-        .filter(|(a, b)| a != b)
-        .count();
+    // A vertical component raises the total speed, shifting particles up the colour
+    // ramp; a zero-filled buffer (the MPM stand-in) keeps horizontal-speed colouring.
+    let flat = render_particles(&vec![0.0f32; count as usize]);
+    let plunging = render_particles(&vec![8.0f32; count as usize]);
+
+    let changed = plain.iter().zip(&flat).filter(|(a, b)| a != b).count();
     assert!(
         changed > 20,
         "expected particles to cover pixels, only {changed} differed"
+    );
+    assert_ne!(
+        flat, plunging,
+        "vertical velocity should contribute to the speed colouring"
     );
 }
 
