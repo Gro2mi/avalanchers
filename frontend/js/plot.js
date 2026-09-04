@@ -1,107 +1,10 @@
 const outputPlot = document.getElementById('outputPlot');
-const demPlot = document.getElementById('demPlot');
 const histogramPlot = document.getElementById('histogramPlot');
 
 const mobilePlotMedia = window.matchMedia('(max-width: 991.98px)');
 
-const resetLighting = {
-    ambient: 0.8,
-    diffuse: 0.8,
-    specular: 0.05,
-    roughness: 0.5,
-    fresnel: 0.2,
-}
-
 function resetPlots() {
-    ['outputPlot', 'demPlot', 'histogramPlot', 'timerPlot'].forEach(id => Plotly.purge(id));
-}
-
-function plotDem(sim) {
-    // DEM  coordinates have to be copied. Otherwise detached ArrayBuffer issues arise when restyling
-    try {
-        const surfaceDem = {
-            x: new Float32Array(sim.x),
-            y: new Float32Array(sim.y),
-            z: to2D(new Float32Array(sim.dem), sim.width, sim.height),
-            type: 'surface',
-            colorscale: [[0, '#a5a5a5'], [1, '#a5a5a5']],
-            showscale: false,
-
-            lighting: {
-                ambient: 0.6,   // Base brightness
-                diffuse: 0.5,   // Defines the shape/shadows
-                specular: 0.05, // Very low "shininess"
-                roughness: 0.9
-            },
-            // cmin: 0,
-            // cmax: 3000,
-            contours: {
-                z: {
-                    show: !mobilePlotMedia.matches,
-                    start: 0,
-                    end: 4000,
-                    size: 100,                 // Contours at 0, 100, 200, ..., 4000
-                    color: 'white',
-                    project: { z: false }
-                },
-            },
-        };
-        const data = [surfaceDem];
-
-        const layout = {
-            template: plotly_dark,
-            margin: {
-                t: 0,
-                b: 0,
-                l: 0,
-                r: 0
-            },
-            autosize: true,
-            scene: {
-                aspectmode: 'data',
-            }
-        };
-        Plotly.newPlot('demPlot', data, layout);
-        demPlot.on('plotly_click', function (eventData) {
-            const point = eventData.points[0];
-            const i = point.pointNumber[0]; // column index (x)
-            const j = point.pointNumber[1]; // row index (y)
-            const x = point.x;
-            const y = point.y;
-            const z = point.z;
-
-            console.log(`Clicked surface point at i=${i}, j=${j}, x=${x}, y=${y}, z=${z}`);
-        });
-    } catch (error) {
-        console.error('Error loading or plotting data:', error);
-    }
-}
-const cyclicAspectColorscale = [
-    [0.0, 'blue'],     // 0° North
-    [0.25, 'green'],    // 90° East
-    [0.5, 'red'],      // 180° South
-    [0.75, 'yellow'],   // 270° West
-    [1.0, 'blue']      // 360° North again to close the loop
-];
-
-function createRandomMatrix2D(width, height) {
-    const matrix = new Array(height);
-    for (let i = 0; i < height; i++) {
-        const row = new Array(width);
-        for (let j = 0; j < width; j++) {
-            row[j] = Math.random();
-        }
-        matrix[i] = row;
-    }
-    return matrix;
-}
-
-function percentileForLegend(percentile, variable) {
-    const values = [...new Float32Array(sim[variable])]
-        .filter(value => Number.isFinite(value) && value > 0)
-        .sort((a, b) => a - b);
-    if (values.length === 0) return null;
-    return values[Math.floor(percentile * (values.length - 1))];
+    ['outputPlot', 'histogramPlot', 'timerPlot'].forEach(id => Plotly.purge(id));
 }
 
 /** Loads the cached data a variable needs, tolerating stages where it does not exist yet. */
@@ -113,7 +16,6 @@ async function ensureVariableFetched(sim, variable) {
         roughness: () => sim.fetch_roughness(),
         peak_velocity: () => sim.fetch_peak_velocity(),
         peak_flow_thickness: () => sim.fetch_peak_flow_thickness(),
-        cell_count: () => sim.fetch_cell_count(),
     };
     const fetcher = fetchers[variable];
     if (!fetcher) return true;
@@ -127,23 +29,6 @@ async function ensureVariableFetched(sim, variable) {
 }
 
 async function updatePlots(sim, selectedVariable) {
-    const showContours = !mobilePlotMedia.matches;
-
-    if (selectedVariable === 'elevation') {
-        Plotly.restyle(demPlot, {
-            surfacecolor: [to2D(new Float32Array(sim.dem), sim.width, sim.height)],
-            colorscale: ['Earth'],
-            showscale: [true],
-            cauto: [false],
-            cmin: [0],
-            cmax: [4000],
-            'colorbar.title.text': ['Elevation (m)'],
-            'contours.z.show': [showContours],
-            lighting: [resetLighting],
-        }, [0]);
-        return;
-    }
-
     if (!await ensureVariableFetched(sim, selectedVariable)) return;
 
     const values = new Float32Array(sim[selectedVariable]);
@@ -152,108 +37,20 @@ async function updatePlots(sim, selectedVariable) {
         return;
     }
 
-    var traceHist = {
-        type: 'histogram',
-        x: values,
-        autobinx: true, // or set fixed bin settings
-    };
+    // Restrict the histogram to cells that carry terrain; flow variables only
+    // become meaningful above a noise floor.
+    const demValues = new Float32Array(sim.dem);
+    let histogramValues = values.filter((val, index) => demValues[index] > 0);
+    if (selectedVariable === 'peak_velocity' || selectedVariable === 'peak_flow_thickness') {
+        histogramValues = histogramValues.filter(val => val > 1e-5);
+    }
 
     const layoutHist = {
         title: `Histogram of ${selectedVariable}`,
         template: plotly_dark,
     };
 
-    var cmax = null;
-    var cmin = null;
-    if (selectedVariable === 'peak_velocity') {
-        cmax = percentileForLegend(0.99, selectedVariable);
-        cmin = 0;
-    }
-    if (selectedVariable === 'peak_flow_thickness') {
-        cmax = percentileForLegend(0.999, selectedVariable);
-        cmin = 0;
-    }
-
-    const hasFixedColorRange = Number.isFinite(cmin) && Number.isFinite(cmax) && cmax > cmin;
-
-    var plotOptions = {
-        surfacecolor: [to2D(values, sim.width, sim.height)],
-        showscale: [true],
-        colorscale: ['Portland'],
-        cauto: [!hasFixedColorRange],
-        cmin: [hasFixedColorRange ? cmin : null],
-        cmax: [hasFixedColorRange ? cmax : null],
-        'colorbar.title.text': [selectedVariable],
-        'contours.z.show': [showContours],
-        lighting: [resetLighting],
-    };
-    const demValues = new Float32Array(sim.dem);
-    traceHist.x = values.filter((val, index) => (demValues[index] > 0));
-    if (selectedVariable === 'cell_count') {
-        const cellCountLog = values.map(val => Math.log10(val));
-        plotOptions.surfacecolor = [to2D(cellCountLog, sim.width, sim.height)];
-        traceHist.x = cellCountLog.filter(val => val > 0);
-    } else if (selectedVariable === 'peak_velocity' || selectedVariable === 'peak_flow_thickness') {
-        traceHist.x = traceHist.x.filter(val => val > 1e-5);
-    }
-    Plotly.restyle(demPlot, plotOptions, [0]);
-    Plotly.react(histogramPlot, [traceHist], layoutHist);
-}
-
-function plotGpx(gpx, dem) {
-    const webMercatorCoords = gpx.map(pt => latLonToWebMercator(pt.lat, pt.lon)).map(pt => dem.interpolateElevation(pt));
-
-    dem.interpolateElevation(webMercatorCoords[0])
-    const lineTrace = {
-        type: 'scatter3d',
-        mode: 'lines+markers',
-        x: webMercatorCoords.map(pt => pt.x),
-        y: webMercatorCoords.map(pt => pt.y),
-        z: webMercatorCoords.map(pt => pt.z + 1 || 3000),
-        marker: {
-            size: 2,
-        },
-        line: {
-            width: 4,
-        },
-        name: 'Route'
-    };
-
-    Plotly.addTraces(demPlot, [lineTrace]);
-}
-
-async function plotTrajectory(timestepData) {
-    const [xminBounds, yminBounds, mapFactor] = sim.dem_trajectory_info;
-    const lineTrace = {
-        type: 'scatter3d',
-        mode: 'line+markers',
-        x: new Float32Array(timestepData.position.filter((_, i) => i % 3 === 0).map(val => val * mapFactor + xminBounds)),
-        y: new Float32Array(timestepData.position.filter((_, i) => i % 3 === 1).map(val => val * mapFactor + yminBounds)),
-        // Offset elevation by 5 units to visually separate the trajectory from the DEM surface
-        z: new Float32Array(timestepData.position.filter((_, i) => i % 3 === 2).map(val => val + 5)),
-        marker: {
-            size: 3,
-            color: timestepData.velocityMagnitude,
-            colorscale: 'Bluered',
-            cmin: Math.min(...timestepData.velocityMagnitude),
-            cmax: Math.max(...timestepData.velocityMagnitude),
-        },
-        name: 'Trajectory'
-    };
-    try {
-        if (demPlot.data) {
-            const index = demPlot.data.findIndex(trace => trace.name === 'Trajectory');
-            if (index !== -1) {
-                // If the trace exists, remove it
-                Plotly.deleteTraces(demPlot, index);
-            }
-        }
-    } catch (TypeError) {
-        // If the plotDiv.data is undefined, we can skip the deletion
-        console.warn('demPlot.data is undefined, skipping trace deletion.');
-    }
-
-    Plotly.addTraces(demPlot, [lineTrace]);
+    Plotly.react(histogramPlot, [{ type: 'histogram', x: histogramValues, autobinx: true }], layoutHist);
 }
 
 async function plotTimestepData(timestepData) {
@@ -289,7 +86,7 @@ async function plotTimestepData(timestepData) {
         mode: 'lines',
         // first element is zero due to velocity being zero at the start
         x: x.slice(1, n - 2),
-        y: new Float32Array(timestepData.cfl.slice(1, n - 2)),
+        y: new Float32Array(timestepData.cfl).slice(1, n - 2),
         name: 'CFL',
         visible: 'legendonly',
     };
@@ -358,33 +155,6 @@ async function plotTimestepData(timestepData) {
         name: 'Diff Position Z',
         visible: 'legendonly',
     };
-    // // const traceNormalX = {
-    // //     type: 'scatter',
-    // //     mode: 'lines',
-    // //     x: x,
-    // //     y: timestepData.normal.x,
-
-    // //     name: 'Normal X',
-    // //     visible: 'legendonly',
-    // // };
-    // // const traceNormalY = {
-    // //     type: 'scatter',
-    // //     mode: 'lines',
-    // //     x: x,
-    // //     y: timestepData.normal.y,
-
-    // //     name: 'Normal Y',
-    // //     visible: 'legendonly',
-    // // };
-    // // const traceNormalZ = {
-    // //     type: 'scatter',
-    // //     mode: 'lines',
-    // //     x: x,
-    // //     y: timestepData.normal.z,
-
-    // //     name: 'Normal Z',
-    // //     visible: 'legendonly',
-    // // };
     const traceStepDistance = {
         type: 'scatter',
         mode: 'lines',
@@ -443,9 +213,6 @@ async function plotTimestepData(timestepData) {
         tracePositionZError,
         traceDiffElevation,
         traceDiffZ,
-        // // traceNormalX,
-        // // traceNormalY,
-        // // traceNormalZ,
         traceStepDistance,
         traceGEff,
     ]
@@ -481,39 +248,7 @@ function restoreTraceVisibility(plotElement, traces) {
     }
 }
 
-
-function plotReleasePointsRGBA(releasePoints, width, height) {
-    const slabMap = [];
-
-    for (let y = 0; y < height; y++) {
-        const row = [];
-        for (let x = 0; x < width; x++) {
-            const idx = (y * width + x) * 4;
-            const alpha = releasePoints[idx + 3]; // A channel
-            row.push(alpha / 255); // Normalize to 0–1 if needed
-        }
-        slabMap.push(row);
-    }
-
-    const data = [{
-        z: slabMap,
-        type: 'heatmap',
-        colorscale: 'Viridis', // or 'Jet', 'Greys', etc.
-        colorbar: { title: 'Slab thickness (norm)' }
-    }];
-
-    const layout = {
-        title: 'Release Points (Slab Thickness)',
-        xaxis: { title: 'X' },
-        yaxis: { title: 'Y', autorange: 'reversed' }, // flip vertically for image-like view
-    };
-
-    Plotly.newPlot('releasePointsPlot', data, layout);
-}
-
 function plotTimer() {
-    // const x = ['Load Data', 'Process Data', 'Render UI', 'Finish'];
-    //   const y = [12.34, 18.22, 7.89, 4.56]; // delta times in ms
     const checkpoints = simTimer.getCheckpoints();
 
     const x = checkpoints.map(cp => cp.name);
@@ -542,24 +277,3 @@ function plotTimer() {
 
     Plotly.newPlot("timerPlot", data, layout);
 }
-
-function plotHistogram() {
-    const data = [{
-        x: simData.roughness.flat().filter(v => v > 0), // Flatten and filter out zero values
-        type: 'histogram',
-        // xbins: {
-        //   size: 1  // Optional: bin width
-        // }
-    }];
-
-    var layout = {
-        // ...layout2d,
-        title: 'Histogram Example',
-        xaxis: { title: 'Value' },
-        yaxis: { title: 'Count' },
-        template: plotly_dark,
-    };
-
-    Plotly.newPlot('histogramPlot', data, layout);
-}
-

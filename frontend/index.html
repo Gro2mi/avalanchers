@@ -406,11 +406,11 @@
             display: block;
         }
 
-        .dem-plot-column {
+        .viewer-column {
             margin-bottom: 1rem;
         }
 
-        .dem-plot-sticky {
+        .viewer-sticky {
             width: 100%;
             display: flex;
             flex-direction: column;
@@ -426,22 +426,37 @@
             overflow: hidden;
         }
 
-        .plot-shell--dem {
+        .plot-shell--regular {
+            height: 600px;
+        }
+
+        .viewer-shell {
+            width: 100%;
+            height: min(75vh, 720px);
+            min-height: 420px;
+            border: 1px solid var(--panel-border);
+            border-radius: 0.75rem;
+            background: #070b14;
+            box-shadow: 0 10px 24px var(--shadow);
+            overflow: hidden;
+        }
+
+        /* Full-width placement below the run card uses most of the screen. */
+        #viewerFlowHost .viewer-shell {
             height: 80vh;
         }
 
-        .plot-shell--regular {
-            height: 600px;
+        #viewerCanvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+            touch-action: none;
         }
 
         #resultPlots {
             display: flex;
             flex-direction: column;
             gap: 0.75rem;
-        }
-
-        #demPlotFlowHost .dem-plot-sticky {
-            height: auto;
         }
 
         @media (min-width: 1200px) {
@@ -452,26 +467,22 @@
                 gap: 1rem;
             }
 
-            .dem-plot-column {
+            .viewer-column {
                 min-width: 0;
                 margin-bottom: 0;
             }
 
-            .dem-plot-column .dem-plot-sticky {
+            .viewer-column .viewer-sticky {
                 position: sticky;
                 top: 1rem;
                 height: calc(100vh - 2rem);
                 min-height: 0;
             }
 
-            .dem-plot-column #demPlot {
+            .viewer-column .viewer-shell {
                 flex: 1 1 auto;
                 min-height: 0;
-                height: auto !important;
-            }
-
-            .dem-plot-column .plot-shell {
-                height: 100%;
+                height: auto;
             }
         }
     </style>
@@ -871,50 +882,68 @@
                             </button>
                             <button id="prepareSimulation" class="btn btn-outline-secondary" disabled>Prepare
                                 only</button>
-                            <div class="d-flex align-items-center">
-                                <span class="status-dot" id="runStatusDot"></span>
-                                <span id="runStatus" class="text-secondary">Waiting for the engine.</span>
-                            </div>
-                        </div>
-
-                        <div class="mt-3">
                             <button id="saveResults" class="btn btn-outline-primary" disabled>Save results as
                                 Zarr</button>
-                            <div class="form-text">
-                                Writes a <code>site/scenario</code> Zarr store to a folder you choose. The folder can be
-                                loaded
-                                again in step 1.
-                            </div>
-                            <div class="source-summary text-secondary mt-2" id="saveStatus"></div>
                         </div>
+
+                        <div class="mt-3 d-flex align-items-center">
+                            <span class="status-dot" id="runStatusDot"></span>
+                            <span id="runStatus" class="text-secondary">Waiting for the engine.</span>
+                        </div>
+                        <div class="source-summary text-secondary mt-2" id="saveStatus"></div>
                     </div>
                 </div>
             </main>
 
-            <aside class="dem-plot-column" id="demPlotStickyHost" aria-label="Terrain preview">
-                <div class="dem-plot-sticky" id="demPlotContainer">
-                    <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
-                        <label for="plotVariable" class="control-label mb-0">Plot variable:</label>
-                        <select id="plotVariable" class="form-select w-auto">
-                            <option value="peak_flow_thickness">Peak Flow Thickness</option>
-                            <option value="peak_velocity">Peak Flow Velocity</option>
-                            <option value="release_areas">Release Area</option>
-                            <option value="roughness">Roughness</option>
-                            <option value="slope_angle">Slope Angle</option>
-                            <option value="slope_aspect">Slope Aspect</option>
-                            <option value="elevation">Elevation</option>
-                        </select>
+            <aside class="viewer-column" id="viewerColumn" aria-label="3D terrain view">
+                <div class="viewer-sticky" id="viewerCard">
+                    <div class="viewer-shell">
+                        <canvas id="viewerCanvas"></canvas>
                     </div>
-                    <div id="demPlot" class="plot-shell plot-shell--dem"></div>
+                    <div class="d-flex align-items-center flex-wrap gap-2">
+                        <label for="viewerOverlay" class="mb-0">Overlay:</label>
+                        <select id="viewerOverlay" class="form-select w-auto">
+                            <option value="peak_velocity" selected>Peak flow velocity</option>
+                            <option value="peak_flow_thickness">Peak flow thickness</option>
+                            <option value="grid_mass">Grid mass</option>
+                            <option value="release_areas">Release areas</option>
+                            <option value="slope_angle">Slope angle</option>
+                            <option value="slope_aspect">Slope aspect</option>
+                            <option value="roughness">Roughness</option>
+                            <option value="none">None</option>
+                        </select>
+                        <div class="form-check mb-0">
+                            <input type="checkbox" id="viewerParticles" class="form-check-input mt-0" checked>
+                            <label class="form-check-label" for="viewerParticles">Particles</label>
+                        </div>
+                        <div class="d-flex align-items-center flex-wrap gap-2">
+                            <label for="viewerSteps" class="mb-0">Steps per frame:</label>
+                            <select id="viewerSteps" class="form-select w-auto">
+                                <option value="1" selected>1</option>
+                                <option value="2">2</option>
+                                <option value="4">4</option>
+                                <option value="8">8</option>
+                                <option value="16">16</option>
+                                <option value="32">32</option>
+                                <option value="64">64</option>
+                                <option value="128">128</option>
+                                <option value="256">256</option>
+                            </select>
+                        </div>
+                        <button id="viewerReset" class="btn btn-outline-secondary" type="button">Reset view</button>
+                    </div>
+                    <div class="source-summary text-secondary" id="viewerStatus">Prepare or run the simulation to
+                        attach the 3D view.</div>
                 </div>
             </aside>
         </div>
     </div>
 
     <div class="container-fluid">
-        <div id="plotVariableAnchor" class="mb-3"></div>
+        <!-- Outside #resultPlots: the full-width viewer must stay visible while a
+             run is live, before any results exist to reveal the plots below. -->
+        <div id="viewerFlowHost"></div>
         <div id="resultPlots">
-            <div id="demPlotFlowHost"></div>
             <div id="histogramPlot" class="plot-shell plot-shell--regular"></div>
             <div id="outputPlot" class="plot-shell plot-shell--regular"></div>
             <h5 class="mt-3">Computation Timer</h5>

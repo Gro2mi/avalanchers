@@ -1,4 +1,6 @@
-avalancheSim.code-workspace
+avalanchers.code-workspace
+web_output/
+dtm_cache.zarr
 cole_considerations/
 test.html
 js/test.js

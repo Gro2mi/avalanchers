@@ -1,4 +1,5 @@
 import init, { WasmSimulation, decode_blosc_chunk, decode_zstd_chunk } from "./pkg/avalanchers.js";
+import { LiveViewer } from "./viewer.js";
 
 window.dem = new Dem();
 window.sim = null;
@@ -66,14 +67,11 @@ const saveStatus = document.getElementById('saveStatus');
 const loadedDemLabel = document.getElementById('loadedDemLabel');
 const loadedReleaseLabel = document.getElementById('loadedReleaseLabel');
 
-const plotVariable = document.getElementById('plotVariable');
-const plotVariableAnchor = document.getElementById('plotVariableAnchor');
-const resultPlots = document.getElementById('resultPlots');
-const demPlotElement = document.getElementById('demPlot');
-const demPlotContainer = document.getElementById('demPlotContainer');
-const demPlotStickyHost = document.getElementById('demPlotStickyHost');
-const demPlotFlowHost = document.getElementById('demPlotFlowHost');
+const viewerOverlay = document.getElementById('viewerOverlay');
+const viewerColumn = document.getElementById('viewerColumn');
+const viewerFlowHost = document.getElementById('viewerFlowHost');
 const desktopLayout = window.matchMedia('(min-width: 1200px)');
+const resultPlots = document.getElementById('resultPlots');
 
 // ---------------------------------------------------------------------------
 // Workflow state
@@ -96,6 +94,12 @@ const state = {
     releaseSource: null,
     hasResults: false,
     busy: false,
+    // Engine-touching background work (result fetching) that runs outside the
+    // busy lock; the viewer must not borrow the engine while it is active.
+    fetchingResults: 0,
+    // Key of the settings+sources currently baked into the engine. When it
+    // matches the next request, the engine is reused instead of rebuilt.
+    lastAppliedKey: null,
 };
 
 const isMobileDevice = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
@@ -141,7 +145,7 @@ function resizePlotIfRendered(plotId) {
 }
 
 function resizeVisibleResultPlots() {
-    ['demPlot', 'histogramPlot', 'outputPlot', 'timerPlot', 'debugPlot']
+    ['histogramPlot', 'outputPlot', 'timerPlot']
         .forEach(resizePlotIfRendered);
 }
 
@@ -157,6 +161,8 @@ function updateResultPlotsVisibility() {
             });
         });
     }
+    // Results appearing (or vanishing) may relocate the 3D view.
+    scheduleViewerPlacement();
 }
 
 function describeDemSource(source) {
@@ -211,7 +217,7 @@ function setBusy(busy) {
 
     runButton.disabled = busy || !ready || !hasDem;
     prepareButton.disabled = busy || !ready || !hasDem;
-    plotVariable.disabled = busy || !ready;
+    viewerOverlay.disabled = busy || !ready;
     saveResultsButton.disabled = busy || !ready || !state.hasResults;
 
     runSpinner.classList.toggle('d-none', !busy);
@@ -327,26 +333,55 @@ function getSettings() {
 // Applying the selected sources to the simulation
 // ---------------------------------------------------------------------------
 
+/** Stable identity of a source, ignoring bulky payload bytes. */
+function sourceIdentity(source) {
+    if (!source) return null;
+    return {
+        kind: source.kind,
+        name: source.name ?? null,
+        site: source.site ?? null,
+        scenario: source.scenario ?? null,
+        zoom: source.kind === 'gpx' ? zoomLevelSlider.value : null,
+        size: source.bytes?.byteLength
+            ?? (source.kind === 'gpx' ? source.gpx.length : null),
+    };
+}
+
 /**
  * Rebuilds the simulation from the current settings and re-applies the selected
- * sources. `create` resets the engine, so the DEM and release areas have to be
- * re-sent whenever the settings change.
+ * sources — unless nothing changed since the last build. Reusing the engine
+ * keeps the renderer attached, so re-running the same configuration does not
+ * blank the 3D view or re-upload the DEM. The caller still has to `prepare`:
+ * on an already-run engine that re-initializes the particles for a fresh run.
  */
 async function applySources() {
     const settings = getSettings();
-    // Rebuilding the engine discards any results from a previous run.
+    const key = JSON.stringify([settings,
+        sourceIdentity(state.demSource), sourceIdentity(state.releaseSource)]);
+    // Rebuilding the engine would discard any results from a previous run and
+    // any background plotting still reading them.
     state.hasResults = false;
+    resultsTaskId++;
+    // Let an in-flight background job abort (it sees the bumped task id) before
+    // the engine is touched again; overlapping borrows panic in wasm-bindgen.
+    await engineJob;
+
+    if (key === state.lastAppliedKey && sim) return;
+    state.lastAppliedKey = key;
 
     if (state.demSource?.kind === 'example') {
         await sim.create(settings);
-        return;
+    } else {
+        delete settings.dem_path;
+        delete settings.release_areas_path;
+        await sim.create(settings);
+        await applyDem();
+        await applyReleaseAreas();
     }
 
-    delete settings.dem_path;
-    delete settings.release_areas_path;
-    await sim.create(settings);
-    await applyDem();
-    await applyReleaseAreas();
+    // Show the freshly loaded DEM in the 3D view. Grid overlays and particles
+    // bind once `prepare` runs; until then the terrain renders bare.
+    await refreshViewer();
 }
 
 async function applyDem() {
@@ -396,9 +431,12 @@ async function applyReleaseAreas() {
 /** Clears everything that depends on the current DEM. */
 function resetDependentState() {
     state.releaseSource = null;
-    zarrScenarioRow.classList.add('d-none');
+    state.lastAppliedKey = null; // force an engine rebuild for the new DEM
+    zarrSiteRow.classList.add('d-none');
     zarrScenarioDropdown.innerHTML = '';
     resetPlots();
+    // A new DEM frames the 3D view afresh; re-runs keep the current camera.
+    window.viewer?.forgetView();
 }
 
 function setZoomRowVisible(visible) {
@@ -441,8 +479,6 @@ async function loadDemFromGpx(file) {
         setZoomRowVisible(true);
 
         await applySources();
-        plotDem(sim);
-        plotGpx(gpx, dem);
         setRunStatus('DEM ready.', 'ready');
     }, demStatus);
 }
@@ -458,7 +494,6 @@ async function loadDemFromRaster(file, ext) {
         setZoomRowVisible(false);
 
         await applySources();
-        plotDem(sim);
         setRunStatus('DEM ready.', 'ready');
     }, demStatus);
 }
@@ -495,13 +530,13 @@ async function selectZarrSite(site) {
         source.dem = null;
         state.releaseSource = null;
         populateScenarioDropdown(source.store, site);
+        window.viewer?.forgetView();
 
         setCardStatus(demStatus, `Loading DEM for site "${site}"…`);
         const raw = await source.store.readSiteDem(site);
         source.dem = { ...raw, ...deriveGeoreference(raw) };
 
         await applySources();
-        plotDem(sim);
         setRunStatus('DEM ready.', 'ready');
     }, demStatus);
 }
@@ -628,11 +663,11 @@ function showReleaseAreas() {
 }
 
 /**
- * Selects a plot variable and awaits the update. The engine rejects overlapping
- * calls, so plot refreshes must never run concurrently with other WASM work.
+ * Fetches a variable and refreshes the histogram. The engine rejects
+ * overlapping calls, so plot refreshes must never run concurrently with other
+ * WASM work.
  */
 async function showVariable(name) {
-    plotVariable.value = name;
     if (!sim || !hasUsableDem()) return;
     await updatePlots(sim, name);
 }
@@ -658,36 +693,118 @@ async function withBusy(action, statusElement) {
     }
 }
 
+/** Re-attaches the 3D viewer after the engine was rebuilt and prepared. */
+async function refreshViewer() {
+    if (!window.viewer) return;
+    await window.viewer.attach();
+}
+
+/**
+ * Latest background result-rendering task. Bumped whenever the engine is
+ * rebuilt so an in-flight plot refresh stops touching the simulation it was
+ * started for.
+ */
+let resultsTaskId = 0;
+
+/**
+ * Serializes engine access from background jobs. The engine rejects overlapping
+ * calls, and on Firefox an overlapping borrow panics with "recursive use of an
+ * object" instead of failing cleanly, so never touch the sim from two jobs.
+ */
+let engineJob = Promise.resolve();
+function runExclusiveEngineJob(job) {
+    const run = engineJob.then(job);
+    engineJob = run.catch(() => {});
+    return run;
+}
+
+const nextFrame = () => new Promise(resolve => requestAnimationFrame(resolve));
+
+/**
+ * Fetches the results and renders the remaining plots step by step in the
+ * background, yielding to the browser between plots so the UI never blocks
+ * while data is fetched or Plotly builds a chart. Runs inside
+ * `runExclusiveEngineJob`; `fetchingResults` keeps the viewer's frame loop from
+ * borrowing the engine meanwhile.
+ */
+async function renderResults(taskId) {
+    const isCurrent = () => taskId === resultsTaskId;
+    if (!isCurrent()) return;
+    state.fetchingResults++;
+    try {
+        setRunStatus('Fetching results…', 'running');
+
+        await sim.fetch_results();
+        if (!isCurrent()) return;
+        simTimer.checkpoint('fetching data');
+
+        // Make containers visible before plotting so Plotly computes full widths.
+        state.hasResults = true;
+        // The run's busy block already released the lock, so re-evaluate the
+        // controls here — otherwise "Save results" never leaves its disabled
+        // pre-run state.
+        refreshWorkflowState();
+
+        const timestepData = await sim.get_timestep_data();
+        if (!isCurrent()) return;
+        await plotTimestepData(timestepData);
+        await nextFrame();
+        if (!isCurrent()) return;
+
+        plotTimer();
+        await nextFrame();
+        if (!isCurrent()) return;
+
+        await showVariable('peak_velocity');
+        if (!isCurrent()) return;
+        resizeVisibleResultPlots();
+        setRunStatus('Simulation finished.', 'ready');
+    } catch (error) {
+        console.error(error);
+        setRunStatus(error?.message ?? String(error), 'error');
+    } finally {
+        state.fetchingResults--;
+    }
+}
+
 async function runSimulation() {
     if (!hasUsableDem()) {
         setRunStatus('Select a DEM in step 1 first.', 'error');
         return;
     }
+    if (state.busy) return;
 
-    await withBusy(async () => {
+    state.busy = true;
+    setBusy(true);
+    try {
         setRunStatus('Running simulation…', 'running');
         await applySources();
+        await sim.prepare();
 
+        // Live path: step the engine from the viewer's frame loop and watch the
+        // 3D view; fall back to the headless full-speed run when attaching fails.
         simTimer = new Timer('AvalancheSimulation');
-        await sim.run();
+        if (window.viewer && sim.renderer_attached) {
+            window.viewer.reveal();
+            await window.viewer.runToCompletion();
+        } else {
+            await sim.run();
+        }
         simTimer.checkpoint('simulation');
+    } catch (error) {
+        console.error(error);
+        setRunStatus(error?.message ?? String(error), 'error');
+        return;
+    } finally {
+        state.busy = false;
+        setBusy(false);
+        refreshWorkflowState();
+    }
 
-        await sim.fetch_results();
-        simTimer.checkpoint('fetching data');
-
-        // Make containers visible before plotting so Plotly computes full widths.
-        state.hasResults = true;
-        updateResultPlotsVisibility();
-
-        const timestepData = await sim.get_timestep_data();
-        await plotTimestepData(timestepData);
-        await plotTrajectory(timestepData);
-        plotTimer();
-
-        await showVariable('peak_velocity');
-        resizeVisibleResultPlots();
-        setRunStatus('Simulation finished.', 'ready');
-    }, null);
+    // Result fetching and plotting continue in the background with the lock
+    // released, so the page and the 3D view stay interactive throughout.
+    // Serialized on the engine queue so it cannot overlap other sim jobs.
+    runExclusiveEngineJob(() => renderResults(++resultsTaskId));
 }
 
 /**
@@ -748,43 +865,79 @@ async function prepareSimulation() {
     }, null);
 }
 
-function scrollToSimulationSection() {
-    const runCard = document.getElementById('runCard');
-    const plotTarget = document.getElementById('demPlot');
-    const target = runCard || plotTarget;
-    if (target) {
-        target.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }
-}
-
 function collapseDemReleaseGroup() {
     if (demReleaseGroup instanceof HTMLDetailsElement) {
         demReleaseGroup.open = false;
     }
 }
 
-function moveDemPlotTo(host) {
-    if (!host || !demPlotContainer || demPlotContainer.parentElement === host) return;
-    host.appendChild(demPlotContainer);
-    if (demPlotElement?.classList.contains('js-plotly-plot')) {
-        requestAnimationFrame(() => Plotly.Plots.resize(demPlotElement));
+function moveViewerCardTo(host) {
+    const card = document.getElementById('viewerCard');
+    if (!host || !card || card.parentElement === host) return;
+
+    const first = card.getBoundingClientRect();
+    // Reparenting keeps the same canvas node, so the attached WebGPU surface
+    // survives; its ResizeObserver reconfigures the frame after the move.
+    host.appendChild(card);
+    const last = card.getBoundingClientRect();
+
+    // FLIP animation: a DOM move cannot be transitioned directly, so start the
+    // card at its old geometry via an inverse transform and let the transition
+    // settle it into the new one.
+    if (first.width <= 0 || last.width <= 0
+        || window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+        return;
     }
+    const dx = first.left - last.left;
+    const dy = first.top - last.top;
+    const sx = first.width / last.width;
+    const sy = first.height / last.height;
+    card.style.transformOrigin = 'top left';
+    card.style.transition = 'none';
+    card.style.transform = `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})`;
+    requestAnimationFrame(() => {
+        card.style.transition = 'transform 0.35s ease';
+        card.style.transform = '';
+        const settle = () => {
+            card.style.transition = '';
+            card.style.transformOrigin = '';
+        };
+        card.addEventListener('transitionend', settle, { once: true });
+        setTimeout(settle, 400); // transitionend can be swallowed when hidden
+    });
 }
 
-function updateDemPlotPlacement() {
-    if (!plotVariable || !demPlotStickyHost || !demPlotFlowHost) return;
+/**
+ * Keeps the 3D view within reach, like the plotly terrain preview before it:
+ * sticky in the side column while the workflow cards are on screen, then full
+ * width below the run card once the result plots scroll into view.
+ */
+function updateViewerPlacement() {
+    if (!viewerColumn || !viewerFlowHost) return;
 
     if (!state.hasResults) {
-        moveDemPlotTo(demPlotStickyHost);
+        moveViewerCardTo(viewerColumn);
         return;
     }
 
-    const placementAnchor = plotVariableAnchor || plotVariable;
-    const plotControlsReached = placementAnchor.getBoundingClientRect().top < window.innerHeight;
-    moveDemPlotTo(!desktopLayout.matches || plotControlsReached
-        ? demPlotFlowHost
-        : demPlotStickyHost);
+    const resultsReached = viewerFlowHost.getBoundingClientRect().top < window.innerHeight;
+    const fullScreen = !desktopLayout.matches || resultsReached;
+    moveViewerCardTo(fullScreen ? viewerFlowHost : viewerColumn);
 }
+
+let viewerPlacementFrame = null;
+function scheduleViewerPlacement() {
+    if (viewerPlacementFrame !== null) return;
+    viewerPlacementFrame = requestAnimationFrame(() => {
+        viewerPlacementFrame = null;
+        updateViewerPlacement();
+    });
+}
+
+window.addEventListener('scroll', scheduleViewerPlacement, { passive: true });
+window.addEventListener('resize', scheduleViewerPlacement);
+desktopLayout.addEventListener('change', updateViewerPlacement);
+updateViewerPlacement();
 
 async function loadExampleCase(run) {
     await withBusy(async () => {
@@ -795,14 +948,17 @@ async function loadExampleCase(run) {
             setLoadingScreenStatus('Engine ready.', `Loading example "${name}"…`);
         }
 
-        resetDependentState();
-        state.demSource = { kind: 'example', name };
-        state.releaseSource = { kind: 'example' };
-        zarrSiteRow.classList.add('d-none');
-        setZoomRowVisible(false);
+        const alreadyLoaded = state.demSource?.kind === 'example'
+            && state.demSource.name === name;
+        if (!alreadyLoaded) {
+            resetDependentState();
+            state.demSource = { kind: 'example', name };
+            state.releaseSource = { kind: 'example' };
+            zarrSiteRow.classList.add('d-none');
+            setZoomRowVisible(false);
+        }
 
         await applySources();
-        plotDem(sim);
         setRunStatus('Example loaded.', 'ready');
 
         if (!run) {
@@ -812,7 +968,6 @@ async function loadExampleCase(run) {
     }, demStatus);
 
     if (run && state.demSource?.kind === 'example') {
-        scrollToSimulationSection();
         await runSimulation();
     }
 }
@@ -823,7 +978,6 @@ async function loadExampleCase(run) {
 
 runShortcutButton.addEventListener('click', async () => {
     collapseDemReleaseGroup();
-    scrollToSimulationSection();
     await loadExampleCase(true);
 });
 // demDropdown.addEventListener('change', () => loadExampleCase(!isMobileDevice));
@@ -873,35 +1027,81 @@ zoomLevelSlider.addEventListener('change', async () => {
     if (state.demSource?.kind !== 'gpx') return;
     const gpx = state.demSource.gpx;
     await withBusy(async () => {
+        window.viewer?.forgetView(); // different zoom means a different terrain
         await dem.loadTiles(gpx, zoomLevelSlider.value);
         await applySources();
-        plotDem(sim);
-        plotGpx(gpx, dem);
     }, demStatus);
 });
 
-plotVariable.addEventListener('change', event => {
+// The 3D overlay select doubles as the histogram variable picker now that the
+// plotly terrain plot is gone; histogram-capable variables update both views.
+const HISTOGRAM_VARIABLE_BY_OVERLAY = {
+    peak_velocity: 'peak_velocity',
+    peak_flow_thickness: 'peak_flow_thickness',
+    release_areas: 'release_areas',
+    slope_angle: 'slope_angle',
+    slope_aspect: 'slope_aspect',
+    roughness: 'roughness',
+};
+
+/** Updates the histogram for an overlay variable, serialized on the engine queue. */
+function updateHistogramForOverlay(overlay) {
+    const variable = HISTOGRAM_VARIABLE_BY_OVERLAY[overlay];
+    // 'none' (and 'grid_mass', which the engine does not expose) have no histogram.
+    if (!variable) return;
+    if (state.busy || state.fetchingResults > 0) return;
     if (!sim || !hasUsableDem()) return;
-    updatePlots(sim, event.target.value).catch(console.error);
-});
-
-document.addEventListener('keydown', async event => {
-    if (event.key === 'r' && !state.busy) await runSimulation();
-});
-
-let plotPlacementFrame = null;
-function scheduleDemPlotPlacement() {
-    if (plotPlacementFrame !== null) return;
-    plotPlacementFrame = requestAnimationFrame(() => {
-        plotPlacementFrame = null;
-        updateDemPlotPlacement();
-    });
+    runExclusiveEngineJob(() => updatePlots(sim, variable)).catch(console.error);
 }
 
-window.addEventListener('scroll', scheduleDemPlotPlacement, { passive: true });
-window.addEventListener('resize', scheduleDemPlotPlacement);
-desktopLayout.addEventListener('change', updateDemPlotPlacement);
-updateDemPlotPlacement();
+viewerOverlay.addEventListener('change', () => {
+    updateHistogramForOverlay(viewerOverlay.value);
+});
+
+// Overlay presets on the number keys, matching the native winit viewer.
+const SHORTCUT_OVERLAYS = {
+    '0': 'none',
+    '1': 'peak_velocity',
+    '2': 'peak_flow_thickness',
+    '3': 'grid_mass',
+    '4': 'release_areas',
+    '5': 'slope_angle',
+    '6': 'slope_aspect',
+    '7': 'roughness',
+};
+
+function isTypingTarget(target) {
+    return target instanceof HTMLInputElement
+        || target instanceof HTMLSelectElement
+        || target instanceof HTMLTextAreaElement;
+}
+
+document.addEventListener('keydown', async event => {
+    // Skip shortcuts typed into form controls and chords like Ctrl+R (reload).
+    if (isTypingTarget(event.target) || event.ctrlKey || event.metaKey || event.altKey) return;
+
+    if ((event.key === 'r' || event.key === 'R') && !state.busy) {
+        await runSimulation();
+        return;
+    }
+    const viewer = window.viewer;
+    if (!viewer) return;
+    if (event.key in SHORTCUT_OVERLAYS) {
+        const overlay = SHORTCUT_OVERLAYS[event.key];
+        viewer.setOverlay(overlay);
+        // Keep the histogram on the same variable as the 3D overlay, matching
+        // what changing the dropdown does.
+        updateHistogramForOverlay(overlay);
+    } else if (event.key === 'p' || event.key === 'P') {
+        viewer.toggleParticles();
+    } else if (event.key === '+' || event.key === '=') {
+        viewer.doubleSteps();
+    } else if (event.key === '-' || event.key === '_') {
+        viewer.halveSteps();
+    } else if (event.key === 'v' || event.key === 'V') {
+        viewer.resetView();
+    }
+});
 
 // ---------------------------------------------------------------------------
 // Startup
@@ -932,6 +1132,9 @@ async function loadEngine() {
         setLoadingScreenStatus('Creating simulation…', 'Allocating engine resources.');
         statusEl.textContent = "Creating Simulation...";
         window.sim = await withTimeout(WasmSimulation.new(), 5000, "WasmSimulation.new");
+        window.viewer = new LiveViewer(window.sim, {
+            isBusy: () => state.busy || state.fetchingResults > 0,
+        });
 
         setLoadingScreenStatus('Engine ready.', 'Loading example…');
         statusEl.textContent = "Engine ready.";
