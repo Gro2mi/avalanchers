@@ -28,7 +28,13 @@ const ORBIT_SPEED: f32 = 0.005;
 const ZOOM_SPEED: f32 = 0.1;
 const STEPS_PER_FRAME: u32 = 1;
 const DEFAULT_SIM_SPEED: f32 = 4.0;
-const DEFAULT_DEM: &str = "data/avaframe/avaAlr.png";
+/// Minimum time between rendered frames while the simulation runs. Stepping is
+/// decoupled from presenting, so fast runs are not throttled to the display rate
+/// and the GPU renders at most ~33 fps instead of once per step.
+const MIN_RENDER_INTERVAL: Duration = Duration::from_millis(30);
+/// Step batches drained per wake when catching up between render slots.
+const MAX_STEP_BATCHES_PER_WAKE: usize = 16;
+const DEFAULT_SETTINGS: &str = "settings.json";
 const WINDOW_ICON: &[u8] = include_bytes!("../../../frontend/icons/android-chrome-512x512.png");
 
 /// Grid buffers cloned from the simulation, both at startup and after a restart.
@@ -123,7 +129,7 @@ impl Overlay {
 fn clone_particle_buffers(
     orchestrator: &ComputeOrchestrator,
     particle_count: u32,
-) -> anyhow::Result<[wgpu::Buffer; 4]> {
+) -> anyhow::Result<[wgpu::Buffer; 5]> {
     let clone_buffer = |name: BufferName| -> anyhow::Result<wgpu::Buffer> {
         orchestrator
             .resources
@@ -148,6 +154,7 @@ fn clone_particle_buffers(
         clone_buffer(BufferName::ParticlesVelocity)?,
         velocity_z,
         clone_buffer(BufferName::ParticlesStopped)?,
+        clone_buffer(BufferName::ParticlesElevation)?,
     ])
 }
 
@@ -161,11 +168,9 @@ struct SimulationView {
     instance: wgpu::Instance,
     terrain: TerrainData,
     grids: Vec<(BufferName, wgpu::Buffer)>,
-    particles: [wgpu::Buffer; 4],
+    particles: [wgpu::Buffer; 5],
     particle_count: u32,
     info: SimInfo,
-    dem_path: String,
-    release_areas_path: String,
     failed: bool,
     final_info_reported: bool,
     step_timings: Vec<(u32, Duration)>,
@@ -187,14 +192,16 @@ impl SimulationView {
         SimModel::from_int(self.simulation.settings.sim_model).unwrap_or(SimModel::Particle)
     }
 
-    fn advance_frame(&mut self) {
+    /// Advances one time-gated step batch. Returns `true` when simulation state
+    /// changed and the frame needs redrawing.
+    fn advance_frame(&mut self) -> bool {
         if self.failed || self.simulation.get_state() >= SimulationState::Finished {
             self.report_final_info();
-            return;
+            return false;
         }
         let now = Instant::now();
         if now < self.next_step_at {
-            return;
+            return false;
         }
 
         let scheduled_step_at = self.next_step_at;
@@ -215,6 +222,7 @@ impl SimulationView {
                 tracing::error!("simulation step failed: {error}");
             }
         }
+        true
     }
 
     fn adjust_speed(&mut self, factor: f32) {
@@ -260,13 +268,8 @@ impl SimulationView {
     /// simulation prepares, so a model change means a full recreate; the DEM is re-read
     /// from disk as part of that.
     fn apply_model(&mut self, model: SimModel) -> anyhow::Result<()> {
-        let settings = Settings {
-            dem_path: Some(self.dem_path.clone()),
-            release_areas_path: Some(self.release_areas_path.clone()),
-            sim_model: Some(model),
-            ..Settings::default()
-        };
-        pollster::block_on(self.simulation.create(settings))?;
+        self.simulation.settings.sim_model = model.as_int();
+        self.simulation.reset();
         self.info = pollster::block_on(self.simulation.run_n_steps(0))?;
         self.refresh_buffers()?;
         tracing::info!("simulation rebuilt with the {model} model");
@@ -347,22 +350,26 @@ impl SimulationView {
     }
 }
 
-fn start_simulation(dem_path: &str, exaggeration: f32) -> anyhow::Result<SimulationView> {
-    let mut sim = pollster::block_on(Simulation::new())?;
-    // Same setup as `Simulation::create_example`, kept explicit so the paths can be
-    // stored for model rebuilds.
-    let release_areas_path = dem_path.replace(".png", "releaseTexture.png");
-    let model = std::env::var("LIVE_SIM_MODEL")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(SimModel::Particle);
-    let settings = Settings {
-        dem_path: Some(dem_path.to_string()),
-        release_areas_path: Some(release_areas_path.clone()),
-        sim_model: Some(model),
-        ..Settings::default()
-    };
-    pollster::block_on(sim.create(settings))?;
+fn start_simulation(settings_path: &str, exaggeration: f32) -> anyhow::Result<SimulationView> {
+    // let mut sim = pollster::block_on(Simulation::new())?;
+    // // Same setup as `Simulation::create_example`, kept explicit so the paths can be
+    // // stored for model rebuilds.
+    // let release_areas_path = settings_path.replace(".png", "releaseTexture.png");
+    // let model = std::env::var("LIVE_SIM_MODEL")
+    //     .ok()
+    //     .and_then(|value| value.parse().ok())
+    //     .unwrap_or(SimModel::Particle);
+    // let settings = Settings {
+    //     dem_path: Some(dem_path.to_string()),
+    //     release_areas_path: Some(release_areas_path.clone()),
+    //     sim_model: Some(model),
+    //     ..Settings::default()
+    // };
+    // pollster::block_on(sim.create(settings))?;
+    let settings =
+        Settings::from_json(&settings_path).expect("Failed to load settings from JSON file");
+
+    let mut sim: Simulation = pollster::block_on(Simulation::new_with_settings(settings.clone()))?;
     tracing::info!(
         "Loaded DEM {}x{} at {} m resolution",
         sim.dem.width,
@@ -412,8 +419,6 @@ fn start_simulation(dem_path: &str, exaggeration: f32) -> anyhow::Result<Simulat
         particles,
         particle_count: info.number_particles,
         info,
-        dem_path: dem_path.to_string(),
-        release_areas_path,
         failed: false,
         final_info_reported: false,
         step_timings: Vec::new(),
@@ -446,6 +451,7 @@ fn write_snapshot(sim: &SimulationView, overlay: Overlay, path: &str) -> anyhow:
             velocity: &sim.particles[1],
             velocity_z: &sim.particles[2],
             stopped: &sim.particles[3],
+            elevation: &sim.particles[4],
         }),
     );
     renderer.particles_mut().set_count(sim.particle_count);
@@ -485,6 +491,12 @@ struct Viewer {
     show_particles: bool,
     /// Model selected in the settings panel; applied on the button click.
     ui_model: SimModel,
+    /// Input or rebuild changed the view; the next redraw must render. Keeps an
+    /// idle viewer at zero GPU work instead of redrawing identical frames.
+    dirty: bool,
+    /// Simulation state changed since the last rendered frame.
+    pending_render: bool,
+    last_render_at: Instant,
 }
 
 impl Viewer {
@@ -498,6 +510,17 @@ impl Viewer {
             panning: false,
             overlay: Overlay::PeakFlowVelocity,
             show_particles: true,
+            dirty: true,
+            pending_render: false,
+            last_render_at: Instant::now(),
+        }
+    }
+
+    /// Flags the view as changed and wakes the event loop for a redraw.
+    fn mark_dirty(&mut self) {
+        self.dirty = true;
+        if let Some(view) = self.window.as_ref() {
+            view.window.request_redraw();
         }
     }
 
@@ -508,6 +531,7 @@ impl Viewer {
         let buffer = self.overlay.buffer_name().map(|name| self.sim.grid(&name));
         view.renderer
             .set_grid_overlay(&self.sim.device, buffer, self.overlay.range());
+        self.dirty = true;
         tracing::info!("overlay: {}", self.overlay.label());
     }
 
@@ -520,8 +544,10 @@ impl Viewer {
             velocity: &self.sim.particles[1],
             velocity_z: &self.sim.particles[2],
             stopped: &self.sim.particles[3],
+            elevation: &self.sim.particles[4],
         });
         view.renderer.set_particles(&self.sim.device, buffers);
+        self.dirty = true;
     }
 
     /// Rebuilds the simulation with the selected model and rebinds every buffer the
@@ -552,6 +578,7 @@ impl Viewer {
         view.config.height = height;
         view.surface.configure(device, &view.config);
         view.renderer.resize(device, width, height);
+        self.mark_dirty();
     }
 }
 
@@ -639,21 +666,34 @@ impl ApplicationHandler for Viewer {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        // egui sees every event first. Pointer events consumed by egui (over the panel)
-        // must not drive the camera, but keyboard focus alone must not swallow the
-        // viewer's single-key shortcuts: egui grabs focus from any click on the panel
-        // and keeps it, so keys are only consumed while a popup is open or a text
-        // field is focused.
-        if let Some(view) = self.window.as_mut() {
-            let response = view.egui_state.on_window_event(&view.window, &event);
-            let egui_needs_keys = view.egui_state.egui_ctx().any_popup_open()
-                || view.egui_state.egui_ctx().text_edit_focused();
-            let consumed = match event {
-                WindowEvent::KeyboardInput { .. } => response.consumed && egui_needs_keys,
-                _ => response.consumed,
-            };
-            if consumed {
-                return;
+        // RedrawRequested is not user input: egui_winit answers it with another
+        // repaint request, which would keep an idle viewer rendering forever.
+        if !matches!(event, WindowEvent::RedrawRequested) {
+            // egui sees every event first. Pointer events consumed by egui (over the panel)
+            // must not drive the camera, but keyboard focus alone must not swallow the
+            // viewer's single-key shortcuts: egui grabs focus from any click on the panel
+            // and keeps it, so keys are only consumed while a popup is open or a text
+            // field is focused.
+            if let Some(view) = self.window.as_mut() {
+                let response = view.egui_state.on_window_event(&view.window, &event);
+                let egui_wants_repaint = response.repaint;
+                let egui_needs_keys = view.egui_state.egui_ctx().any_popup_open()
+                    || view.egui_state.egui_ctx().text_edit_focused();
+                let consumed = match event {
+                    WindowEvent::KeyboardInput { .. } => response.consumed && egui_needs_keys,
+                    _ => response.consumed,
+                };
+                if consumed {
+                    if egui_wants_repaint {
+                        self.mark_dirty();
+                    }
+                    return;
+                }
+                // egui wants repaints for almost every event (any cursor move),
+                // so this must not return: camera input below still needs to run.
+                if egui_wants_repaint {
+                    self.mark_dirty();
+                }
             }
         }
 
@@ -685,7 +725,10 @@ impl ApplicationHandler for Viewer {
                     let width = view.config.width.max(1) as f32;
                     let height = view.config.height.max(1) as f32;
                     view.renderer.camera.pan(dx / width, dy / height);
+                } else {
+                    return;
                 }
+                self.mark_dirty();
             }
             WindowEvent::CursorLeft { .. } => self.cursor = None,
             WindowEvent::MouseWheel { delta, .. } => {
@@ -695,6 +738,7 @@ impl ApplicationHandler for Viewer {
                 };
                 if let Some(view) = self.window.as_mut() {
                     view.renderer.camera.zoom(scroll * ZOOM_SPEED);
+                    self.mark_dirty();
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
@@ -764,16 +808,23 @@ impl ApplicationHandler for Viewer {
                             view.renderer.camera =
                                 render_core::OrbitCamera::framing(&self.sim.terrain, aspect);
                         }
+                        self.mark_dirty();
                     }
                     _ => {}
                 }
             }
             WindowEvent::RedrawRequested => {
-                let device = self.sim.device.clone();
-                let queue = self.sim.queue.clone();
+                // Stepping happens in about_to_wait; a redraw only presents state.
+                // Clean, unchanged frames keep the previous swapchain image.
                 let Some(view) = self.window.as_mut() else {
                     return;
                 };
+                if !self.dirty && !self.pending_render {
+                    return;
+                }
+
+                let device = self.sim.device.clone();
+                let queue = self.sim.queue.clone();
 
                 let frame = match view.surface.get_current_texture() {
                     wgpu::CurrentSurfaceTexture::Success(frame)
@@ -790,7 +841,6 @@ impl ApplicationHandler for Viewer {
                     }
                 };
 
-                self.sim.advance_frame();
                 let overlay = self.overlay.label();
                 let title = if self.sim.failed {
                     format!("Avalanchers - Simulation Failed - overlay: {overlay}")
@@ -908,7 +958,9 @@ impl ApplicationHandler for Viewer {
                 full_output.textures_delta.clear();
 
                 queue.present(frame);
-                view.window.request_redraw();
+                self.dirty = false;
+                self.pending_render = false;
+                self.last_render_at = Instant::now();
             }
             _ => {}
         }
@@ -923,9 +975,39 @@ impl ApplicationHandler for Viewer {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        if let Some(view) = self.window.as_ref() {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(view) = self.window.as_ref() else {
+            return;
+        };
+
+        // Drain every due step batch (bounded); rendering is capped separately so
+        // fast runs are not throttled to the display rate.
+        let mut stepped = false;
+        for _ in 0..MAX_STEP_BATCHES_PER_WAKE {
+            match self.sim.advance_frame() {
+                true => stepped = true,
+                false => break,
+            }
+        }
+        if stepped {
+            self.pending_render = true;
+        }
+
+        let active =
+            !self.sim.failed && self.sim.simulation.get_state() < SimulationState::Finished;
+        let render_slot = self.last_render_at + MIN_RENDER_INTERVAL;
+        if self.dirty || (self.pending_render && Instant::now() >= render_slot) {
             view.window.request_redraw();
+        } else if active || self.pending_render {
+            // Sleep until the earlier of the next due step and — only when a
+            // frame is waiting — the next render slot; input wakes us earlier.
+            let mut wake = self.sim.next_step_at;
+            if self.pending_render {
+                wake = wake.min(render_slot);
+            }
+            event_loop.set_control_flow(ControlFlow::WaitUntil(wake.max(Instant::now())));
+        } else {
+            event_loop.set_control_flow(ControlFlow::Wait);
         }
     }
 }
@@ -939,15 +1021,15 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     let mut args = std::env::args().skip(1);
-    let dem_path = args.next().unwrap_or_else(|| DEFAULT_DEM.to_string());
+    let settings_path = args.next().unwrap_or_else(|| DEFAULT_SETTINGS.to_string());
     let exaggeration: f32 = args.next().and_then(|v| v.parse().ok()).unwrap_or(1.0);
     let snapshot = std::env::var("LIVE_SIM_SNAPSHOT").ok();
     println!(
-        "DEM path: {dem_path} exaggeration: {exaggeration} snapshot: {:?}",
+        "Settings path: {settings_path} exaggeration: {exaggeration} snapshot: {:?}",
         snapshot
     );
 
-    let mut sim = start_simulation(&dem_path, exaggeration)?;
+    let mut sim = start_simulation(&settings_path, exaggeration)?;
 
     if let Some(path) = snapshot {
         sim.run_to_completion()?;
@@ -956,7 +1038,8 @@ fn main() -> anyhow::Result<()> {
     }
 
     let event_loop = EventLoop::new()?;
-    event_loop.set_control_flow(ControlFlow::Poll);
+    // The viewer switches to WaitUntil dynamically; idle frames cost nothing.
+    event_loop.set_control_flow(ControlFlow::Wait);
     event_loop.run_app(&mut Viewer::new(sim))?;
     Ok(())
 }

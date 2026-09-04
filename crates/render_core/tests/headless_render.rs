@@ -229,13 +229,15 @@ fn particles_are_drawn_on_top_of_the_terrain() {
     let terrain = sloped_terrain(32, 32);
     let plain = read_rendered_pixels(&ctx, &terrain);
 
-    // A diagonal line of particles following the sloped surface.
+    // A diagonal line of particles following the sloped surface. The terrain height
+    // at (i * 10, i * 10) is 1000 + (i + i) * 1.5, matching the cell centres.
     let count = 32u32;
     let positions: Vec<[f32; 2]> = (0..count)
         .map(|i| [i as f32 * 10.0, i as f32 * 10.0])
         .collect();
     let velocities: Vec<[f32; 2]> = (0..count).map(|i| [i as f32, 0.0]).collect();
     let stopped = vec![0u32; count as usize];
+    let elevations: Vec<f32> = (0..count).map(|i| 1000.0 + i as f32 * 3.0).collect();
 
     let render_particles = |velocities_z: &[f32]| {
         render_with(&ctx, &terrain, |renderer, device| {
@@ -243,6 +245,7 @@ fn particles_are_drawn_on_top_of_the_terrain() {
             let velocity = storage_buffer(device, &velocities);
             let velocity_z = storage_buffer(device, velocities_z);
             let stopped = storage_buffer(device, &stopped);
+            let elevation = storage_buffer(device, &elevations);
 
             renderer.set_particles(
                 device,
@@ -251,6 +254,7 @@ fn particles_are_drawn_on_top_of_the_terrain() {
                     velocity: &velocity,
                     velocity_z: &velocity_z,
                     stopped: &stopped,
+                    elevation: &elevation,
                 }),
             );
             renderer.particles_mut().set_count(count);

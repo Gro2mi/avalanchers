@@ -9,7 +9,7 @@ struct Uniforms {
     up: vec4<f32>,
     // particle count, velocity used as the top of the colour ramp
     params: vec4<f32>,
-    // grid width, grid height, cell size, height offset above the surface
+    // unused, unused, unused, height offset above the surface
     grid: vec4<f32>,
 };
 
@@ -17,7 +17,7 @@ struct Uniforms {
 @group(0) @binding(1) var<storage, read> positions: array<vec2<f32>>;
 @group(0) @binding(2) var<storage, read> velocities: array<vec2<f32>>;
 @group(0) @binding(3) var<storage, read> stopped: array<u32>;
-@group(0) @binding(4) var heightmap: texture_2d<f32>;
+@group(0) @binding(4) var<storage, read> elevations: array<f32>;
 @group(0) @binding(5) var<storage, read> velocities_z: array<f32>;
 
 struct VertexOutput {
@@ -26,29 +26,6 @@ struct VertexOutput {
     @location(1) @interpolate(flat) speed: f32,
     @location(2) @interpolate(flat) moving: f32,
 };
-
-fn load_height(x: i32, y: i32) -> f32 {
-    let max_x = i32(u.grid.x) - 1;
-    let max_y = i32(u.grid.y) - 1;
-    let coord = vec2<i32>(clamp(x, 0, max_x), clamp(y, 0, max_y));
-    return textureLoad(heightmap, coord, 0).r;
-}
-
-// The simulation never writes back particle elevation, so the surface height is
-// interpolated from the DEM instead.
-fn surface_elevation(plane: vec2<f32>) -> f32 {
-    let cell = max(plane / u.grid.z, vec2<f32>(0.0, 0.0));
-    let base = vec2<i32>(i32(floor(cell.x)), i32(floor(cell.y)));
-    let f = cell - floor(cell);
-
-    let h00 = load_height(base.x, base.y);
-    let h10 = load_height(base.x + 1, base.y);
-    let h01 = load_height(base.x, base.y + 1);
-    let h11 = load_height(base.x + 1, base.y + 1);
-
-    let height = mix(mix(h00, h10, f.x), mix(h01, h11, f.x), f.y);
-    return height * u.up.w;
-}
 
 @vertex
 fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
@@ -66,7 +43,7 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 
     // The simulation stores x and y in the DEM plane; y maps to the renderer's z axis.
     let plane = positions[index];
-    let centre = vec3<f32>(plane.x, surface_elevation(plane) + u.grid.w, plane.y);
+    let centre = vec3<f32>(plane.x, elevations[index] * u.up.w + u.grid.w, plane.y);
 
     let radius = u.right.w;
     let world = centre + u.right.xyz * (offset.x * radius) + u.up.xyz * (offset.y * radius);

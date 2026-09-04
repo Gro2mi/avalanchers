@@ -11,6 +11,14 @@ use tracing::{info, trace};
 use wasm_bindgen::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use web_sys::window;
+
+#[cfg(target_arch = "wasm32")]
+mod renderer;
+#[cfg(target_arch = "wasm32")]
+use renderer::RenderView;
+#[cfg(target_arch = "wasm32")]
+use simulation::SimulationState;
+
 static BASE_URL: OnceLock<String> = OnceLock::new();
 
 #[wasm_bindgen(start)]
@@ -139,17 +147,56 @@ impl Default for WasmSettings {
 #[wasm_bindgen]
 pub struct WasmSimulation {
     inner: Simulation,
+    #[cfg(target_arch = "wasm32")]
+    view: Option<RenderView>,
+    /// Camera of the most recent view. Invalidations (DEM changes, re-runs) drop
+    /// the view long before the re-attach happens, so the viewpoint is stashed
+    /// here to survive that gap.
+    #[cfg(target_arch = "wasm32")]
+    last_camera: Option<render_core::OrbitCamera>,
 }
+
+/// Renderer housekeeping that is not part of the JS API.
+#[cfg(target_arch = "wasm32")]
+impl WasmSimulation {
+    fn view_mut(&mut self) -> Result<&mut RenderView, JsValue> {
+        self.view
+            .as_mut()
+            .ok_or_else(|| JsValue::from_str("renderer not attached"))
+    }
+
+    /// A new DEM invalidates the renderer's terrain and every cloned buffer, so the
+    /// canvas must be re-attached after the simulation is prepared again. The
+    /// camera is stashed so the viewpoint survives the re-attach.
+    fn invalidate_renderer(&mut self) {
+        if let Some(view) = self.view.take() {
+            self.last_camera = Some(view.renderer.camera);
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl WasmSimulation {
+    fn invalidate_renderer(&mut self) {}
+}
+
 #[wasm_bindgen]
 impl WasmSimulation {
     pub async fn new() -> Result<WasmSimulation, JsValue> {
         let inner = Simulation::new().await.map_err(to_js_err)?;
-        Ok(WasmSimulation { inner })
+        Ok(WasmSimulation {
+            inner,
+            #[cfg(target_arch = "wasm32")]
+            view: None,
+            #[cfg(target_arch = "wasm32")]
+            last_camera: None,
+        })
     }
     pub async fn create_example(&mut self, dem_path: String) -> Result<(), JsValue> {
         let path = base_url().to_owned() + "data/avaframe/" + &dem_path + ".png";
         info!("Creating simulation with DEM path: {}", path);
         self.inner.create_example(&path).await.map_err(to_js_err)?;
+        self.invalidate_renderer();
         Ok(())
     }
 
@@ -160,6 +207,7 @@ impl WasmSimulation {
         // 2. Run the async creation
         // Browser environment REQUIRES .await here. block_on() will panic.
         self.inner.create(settings).await.map_err(to_js_err)?;
+        self.invalidate_renderer();
         Ok(())
     }
 
@@ -190,6 +238,7 @@ impl WasmSimulation {
                 map_factor,
             )
             .map_err(to_js_err)?;
+        self.invalidate_renderer();
         Ok(())
     }
 
@@ -204,6 +253,7 @@ impl WasmSimulation {
         self.inner
             .set_dem_default(dem_data, width as usize, height as usize, cell_size)
             .map_err(to_js_err)?;
+        self.invalidate_renderer();
         Ok(())
     }
 
@@ -233,6 +283,7 @@ impl WasmSimulation {
                 dem.map_factor,
             )
             .map_err(to_js_err)?;
+        self.invalidate_renderer();
         Ok(())
     }
 
@@ -257,7 +308,13 @@ impl WasmSimulation {
     }
 
     pub async fn prepare(&mut self) -> Result<(), JsValue> {
-        self.inner.prepare().await.map_err(to_js_err)
+        self.inner.prepare().await.map_err(to_js_err)?;
+        // Re-preparing rebuilds buffers the renderer watches (e.g. new release areas).
+        #[cfg(target_arch = "wasm32")]
+        if let Some(view) = self.view.as_mut() {
+            view.refresh_buffers(self.inner.orchestrator(), self.inner.number_particles());
+        }
+        Ok(())
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -416,5 +473,139 @@ impl WasmSimulation {
         Ok(WasmTimestepData {
             inner: data.clone(),
         })
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+impl WasmSimulation {
+    /// Attaches a live renderer to `canvas`, drawing the simulation's own GPU
+    /// buffers without copying data back to the CPU. The simulation must be
+    /// prepared (`prepare()` or `run()`) so its buffers exist, and the canvas'
+    /// `width`/`height` attributes must be set (ideally `clientWidth *
+    /// devicePixelRatio`). Re-attaching replaces any previous renderer.
+    pub fn attach_renderer(
+        &mut self,
+        canvas: web_sys::HtmlCanvasElement,
+        exaggeration: f32,
+    ) -> Result<(), JsValue> {
+        // Re-attaches keep the current viewpoint: invalidation stashed the camera
+        // of the dropped view, and a live view hands its camera over directly.
+        self.invalidate_renderer();
+        if self.inner.dem.data1d.is_empty() {
+            return Err(JsValue::from_str("set a DEM before attaching the renderer"));
+        }
+
+        let mut view = RenderView::new(
+            self.inner.orchestrator(),
+            canvas,
+            &self.inner.dem,
+            exaggeration,
+            self.inner.number_particles(),
+        )
+        .map_err(to_js_err)?;
+        if let Some(camera) = self.last_camera {
+            view.renderer.camera = camera;
+            let (width, height) = view.renderer.size();
+            view.renderer.camera.set_aspect(width, height);
+        }
+        self.view = Some(view);
+        info!("renderer attached to canvas");
+        Ok(())
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn renderer_attached(&self) -> bool {
+        self.view.is_some()
+    }
+
+    /// True once the simulation reaches (or passes) the `Finished` state, so a JS
+    /// frame loop can stop stepping and keep rendering for camera inspection.
+    #[wasm_bindgen(getter)]
+    pub fn is_finished(&self) -> bool {
+        self.inner.get_state() >= SimulationState::Finished
+    }
+
+    /// Advances the simulation by `steps` timesteps and renders one frame onto the
+    /// canvas. Call this from a `requestAnimationFrame` loop; `steps = 0` only
+    /// redraws, for example while the camera moves after the run finished.
+    pub async fn render_frame(&mut self, steps: u32) -> Result<(), JsValue> {
+        if steps > 0 && self.inner.get_state() < SimulationState::Finished {
+            let info = self.inner.run_n_steps(steps).await.map_err(to_js_err)?;
+            self.view_mut()?
+                .renderer
+                .particles_mut()
+                .set_count(info.number_particles);
+        }
+        self.view_mut()?.render();
+        Ok(())
+    }
+
+    /// Rotates the camera; inputs are pixel deltas from a drag.
+    pub fn orbit(&mut self, delta_x: f32, delta_y: f32) -> Result<(), JsValue> {
+        self.view_mut()?.orbit(delta_x, delta_y);
+        Ok(())
+    }
+
+    /// Moves the camera target in the screen plane; inputs are pixel deltas from a drag.
+    pub fn pan(&mut self, delta_x: f32, delta_y: f32) -> Result<(), JsValue> {
+        self.view_mut()?.pan(delta_x, delta_y);
+        Ok(())
+    }
+
+    /// Zooms towards or away from the target; positive `delta` zooms in. Pass the
+    /// wheel/scroll delta.
+    pub fn zoom(&mut self, delta: f32) -> Result<(), JsValue> {
+        self.view_mut()?.zoom(delta);
+        Ok(())
+    }
+
+    /// Resets the camera to the default terrain framing.
+    pub fn reset_view(&mut self) -> Result<(), JsValue> {
+        self.view_mut()?.reset_view();
+        Ok(())
+    }
+
+    /// Drops the live view and the remembered camera without stashing either, so
+    /// the next attach frames the new terrain afresh. Call before loading a
+    /// different DEM; re-runs of the same DEM should keep the view instead.
+    pub fn forget_view(&mut self) {
+        self.view = None;
+        self.last_camera = None;
+    }
+
+    /// Selects the scalar field tinting the terrain: "none", "peak_velocity",
+    /// "peak_flow_thickness", "grid_mass", "release_areas", "slope_angle",
+    /// "slope_aspect" or "roughness". A colour bar legend is drawn while an
+    /// overlay is active.
+    pub fn set_overlay(&mut self, name: String) -> Result<(), JsValue> {
+        let overlay = renderer::Overlay::from_name(&name)
+            .ok_or_else(|| JsValue::from_str(&format!("unknown overlay '{name}'")))?;
+        let view = self.view_mut()?;
+        view.overlay = overlay;
+        view.apply_overlay();
+        Ok(())
+    }
+
+    /// Shows or hides the simulation particles.
+    pub fn set_particles_visible(&mut self, visible: bool) -> Result<(), JsValue> {
+        let view = self.view_mut()?;
+        view.show_particles = visible;
+        view.apply_particles();
+        Ok(())
+    }
+
+    /// Resizes the canvas surface; call after the canvas' `width`/`height`
+    /// attributes changed, for example on window resize.
+    pub fn resize(&mut self, width: u32, height: u32) -> Result<(), JsValue> {
+        if width == 0 || height == 0 {
+            return Ok(());
+        }
+        let view = self.view_mut()?;
+        view.config.width = width;
+        view.config.height = height;
+        view.surface.configure(&view.device, &view.config);
+        view.renderer.resize(&view.device, width, height);
+        Ok(())
     }
 }

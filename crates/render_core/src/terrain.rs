@@ -461,11 +461,6 @@ impl TerrainRenderer {
         );
     }
 
-    /// The DEM heightmap, shared with passes that need to place geometry on the surface.
-    pub fn heightmap_view(&self) -> &wgpu::TextureView {
-        &self.heightmap_view
-    }
-
     /// Updates the colour ramp bounds without rebuilding the bind group.
     pub fn set_overlay_range(&mut self, range: OverlayRange) {
         self.uniforms.overlay[1] = range.min;

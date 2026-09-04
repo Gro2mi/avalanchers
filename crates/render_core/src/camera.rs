@@ -4,6 +4,10 @@ use crate::terrain::TerrainData;
 const MIN_PITCH: f32 = 0.02;
 const MAX_PITCH: f32 = 1.5;
 const MIN_DISTANCE: f32 = 0.01;
+/// Rotation added to the computed downhill yaw so the default view meets the
+/// slope at an angle instead of head-on: a camera looking straight up the fall
+/// line flattens the relief and hides the release areas behind the ridge.
+const VIEW_YAW_OFFSET: f32 = 0.3;
 
 /// Orbit camera: looks at `target` from a point on a sphere defined by `yaw`, `pitch` and `distance`.
 ///
@@ -38,8 +42,10 @@ impl Default for OrbitCamera {
 }
 
 impl OrbitCamera {
-    /// Default viewpoint for a DEM: centered on the real data, tilted, and pulled back until
-    /// the whole terrain fits.
+    /// Default viewpoint for a DEM: centered on the real data, standing in the
+    /// valley on the low side of the terrain so the mountain face and its release
+    /// area face the camera — offset in yaw so the slope is seen at an angle —
+    /// and pulled back until the whole terrain fits.
     pub fn framing(terrain: &TerrainData, aspect: f32) -> Self {
         let samples = terrain.fit_samples();
         let (min_p, max_p) = samples.iter().fold(
@@ -66,10 +72,11 @@ impl OrbitCamera {
         let half_fov_y = fov_y * 0.5;
         let half_fov = half_fov_y.min((aspect * half_fov_y.tan()).atan());
 
+        let horizontal_extent = (max_p.x - min_p.x).max(max_p.z - min_p.z).max(f32::EPSILON);
         let mut camera = Self {
             target,
             distance: (radius / half_fov.tan()).max(MIN_DISTANCE),
-            yaw: -0.6,
+            yaw: downhill_yaw(&samples, min_p.y, max_p.y, horizontal_extent) + VIEW_YAW_OFFSET,
             pitch: 0.55,
             fov_y,
             znear: 0.1,
@@ -187,6 +194,42 @@ impl OrbitCamera {
     }
 }
 
+/// Yaw that places the camera on the low side of the terrain, looking up at the
+/// high ground where release areas sit. Flat or symmetric terrain (a bowl, a
+/// pyramid) has no favoured side and falls back to the classic fixed angle.
+fn downhill_yaw(samples: &[Vec3], min_y: f32, max_y: f32, horizontal_extent: f32) -> f32 {
+    const FALLBACK_YAW: f32 = -0.6;
+
+    let relief = max_y - min_y;
+    if relief <= f32::EPSILON {
+        return FALLBACK_YAW;
+    }
+
+    // Centroids of the top and bottom elevation quarters; averaging keeps a
+    // single noisy pixel from steering the camera.
+    let (mut high, mut high_count) = (Vec3::ZERO, 0u32);
+    let (mut low, mut low_count) = (Vec3::ZERO, 0u32);
+    for point in samples {
+        if point.y > min_y + 0.75 * relief {
+            high = high + *point;
+            high_count += 1;
+        } else if point.y < min_y + 0.25 * relief {
+            low = low + *point;
+            low_count += 1;
+        }
+    }
+    if high_count == 0 || low_count == 0 {
+        return FALLBACK_YAW;
+    }
+
+    let downhill = (low * (1.0 / low_count as f32)) - (high * (1.0 / high_count as f32));
+    let horizontal = (downhill.x * downhill.x + downhill.z * downhill.z).sqrt();
+    if horizontal < 0.05 * horizontal_extent {
+        return FALLBACK_YAW;
+    }
+    downhill.x.atan2(downhill.z)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,6 +304,33 @@ mod tests {
                 "terrain should fill the viewport at aspect {aspect}, got {fill}"
             );
         }
+    }
+
+    #[test]
+    fn default_framing_faces_the_mountain_from_the_valley() {
+        // Terrain rising towards +z: the camera must stand on the low (-z) side
+        // looking uphill at the mountain face, not behind the summit.
+        let (width, height) = (64u32, 64u32);
+        let heights = (0..height)
+            .flat_map(|y| (0..width).map(move |x| 100.0 + y as f32 * 5.0))
+            .collect();
+        let terrain = TerrainData::new(width, height, 10.0, heights).unwrap();
+
+        let camera = OrbitCamera::framing(&terrain, 16.0 / 9.0);
+        let eye = camera.eye();
+        assert!(
+            eye.z < camera.target.z,
+            "camera should stand on the low side: eye.z {} vs target.z {}",
+            eye.z,
+            camera.target.z
+        );
+        // The high corner must stay in view, so the framing still fits the terrain.
+        let view_proj = camera.view_projection();
+        let ndc = transform_point(view_proj, Vec3::new(0.0, 400.0, 630.0));
+        assert!(
+            ndc.x.abs() <= 1.0 && ndc.y.abs() <= 1.0,
+            "summit corner out of view: {ndc:?}"
+        );
     }
 
     #[test]

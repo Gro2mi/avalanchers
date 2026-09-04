@@ -15,6 +15,8 @@ pub struct ParticleBuffers<'a> {
     pub velocity_z: &'a wgpu::Buffer,
     /// `array<u32>` where a non-zero entry marks a stopped particle.
     pub stopped: &'a wgpu::Buffer,
+    /// `array<f32>` of particle elevations above sea level, in metres.
+    pub elevation: &'a wgpu::Buffer,
 }
 
 #[repr(C)]
@@ -27,19 +29,17 @@ struct ParticleUniforms {
     up: [f32; 4],
     /// particle count, velocity at the top of the colour ramp
     params: [f32; 4],
-    /// grid width, grid height, cell size, height offset above the surface
+    /// unused, unused, unused, height offset above the surface
     grid: [f32; 4],
 }
 
 /// Draws particles as camera-facing discs, expanded on the GPU from the vertex index.
-/// Particle height comes from the DEM, because the simulation only writes back the
-/// horizontal position.
+/// Particle height is read from the simulation's per-particle elevation buffer.
 pub struct ParticleRenderer {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     bind_group: Option<wgpu::BindGroup>,
     uniform_buffer: wgpu::Buffer,
-    heightmap: wgpu::TextureView,
     uniforms: ParticleUniforms,
     count: u32,
 }
@@ -49,7 +49,6 @@ impl ParticleRenderer {
         device: &wgpu::Device,
         color_format: wgpu::TextureFormat,
         depth_format: wgpu::TextureFormat,
-        heightmap: wgpu::TextureView,
         terrain: &crate::terrain::TerrainData,
     ) -> Self {
         let radius = terrain.cell_size();
@@ -100,16 +99,7 @@ impl ParticleRenderer {
                 storage_entry(1),
                 storage_entry(2),
                 storage_entry(3),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
+                storage_entry(4),
                 storage_entry(5),
             ],
         });
@@ -166,7 +156,6 @@ impl ParticleRenderer {
             bind_group_layout,
             bind_group: None,
             uniform_buffer,
-            heightmap,
             uniforms,
             count: 0,
         }
@@ -197,7 +186,7 @@ impl ParticleRenderer {
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,
-                        resource: wgpu::BindingResource::TextureView(&self.heightmap),
+                        resource: buffers.elevation.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 5,

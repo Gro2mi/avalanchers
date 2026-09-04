@@ -105,13 +105,7 @@ impl Renderer {
         let (width, height) = (width.max(1), height.max(1));
         let terrain_renderer =
             TerrainRenderer::new(device, queue, color_format, DEPTH_FORMAT, terrain);
-        let particles = ParticleRenderer::new(
-            device,
-            color_format,
-            DEPTH_FORMAT,
-            terrain_renderer.heightmap_view().clone(),
-            terrain,
-        );
+        let particles = ParticleRenderer::new(device, color_format, DEPTH_FORMAT, terrain);
         let colorbar = ColorbarRenderer::new(device, queue, color_format);
 
         Self {
