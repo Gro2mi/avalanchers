@@ -249,13 +249,7 @@ pub struct TileId {
     pub easting: u32,
 }
 
-#[derive(Debug, Clone)]
-pub struct BBox {
-    pub min_northing: u32,
-    pub max_northing: u32,
-    pub min_easting: u32,
-    pub max_easting: u32,
-}
+pub use crate::rasterizer::BBox;
 
 pub struct TileManager {
     client: Client,
@@ -263,9 +257,13 @@ pub struct TileManager {
     dtm: Array<FilesystemStore>,
     min_easting_km: u64,
     min_northing_km: u64,
+    cell_size: f32,
 }
 
 impl TileManager {
+    pub fn cell_size(&self) -> f32 {
+        self.cell_size
+    }
     /// Initializes the Tile Manager with a local Zarr filesystem store
     pub fn new(cache_dir: &str) -> Result<Self, TileManagerError> {
         let store = Arc::new(FilesystemStore::new(cache_dir)?);
@@ -435,6 +433,7 @@ impl TileManager {
             dtm,
             min_easting_km,
             min_northing_km,
+            cell_size,
             // tile_size,
         })
     }
@@ -652,9 +651,9 @@ impl TileManager {
 
                 self.dtm
                     .store_chunk(&chunk_indices, resampled.as_slice().unwrap())?;
-                info!("Cache miss")
+                debug!("Cache miss: {:?}", chunk_indices);
             }
-            info!("Cache hit")
+            debug!("Cache hit: {:?}", chunk_indices)
         }
 
         //

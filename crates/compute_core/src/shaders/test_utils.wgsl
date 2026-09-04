@@ -4,7 +4,7 @@
 
 @compute @workgroup_size(1)
 fn test_utils(@builtin(global_invocation_id) id: vec3u) {
-    let nan = bitcast<f32>(0x7F800001u);
+    let nan = bitcast<f32>(0x7FC00000u);
     let neg_nan = bitcast<f32>(0xFF800001u);
     let inf = bitcast<f32>(0x7F800000u);
     let neg_inf = bitcast<f32>(0xFF800000u);
@@ -118,6 +118,7 @@ struct SimSettings {
     roughness_threshold: f32,
     flags: u32,
     release_max_elevation: f32,
+    peak_flow_thickness_threshold: f32,
 };
 
 struct AtomicValues {

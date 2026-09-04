@@ -91,6 +91,7 @@ pub struct SimSettings {
     pub roughness_threshold: f32,
     pub flags: u32,
     pub release_max_elevation: f32,
+    pub peak_flow_thickness_threshold: f32,
 }
 
 impl Hash for SimSettings {
@@ -123,6 +124,7 @@ impl Hash for SimSettings {
         self.release_min_elevation.to_bits().hash(state);
         self.velocity_threshold.to_bits().hash(state);
         self.roughness_threshold.to_bits().hash(state);
+        self.peak_flow_thickness_threshold.to_bits().hash(state);
         // Flags
         self.flags.hash(state);
     }
@@ -174,6 +176,8 @@ impl SimSettings {
             max_slope_angle: 60.0,
             release_min_elevation: 1500.0,
             release_max_elevation: 8848.0,
+
+            peak_flow_thickness_threshold: 0.1,
         }
     }
 
@@ -256,6 +260,9 @@ impl SimSettings {
         }
         if let Some(val) = patch.roughness_threshold {
             settings.roughness_threshold = val;
+        }
+        if let Some(val) = patch.peak_flow_thickness_threshold {
+            settings.peak_flow_thickness_threshold = val;
         }
         if let Some(val) = patch.enable_curvature {
             if val {
@@ -488,6 +495,7 @@ pub struct Settings {
     pub release_max_elevation: Option<f32>,
     pub velocity_threshold: Option<f32>,
     pub roughness_threshold: Option<f32>,
+    pub peak_flow_thickness_threshold: Option<f32>,
 
     pub enable_curvature: Option<bool>,
     pub enable_particle_interaction: Option<bool>,
@@ -569,6 +577,7 @@ mod tests {
         assert_eq!(settings.release_max_elevation, 8848.0);
         assert_eq!(settings.velocity_threshold, 0.1);
         assert_eq!(settings.roughness_threshold, 0.01);
+        assert_eq!(settings.peak_flow_thickness_threshold, 0.1);
     }
 
     #[test_log::test]
@@ -619,6 +628,7 @@ mod tests {
             release_max_elevation: Some(200.0),
             velocity_threshold: Some(0.001),
             roughness_threshold: Some(0.002),
+            peak_flow_thickness_threshold: Some(1.5),
             dem_path: Some(String::from("dem.png")),
             release_areas_path: Some(String::from("release_area.png")),
             output_path: Some(String::from("output")),
@@ -644,6 +654,7 @@ mod tests {
         assert_eq!(sim_settings.release_max_elevation, 200.0);
         assert_eq!(sim_settings.velocity_threshold, 0.001);
         assert_eq!(sim_settings.roughness_threshold, 0.002);
+        assert_eq!(sim_settings.peak_flow_thickness_threshold, 1.5);
         assert_eq!(sim_settings.grid_shape_x, dem.width as u32);
         assert_eq!(sim_settings.grid_shape_y, dem.height as u32);
         assert_eq!(sim_settings.cell_size, dem.cell_size);
@@ -738,6 +749,10 @@ mod tests {
         assert_eq!(
             settings.roughness_threshold,
             deserialized.roughness_threshold
+        );
+        assert_eq!(
+            settings.peak_flow_thickness_threshold,
+            deserialized.peak_flow_thickness_threshold
         );
         assert_eq!(settings.flags, deserialized.flags);
     }

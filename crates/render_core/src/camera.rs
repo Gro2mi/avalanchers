@@ -312,7 +312,7 @@ mod tests {
         // looking uphill at the mountain face, not behind the summit.
         let (width, height) = (64u32, 64u32);
         let heights = (0..height)
-            .flat_map(|y| (0..width).map(move |x| 100.0 + y as f32 * 5.0))
+            .flat_map(|y| (0..width).map(move |_x| 100.0 + y as f32 * 5.0))
             .collect();
         let terrain = TerrainData::new(width, height, 10.0, heights).unwrap();
 

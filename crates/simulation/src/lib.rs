@@ -9,7 +9,6 @@ use compute_core::{
 };
 #[cfg(target_arch = "wasm32")]
 use data_processor::zarr_writer::{ResultGrids, ZarrEntry};
-// use data_processor;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Once;
 use web_time::Instant;
@@ -52,11 +51,22 @@ pub enum SimulationState {
     Evaluated,
 }
 
+pub struct SimulationLoadResult {
+    pub settings: SimSettings,
+    pub dem: Dem,
+    pub roi: Vec<bool>,
+    pub dem_path: String,
+    pub release_areas_path: Option<String>,
+    pub batch_compute_steps: Option<u32>,
+    pub output_path: Option<String>,
+}
+
 pub struct Simulation {
     orchestrator: ComputeOrchestrator,
     pub settings: SimSettings,
     pub dem_path: String,
     pub dem: Dem,
+    pub roi: Vec<bool>,
     pub output_path: String,
     release_areas_path: Option<String>,
     release_areas_array: Option<Vec<f32>>,
@@ -67,15 +77,6 @@ pub struct Simulation {
     pub ava_mask: Vec<bool>,
     #[cfg(not(target_arch = "wasm32"))]
     output: Option<data_processor::output::Output>,
-}
-
-pub struct SimulationLoadResult {
-    pub settings: SimSettings,
-    pub dem: Dem,
-    pub dem_path: String,
-    pub release_areas_path: Option<String>,
-    pub batch_compute_steps: Option<u32>,
-    pub output_path: Option<String>,
 }
 
 impl Simulation {
@@ -91,6 +92,7 @@ impl Simulation {
             output_path: "avalanchers".to_string(),
             dem_path: String::new(),
             dem: Dem::default(),
+            roi: Vec::new(),
             number_particles: 0,
             state: SimulationState::Uninitialized,
             gpu_cache: GpuCache::default(),
@@ -159,7 +161,7 @@ impl Simulation {
 
     pub async fn load_data(settings: &Settings) -> Result<SimulationLoadResult> {
         timer_checkpoint("Start create");
-        let (settings_result, dem_result, _outline) =
+        let (settings_result, dem_result, outline) =
             data_processor::create_sim_settings_and_dem(settings).await?;
 
         timer_checkpoint("Load settings");
@@ -167,6 +169,7 @@ impl Simulation {
         Ok(SimulationLoadResult {
             settings: settings_result,
             dem: dem_result,
+            roi: outline,
             batch_compute_steps: settings.batch_compute_steps,
             dem_path: settings.dem_path.clone().unwrap_or_default(),
             release_areas_path: settings.release_areas_path.clone(),
@@ -182,6 +185,7 @@ impl Simulation {
 
         self.dem = data.dem;
         self.dem_path = data.dem_path;
+        self.roi = data.roi;
         self.output_path = data
             .output_path
             .unwrap_or_else(|| "avalanchers.zarr".to_string());
@@ -510,7 +514,7 @@ impl Simulation {
         if self.state < SimulationState::Finished {
             bail!("Simulation must be finished before post-processing results");
         }
-        let threshold = 0.01;
+        let threshold = self.settings.peak_flow_thickness_threshold;
         let dem_width = self.dem.width;
         let (peak_flow_thickness, ava_mask) = mask_threshold_and_biggest_blob(
             self.fetch_peak_flow_thickness().await?,
@@ -528,20 +532,38 @@ impl Simulation {
         Ok(())
     }
 
-    pub async fn evaluate(&mut self) -> Result<(f32, f32, f32, f32)> {
+    pub async fn evaluate(&mut self) -> Result<(f32, f32, f32, f32, f32, f32, f32, f32)> {
         if self.state < SimulationState::PostProcessed {
             bail!("Simulation must be post-processed before evaluation");
         }
-        let iou = 0.0;
+        let iou = compute_core::evaluation::evaluate_mass_movement_area(&self.ava_mask, &self.roi)
+            .map_err(|e| anyhow::anyhow!("Mass movement area evaluation failed: {e:?}"))?
+            .jaccard;
         let (horizontal_distance, vertical_drop) = self
             .dem
             .get_elevation_extrema_distance_and_drop(&self.ava_mask)
             .unwrap_or((0.0, 0.0));
+        let beeline_3d = horizontal_distance.hypot(vertical_drop);
+        let (horizontal_distance_ref, vertical_drop_ref) = self
+            .dem
+            .get_elevation_extrema_distance_and_drop(&self.roi)
+            .unwrap_or((0.0, 0.0));
+        let beeline_3d_ref = horizontal_distance_ref.hypot(vertical_drop_ref);
         let velocities = self.fetch_peak_velocity().await?;
         let peak_velocity = velocities.iter().copied().reduce(f32::max).unwrap_or(0.0);
         self.state = SimulationState::Evaluated;
-        Ok((iou, horizontal_distance, vertical_drop, peak_velocity))
+        Ok((
+            iou as f32,
+            horizontal_distance,
+            vertical_drop,
+            horizontal_distance_ref,
+            vertical_drop_ref,
+            beeline_3d,
+            beeline_3d_ref,
+            peak_velocity,
+        ))
     }
+
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn save_with_path(&mut self, path: &str) -> Result<()> {
         if self.output_path != path {
@@ -777,7 +799,7 @@ impl Simulation {
                         .run_compute_roughness(&self.settings)
                         .await?;
                     self.orchestrator
-                        .run_compute_release_areas(&self.settings)
+                        .run_compute_release_areas(&self.settings, &self.roi)
                         .await?
                 }
             },
@@ -1010,8 +1032,11 @@ impl Simulation {
 
             let data_aos: Vec<_> = full_data.into_iter().step_by(3).collect();
 
-            self.gpu_cache.timestep_data =
-                Some(TimestepData::from_aos(&data_aos, self.settings.cell_size));
+            self.gpu_cache.timestep_data = Some(TimestepData::from_aos(
+                &data_aos,
+                self.settings.cell_size,
+                self.sim_info.timestep as usize,
+            ));
         }
         Ok(self.gpu_cache.timestep_data.as_ref().unwrap())
     }
@@ -1276,6 +1301,7 @@ mod tests {
     const RELEASE_TEXTURE_PATH: &str = "../../data/avaframe/avaInclinedPlanereleaseTexture.png";
     const GAR_PATH: &str = "../../data/avaframe/avaGar.png";
     const GAR_RELEASE_TEXTURE_PATH: &str = "../../data/avaframe/avaGarreleaseTexture.png";
+    const ROI_PATH: &str = "../../data/outline/polygon_10721.shp";
 
     #[test]
     fn test_init_logging_idempotent() {
@@ -2616,6 +2642,26 @@ mod tests {
             "Expected less cells above threshold at x={} than at x={}",
             x_start,
             x
+        );
+    }
+
+    #[tokio::test]
+    async fn test_load_roi() {
+        let mut sim: Simulation = block_on(Simulation::new()).expect("Failed to create Simulation");
+        let settings = Settings {
+            outlines_path: Some(ROI_PATH.to_string()),
+            outlines_padding: Some(50.0),
+            ..Default::default()
+        };
+        sim.create(settings)
+            .await
+            .expect("Failed to create simulation");
+        // block_on(sim.create(settings)).expect("Failed to create simulation");
+        assert!(!sim.roi.is_empty(), "ROI should be loaded");
+        assert_eq!(
+            sim.roi.len(),
+            sim.dem.data1d.len(),
+            "ROI length should match DEM data length"
         );
     }
 }

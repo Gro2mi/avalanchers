@@ -844,7 +844,7 @@ fn load_outline(path: &str, padding: f32) -> Result<RasterGrid, DataProcessorErr
 
 pub async fn create_sim_settings_and_dem_from_path(
     file_path: &str,
-) -> Result<(SimSettings, Dem, RasterGrid), DataProcessorError> {
+) -> Result<(SimSettings, Dem, Vec<bool>), DataProcessorError> {
     let settings = Settings {
         dem_path: Some(file_path.to_string()),
         ..Default::default()
@@ -853,7 +853,7 @@ pub async fn create_sim_settings_and_dem_from_path(
 }
 pub async fn create_sim_settings_and_dem(
     settings: &Settings,
-) -> Result<(SimSettings, Dem, RasterGrid), DataProcessorError> {
+) -> Result<(SimSettings, Dem, Vec<bool>), DataProcessorError> {
     let (outline, dem) = match (&settings.outlines_path, &settings.dem_path) {
         // 1. Outline only -> build outline and DEM from tile manager
         #[cfg(target_arch = "wasm32")]
@@ -866,35 +866,33 @@ pub async fn create_sim_settings_and_dem(
                 .outlines_padding
                 .ok_or(DataProcessorError::NoneOutlinesPadding)?;
             let outline = load_outline(outline_path, padding)?;
-
+            if !outline.data.iter().any(|&v| v) {
+                return Err(DataProcessorError::DemError(format!(
+                    "case {}: rasterised outline is empty",
+                    outline_path
+                )));
+            }
             let tile_manager = TileManager::new("dtm_cache.zarr")?;
+            let dem = tile_manager.get_dem(&outline.get_bbox()).await?;
 
-            let bbox = tile_manager::BBox {
-                min_northing: outline.origin_y as u32,
-                max_northing: (outline.origin_y + outline.height as f64 * outline.cell_size) as u32,
-                min_easting: outline.origin_x as u32,
-                max_easting: (outline.origin_x + outline.width as f64 * outline.cell_size) as u32,
-            };
+            if dem.data1d.iter().any(|v: &f32| v.is_nan()) {
+                return Err(DataProcessorError::DemError(format!(
+                    "case {}: DEM contains NaN (missing swissALTI3D coverage)",
+                    outline_path
+                )));
+            }
 
-            let dem = tile_manager.get_dem(&bbox).await?;
+            // let (_min_elevation, max_elevation) = dem.get_elevation_extrema(&outline.data).unwrap();
 
-            (outline, dem)
+            // let dem = dem.mask_above_elevation(max_elevation + 20.0);
+
+            (outline.data, dem)
         }
 
         // 2. DEM only -> load DEM and create an all-ones outline
         (None, Some(dem_path)) => {
             let dem = load_dem(dem_path).await?;
-
-            let outline = RasterGrid {
-                width: dem.width,
-                height: dem.height,
-                cell_size: dem.cell_size as f64,
-                origin_x: dem.bounds.xmin as f64,
-                origin_y: dem.bounds.ymin as f64,
-                data: vec![1u8; dem.width * dem.height],
-            };
-
-            (outline, dem)
+            (vec![true; dem.width * dem.height], dem)
         }
 
         // 3. Both provided -> load outline and DEM from file
@@ -906,11 +904,11 @@ pub async fn create_sim_settings_and_dem(
 
             let dem = load_dem(dem_path).await?;
 
-            (outline, dem)
+            (outline.data, dem)
         }
 
         // Neither provided
-        (None, None) => (RasterGrid::default(), Dem::default()),
+        (None, None) => (Vec::new(), Dem::default()),
     };
 
     let sim_settings = SimSettings::from_settings(settings, &dem);
@@ -931,9 +929,7 @@ pub fn settings_from_json_file(path: &str) -> io::Result<Settings> {
     Ok(settings)
 }
 
-pub async fn sim_settings_and_dem_from_json_file(
-    file_path: &str,
-) -> (SimSettings, Dem, RasterGrid) {
+pub async fn sim_settings_and_dem_from_json_file(file_path: &str) -> (SimSettings, Dem, Vec<bool>) {
     let data = std::fs::read_to_string(file_path).expect("Failed to read json file");
     let settings = Settings::loads(&data).expect("Failed to load settings from JSON file");
     create_sim_settings_and_dem(&settings)
@@ -1118,6 +1114,7 @@ mod tests {
             release_max_elevation: Some(13.0),
             velocity_threshold: Some(12.0),
             roughness_threshold: Some(13.0),
+            peak_flow_thickness_threshold: Some(14.0),
             enable_curvature: Some(true),
             enable_entrainment: Some(true),
             enable_particle_interaction: Some(true),
@@ -1148,6 +1145,7 @@ mod tests {
         assert_eq!(loaded.release_max_elevation, Some(13.0));
         assert_eq!(loaded.velocity_threshold, Some(12.0));
         assert_eq!(loaded.roughness_threshold, Some(13.0));
+        assert_eq!(loaded.peak_flow_thickness_threshold, Some(14.0));
         assert_eq!(loaded.enable_curvature, Some(true));
         assert_eq!(loaded.enable_entrainment, Some(true));
         assert_eq!(loaded.enable_particle_interaction, Some(true));
@@ -1308,9 +1306,7 @@ mod tests {
         assert_eq!(sim_settings.grid_shape_x, dem.width as u32);
         assert_eq!(sim_settings.grid_shape_y, dem.height as u32);
         assert_eq!(sim_settings.cell_size, dem.cell_size);
-        assert_eq!(outline.cell_size, dem.cell_size as f64);
-        assert_eq!(outline.origin_x, dem.bounds.xmin as f64);
-        assert_eq!(outline.origin_y, dem.bounds.ymin as f64);
+        assert_eq!(outline.len(), dem.data1d.len());
 
         let settings = Settings {
             dem_path: Some(PARABOLA_PATH.to_string()),
@@ -1330,9 +1326,7 @@ mod tests {
         assert_eq!(json_sim_settings.density, 321.0);
         assert_eq!(json_sim_settings.grid_shape_x, dem.width as u32);
         assert_eq!(json_sim_settings.grid_shape_y, dem.height as u32);
-        assert_eq!(json_outline.cell_size, dem.cell_size as f64);
-        assert_eq!(json_outline.origin_x, dem.bounds.xmin as f64);
-        assert_eq!(json_outline.origin_y, dem.bounds.ymin as f64);
+        assert_eq!(json_outline.len(), dem.data1d.len());
     }
 
     #[test]

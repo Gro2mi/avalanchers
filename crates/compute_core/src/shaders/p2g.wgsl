@@ -21,7 +21,7 @@ fn p2g(@builtin(global_invocation_id) id: vec3u) {
         return;
     }
     let cell = position_to_cell(particles_position[id.x].xy);
-    if cell.x < 1 || cell.x >= (sim_settings.grid_shape.x - 1) || cell.y < 1 || cell.y >= (sim_settings.grid_shape.y - 1) {
+    if cell.x < 3 || cell.x >= (sim_settings.grid_shape.x - 3) || cell.y < 3 || cell.y >= (sim_settings.grid_shape.y - 3) {
         return;
     }
     
@@ -140,6 +140,7 @@ struct SimSettings {
     roughness_threshold: f32,
     flags: u32,
     release_max_elevation: f32,
+    peak_flow_thickness_threshold: f32,
 };
 
 struct AtomicValues {

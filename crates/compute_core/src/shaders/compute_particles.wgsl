@@ -170,7 +170,13 @@ fn compute_particles(
     var elevation = get_elevation(new_uv);
     position = new_position;
     // TODO more sophisticated projection methods
-    position.z = elevation;
+    
+    let seed = 42u;
+    var rng_seed = pcg_hash((pId.x * 73856093u) ^
+    (pId.y * 19349663u) ^
+    seed);
+    // randomize the height within the interpolated_h range for viz
+    position.z = elevation + interpolated_h * rand1(&rng_seed)*1;
 
     if particleId == sim_info.number_particles / 2u {
         var current: TimestepData;
@@ -402,6 +408,39 @@ fn get_curvature(uv: vec2f) -> vec3f {
     return textureSampleLevel(curvature_texture, tex_sampler, uv, 0).xyz;
 }
 
+// import random.wgsl;
+// BEGIN random.wgsl
+// A high-quality 32-bit hash (PCG)
+fn pcg_hash(input: u32) -> u32 {
+    var state = input * 747796405u + 2891336453u;
+    var word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+// Advances the seed and returns a float 0.0 -> 1.0
+fn next_rand(seed: ptr<function, u32>) -> f32 {
+    *seed = pcg_hash(*seed);
+    return f32(*seed) / f32(0xffffffffu);
+}
+
+fn rand1(seed: ptr<function, u32>) -> f32 {
+    return next_rand(seed);
+}
+
+fn rand2(seed: ptr<function, u32>) -> vec2f {
+    return vec2f(next_rand(seed), next_rand(seed));
+}
+
+fn rand3(seed: ptr<function, u32>) -> vec3f {
+    return vec3f(next_rand(seed), next_rand(seed), next_rand(seed));
+}
+
+fn rand4(seed: ptr<function, u32>) -> vec4f {
+    return vec4f(next_rand(seed), next_rand(seed), next_rand(seed), next_rand(seed));
+}
+
+// END random.wgsl
+
 // import utils.wgsl;
 // BEGIN utils.wgsl
 const WG_SIZE_2D: u32 = 16u;
@@ -469,6 +508,7 @@ struct SimSettings {
     roughness_threshold: f32,
     flags: u32,
     release_max_elevation: f32,
+    peak_flow_thickness_threshold: f32,
 };
 
 struct AtomicValues {

@@ -162,6 +162,7 @@ struct SimSettings {
     roughness_threshold: f32,
     flags: u32,
     release_max_elevation: f32,
+    peak_flow_thickness_threshold: f32,
 };
 
 struct AtomicValues {

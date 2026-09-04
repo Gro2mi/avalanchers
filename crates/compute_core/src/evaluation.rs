@@ -9,6 +9,8 @@ pub struct MassMovementEvaluation {
     pub gamma: f64,
     /// The final composite index (Omega_T) which ranges between -1 and 1
     pub jaccard: f64,
+    /// Straight-line 3D distance between the highest and lowest simulated cells.
+    pub beeline_distance_3d: f64,
 }
 
 /// Errors that could happen during the evaluation phase.
@@ -26,57 +28,55 @@ pub enum MassMovementEvaluationError {
 /// `true` indicates a cell is affected by the mass movement (above threshold),
 /// and `false` indicates it is unaffected.
 pub fn evaluate_mass_movement_area(
-    reference_grid: &[Vec<bool>],
-    simulated_grid: &[Vec<bool>],
+    reference_grid: &[bool],
+    simulated_grid: &[bool],
 ) -> Result<MassMovementEvaluation, MassMovementEvaluationError> {
-    let rows = reference_grid.len();
-    if rows == 0 {
+    if reference_grid.is_empty() {
         return Err(MassMovementEvaluationError::EmptyGrid);
     }
 
-    let cols = reference_grid[0].len();
-    if cols == 0 {
-        return Err(MassMovementEvaluationError::EmptyGrid);
-    }
-
-    // Ensure the simulated grid has the exact same dimensions
-    if simulated_grid.len() != rows {
+    // Ensure both flattened grids have the exact same length
+    if simulated_grid.len() != reference_grid.len() {
         return Err(MassMovementEvaluationError::DimensionMismatch);
     }
 
-    let mut count_intersection = 0;
-    let mut count_undershoot = 0;
-    let mut count_overshoot = 0;
+    let mut count_intersection: u32 = 0;
+    let mut count_undershoot: u32 = 0;
+    let mut count_overshoot: u32 = 0;
 
-    for i in 0..rows {
-        if reference_grid[i].len() != cols || simulated_grid[i].len() != cols {
-            return Err(MassMovementEvaluationError::DimensionMismatch);
-        }
-
-        for j in 0..cols {
-            let obs = reference_grid[i][j];
-            let sim = simulated_grid[i][j];
-
-            match (obs, sim) {
-                (true, true) => count_intersection += 1, // Intersection (X)
-                (true, false) => count_undershoot += 1,  // Underestimated (U)
-                (false, true) => count_overshoot += 1,   // Overestimated (O)
-                (false, false) => {}                     // True Negatives (Ignored in T)
-            }
+    for (&obs, &sim) in reference_grid.iter().zip(simulated_grid.iter()) {
+        match (obs, sim) {
+            (true, true) => count_intersection += 1, // Intersection (X)
+            (true, false) => count_undershoot += 1,  // Underestimated (U)
+            (false, true) => count_overshoot += 1,   // Overestimated (O)
+            (false, false) => {}                     // True Negatives (Ignored in T)
         }
     }
 
+    Ok(evaluation_from_counts(
+        count_intersection,
+        count_undershoot,
+        count_overshoot,
+    ))
+}
+
+pub(crate) fn evaluation_from_counts(
+    count_intersection: u32,
+    count_undershoot: u32,
+    count_overshoot: u32,
+) -> MassMovementEvaluation {
     // Total Area T is the union of affected areas: X + U + O
     let total_union = count_intersection + count_undershoot + count_overshoot;
 
     // Handle edge case where neither simulation nor observation has any affected pixels
     if total_union == 0 {
-        return Ok(MassMovementEvaluation {
+        return MassMovementEvaluation {
             alpha: 1.0,
             beta: 0.0,
             gamma: 0.0,
             jaccard: 1.0, // Perfect fit if nothing was supposed to happen and nothing did
-        });
+            beeline_distance_3d: 0.0,
+        };
     }
 
     let t_f64 = total_union as f64;
@@ -89,12 +89,13 @@ pub fn evaluate_mass_movement_area(
     // Omega_T = alpha_T - beta_T - gamma_T
     let omega_t = alpha_t - beta_t - gamma_t;
 
-    Ok(MassMovementEvaluation {
+    MassMovementEvaluation {
         alpha: alpha_t,
         beta: beta_t,
         gamma: gamma_t,
         jaccard: (omega_t + 1.0) / 2.0,
-    })
+        beeline_distance_3d: 0.0,
+    }
 }
 
 /// Computes the Hazard-Weighted Runout Index (omega).
@@ -175,6 +176,7 @@ pub fn evaluate_distance_weighted_mass_movement_runout(
             beta: 0.0,
             gamma: 0.0,
             jaccard: 1.0,
+            beeline_distance_3d: 0.0,
         });
     }
 
@@ -190,6 +192,7 @@ pub fn evaluate_distance_weighted_mass_movement_runout(
         beta,
         gamma,
         jaccard: (omega + 1.0) / 2.0,
+        beeline_distance_3d: 0.0,
     })
 }
 
@@ -201,8 +204,8 @@ mod tests {
     fn test_perfect_match() {
         // A perfect simulation totally fits the observed deposition area (A = \hat{A})
         // Expected: alpha_t = 1.0, beta_t = 0.0, gamma_t = 0.0, omega_t = 1.0
-        let reference = vec![vec![true, false, true], vec![false, true, false]];
-        let simulated = vec![vec![true, false, true], vec![false, true, false]];
+        let reference = vec![true, false, true, false, true, false];
+        let simulated = vec![true, false, true, false, true, false];
 
         let result = evaluate_mass_movement_area(&reference, &simulated).unwrap();
         assert_eq!(result.alpha, 1.0);
@@ -215,8 +218,8 @@ mod tests {
     fn test_complete_mismatch() {
         // Simulation completely misses the reference area (X = 0)
         // Expected: alpha_t = 0.0, jaccard = 0.0
-        let reference = vec![vec![true, true, false], vec![false, false, false]];
-        let simulated = vec![vec![false, false, false], vec![false, true, true]];
+        let reference = vec![true, true, false, false, false, false];
+        let simulated = vec![false, false, false, false, true, true];
 
         let result = evaluate_mass_movement_area(&reference, &simulated).unwrap();
         assert_eq!(result.alpha, 0.0);
@@ -237,8 +240,8 @@ mod tests {
         // Underestimated (U) = 1 cell (index (0,0))       -> beta  = 1/4 = 0.25
         // Overestimated (O) = 1 cell (index (0,2))        -> gamma = 1/4 = 0.25
         // Omega_T = 0.5 - 0.25 - 0.25 = 0.0
-        let reference = vec![vec![true, true, false], vec![false, true, false]];
-        let simulated = vec![vec![false, true, true], vec![false, true, false]];
+        let reference = vec![true, true, false, false, true, false];
+        let simulated = vec![false, true, true, false, true, false];
 
         let result = evaluate_mass_movement_area(&reference, &simulated).unwrap();
         assert_eq!(result.alpha, 0.5);
@@ -251,8 +254,8 @@ mod tests {
     fn test_empty_union_edge_case() {
         // Neither reference nor simulation contains any mass movement activity.
         // Expected: System handles division cleanly, returns perfect baseline score.
-        let reference = vec![vec![false, false], vec![false, false]];
-        let simulated = vec![vec![false, false], vec![false, false]];
+        let reference = vec![false, false, false, false];
+        let simulated = vec![false, false, false, false];
 
         let result = evaluate_mass_movement_area(&reference, &simulated).unwrap();
         assert_eq!(result.alpha, 1.0);
@@ -261,9 +264,9 @@ mod tests {
 
     #[test]
     fn test_grid_dimension_mismatches() {
-        let reference = vec![vec![true, true]];
-        let simulated_wrong_rows = vec![vec![true, true], vec![true, true]];
-        let simulated_wrong_cols = vec![vec![true, true, true]];
+        let reference = vec![true, true];
+        let simulated_wrong_rows = vec![true, true, true, true];
+        let simulated_wrong_cols = vec![true, true, true];
 
         assert_eq!(
             evaluate_mass_movement_area(&reference, &simulated_wrong_rows),
@@ -277,8 +280,8 @@ mod tests {
 
     #[test]
     fn test_empty_grids() {
-        let empty_ref: Vec<Vec<bool>> = vec![];
-        let valid_sim = vec![vec![true]];
+        let empty_ref: Vec<bool> = vec![];
+        let valid_sim = vec![true];
 
         assert_eq!(
             evaluate_mass_movement_area(&empty_ref, &valid_sim),

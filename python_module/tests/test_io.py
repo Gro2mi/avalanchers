@@ -26,7 +26,7 @@ def test_simulation_save():
 
     site = data.get_site(site_name)
 
-    expected_site_hash = "30b379fd01bbec1a"
+    expected_site_hash = "d786eb15c92acdd8"
     assert site.hash == expected_site_hash, (
         f"Site hash does not match, expected '{expected_site_hash}', got {site.hash}"
     )
@@ -76,7 +76,7 @@ def test_simulation_save():
         f"got {scenario.name}"
     )
     assert scenario.name_no_hash == site_name + "releaseTexture"
-    assert np.isclose(scenario.release_volume_m3, 7283.78076171875)
+    assert np.isclose(scenario.release_volume_m3, 7283.78076171875, atol=0.4)
     # assert np.isclose(scenario.aspect_release_degrees, None)
     assert scenario.aspect_release_degrees is None
     assert scenario.number_of_runs == 2

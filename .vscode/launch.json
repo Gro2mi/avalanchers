@@ -1,6 +1,22 @@
 {
     "version": "0.2.0",
-    "configurations": [
+    "configurations": [{
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug Rust",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin",
+                    "your_binary_name"
+                ]
+            },
+            "initCommands": [
+                "script import sys; print('Python:', sys.version)",
+                // Automatically loads rustc's natvis/pretty printers
+                "command script import 2>/dev/null || true"
+            ]
+        },
         {
             "type": "chrome",
             "name": "AvaSim",
@@ -22,5 +38,6 @@
             "request": "launch",
             "url": "https://192.168.1.100/index.html?debug=vscode"
         }
-    ]
+    ],
+    "python.defaultInterpreterPath": "C:\\git\\avalanchers\\.venv\\Scripts\\python.exe"
 }

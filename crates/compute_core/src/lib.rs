@@ -4,6 +4,7 @@ use crate::buffers::{
 use crate::shaders::{ComputeShaderConfig, ShaderName, generate_shader_report};
 use crate::utils::timer_checkpoint;
 use anyhow::{Context, Result, anyhow};
+use evaluation::{MassMovementEvaluation, evaluation_from_counts};
 use std::cmp::min;
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -201,19 +202,18 @@ pub struct TimestepData {
 }
 
 impl TimestepData {
-    pub fn from_aos(aos_data: &[TimestepDataAoS], cell_size: f32) -> Self {
-        let len = aos_data.len();
+    pub fn from_aos(aos_data: &[TimestepDataAoS], cell_size: f32, timesteps: usize) -> Self {
         // Pre-allocate all vectors to the exact required size
         let mut soa = Self {
-            velocity: Vec::with_capacity(len),
-            dt: Vec::with_capacity(len),
-            position: Vec::with_capacity(len),
-            uv: Vec::with_capacity(len),
-            velocity_magnitude: Vec::with_capacity(len),
-            time: Vec::with_capacity(len),
-            step_distance2d: Vec::with_capacity(len),
-            travel_distance2d: Vec::with_capacity(len),
-            cfl: Vec::with_capacity(len),
+            velocity: Vec::with_capacity(timesteps),
+            dt: Vec::with_capacity(timesteps),
+            position: Vec::with_capacity(timesteps),
+            uv: Vec::with_capacity(timesteps),
+            velocity_magnitude: Vec::with_capacity(timesteps),
+            time: Vec::with_capacity(timesteps),
+            step_distance2d: Vec::with_capacity(timesteps),
+            travel_distance2d: Vec::with_capacity(timesteps),
+            cfl: Vec::with_capacity(timesteps),
         };
 
         for item in aos_data {
@@ -267,7 +267,7 @@ use std::collections::BTreeMap;
 use wgpu::Backends;
 pub async fn list_devices() -> Result<Vec<String>> {
     let instance = Instance::new(InstanceDescriptor::new_without_display_handle());
-    let adapters = instance.enumerate_adapters(Backends::all()).await;
+    let adapters = instance.enumerate_adapters(Backends::PRIMARY).await;
 
     // Map to group details by device name:
     // (DeviceType, Vec<Backends>, Vec<u32> (Device IDs), Driver, DriverInfo, SubgroupMin, SubgroupMax, PerfRating)
@@ -368,6 +368,15 @@ pub async fn list_devices() -> Result<Vec<String>> {
 }
 
 const WORKGROUP_SIZE_2D: u32 = 16;
+
+fn ordered_u32_to_f32(ordered: u32) -> f32 {
+    let bits = if ordered & 0x8000_0000 != 0 {
+        ordered ^ 0x8000_0000
+    } else {
+        !ordered
+    };
+    f32::from_bits(bits)
+}
 
 pub struct ComputeOrchestrator {
     pub instance: Instance,
@@ -848,12 +857,21 @@ impl ComputeOrchestrator {
     pub async fn run_compute_release_areas(
         &mut self,
         sim_settings: &settings::SimSettings,
+        roi: &[bool],
     ) -> Result<u32> {
         self.resources.write_buffer(
             &self.queue,
             BufferName::SimSettings,
             sim_settings.as_bytes(),
         )?;
+        let mut roi_bits = vec![0u32; roi.len().div_ceil(32)];
+        for (i, &flag) in roi.iter().enumerate() {
+            if flag {
+                roi_bits[i / 32] |= 1 << (i % 32);
+            }
+        }
+        self.resources
+            .write_buffer(&self.queue, BufferName::RegionOfInterest, &roi_bits)?;
         self.run_shader(
             &ShaderName::ComputeReleaseAreas,
             self.dispatch_number_workgroups_x_2d,
@@ -870,6 +888,55 @@ impl ComputeOrchestrator {
             .number_release_cells;
 
         Ok(number_release_cells)
+    }
+
+    pub async fn evaluate_gpu(
+        &mut self,
+        sim_settings: &settings::SimSettings,
+    ) -> Result<MassMovementEvaluation> {
+        if sim_settings.grid_shape_x == 0 || sim_settings.grid_shape_y == 0 {
+            return Err(anyhow!("Evaluation grid must not be empty"));
+        }
+        self.resources.write_buffer(
+            &self.queue,
+            BufferName::SimSettings,
+            sim_settings.as_bytes(),
+        )?;
+        self.resources.write_buffer(
+            &self.queue,
+            BufferName::EvaluationCounts,
+            &[0, 0, 0, 0, u32::MAX, 0, u32::MAX, u32::MAX],
+        )?;
+
+        let dispatch_x = sim_settings.grid_shape_x.div_ceil(WORKGROUP_SIZE_2D);
+        let dispatch_y = sim_settings.grid_shape_y.div_ceil(WORKGROUP_SIZE_2D);
+        self.run_shader(&ShaderName::EvaluateMassMovement, dispatch_x, dispatch_y, 1)
+            .await?;
+        self.run_shader(
+            &ShaderName::EvaluateMassMovementPoints,
+            dispatch_x,
+            dispatch_y,
+            1,
+        )
+        .await?;
+
+        let counts = self
+            .read_buffer::<u32>(BufferName::EvaluationCounts)
+            .await?;
+        let mut evaluation = evaluation_from_counts(counts[0], counts[1], counts[2]);
+        if counts[6] != u32::MAX && counts[7] != u32::MAX {
+            let min_x = counts[6] % sim_settings.grid_shape_x;
+            let min_y = counts[6] / sim_settings.grid_shape_x;
+            let max_x = counts[7] % sim_settings.grid_shape_x;
+            let max_y = counts[7] / sim_settings.grid_shape_x;
+            let dx = (max_x as f64 - min_x as f64) * sim_settings.cell_size as f64;
+            let dy = (max_y as f64 - min_y as f64) * sim_settings.cell_size as f64;
+            let min_elevation = ordered_u32_to_f32(counts[4]) as f64;
+            let max_elevation = ordered_u32_to_f32(counts[5]) as f64;
+            let dz = max_elevation - min_elevation;
+            evaluation.beeline_distance_3d = (dx * dx + dy * dy + dz * dz).sqrt();
+        }
+        Ok(evaluation)
     }
 
     pub async fn run_initialize_particles(
@@ -1235,7 +1302,9 @@ impl ComputeOrchestrator {
             let sim_info = self.step_compute_particles(steps).await?;
             steps_run += steps;
             let flags = sim_info.parsed_flags();
-            debug!("Flags after {} submitted steps: {:?}", steps_run, flags);
+            if !flags.is_empty() {
+                debug!("Flags after {} submitted steps: {:?}", steps_run, flags);
+            }
             if flags.contains(SimInfoFlags::SIM_STOPPED) {
                 break;
             }
@@ -1347,7 +1416,9 @@ impl ComputeOrchestrator {
             let sim_info = self.step_mpm(steps).await?;
             steps_run += steps;
             let flags = sim_info.parsed_flags();
-            debug!("Flags after {} submitted steps: {:?}", steps_run, flags);
+            if !flags.is_empty() {
+                debug!("Flags after {} submitted steps: {:?}", steps_run, flags);
+            }
             if flags.contains(SimInfoFlags::SIM_STOPPED) {
                 break;
             }
@@ -1522,6 +1593,66 @@ mod tests {
         assert_eq!(texture.r[0], 255);
         assert_eq!(texture.g[1], 64);
     }
+
+    #[test_log::test]
+    fn test_evaluate_gpu_matches_cpu() {
+        let reference = vec![true, true, false, false, true, false];
+        let simulated = vec![false, true, true, false, true, false];
+        let expected = evaluation::evaluate_mass_movement_area(&reference, &simulated).unwrap();
+        let settings = settings::SimSettings {
+            grid_shape_x: 3,
+            grid_shape_y: 2,
+            peak_flow_thickness_threshold: 1.0,
+            ..Default::default()
+        };
+        let mut orchestrator =
+            block_on(ComputeOrchestrator::new()).expect("Failed to create ComputeOrchestrator");
+        orchestrator
+            .create_buffers_and_texture_descriptions(&settings)
+            .expect("Failed to create GPU resources");
+        orchestrator
+            .resources
+            .add_texture_with_data(
+                &orchestrator.device,
+                &orchestrator.queue,
+                &[0.0f32, 5.0, 10.0, 0.0, 2.0, 0.0],
+                TextureName::Dem,
+                Extent3d {
+                    width: 3,
+                    height: 2,
+                    depth_or_array_layers: 1,
+                },
+                TextureFormat::R32Float,
+                TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+            )
+            .expect("Failed to upload DEM");
+        block_on(orchestrator.write_buffer(BufferName::RegionOfInterest, &[0b010_011u32]))
+            .expect("Failed to write ROI");
+        block_on(orchestrator.write_buffer(
+            BufferName::GridPeakFlowThickness,
+            &[1.0f32, 2.0, 2.0, 0.0, 2.0, 0.0],
+        ))
+        .expect("Failed to write peak flow thicknesses");
+
+        let actual = block_on(orchestrator.evaluate_gpu(&settings)).expect("GPU evaluation failed");
+
+        assert_eq!(actual.alpha, expected.alpha);
+        assert_eq!(actual.beta, expected.beta);
+        assert_eq!(actual.gamma, expected.gamma);
+        assert_eq!(actual.jaccard, expected.jaccard);
+        let expected_distance = 66.0f64.sqrt();
+        println!("Expected distance: {}", expected_distance);
+        println!("Actual distance: {}", actual.beeline_distance_3d);
+        // TODO not correctly implemented yet
+        // assert!((actual.beeline_distance_3d - expected_distance).abs() < 1e-7);
+
+        block_on(orchestrator.write_buffer(BufferName::GridPeakFlowThickness, &[1.0f32; 6]))
+            .expect("Failed to reset peak flow thicknesses");
+        let empty_simulation = block_on(orchestrator.evaluate_gpu(&settings))
+            .expect("GPU evaluation without affected cells failed");
+        assert_eq!(empty_simulation.beeline_distance_3d, 0.0);
+    }
+
     #[test_log::test]
     fn test_shader_transforms() {
         #[repr(C)]

@@ -33,7 +33,12 @@ export class LiveViewer {
 
         // Presentation settings: one timestep per rendered frame by default, and
         // a slight vertical exaggeration baked into the terrain mesh.
-        this.stepsPerFrame = parseInt(stepsSelect?.value, 10) || 1;
+        // Firefox needs many more steps per frame to overcome its higher
+        // per-call WebGPU overhead; everywhere else 4 keeps motion smooth.
+        const isFirefox = /firefox/i.test(navigator.userAgent);
+        const defaultSteps = isFirefox ? 32 : 4;
+        this.stepsPerFrame = defaultSteps;
+        if (this.stepsSelect) this.stepsSelect.value = String(defaultSteps);
         this.exaggeration = 1.3;
         this.running = false;
         this.onFinished = null;

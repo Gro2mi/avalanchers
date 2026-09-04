@@ -6,6 +6,13 @@
 @group(0) @binding(5) var<storage, read_write> debug: array<f32>;
 @group(0) @binding(6) var<storage, read_write> atomic_values: AtomicValues;
 
+@group(0) @binding(7) var<storage, read> roi_bit_packed: array<u32>;
+
+fn is_roi(index: u32) -> bool {
+    let word = roi_bit_packed[index / 32u];
+    let bit = index % 32u;
+    return (word & (1u << bit)) != 0u;
+}
 
 @compute @workgroup_size(WG_SIZE_2D, WG_SIZE_2D, 1)
 fn compute_release_areas(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -13,6 +20,10 @@ fn compute_release_areas(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     let idx = xy_to_idx(id.xy);
+    if !is_roi(idx) {
+        release_areas[idx] = 0f;
+        return;
+    }
     let tex_pos = id.xy;
     let slope_angle = slope_angles[idx];
 
@@ -103,6 +114,7 @@ struct SimSettings {
     roughness_threshold: f32,
     flags: u32,
     release_max_elevation: f32,
+    peak_flow_thickness_threshold: f32,
 };
 
 struct AtomicValues {

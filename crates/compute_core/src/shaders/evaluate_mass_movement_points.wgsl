@@ -1,3 +1,51 @@
+struct EvaluationCounts {
+    intersection: atomic<u32>,
+    undershoot: atomic<u32>,
+    overshoot: atomic<u32>,
+    _padding: atomic<u32>,
+    minimum_elevation: atomic<u32>,
+    maximum_elevation: atomic<u32>,
+    minimum_index: atomic<u32>,
+    maximum_index: atomic<u32>,
+}
+
+@group(0) @binding(1) var<storage, read> region_of_interest: array<u32>;
+@group(0) @binding(2) var<storage, read> grid_peak_flow_thickness: array<f32>;
+@group(0) @binding(3) var<storage, read_write> counts: EvaluationCounts;
+@group(0) @binding(4) var dem_texture: texture_2d<f32>;
+
+fn float_to_ordered(value: f32) -> u32 {
+    let bits = bitcast<u32>(value);
+    return select(~bits, bits ^ 0x80000000u, (bits & 0x80000000u) == 0u);
+}
+
+@compute @workgroup_size(16, 16, 1)
+fn evaluate_mass_movement_points(@builtin(global_invocation_id) id: vec3<u32>) {
+    if id.x >= sim_settings.grid_shape.x || id.y >= sim_settings.grid_shape.y {
+        return;
+    }
+
+    let index = id.y * sim_settings.grid_shape.x + id.x;
+    if grid_peak_flow_thickness[index] <= sim_settings.peak_flow_thickness_threshold {
+        return;
+    }
+
+    let elevation = textureLoad(dem_texture, vec2<i32>(id.xy), 0).r;
+    if !is_finite(elevation) {
+        return;
+    }
+
+    let ordered_elevation = float_to_ordered(elevation);
+    if ordered_elevation == atomicLoad(&counts.minimum_elevation) {
+        atomicMin(&counts.minimum_index, index);
+    }
+    if ordered_elevation == atomicLoad(&counts.maximum_elevation) {
+        atomicMin(&counts.maximum_index, index);
+    }
+}
+
+// import utils.wgsl;
+// BEGIN utils.wgsl
 const WG_SIZE_2D: u32 = 16u;
 
 const g: f32 = 9.81;
@@ -207,3 +255,4 @@ fn compute_centroid(points: ptr<function, array<vec2<f32>, 256>>, count: u32) ->
 
     return vec2<f32>(cx, cy) / (6.0 * area);
 }
+// END utils.wgsl

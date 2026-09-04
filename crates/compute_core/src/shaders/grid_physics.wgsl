@@ -40,11 +40,10 @@ fn grid_physics(@builtin(global_invocation_id) id: vec3u) {
     // atomic_float let v = grid_momentum_atomic[idx * 2 + 1] / mass;
     let h = mass / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size) * n.z;
     // new max value
-    if peak_flow_thickness[idx] < h {
+    if h > sim_settings.peak_flow_thickness_threshold && h > peak_flow_thickness[idx] {
         // new cell reached
-        if peak_flow_thickness[idx] < 1e-5 {
-            new_cells_rolling_window[sim_info.timestep % 40u] = new_cells_rolling_window[sim_info.timestep % 40u] + 1u; // update new cell count for diagnostics
-        }
+        new_cells_rolling_window[sim_info.timestep % 40u] = new_cells_rolling_window[sim_info.timestep % 40u] + 1u; // update new cell count for diagnostics
+        
         peak_flow_thickness[idx] = h;
         if is_finite(h) {
             atomicMax(&atomic_values.peak_flow_thickness, bitcast<u32>(h));
@@ -267,6 +266,7 @@ struct SimSettings {
     roughness_threshold: f32,
     flags: u32,
     release_max_elevation: f32,
+    peak_flow_thickness_threshold: f32,
 };
 
 struct AtomicValues {

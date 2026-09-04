@@ -64,6 +64,9 @@ pub enum BufferName {
     SlopeAspect,
     Roughness,
     ReleaseAreas,
+    RegionOfInterest,
+
+    EvaluationCounts,
 
     TestOutput,
 }
@@ -97,6 +100,8 @@ impl BufferName {
             BufferName::ReleaseAreas => "release_areas",
             BufferName::TestOutput => "test_output",
             BufferName::GridForces => "grid_forces",
+            BufferName::RegionOfInterest => "region_of_interest",
+            BufferName::EvaluationCounts => "evaluation_counts",
         }
     }
 }
@@ -138,6 +143,8 @@ impl std::str::FromStr for BufferName {
             "release_areas" => Ok(BufferName::ReleaseAreas),
             "test_output" => Ok(BufferName::TestOutput),
             "grid_forces" => Ok(BufferName::GridForces),
+            "region_of_interest" => Ok(BufferName::RegionOfInterest),
+            "evaluation_counts" => Ok(BufferName::EvaluationCounts),
             _ => Err(format!("Unknown buffer name: {}", name)),
         }
     }
@@ -743,6 +750,18 @@ pub fn create_buffers_and_texture_descriptions(
         device,
         BufferName::GridPeakVelocity,
         grid_bytes_size,
+        BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+    );
+    gpu_resources.add_buffer(
+        device,
+        BufferName::RegionOfInterest,
+        grid_bytes_size,
+        BufferUsages::STORAGE | BufferUsages::COPY_DST,
+    );
+    gpu_resources.add_buffer(
+        device,
+        BufferName::EvaluationCounts,
+        u32::BITS as usize,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
     );
     gpu_resources.add_buffer(

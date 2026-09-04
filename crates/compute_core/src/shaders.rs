@@ -65,6 +65,8 @@ define_shaders! {
     ResetGrid => "reset_grid",
     ComputeRoughness => "compute_roughness",
     ComputeReleaseAreas => "compute_release_areas",
+    EvaluateMassMovement => "evaluate_mass_movement",
+    EvaluateMassMovementPoints => "evaluate_mass_movement_points",
     InitializeParticles => "initialize_particles",
     ComputeParticles => "compute_particles",
     G2P => "g2p",
@@ -525,6 +527,112 @@ pub fn create_shader_configs(
     );
 
     shader_configs.insert(
+        ShaderName::EvaluateMassMovement,
+        ComputeShaderConfig::new(
+            device,
+            ShaderName::EvaluateMassMovement,
+            load_shader_source(ShaderName::EvaluateMassMovement, has_float32_atomic),
+            &[
+                (
+                    BufferName::SimSettings.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                (
+                    BufferName::RegionOfInterest.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                (
+                    BufferName::GridPeakFlowThickness.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                (
+                    BufferName::EvaluationCounts.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                (
+                    TextureName::Dem.to_string(),
+                    BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float {
+                            filterable: has_float32_filterable,
+                        },
+                    },
+                ),
+            ],
+        )?,
+    );
+
+    shader_configs.insert(
+        ShaderName::EvaluateMassMovementPoints,
+        ComputeShaderConfig::new(
+            device,
+            ShaderName::EvaluateMassMovementPoints,
+            load_shader_source(ShaderName::EvaluateMassMovementPoints, has_float32_atomic),
+            &[
+                (
+                    BufferName::SimSettings.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                (
+                    BufferName::RegionOfInterest.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                (
+                    BufferName::GridPeakFlowThickness.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                (
+                    BufferName::EvaluationCounts.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                (
+                    TextureName::Dem.to_string(),
+                    BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float {
+                            filterable: has_float32_filterable,
+                        },
+                    },
+                ),
+            ],
+        )?,
+    );
+
+    shader_configs.insert(
         ShaderName::ComputeReleaseAreas,
         ComputeShaderConfig::new(
             device,
@@ -592,6 +700,15 @@ pub fn create_shader_configs(
                     BufferName::AtomicValues.to_string(),
                     BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                // Binding 7:
+                (
+                    BufferName::RegionOfInterest.to_string(),
+                    BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
@@ -1488,6 +1605,26 @@ pub fn create_shader_configs(
             ],
         )?,
     );
+
+    #[cfg(test)]
+    {
+        shader_configs.extend(create_test_shader_configs(
+            device,
+            has_float32_filterable,
+            has_float32_atomic,
+        )?);
+    }
+
+    Ok(shader_configs)
+}
+
+#[cfg(test)]
+fn create_test_shader_configs(
+    device: &Device,
+    has_float32_filterable: bool,
+    has_float32_atomic: bool,
+) -> Result<std::collections::HashMap<ShaderName, ComputeShaderConfig>> {
+    let mut shader_configs = std::collections::HashMap::new();
 
     shader_configs.insert(
         ShaderName::TestTransforms,

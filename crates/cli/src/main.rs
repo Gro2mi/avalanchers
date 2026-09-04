@@ -102,6 +102,8 @@ struct Args {
     velocity_threshold: Option<f32>,
     #[arg(long)]
     roughness_threshold: Option<f32>,
+    #[arg(long)]
+    peak_flow_thickness_threshold: Option<f32>,
     #[arg(long, value_parser = parse_bool)]
     enable_curvature: Option<bool>,
     #[arg(long, value_parser = parse_bool)]
@@ -194,6 +196,9 @@ impl Args {
         }
         if let Some(value) = self.roughness_threshold {
             settings.roughness_threshold = Some(value);
+        }
+        if let Some(value) = self.peak_flow_thickness_threshold {
+            settings.peak_flow_thickness_threshold = Some(value);
         }
         if let Some(value) = self.enable_curvature {
             settings.enable_curvature = Some(value);
@@ -387,6 +392,7 @@ mod tests {
             release_min_elevation: None,
             velocity_threshold: None,
             roughness_threshold: None,
+            peak_flow_thickness_threshold: None,
             enable_particle_interaction: None,
             enable_earth_pressure_coefficient: None,
             enable_entrainment: None,

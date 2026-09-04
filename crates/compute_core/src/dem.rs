@@ -1,4 +1,5 @@
 use crate::utils::*;
+use core::f32;
 use std::hash::{Hash, Hasher};
 
 #[derive(Default)]
@@ -204,8 +205,7 @@ impl Dem {
         Some((min_point, max_point))
     }
 
-    #[allow(dead_code)]
-    fn get_elevation_extrema(&self, mask: &[bool]) -> Option<(f32, f32)> {
+    pub fn get_elevation_extrema(&self, mask: &[bool]) -> Option<(f32, f32)> {
         let (min_point, max_point) = self.get_elevation_extrema_points(mask)?;
         let min_elevation = self.data1d[min_point.0 * self.width + min_point.1];
         let max_elevation = self.data1d[max_point.0 * self.width + max_point.1];
@@ -224,6 +224,16 @@ impl Dem {
         let drop = max_elevation - min_elevation;
 
         Some((distance2d, drop))
+    }
+
+    pub fn mask_above_elevation(&self, max_elevation: f32) -> Dem {
+        let mut new_dem = self.clone();
+        for val in new_dem.data1d.iter_mut() {
+            if *val > max_elevation {
+                *val = f32::NAN;
+            }
+        }
+        new_dem
     }
 }
 
@@ -514,6 +524,29 @@ mod tests {
         };
         assert_eq!(dem.get_elevation_extrema_points(&[false, false]), None);
         assert_eq!(dem.get_elevation_extrema_points(&[true]), None);
+    }
+
+    #[test]
+    fn mask_above_elevation_masks_only_values_above_threshold() {
+        let dem = Dem {
+            width: 2,
+            height: 2,
+            data1d: vec![100.0, 200.0, 300.0, f32::NAN],
+            ..Dem::default()
+        };
+
+        let masked = dem.mask_above_elevation(200.0);
+
+        assert_eq!(masked.data1d[0], 100.0);
+        assert_eq!(masked.data1d[1], 200.0);
+        assert!(masked.data1d[2].is_nan());
+        assert!(masked.data1d[3].is_nan());
+
+        // Original DEM should remain unchanged.
+        assert_eq!(dem.data1d[0], 100.0);
+        assert_eq!(dem.data1d[1], 200.0);
+        assert_eq!(dem.data1d[2], 300.0);
+        assert!(dem.data1d[3].is_nan());
     }
 
     #[test]

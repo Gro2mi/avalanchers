@@ -1,3 +1,40 @@
+struct EvaluationCounts {
+    intersection: atomic<u32>,
+    undershoot: atomic<u32>,
+    overshoot: atomic<u32>,
+    _padding: atomic<u32>,
+}
+
+@group(0) @binding(1) var<storage, read> region_of_interest: array<u32>;
+@group(0) @binding(2) var<storage, read> grid_peak_flow_thickness: array<f32>;
+@group(0) @binding(3) var<storage, read_write> counts: EvaluationCounts;
+
+fn bit_is_set(word: u32, index: u32) -> bool {
+    return (word & (1u << (index % 32u))) != 0u;
+}
+
+@compute @workgroup_size(16, 16, 1)
+fn evaluate_mass_movement(@builtin(global_invocation_id) id: vec3<u32>) {
+    if id.x >= sim_settings.grid_shape.x || id.y >= sim_settings.grid_shape.y {
+        return;
+    }
+
+    let index = id.y * sim_settings.grid_shape.x + id.x;
+    let word_index = index / 32u;
+    let reference_affected = bit_is_set(region_of_interest[word_index], index);
+    let simulated_affected = grid_peak_flow_thickness[index] > sim_settings.peak_flow_thickness_threshold;
+
+    if reference_affected && simulated_affected {
+        atomicAdd(&counts.intersection, 1u);
+    } else if reference_affected {
+        atomicAdd(&counts.undershoot, 1u);
+    } else if simulated_affected {
+        atomicAdd(&counts.overshoot, 1u);
+    }
+}
+
+// import utils.wgsl;
+// BEGIN utils.wgsl
 const WG_SIZE_2D: u32 = 16u;
 
 const g: f32 = 9.81;
@@ -207,3 +244,4 @@ fn compute_centroid(points: ptr<function, array<vec2<f32>, 256>>, count: u32) ->
 
     return vec2<f32>(cx, cy) / (6.0 * area);
 }
+// END utils.wgsl

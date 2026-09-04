@@ -136,9 +136,12 @@ impl PySimulation {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
         let settings = Settings::loads(&json_str)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
-        self.inner
-            .create(settings.clone())
-            .block_on()
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_runtime_err()?;
+        runtime
+            .block_on(self.inner.create(settings.clone()))
             .map_runtime_err()?;
         Ok(())
     }
@@ -280,13 +283,26 @@ impl PySimulation {
 
     /// Evaluate the final simulation against the configured metrics.
     pub fn evaluate<'a>(&mut self, py: Python<'a>) -> PyResult<Bound<'a, PyDict>> {
-        let (a, b, c, d) = self.inner.evaluate().block_on().map_runtime_err()?;
+        let (
+            iou,
+            horizontal_distance,
+            vertical_drop,
+            horizontal_distance_ref,
+            vertical_drop_ref,
+            beeline_3d,
+            beeline_3d_ref,
+            peak_velocity,
+        ) = self.inner.evaluate().block_on().map_runtime_err()?;
 
         let dict = PyDict::new(py);
-        dict.set_item("jaccard", a)?;
-        dict.set_item("horizontal_distance", b)?;
-        dict.set_item("vertical_drop", c)?;
-        dict.set_item("peak_velocity", d)?;
+        dict.set_item("iou", iou)?;
+        dict.set_item("horizontal_distance", horizontal_distance)?;
+        dict.set_item("vertical_drop", vertical_drop)?;
+        dict.set_item("horizontal_distance_ref", horizontal_distance_ref)?;
+        dict.set_item("vertical_drop_ref", vertical_drop_ref)?;
+        dict.set_item("peak_velocity", peak_velocity)?;
+        dict.set_item("beeline_3d", beeline_3d)?;
+        dict.set_item("beeline_3d_ref", beeline_3d_ref)?;
 
         Ok(dict)
     }
@@ -322,6 +338,29 @@ impl PySimulation {
             .map_err(|_| {
                 PyErr::new::<PyValueError, _>("Dimension mismatch during texture conversion")
             })
+    }
+
+    #[getter]
+    pub fn roi<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<bool>>> {
+        let dims = [self.inner.dem.height, self.inner.dem.width];
+        // let roi: Vec<bool> = self
+        //     .inner
+        //     .roi
+        //     .iter()
+        //     .flat_map(|&word| {
+        //         // Unpack each u32 into 32 booleans (Least Significant Bit first)
+        //         (0..32).map(move |bit_idx| (word & (1 << bit_idx)) != 0)
+        //     })
+        //     .collect();
+
+        self.inner.roi.to_pyarray(py).reshape(dims).map_err(|_| {
+            PyErr::new::<PyValueError, _>(format!(
+                "Dimension mismatch during texture conversion. Expected: {}x{}, got: {}",
+                dims[0],
+                dims[1],
+                self.inner.roi.len()
+            ))
+        })
     }
 
     #[getter]
