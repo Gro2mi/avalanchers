@@ -2,6 +2,7 @@
 @group(0) @binding(1) var<storage, read_write> grid_mass_atomic: array<u32>;
 @group(0) @binding(2) var<storage, read_write> atomic_values: AtomicValues;
 @group(0) @binding(3) var<storage, read_write> grid_momentum_atomic: array<i32>;
+@group(0) @binding(4) var<storage, read_write> grid_forces_atomic: array<i32>;
 
 @compute @workgroup_size(WG_SIZE_2D, WG_SIZE_2D, 1)
 fn reset_grid(@builtin(global_invocation_id) global_id: vec3<u32>) {
@@ -9,6 +10,8 @@ fn reset_grid(@builtin(global_invocation_id) global_id: vec3<u32>) {
         grid_mass_atomic[xy_to_idx(global_id.xy)] = 0u; // Reset grid masses for the new timestep
         grid_momentum_atomic[xy_to_idx(global_id.xy) * 2u] = 0; // Reset grid momentum (u) for the new timestep
         grid_momentum_atomic[xy_to_idx(global_id.xy) * 2u + 1u] = 0; // Reset grid momentum (v) for the new timestep
+        grid_forces_atomic[xy_to_idx(global_id.xy) * 2u] = 0; // Reset grid forces (x) for the new timestep
+        grid_forces_atomic[xy_to_idx(global_id.xy) * 2u + 1u] = 0; // Reset grid forces (y) for the new timestep
     }
     if global_id.x == 0u && global_id.y == 0u {
         atomicStore(&atomic_values.peak_velocity, 0u); // reset peak velocity for diagnostics
@@ -34,6 +37,9 @@ const INV_MAX_VELOCITY_FACTOR: f32 = 1 / MAX_VELOCITY_FACTOR; // u32 limit is 43
 const INV_MASS_FACTOR: f32 = 1 / MASS_FACTOR; // u32 limit is 4.3km thickness
 const INV_H_FACTOR: f32 = 1 / H_FACTOR; 
 const INV_MOMENTUM_FACTOR: f32 = 1 / MOMENTUM_FACTOR;
+// depth-integrated internal force (h * sigma * grad_w * area, ~1e4..1e5 N per node contribution)
+const FORCE_FACTOR: f32 = 1e-3; // i32 limit is 2.1e6 N per node
+const INV_FORCE_FACTOR: f32 = 1 / FORCE_FACTOR;
 
 // TODO precompute often used values on the cpu and pass them as uniforms to avoid redundant calculations on the gpu
 
@@ -90,6 +96,10 @@ struct SimSettings {
     flags: u32,
     release_max_elevation: f32,
     peak_flow_thickness_threshold: f32,
+    // MPMDAC constitutive model (must mirror the Rust POD layout)
+    constitutive_model: u32,
+    shear_modulus: f32,
+    hardening_modulus: f32,
 };
 
 struct AtomicValues {
@@ -199,6 +209,33 @@ fn quadratic_weight(d: f32) -> f32 {
 
 fn calculate_weight(distance: vec2f) -> f32 {
     return quadratic_weight(distance.x) * quadratic_weight(distance.y);
+}
+
+// derivative of quadratic_weight with respect to its (cell-unit) argument
+fn quadratic_weight_gradient(d: f32) -> f32 {
+    let abs_d = abs(d);
+    if abs_d < 0.5 {
+        return -2.0 * d;
+    } else if abs_d < 1.5 {
+        return -sign(d) * (1.5 - abs_d);
+    }
+    return 0.0;
+}
+
+// physical gradient of the 2D B-spline weight, in 1/m
+fn calculate_weight_gradient(distance: vec2f) -> vec2f {
+    return vec2f(
+        quadratic_weight_gradient(distance.x) * quadratic_weight(distance.y),
+        quadratic_weight(distance.x) * quadratic_weight_gradient(distance.y)
+    ) / sim_settings.cell_size;
+}
+
+fn determinant_2x2(m: mat2x2<f32>) -> f32 {
+    return m[0][0] * m[1][1] - m[0][1] * m[1][0];
+}
+
+fn identity_2x2() -> mat2x2<f32> {
+    return mat2x2<f32>(vec2f(1.0, 0.0), vec2f(0.0, 1.0));
 }
 
 fn calculate_distance_to_node(particle_position: vec2f, node_position: vec2u) -> vec2f {

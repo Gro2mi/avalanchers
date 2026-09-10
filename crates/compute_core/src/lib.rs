@@ -864,7 +864,7 @@ impl ComputeOrchestrator {
                 self.max_texture_size
             ));
         }
-        if sim_settings.sim_model > 1 {
+        if sim_settings.sim_model > 2 {
             return Err(anyhow!(
                 "Unsupported simulation model: {}",
                 sim_settings.sim_model
@@ -908,7 +908,7 @@ impl ComputeOrchestrator {
             texture_usage_input,
         )?;
         match sim_settings.sim_model {
-            0 => self.run_shader(
+            0 | 2 => self.run_shader(
                 &ShaderName::AnalyzeTerrain,
                 self.dispatch_number_workgroups_x_2d,
                 self.dispatch_number_workgroups_y_2d,
@@ -920,7 +920,7 @@ impl ComputeOrchestrator {
                 self.dispatch_number_workgroups_y_2d,
                 1,
             ),
-            2_u32..=u32::MAX => {
+            3_u32..=u32::MAX => {
                 return Err(anyhow!(
                     "Unsupported simulation model: {}",
                     sim_settings.sim_model
@@ -1220,7 +1220,7 @@ impl ComputeOrchestrator {
         sim_settings: &settings::SimSettings,
         number_release_particles: u32,
     ) -> Result<u32> {
-        if sim_settings.sim_model > 1 {
+        if sim_settings.sim_model > 2 {
             return Err(anyhow!(
                 "Unsupported simulation model: {}",
                 sim_settings.sim_model
@@ -1309,7 +1309,7 @@ impl ComputeOrchestrator {
                     BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
                 );
                 self.add_buffer(
-                    BufferName::GridForces,
+                    BufferName::GridVelocity,
                     grid_buffer_size_vec2,
                     BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
                 );
@@ -1321,7 +1321,22 @@ impl ComputeOrchestrator {
                     BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
                 );
             }
-            2_u32..=u32::MAX => {
+            2 => {
+                self.add_buffer(
+                    BufferName::ParticlesAffineMatrix,
+                    particle_buffer_size_single_value * 4,
+                    BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+                );
+                // per-particle stress state, zero-initialized (no deviatoric
+                // stress, no accumulated plastic strain)
+                let init_stress_state: Vec<f32> = vec![0.0; number_release_particles as usize * 4];
+                self.add_buffer_with_data(
+                    BufferName::ParticlesStress,
+                    &init_stress_state,
+                    BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+                );
+            }
+            3_u32..=u32::MAX => {
                 return Err(anyhow!(
                     "Unsupported simulation model: {}",
                     sim_settings.sim_model
@@ -1417,7 +1432,12 @@ impl ComputeOrchestrator {
                 ShaderName::GridPhysicsCurvilinear,
                 ShaderName::G2P,
             ),
-            2_u32..=u32::MAX => {
+            2 => (
+                ShaderName::P2GMPMDAC,
+                ShaderName::GridPhysicsMPMDAC,
+                ShaderName::G2PMPMDAC,
+            ),
+            3_u32..=u32::MAX => {
                 return Err(anyhow!(
                     "Unsupported simulation model: {}",
                     sim_settings.sim_model
@@ -1542,71 +1562,97 @@ impl ComputeOrchestrator {
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("Simulation Step Encoder"),
                 });
-        {
+        // the MPMDAC model derives its particle depth from the previous
+        // step's grid mass, so each step starts with a mass snapshot copy
+        let snapshot_mass = sim_model == SimModel::MpmDaC;
+        let (mass_buffer, mass_previous_buffer, mass_copy_bytes) = if snapshot_mass {
+            (
+                Some(
+                    self.resources
+                        .get_buffer(&BufferName::GridMass)
+                        .ok_or_else(|| anyhow!("GridMass buffer not found"))?,
+                ),
+                Some(
+                    self.resources
+                        .get_buffer(&BufferName::GridMassPrevious)
+                        .ok_or_else(|| anyhow!("GridMassPrevious buffer not found"))?,
+                ),
+                self.resources
+                    .get_buffer(&BufferName::GridMass)
+                    .map(|buffer| buffer.size())
+                    .unwrap_or(0),
+            )
+        } else {
+            (None, None, 0)
+        };
+        for _ in 0..steps {
+            if let (Some(source), Some(destination)) =
+                (mass_buffer.as_ref(), mass_previous_buffer.as_ref())
+            {
+                command_encoder.copy_buffer_to_buffer(source, 0, destination, 0, mass_copy_bytes);
+            }
             let mut compute_pass =
                 command_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("Simulation Step Pass"),
                     timestamp_writes: None,
                 });
 
-            for _ in 0..steps {
-                compute_pass.set_pipeline(&simulation_pipelines.reset_grid);
-                compute_pass.set_bind_group(0, &simulation_bind_groups.reset_grid, &[]);
-                compute_pass.dispatch_workgroups(
-                    self.dispatch_number_workgroups_x_2d,
-                    self.dispatch_number_workgroups_y_2d,
-                    1,
-                );
+            compute_pass.set_pipeline(&simulation_pipelines.reset_grid);
+            compute_pass.set_bind_group(0, &simulation_bind_groups.reset_grid, &[]);
+            compute_pass.dispatch_workgroups(
+                self.dispatch_number_workgroups_x_2d,
+                self.dispatch_number_workgroups_y_2d,
+                1,
+            );
 
-                compute_pass.set_pipeline(&simulation_pipelines.p2g);
-                compute_pass.set_bind_group(0, &simulation_bind_groups.p2g, &[]);
-                compute_pass.dispatch_workgroups(self.dispatch_number_workgroups_1d, 1, 1);
+            compute_pass.set_pipeline(&simulation_pipelines.p2g);
+            compute_pass.set_bind_group(0, &simulation_bind_groups.p2g, &[]);
+            compute_pass.dispatch_workgroups(self.dispatch_number_workgroups_1d, 1, 1);
 
-                compute_pass.set_pipeline(&simulation_pipelines.grid_physics);
-                compute_pass.set_bind_group(0, &simulation_bind_groups.grid_physics, &[]);
-                compute_pass.dispatch_workgroups(
-                    self.dispatch_number_workgroups_x_2d,
-                    self.dispatch_number_workgroups_y_2d,
-                    1,
-                );
+            compute_pass.set_pipeline(&simulation_pipelines.grid_physics);
+            compute_pass.set_bind_group(0, &simulation_bind_groups.grid_physics, &[]);
+            compute_pass.dispatch_workgroups(
+                self.dispatch_number_workgroups_x_2d,
+                self.dispatch_number_workgroups_y_2d,
+                1,
+            );
 
-                compute_pass.set_pipeline(&simulation_pipelines.particle_update);
-                compute_pass.set_bind_group(0, &simulation_bind_groups.particle_update, &[]);
-                compute_pass.dispatch_workgroups(self.dispatch_number_workgroups_1d, 1, 1);
+            compute_pass.set_pipeline(&simulation_pipelines.particle_update);
+            compute_pass.set_bind_group(0, &simulation_bind_groups.particle_update, &[]);
+            compute_pass.dispatch_workgroups(self.dispatch_number_workgroups_1d, 1, 1);
 
-                compute_pass.set_pipeline(&simulation_pipelines.update_sim_info);
-                compute_pass.set_bind_group(0, &simulation_bind_groups.update_sim_info, &[]);
-                compute_pass.dispatch_workgroups(1, 1, 1);
+            compute_pass.set_pipeline(&simulation_pipelines.update_sim_info);
+            compute_pass.set_bind_group(0, &simulation_bind_groups.update_sim_info, &[]);
+            compute_pass.dispatch_workgroups(1, 1, 1);
 
-                if self.enable_center_of_mass {
-                    if self.center_of_mass_biggest_blob {
-                        compute_pass.set_pipeline(&simulation_pipelines.center_of_mass_seed);
-                        compute_pass.set_bind_group(
-                            0,
-                            &simulation_bind_groups.center_of_mass_seed,
-                            &[],
-                        );
-                        compute_pass.dispatch_workgroups(
-                            self.dispatch_number_workgroups_x_2d,
-                            self.dispatch_number_workgroups_y_2d,
-                            1,
-                        );
-                        compute_pass.set_pipeline(&simulation_pipelines.center_of_mass_propagate);
-                        compute_pass.set_bind_group(
-                            0,
-                            &simulation_bind_groups.center_of_mass_propagate,
-                            &[],
-                        );
-                        compute_pass.dispatch_workgroups(
-                            self.dispatch_number_workgroups_x_2d,
-                            self.dispatch_number_workgroups_y_2d,
-                            1,
-                        );
-                    }
-                    compute_pass.set_pipeline(&simulation_pipelines.center_of_mass);
-                    compute_pass.set_bind_group(0, &simulation_bind_groups.center_of_mass, &[]);
-                    compute_pass.dispatch_workgroups(1, 1, 1);
+            if self.enable_center_of_mass {
+                if self.center_of_mass_biggest_blob {
+                    compute_pass.set_pipeline(&simulation_pipelines.center_of_mass_seed);
+                    compute_pass.set_bind_group(
+                        0,
+                        &simulation_bind_groups.center_of_mass_seed,
+                        &[],
+                    );
+                    compute_pass.dispatch_workgroups(
+                        self.dispatch_number_workgroups_x_2d,
+                        self.dispatch_number_workgroups_y_2d,
+                        1,
+                    );
+                    compute_pass.set_pipeline(&simulation_pipelines.center_of_mass_propagate);
+                    compute_pass.set_bind_group(
+                        0,
+                        &simulation_bind_groups.center_of_mass_propagate,
+                        &[],
+                    );
+                    compute_pass.dispatch_workgroups(
+                        self.dispatch_number_workgroups_x_2d,
+                        self.dispatch_number_workgroups_y_2d,
+                        1,
+                    );
                 }
+                compute_pass.set_pipeline(&simulation_pipelines.center_of_mass);
+                compute_pass.set_bind_group(0, &simulation_bind_groups.center_of_mass, &[]);
+                compute_pass.dispatch_workgroups(1, 1, 1);
             }
         }
         self.queue.submit(Some(command_encoder.finish()));
@@ -1684,7 +1730,15 @@ impl ComputeOrchestrator {
                 )
                 .await?
             }
-            2_u32..=u32::MAX => {
+            2 => {
+                self.run_mpmdac(
+                    sim_settings,
+                    number_release_particles,
+                    minimum_dem_elevation,
+                )
+                .await?
+            }
+            3_u32..=u32::MAX => {
                 return Err(anyhow!(
                     "Unsupported simulation model: {}",
                     sim_settings.sim_model
@@ -1757,6 +1811,58 @@ impl ComputeOrchestrator {
                 .batch_compute_steps
                 .min(sim_settings.max_steps - steps_run);
             let sim_info = self.step_curvilinear(steps).await?;
+            steps_run += steps;
+            let flags = sim_info.parsed_flags();
+            if !flags.is_empty() {
+                debug!("Flags after {} submitted steps: {:?}", steps_run, flags);
+            }
+            if flags.contains(SimInfoFlags::SIM_STOPPED) {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn prepare_mpmdac(
+        &mut self,
+        sim_settings: &settings::SimSettings,
+        number_release_particles: u32,
+        minimum_dem_elevation: f32,
+    ) -> Result<()> {
+        self.prepare_simulation(
+            sim_settings,
+            number_release_particles,
+            minimum_dem_elevation,
+        )
+        .await
+    }
+
+    pub async fn step_mpmdac(&mut self, steps: u32) -> Result<SimInfo> {
+        self.step_simulation(steps, SimModel::MpmDaC).await
+    }
+
+    pub async fn run_mpmdac(
+        &mut self,
+        sim_settings: &settings::SimSettings,
+        number_release_particles: u32,
+        minimum_dem_elevation: f32,
+    ) -> Result<()> {
+        if self.batch_compute_steps == 0 {
+            return Err(anyhow!("batch_compute_steps must be greater than zero"));
+        }
+        self.prepare_mpmdac(
+            sim_settings,
+            number_release_particles,
+            minimum_dem_elevation,
+        )
+        .await?;
+
+        let mut steps_run = 0;
+        while steps_run < sim_settings.max_steps {
+            let steps = self
+                .batch_compute_steps
+                .min(sim_settings.max_steps - steps_run);
+            let sim_info = self.step_mpmdac(steps).await?;
             steps_run += steps;
             let flags = sim_info.parsed_flags();
             if !flags.is_empty() {

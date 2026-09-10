@@ -896,6 +896,7 @@ impl ApplicationHandler for Viewer {
                                             SimModel::Curvilinear,
                                             "Curvilinear",
                                         );
+                                        ui.selectable_value(&mut draft, SimModel::MpmDaC, "MPMDAC");
                                     });
                             });
                             ui.add_enabled_ui(draft != current, |ui| {

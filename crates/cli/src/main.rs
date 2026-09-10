@@ -1,7 +1,9 @@
 // compute_cli/src/main.rs
 use anyhow::Result;
 use clap::Parser;
-use compute_core::settings::{CrownLineMethod, FrictionModel, Settings, SimModel};
+use compute_core::settings::{
+    ConstitutiveModel, CrownLineMethod, FrictionModel, Settings, SimModel,
+};
 #[allow(unused_imports)]
 use compute_core::utils::{MaxValue, timer_checkpoint, timer_get_summary, timer_new};
 use pollster::block_on;
@@ -32,6 +34,11 @@ fn parse_friction_model(value: &str) -> Result<FrictionModel> {
 fn parse_crown_line_method(value: &str) -> Result<CrownLineMethod> {
     CrownLineMethod::from_str(value)
         .map_err(|err| anyhow::anyhow!("invalid crown line method '{value}': {err}"))
+}
+
+fn parse_constitutive_model(value: &str) -> Result<ConstitutiveModel> {
+    ConstitutiveModel::from_str(value)
+        .map_err(|err| anyhow::anyhow!("invalid constitutive model '{value}': {err}"))
 }
 
 #[derive(Parser, Debug)]
@@ -95,6 +102,12 @@ struct Args {
     internal_friction_angle: Option<f32>,
     #[arg(long)]
     basal_friction_angle: Option<f32>,
+    #[arg(long, value_parser = parse_constitutive_model)]
+    constitutive_model: Option<ConstitutiveModel>,
+    #[arg(long)]
+    shear_modulus: Option<f32>,
+    #[arg(long)]
+    hardening_modulus: Option<f32>,
     #[arg(long)]
     cfl: Option<f32>,
     #[arg(long)]
@@ -197,6 +210,15 @@ impl Args {
         }
         if let Some(value) = self.internal_friction_angle {
             settings.internal_friction_angle = Some(value);
+        }
+        if let Some(value) = self.constitutive_model {
+            settings.constitutive_model = Some(value);
+        }
+        if let Some(value) = self.shear_modulus {
+            settings.shear_modulus = Some(value);
+        }
+        if let Some(value) = self.hardening_modulus {
+            settings.hardening_modulus = Some(value);
         }
         if let Some(value) = self.basal_friction_angle {
             settings.basal_friction_angle = Some(value);
@@ -411,6 +433,9 @@ mod tests {
             grain_diameter: None,
             internal_friction_angle: None,
             basal_friction_angle: None,
+            constitutive_model: None,
+            shear_modulus: None,
+            hardening_modulus: None,
             cfl: None,
             min_slope_angle: None,
             max_slope_angle: None,

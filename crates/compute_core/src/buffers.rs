@@ -100,6 +100,9 @@ pub enum BufferName {
     GridPeakVelocity,
     GridPeakFlowThickness,
     GridMass,
+    /// snapshot of the previous step's GridMass, used by the MPMDAC
+    /// model to derive a smooth clump-aware particle depth
+    GridMassPrevious,
     GridMomentum,
     GridVelocity,
     GridForces,
@@ -113,6 +116,10 @@ pub enum BufferName {
     ParticlesMass,
     ParticlesState,
     ParticlesAffineMatrix,
+    /// per-particle stress state of the MPMDAC model: deviatoric stress
+    /// (symmetric mat2x2: tau_xx, tau_xy, tau_yy) in [0][0], [0][1], [1][0]
+    /// and the cumulative plastic strain in [1][1]
+    ParticlesStress,
 
     /// timestep data of the 0 index particle
     TimestepData,
@@ -162,9 +169,11 @@ impl BufferName {
             BufferName::ParticlesState => "particles_state",
             BufferName::ParticlesElevation => "particles_elevation",
             BufferName::ParticlesAffineMatrix => "particles_affine_matrix",
+            BufferName::ParticlesStress => "particles_stress",
             BufferName::ParticlesVelocityZ => "particles_velocity_z",
             BufferName::TimestepData => "timestep_data",
             BufferName::GridMass => "grid_mass",
+            BufferName::GridMassPrevious => "grid_mass_previous",
             BufferName::GridMomentum => "grid_momentum",
             BufferName::GridVelocity => "grid_velocity",
             BufferName::GridPeakFlowThickness => "grid_peak_flow_thickness",
@@ -214,8 +223,10 @@ impl std::str::FromStr for BufferName {
             "particles_elevation" => Ok(BufferName::ParticlesElevation),
             "particles_velocity_z" => Ok(BufferName::ParticlesVelocityZ),
             "particles_affine_matrix" => Ok(BufferName::ParticlesAffineMatrix),
+            "particles_stress" => Ok(BufferName::ParticlesStress),
             "timestep_data" => Ok(BufferName::TimestepData),
             "grid_mass" => Ok(BufferName::GridMass),
+            "grid_mass_previous" => Ok(BufferName::GridMassPrevious),
             "grid_momentum" => Ok(BufferName::GridMomentum),
             "grid_velocity" => Ok(BufferName::GridVelocity),
             "grid_peak_flow_thickness" => Ok(BufferName::GridPeakFlowThickness),
@@ -870,6 +881,13 @@ pub fn create_buffers_and_texture_descriptions(
         grid_bytes_size,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
     );
+    // previous-step mass snapshot for the MPMDAC model's particle depth
+    gpu_resources.add_buffer(
+        device,
+        BufferName::GridMassPrevious,
+        grid_bytes_size,
+        BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+    );
     // scratch for the biggest-blob detection in compute_center_of_mass
     gpu_resources.add_buffer(
         device,
@@ -892,6 +910,15 @@ pub fn create_buffers_and_texture_descriptions(
     gpu_resources.add_buffer(
         device,
         BufferName::GridVelocity,
+        grid_bytes_size * 2,
+        BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+    );
+    // per-cell force vector: written by grid_physics for the terrain-following
+    // model, atomically accumulated by p2g_mpmdac for the MPMDAC model,
+    // zeroed by reset_grid for every model
+    gpu_resources.add_buffer(
+        device,
+        BufferName::GridForces,
         grid_bytes_size * 2,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
     );

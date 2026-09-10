@@ -99,6 +99,10 @@ pub struct SimSettings {
     pub flags: u32,
     pub release_max_elevation: f32,
     pub peak_flow_thickness_threshold: f32,
+    // MPMDAC constitutive model
+    pub constitutive_model: u32,
+    pub shear_modulus: f32,
+    pub hardening_modulus: f32,
 }
 
 impl Hash for SimSettings {
@@ -132,6 +136,10 @@ impl Hash for SimSettings {
         self.velocity_threshold.to_bits().hash(state);
         self.roughness_threshold.to_bits().hash(state);
         self.peak_flow_thickness_threshold.to_bits().hash(state);
+        // MPMDAC constitutive model
+        self.constitutive_model.hash(state);
+        self.shear_modulus.to_bits().hash(state);
+        self.hardening_modulus.to_bits().hash(state);
         // Flags
         self.flags.hash(state);
     }
@@ -185,6 +193,10 @@ impl SimSettings {
             release_max_elevation: 8848.0,
 
             peak_flow_thickness_threshold: 0.1,
+
+            constitutive_model: ConstitutiveModel::DruckerPrager.as_int(),
+            shear_modulus: 5.0e4,
+            hardening_modulus: 0.0,
         }
     }
 
@@ -270,6 +282,15 @@ impl SimSettings {
         }
         if let Some(val) = patch.peak_flow_thickness_threshold {
             settings.peak_flow_thickness_threshold = val;
+        }
+        if let Some(val) = patch.constitutive_model {
+            settings.constitutive_model = val.as_int();
+        }
+        if let Some(val) = patch.shear_modulus {
+            settings.shear_modulus = val;
+        }
+        if let Some(val) = patch.hardening_modulus {
+            settings.hardening_modulus = val;
         }
         if let Some(val) = patch.enable_curvature {
             if val {
@@ -404,9 +425,86 @@ impl<'de> Deserialize<'de> for FrictionModel {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConstitutiveModel {
+    /// pressure-dependent Drucker-Prager / Mohr-Coulomb yield
+    DruckerPrager,
+    /// rate-dependent mu(I) inertial rheology
+    MuI,
+}
+
+impl ConstitutiveModel {
+    pub fn from_int(value: u32) -> Option<Self> {
+        match value {
+            0 => Some(ConstitutiveModel::DruckerPrager),
+            1 => Some(ConstitutiveModel::MuI),
+            _ => None,
+        }
+    }
+
+    pub fn as_int(&self) -> u32 {
+        match self {
+            ConstitutiveModel::DruckerPrager => 0,
+            ConstitutiveModel::MuI => 1,
+        }
+    }
+}
+
+impl FromStr for ConstitutiveModel {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_lowercase().as_str() {
+            "drucker-prager" | "drucker_prager" | "dp" | "mohr-coulomb" => Ok(Self::DruckerPrager),
+            "mu-i" | "mui" | "mu(i)" | "mu-i-rheology" => Ok(Self::MuI),
+            _ => Err(format!("unknown constitutive model: {value}")),
+        }
+    }
+}
+
+impl fmt::Display for ConstitutiveModel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::DruckerPrager => "drucker-prager",
+            Self::MuI => "mu-i",
+        })
+    }
+}
+
+impl Serialize for ConstitutiveModel {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for ConstitutiveModel {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Value {
+            Int(u32),
+            String(String),
+        }
+
+        match Value::deserialize(deserializer)? {
+            Value::Int(value) => Self::from_int(value)
+                .ok_or_else(|| D::Error::custom(format!("invalid constitutive model: {value}"))),
+
+            Value::String(value) => value.parse::<Self>().map_err(D::Error::custom),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SimModel {
     TerrainFollowing,
     Curvilinear,
+    MpmDaC,
 }
 
 impl SimModel {
@@ -414,6 +512,7 @@ impl SimModel {
         match value {
             0 => Some(Self::TerrainFollowing),
             1 => Some(Self::Curvilinear),
+            2 => Some(Self::MpmDaC),
             _ => None,
         }
     }
@@ -422,6 +521,7 @@ impl SimModel {
         match self {
             Self::TerrainFollowing => 0,
             Self::Curvilinear => 1,
+            Self::MpmDaC => 2,
         }
     }
 }
@@ -433,6 +533,7 @@ impl FromStr for SimModel {
         match value.to_lowercase().as_str() {
             "terrain-following" | "terrain" | "t" => Ok(Self::TerrainFollowing),
             "curvilinear" | "curvi" | "c" => Ok(Self::Curvilinear),
+            "mpmdac" | "mpm-dac" | "mpm_depth_averaged_curvilinear" => Ok(Self::MpmDaC),
             _ => Err(format!("unknown simulation model: {value}")),
         }
     }
@@ -443,6 +544,7 @@ impl fmt::Display for SimModel {
         f.write_str(match self {
             Self::TerrainFollowing => "terrain-following",
             Self::Curvilinear => "curvilinear",
+            Self::MpmDaC => "mpmdac",
         })
     }
 }
@@ -566,6 +668,16 @@ pub struct Settings {
     pub velocity_threshold: Option<f32>,
     pub roughness_threshold: Option<f32>,
     pub peak_flow_thickness_threshold: Option<f32>,
+
+    /// Constitutive law of the MPMDAC model: pressure-dependent
+    /// Drucker-Prager (default) or the rate-dependent mu(I) rheology.
+    pub constitutive_model: Option<ConstitutiveModel>,
+    /// Deviatoric shear modulus (Pa) of the MPMDAC model's elastic
+    /// predictor; large values approach the rigid-plastic limit.
+    pub shear_modulus: Option<f32>,
+    /// Linear isotropic hardening modulus (Pa per unit accumulated plastic
+    /// strain) of the MPMDAC model; 0 disables hardening.
+    pub hardening_modulus: Option<f32>,
 
     pub enable_curvature: Option<bool>,
     pub enable_particle_interaction: Option<bool>,
@@ -705,6 +817,9 @@ mod tests {
             velocity_threshold: Some(0.001),
             roughness_threshold: Some(0.002),
             peak_flow_thickness_threshold: Some(1.5),
+            constitutive_model: Some(ConstitutiveModel::MuI),
+            shear_modulus: Some(1234.5),
+            hardening_modulus: Some(678.9),
             dem_path: Some(String::from("dem.png")),
             release_areas_path: Some(String::from("release_area.png")),
             output_path: Some(String::from("output")),
@@ -733,6 +848,9 @@ mod tests {
         assert_eq!(sim_settings.velocity_threshold, 0.001);
         assert_eq!(sim_settings.roughness_threshold, 0.002);
         assert_eq!(sim_settings.peak_flow_thickness_threshold, 1.5);
+        assert_eq!(sim_settings.constitutive_model, 1);
+        assert_eq!(sim_settings.shear_modulus, 1234.5);
+        assert_eq!(sim_settings.hardening_modulus, 678.9);
         assert_eq!(sim_settings.grid_shape_x, dem.width as u32);
         assert_eq!(sim_settings.grid_shape_y, dem.height as u32);
         assert_eq!(sim_settings.cell_size, dem.cell_size);
@@ -872,7 +990,11 @@ mod tests {
 
     #[test]
     fn sim_model_int_roundtrip() {
-        let models = [SimModel::TerrainFollowing, SimModel::Curvilinear];
+        let models = [
+            SimModel::TerrainFollowing,
+            SimModel::Curvilinear,
+            SimModel::MpmDaC,
+        ];
 
         for model in models {
             let value = model.as_int();
@@ -886,8 +1008,9 @@ mod tests {
     fn sim_model_from_int() {
         assert_eq!(SimModel::from_int(0), Some(SimModel::TerrainFollowing));
         assert_eq!(SimModel::from_int(1), Some(SimModel::Curvilinear));
+        assert_eq!(SimModel::from_int(2), Some(SimModel::MpmDaC));
 
-        assert_eq!(SimModel::from_int(2), None);
+        assert_eq!(SimModel::from_int(3), None);
         assert_eq!(SimModel::from_int(u32::MAX), None);
     }
 
@@ -896,6 +1019,7 @@ mod tests {
         let models = [
             (SimModel::TerrainFollowing, "terrain-following"),
             (SimModel::Curvilinear, "curvilinear"),
+            (SimModel::MpmDaC, "mpmdac"),
         ];
 
         for (model, string) in models {
@@ -911,6 +1035,9 @@ mod tests {
         }
         for value in ["curvilinear", "curvi", "c", "CURVI"] {
             assert_eq!(SimModel::from_str(value), Ok(SimModel::Curvilinear));
+        }
+        for value in ["mpmdac", "MPM-DAC", "mpm_depth_averaged_curvilinear"] {
+            assert_eq!(SimModel::from_str(value), Ok(SimModel::MpmDaC));
         }
     }
 
@@ -964,6 +1091,39 @@ mod tests {
             assert_eq!(model.to_string(), string);
             assert_eq!(FrictionModel::from_str(string), Ok(model));
         }
+    }
+
+    #[test]
+    fn constitutive_model_roundtrip() {
+        assert_eq!(
+            ConstitutiveModel::from_int(0),
+            Some(ConstitutiveModel::DruckerPrager)
+        );
+        assert_eq!(ConstitutiveModel::from_int(1), Some(ConstitutiveModel::MuI));
+        assert_eq!(ConstitutiveModel::from_int(2), None);
+
+        assert_eq!(
+            ConstitutiveModel::DruckerPrager.to_string(),
+            "drucker-prager"
+        );
+        assert_eq!(ConstitutiveModel::MuI.to_string(), "mu-i");
+        assert_eq!(
+            ConstitutiveModel::from_str("drucker-prager"),
+            Ok(ConstitutiveModel::DruckerPrager)
+        );
+        assert_eq!(
+            ConstitutiveModel::from_str("dp"),
+            Ok(ConstitutiveModel::DruckerPrager)
+        );
+        assert_eq!(
+            ConstitutiveModel::from_str("mohr-coulomb"),
+            Ok(ConstitutiveModel::DruckerPrager)
+        );
+        assert_eq!(
+            ConstitutiveModel::from_str("mui"),
+            Ok(ConstitutiveModel::MuI)
+        );
+        assert!(ConstitutiveModel::from_str("invalid").is_err());
     }
 
     #[test]

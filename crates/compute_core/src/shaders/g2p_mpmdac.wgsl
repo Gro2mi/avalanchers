@@ -1,50 +1,179 @@
+// MPMDAC (MPM depth-averaged curvilinear) grid-to-particle transfer: APIC
+// velocity gather and terrain-following advection.
+struct TimestepDataArray {
+    trajectories: array<TimestepData, 3>,
+};
+
+struct TimestepData {
+    velocity: vec3f,
+    dt: f32,
+    acceleration_tangential: vec3f,
+    acceleration_friction_magnitude: f32,
+    position: vec3f,
+    elevation: f32,
+    normal: vec3f,
+    g_eff: f32,
+    acceleration_normal: vec3f,
+    _pad1: f32,
+    uv: vec2f,
+    _pad2: vec2f,
+};
+
 @group(0) @binding(1) var<storage, read_write> sim_info: SimInfo;
-@group(0) @binding(2) var<storage> particles_position: array<vec2<f32>>;
-@group(0) @binding(3) var<storage> particles_velocity: array<vec2<f32>>;
-@group(0) @binding(4) var<storage> particles_mass: array<f32>;
-// atomic_float @group(0) @binding(5) var<storage, read_write> grid_mass_atomic: array<atomic<f32>>;
-// atomic_float @group(0) @binding(6) var<storage, read_write> grid_momentum_atomic: array<atomic<f32>>; 
-@group(0) @binding(5) var<storage, read_write> grid_mass_atomic: array<atomic<u32>>;  // no_atomic_float 
-@group(0) @binding(6) var<storage, read_write> grid_momentum_atomic: array<atomic<i32>>;  // no_atomic_float 
+@group(0) @binding(2) var terrain_geometry_texture: texture_2d<f32>;
+@group(0) @binding(3) var tex_sampler: sampler;
+@group(0) @binding(4) var<storage, read_write> particles_position: array<vec2<f32>>;
+@group(0) @binding(5) var<storage, read_write> particles_velocity: array<vec2<f32>>;
+@group(0) @binding(6) var<storage, read_write> particles_state: array<u32>;
+@group(0) @binding(7) var<storage, read> grid_velocity: array<vec2<f32>>;
+@group(0) @binding(8) var<storage, read_write> atomic_values: AtomicValues;
+@group(0) @binding(9) var<storage, read_write> out_timestep_data: array<TimestepDataArray>; // trajectory data, fixed size 3
+@group(0) @binding(10) var<storage, read_write> out_debug: array<f32>;
+@group(0) @binding(11) var<storage, read_write> particles_affine_matrix: array<mat2x2<f32>>;
+@group(0) @binding(12) var dem_texture: texture_2d<f32>;
+@group(0) @binding(13) var<storage, read_write> particles_elevation: array<f32>;
 
 override WG_SIZE_1D: u32 = 1u;
 @compute @workgroup_size(WG_SIZE_1D, 1, 1)
-fn p2g(@builtin(global_invocation_id) id: vec3u) {
-    if id.x >= sim_info.number_particles {
+fn g2p_mpmdac(
+    @builtin(global_invocation_id) pId: vec3<u32>
+) {
+    let particleId = pId.x;
+
+    if particleId >= sim_info.number_particles {
         return;
     }
     if (sim_info.flags & SIM_INFO_STOPPED) != 0u {
         return;
-    }    
-    let use_particle_interaction: bool = (sim_settings.flags & (1u << 1u)) != 0u;
-    if sim_settings.model_type == 0 && !use_particle_interaction {
+    }
+    if (particles_state[particleId] & PARTICLE_STOPPED) != 0u {
         return;
     }
-    let cell = position_to_cell(particles_position[id.x].xy);
-    if cell.x < 3 || cell.x >= (sim_settings.grid_shape.x - 3) || cell.y < 3 || cell.y >= (sim_settings.grid_shape.y - 3) {
+    var position = particles_position[particleId];
+    let uv = position_to_uv(position);
+    let terrain_data = textureSampleLevel(terrain_geometry_texture, tex_sampler, uv, 0);
+    let normal = normalize(terrain_data.xyz);
+
+    if is_nan(normal.x) {
+        var state = sim_info.timestep;
+        state |= PARTICLE_STOPPED;
+        particles_state[particleId] = state;
+        atomicAdd(&atomic_values.stopped_particles, 1u);
+        sim_info.flags |= SIM_INFO_PARTICLE_OUT_OF_DEM_DATA;
         return;
     }
-    
-    transfer_p2g(id.x);
+
+    // affine (APIC) transfer
+    let update = transfer_g2p(particleId);
+    let new_velocity = update.velocity;
+    let new_affine_matrix = update.affine_matrix;
+
+    var dt = sim_info.dt;
+
+    // The per-particle deviatoric stress (with its accumulated plastic
+    // strain) lives in ParticlesStress and is updated by the constitutive
+    // model in p2g_mpmdac; here only the APIC state and position are carried.
+
+    position = position + new_velocity * dt;
+
+    particles_position[particleId] = position;
+    particles_velocity[particleId] = new_velocity;
+    particles_affine_matrix[particleId] = new_affine_matrix;
+    let uv_new = position_to_uv(position);
+    let elevation = get_elevation(uv_new);
+    particles_elevation[particleId] = elevation;
+
+    if particleId == sim_info.number_particles / 2u {
+        var current: TimestepData;
+        current.position = vec3f(position, elevation);
+        current.velocity = vec3f(new_velocity, 0.0);
+        current.uv = uv;
+        current.dt = dt;
+        current.acceleration_tangential = vec3f(0.0);
+        current.acceleration_friction_magnitude = 0.0;
+        current.elevation = 0.0;
+        current.normal = vec3f(normal);
+        current.g_eff = 0.0;
+        current.acceleration_normal = vec3f(0.0);
+        current._pad1 = 0.0;
+        current._pad2 = vec2f(0.0);
+        update_output_data(0u, sim_info.timestep - 1, current);
+    }
+    if particleId == sim_info.number_particles / 2u {
+        out_debug[0] = f32(position.x);
+        out_debug[1] = f32(position.y);
+        out_debug[2] = f32(uv.x);
+        out_debug[3] = f32(uv.y);
+        out_debug[4] = length(new_affine_matrix[0]) + length(new_affine_matrix[1]);
+        out_debug[5] = f32(sim_info.timestep);
+        out_debug[6] = f32(sim_info.number_particles);
+        out_debug[7] = f32(sim_settings.released_particles_per_cell);
+        out_debug[8] = f32(sim_settings.grid_shape.x);
+        out_debug[9] = f32(sim_settings.grid_shape.y);
+        out_debug[10] = f32(sim_settings.world_size.x);
+        out_debug[11] = f32(sim_settings.world_size.y);
+        out_debug[12] = f32(sim_settings.internal_friction_angle);
+    }
+
+    if dot(new_velocity, new_velocity) < sim_settings.velocity_threshold * sim_settings.velocity_threshold {
+        var state = sim_info.timestep;
+        state |= PARTICLE_STOPPED;
+        particles_state[particleId] = state;
+        atomicAdd(&atomic_values.stopped_particles, 1u);
+        return;
+    }
+
+    if is_nan(position.x) {
+        var state = sim_info.timestep;
+        state |= PARTICLE_STOPPED;
+        state |= PARTICLE_OUT_OF_DEM_DATA;
+        particles_state[particleId] = state;
+        atomicAdd(&atomic_values.stopped_particles, 1u);
+        sim_info.flags |= SIM_INFO_IS_NAN;
+        sim_info.flags |= SIM_INFO_PARTICLE_OUT_OF_DEM_DATA;
+        return;
+    }
+    if is_nan(new_velocity.x) {
+        var state = sim_info.timestep;
+        state |= PARTICLE_STOPPED;
+        state |= PARTICLE_OUT_OF_DEM_DATA;
+        particles_state[particleId] = state;
+        atomicAdd(&atomic_values.stopped_particles, 1u);
+        sim_info.flags |= SIM_INFO_IS_NAN;
+        return;
+    }
+
+    // we leave a two cell boundary
+    if position.x < 2.0 * sim_settings.cell_size
+        || position.x > sim_settings.world_size.x - 2.0 * sim_settings.cell_size
+        || position.y < 2.0 * sim_settings.cell_size
+        || position.y > sim_settings.world_size.y - 2.0 * sim_settings.cell_size {
+        var state = sim_info.timestep;
+        state |= PARTICLE_STOPPED;
+        state |= PARTICLE_OUT_OF_BOUNDS;
+        particles_state[particleId] = state;
+        atomicAdd(&atomic_values.stopped_particles, 1u);
+        sim_info.flags |= SIM_INFO_OUT_OF_BOUNDS;
+        return;
+    }
 }
 
-// import transfer_p2g.wgsl;
-// BEGIN transfer_p2g.wgsl
-fn quantize_momentum_component(value: f32) -> i32 {
-    // Keep conversion inside i32 range before atomicAdd.
-    let i32_max_f = 2147483647.0;
-    let clamped = clamp(value, -i32_max_f, i32_max_f);
-    return i32(round(clamped));
+fn get_elevation(uv: vec2f) -> f32 {
+    // TODO: fix interpolation at the edges of the texture
+    return textureSampleLevel(dem_texture, tex_sampler, uv, 0).x;
+}
+fn update_output_data(trajectory: u32, timestep: u32, timestep_data: TimestepData) {
+    out_timestep_data[timestep].trajectories[trajectory] = timestep_data;
 }
 
-fn transfer_p2g(p_idx: u32) {
-    // the stencil is offset by half a cell as it is in the middle of the cell
+// import transfer_g2p_affine.wgsl;
+// BEGIN transfer_g2p_affine.wgsl
+fn transfer_g2p(p_idx: u32) -> G2PUpdate {
     let grid_pos = particles_position[p_idx] / sim_settings.cell_size - vec2f(0.5);
     let base_node = vec2u(floor(grid_pos - vec2f(0.5)));
     
-    let p_mass = particles_mass[p_idx];
-    let p_velocity = particles_velocity[p_idx];
-    // let affine_matrix = particles_affine_matrix[p_idx];
+    var interpolated_velocity = vec2f(0.0);
+    var new_affine_matrix = mat2x2<f32>(vec2<f32>(0.0), vec2<f32>(0.0));
 
     for (var i: u32 = 0; i < 3; i++) {
         for (var j: u32 = 0; j < 3; j++) {
@@ -52,27 +181,18 @@ fn transfer_p2g(p_idx: u32) {
             let distance = calculate_distance_to_node(grid_pos, node_coords);
             let weight = calculate_weight(distance);
             let idx = xy_to_idx(node_coords);
-            // let affine_velocity = p_velocity + (affine_matrix * distance);
-
-            
-            
-            // atomic_float atomicAdd(&grid_mass_atomic[idx], p_mass * weight);
-            // atomic_float atomicAdd(&grid_momentum_atomic[idx * 2u], p_mass * p_velocity.x * weight);
-            // atomic_float atomicAdd(&grid_momentum_atomic[idx * 2u + 1u], p_mass * p_velocity.y * weight);
-            // for affine transfer
-            // atomicAdd(&grid_momentum_atomic[idx * 2u], p_mass * affine_velocity.x * weight);
-            // atomicAdd(&grid_momentum_atomic[idx * 2u + 1u], p_mass * affine_velocity.y * weight);
-
-            atomicAdd(&grid_mass_atomic[idx], u32(round(p_mass * weight * MASS_FACTOR))); // no_atomic_float 
-            let momentum_x = p_mass * p_velocity.x * weight * MOMENTUM_FACTOR; // no_atomic_float 
-            let momentum_y = p_mass * p_velocity.y * weight * MOMENTUM_FACTOR; // no_atomic_float 
-            atomicAdd(&grid_momentum_atomic[idx * 2u], quantize_momentum_component(momentum_x)); // no_atomic_float 
-            atomicAdd(&grid_momentum_atomic[idx * 2u + 1u], quantize_momentum_component(momentum_y)); // no_atomic_float 
+            let grid_vel = grid_velocity[idx];
+            interpolated_velocity += weight * grid_vel;
+            new_affine_matrix += 4.0 * weight * mat2x2<f32>(
+                grid_vel * distance.x,
+                grid_vel * distance.y
+            );
         }
     }
+    return G2PUpdate(interpolated_velocity, new_affine_matrix);
 }
-// END transfer_p2g.wgsl
 
+// END transfer_g2p_affine.wgsl
 // import utils.wgsl;
 // BEGIN utils.wgsl
 const WG_SIZE_2D: u32 = 16u;

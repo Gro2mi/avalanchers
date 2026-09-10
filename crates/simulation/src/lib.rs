@@ -666,6 +666,15 @@ impl Simulation {
                         )
                         .await?;
                 }
+                model if model == SimModel::MpmDaC.as_int() => {
+                    self.orchestrator
+                        .prepare_mpmdac(
+                            &self.settings,
+                            self.number_particles,
+                            self.dem.minimum_elevation,
+                        )
+                        .await?;
+                }
                 _ => bail!("Unsupported simulation model: {}", self.settings.sim_model),
             }
             self.sim_info = self.fetch_sim_info().await?;
@@ -692,6 +701,9 @@ impl Simulation {
             }
             model if model == SimModel::Curvilinear.as_int() => {
                 self.orchestrator.step_curvilinear(steps).await?
+            }
+            model if model == SimModel::MpmDaC.as_int() => {
+                self.orchestrator.step_mpmdac(steps).await?
             }
             _ => bail!("Unsupported simulation model: {}", self.settings.sim_model),
         };
@@ -1542,7 +1554,7 @@ impl Simulation {
         }
         if self.gpu_cache.particles_velocity_z.is_none() {
             self.gpu_cache.read_count += 1;
-            if self.settings.sim_model == SimModel::Curvilinear.as_int() {
+            if self.settings.sim_model != SimModel::TerrainFollowing.as_int() {
                 self.gpu_cache.particles_velocity_z =
                     Some(vec![0.0; self.number_particles as usize]);
             } else {
@@ -3127,6 +3139,185 @@ mod tests {
 
         assert_eq!(velocity_z.len(), number_particles);
         assert!(velocity_z.iter().all(|velocity| *velocity == 0.0));
+    }
+
+    #[test_log::test]
+    fn test_mpmdac_velocity_z_is_synthetic_zero() {
+        let mut sim = setup_simple_sim(40.0, 3.0);
+        sim.settings.sim_model = SimModel::MpmDaC.as_int();
+        block_on(sim.prepare()).expect("Failed to prepare MPMDAC simulation");
+        let number_particles = sim.number_particles as usize;
+
+        let velocity_z = block_on(sim.fetch_particles_velocity_z())
+            .expect("Failed to fetch MPMDAC vertical velocity");
+
+        assert_eq!(velocity_z.len(), number_particles);
+        assert!(velocity_z.iter().all(|velocity| *velocity == 0.0));
+    }
+
+    // Diagnostic: steps the MPMDAC model one step at a time and dumps
+    // the raw quantized grid buffer maxima to expose overflow or amplification.
+    #[test_log::test]
+    #[ignore]
+    fn test_mpmdac_diagnostic_steps() {
+        let mut sim = setup_simple_sim(40.0, 3.0);
+        sim.settings.sim_model = SimModel::MpmDaC.as_int();
+        sim.settings.max_steps = 15;
+        block_on(sim.prepare()).expect("Failed to prepare MPMDAC simulation");
+
+        for _ in 0..15 {
+            let info = block_on(sim.run_n_steps(1)).expect("step failed");
+            let positions = block_on(sim.fetch_particles_position())
+                .expect("positions")
+                .clone();
+            let velocities = block_on(sim.fetch_particles_velocity())
+                .expect("velocities")
+                .clone();
+            let orchestrator = sim.orchestrator();
+            let mass: Vec<u32> =
+                block_on(orchestrator.read_buffer(BufferName::GridMass)).expect("mass buffer");
+            let momentum: Vec<i32> = block_on(orchestrator.read_buffer(BufferName::GridMomentum))
+                .expect("momentum buffer");
+            let forces: Vec<i32> =
+                block_on(orchestrator.read_buffer(BufferName::GridForces)).expect("forces buffer");
+            let grid_velocity: Vec<[f32; 2]> =
+                block_on(orchestrator.read_buffer(BufferName::GridVelocity))
+                    .expect("velocity buffer");
+            let max_mass_kg = mass.iter().copied().max().unwrap_or(0) as f32 * 0.1;
+            let max_momentum = momentum.iter().copied().map(|v| v.abs()).max().unwrap_or(0);
+            let max_force = forces.iter().copied().map(|v| v.abs()).max().unwrap_or(0);
+            let max_grid_speed = grid_velocity
+                .iter()
+                .map(|velocity| {
+                    velocity
+                        .iter()
+                        .map(|component| component.abs())
+                        .fold(0.0f32, f32::max)
+                })
+                .fold(0.0f32, f32::max);
+            let max_particle_speed = velocities
+                .iter()
+                .map(|velocity| (velocity[0] * velocity[0] + velocity[1] * velocity[1]).sqrt())
+                .fold(0.0f32, f32::max);
+            let min_x = positions.iter().map(|p| p[0]).fold(f32::MAX, f32::min);
+            let max_x = positions.iter().map(|p| p[0]).fold(f32::MIN, f32::max);
+            let min_y = positions.iter().map(|p| p[1]).fold(f32::MAX, f32::min);
+            let max_y = positions.iter().map(|p| p[1]).fold(f32::MIN, f32::max);
+            println!(
+                "t={:>3} dt={:>7.3} sim_max_v={:>9.3} flags={:#010x} | mass_kg={:>10.1} mom_i32={:>8} force_i32={:>8} grid_v={:>8.3} particle_v={:>8.3} bbox_x=({:.1},{:.1}) bbox_y=({:.1},{:.1})",
+                info.timestep,
+                info.dt,
+                info.max_velocity,
+                info.flags,
+                max_mass_kg,
+                max_momentum,
+                max_force,
+                max_grid_speed,
+                max_particle_speed,
+                min_x,
+                max_x,
+                min_y,
+                max_y,
+            );
+        }
+    }
+
+    // Diagnostic on the real avaWog case (reproduces the reported fireworks).
+    #[test_log::test]
+    #[ignore]
+    fn test_mpmdac_diagnostic_avawog() {
+        let mut sim = block_on(Simulation::new()).expect("Failed to create Simulation");
+        let settings = Settings::loads(
+            r#"{
+                "dem_path": "C:/git/avalanchers/data/avaframe/avaWog.png",
+                "release_areas_path": "C:/git/avalanchers/data/avaframe/avaWogreleaseTexture.png",
+                "sim_model": "mpmdac",
+                "friction_model": "voellmy",
+                "max_steps": 40,
+                "released_particles_per_cell": 4,
+                "slab_thickness_factor": 1.0,
+                "friction_coefficient": 0.2,
+                "drag_coefficient": 2000.0,
+                "velocity_threshold": 0.1,
+                "enable_center_of_mass": false
+            }"#,
+        )
+        .expect("Failed to parse settings");
+        block_on(sim.create(settings)).expect("Failed to load avaWog data");
+
+        for _ in 0..40 {
+            let info = block_on(sim.run_n_steps(1)).expect("step failed");
+            let positions = block_on(sim.fetch_particles_position())
+                .expect("positions")
+                .clone();
+            let velocities = block_on(sim.fetch_particles_velocity())
+                .expect("velocities")
+                .clone();
+            let orchestrator = sim.orchestrator();
+            let mass: Vec<u32> =
+                block_on(orchestrator.read_buffer(BufferName::GridMass)).expect("mass buffer");
+            let momentum: Vec<i32> = block_on(orchestrator.read_buffer(BufferName::GridMomentum))
+                .expect("momentum buffer");
+            let forces: Vec<i32> =
+                block_on(orchestrator.read_buffer(BufferName::GridForces)).expect("forces buffer");
+            let grid_velocity: Vec<[f32; 2]> =
+                block_on(orchestrator.read_buffer(BufferName::GridVelocity))
+                    .expect("velocity buffer");
+            let max_mass_kg = mass.iter().copied().max().unwrap_or(0) as f32 * 0.1;
+            let max_momentum = momentum.iter().copied().map(|v| v.abs()).max().unwrap_or(0);
+            let max_force = forces.iter().copied().map(|v| v.abs()).max().unwrap_or(0);
+            let max_grid_speed = grid_velocity
+                .iter()
+                .map(|velocity| {
+                    velocity
+                        .iter()
+                        .map(|component| component.abs())
+                        .fold(0.0f32, f32::max)
+                })
+                .fold(0.0f32, f32::max);
+            let max_particle_speed = velocities
+                .iter()
+                .map(|velocity| (velocity[0] * velocity[0] + velocity[1] * velocity[1]).sqrt())
+                .fold(0.0f32, f32::max);
+            let min_x = positions.iter().map(|p| p[0]).fold(f32::MAX, f32::min);
+            let max_x = positions.iter().map(|p| p[0]).fold(f32::MIN, f32::max);
+            let min_y = positions.iter().map(|p| p[1]).fold(f32::MAX, f32::min);
+            let max_y = positions.iter().map(|p| p[1]).fold(f32::MIN, f32::max);
+            // clumping metric: particles per DEM cell
+            let cell_size = sim.settings.cell_size;
+            let mut occupancy: std::collections::HashMap<(u32, u32), u32> =
+                std::collections::HashMap::new();
+            for position in &positions {
+                let key = (
+                    (position[0] / cell_size) as u32,
+                    (position[1] / cell_size) as u32,
+                );
+                *occupancy.entry(key).or_insert(0) += 1;
+            }
+            let mut counts: Vec<u32> = occupancy.values().copied().collect();
+            counts.sort_unstable();
+            let max_occupancy = counts.last().copied().unwrap_or(0);
+            let p99_occupancy = counts[counts.len().saturating_sub(1 + counts.len() / 100)]
+                .max(counts.first().copied().unwrap_or(0));
+            println!(
+                "t={:>3} dt={:>7.3} sim_max_v={:>9.3} flags={:#010x} | mass_kg={:>10.1} mom_i32={:>8} force_i32={:>8} grid_v={:>8.3} particle_v={:>8.3} occ_max={:>4} occ_p99={:>4} bbox_x=({:.1},{:.1}) bbox_y=({:.1},{:.1})",
+                info.timestep,
+                info.dt,
+                info.max_velocity,
+                info.flags,
+                max_mass_kg,
+                max_momentum,
+                max_force,
+                max_grid_speed,
+                max_particle_speed,
+                max_occupancy,
+                p99_occupancy,
+                min_x,
+                max_x,
+                min_y,
+                max_y,
+            );
+        }
     }
 
     // Ensure set_release_areas returns an error when the provided array length
