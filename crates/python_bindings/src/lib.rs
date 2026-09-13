@@ -1067,6 +1067,38 @@ impl PySimulation {
         Ok(elevation.to_pyarray(py))
     }
 
+    /// float32 array of the particle masses in kg.
+    #[getter]
+    fn get_particles_mass<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<f32>>> {
+        let mass = self
+            .inner
+            .fetch_particles_mass()
+            .block_on()
+            .map_runtime_err()?;
+        Ok(mass.to_pyarray(py))
+    }
+
+    /// u32 array of the per-cell deposited mass as quantized by p2g
+    /// (scaled by ``MASS_FACTOR`` in the shader utils), ``height * width``.
+    #[getter]
+    fn get_grid_mass<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<u32>>> {
+        let data = self.inner.fetch_grid_mass().block_on().map_runtime_err()?;
+        Ok(data.to_pyarray(py))
+    }
+
+    /// i32 array of the per-cell deposited momentum as quantized by p2g
+    /// (``u, v`` interleaved, scaled by ``MOMENTUM_FACTOR`` in the shader
+    /// utils), ``height * width * 2``.
+    #[getter]
+    fn get_grid_momentum<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<i32>>> {
+        let data = self
+            .inner
+            .fetch_grid_momentum()
+            .block_on()
+            .map_runtime_err()?;
+        Ok(data.to_pyarray(py))
+    }
+
     /// u32 array of the particle stop timesteps (0 = still moving).
     #[getter]
     fn get_stopped<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<u32>>> {

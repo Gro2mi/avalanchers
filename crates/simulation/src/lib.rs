@@ -1584,6 +1584,42 @@ impl Simulation {
         Ok(self.gpu_cache.particles_mass.as_ref().unwrap())
     }
 
+    /// Raw per-cell deposited mass, as quantized by p2g (u32, scaled by
+    /// `MASS_FACTOR` in the shader utils). The buffers reflect the p2g deposit
+    /// of the most recently completed step, i.e. the mass field the grid
+    /// physics pass consumed.
+    pub async fn fetch_grid_mass(&mut self) -> Result<&Vec<u32>> {
+        if self.state < SimulationState::ParticlesInitialized {
+            bail!("Simulation must be initialized before reading grid buffers");
+        }
+        if self.gpu_cache.grid_mass.is_none() {
+            self.gpu_cache.read_count += 1;
+            self.gpu_cache.grid_mass = Some(
+                self.orchestrator
+                    .read_buffer::<u32>(BufferName::GridMass)
+                    .await?,
+            );
+        }
+        Ok(self.gpu_cache.grid_mass.as_ref().unwrap())
+    }
+
+    /// Raw per-cell deposited momentum as quantized by p2g (i32 pairs
+    /// `u, v` per cell, scaled by `MOMENTUM_FACTOR` in the shader utils).
+    pub async fn fetch_grid_momentum(&mut self) -> Result<&Vec<i32>> {
+        if self.state < SimulationState::ParticlesInitialized {
+            bail!("Simulation must be initialized before reading grid buffers");
+        }
+        if self.gpu_cache.grid_momentum.is_none() {
+            self.gpu_cache.read_count += 1;
+            self.gpu_cache.grid_momentum = Some(
+                self.orchestrator
+                    .read_buffer::<i32>(BufferName::GridMomentum)
+                    .await?,
+            );
+        }
+        Ok(self.gpu_cache.grid_momentum.as_ref().unwrap())
+    }
+
     /// Per-particle elevation values.
     pub async fn fetch_particles_elevation(&mut self) -> Result<&Vec<f32>> {
         if self.state < SimulationState::ParticlesInitialized {

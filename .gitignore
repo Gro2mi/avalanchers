@@ -2,6 +2,7 @@ avalanchers.code-workspace
 web_output/
 dtm_cache.zarr
 cole_considerations/
+.zcode
 test.html
 js/test.js
 wgsl/test.wgsl
