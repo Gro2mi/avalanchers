@@ -103,6 +103,9 @@ pub struct SimSettings {
     pub constitutive_model: u32,
     pub shear_modulus: f32,
     pub hardening_modulus: f32,
+    // MPMDAC compressibility; bulk_modulus 0 = incompressible
+    pub bulk_modulus: f32,
+    pub compaction_pressure: f32,
 }
 
 impl Hash for SimSettings {
@@ -140,6 +143,9 @@ impl Hash for SimSettings {
         self.constitutive_model.hash(state);
         self.shear_modulus.to_bits().hash(state);
         self.hardening_modulus.to_bits().hash(state);
+        // MPMDAC compressibility
+        self.bulk_modulus.to_bits().hash(state);
+        self.compaction_pressure.to_bits().hash(state);
         // Flags
         self.flags.hash(state);
     }
@@ -197,6 +203,9 @@ impl SimSettings {
             constitutive_model: ConstitutiveModel::DruckerPrager.as_int(),
             shear_modulus: 5.0e4,
             hardening_modulus: 0.0,
+
+            bulk_modulus: 2.0e4,
+            compaction_pressure: 2.0e3,
         }
     }
 
@@ -291,6 +300,12 @@ impl SimSettings {
         }
         if let Some(val) = patch.hardening_modulus {
             settings.hardening_modulus = val;
+        }
+        if let Some(val) = patch.bulk_modulus {
+            settings.bulk_modulus = val;
+        }
+        if let Some(val) = patch.compaction_pressure {
+            settings.compaction_pressure = val;
         }
         if let Some(val) = patch.enable_curvature {
             if val {
@@ -626,7 +641,7 @@ impl<'de> Deserialize<'de> for CrownLineMethod {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Default, Clone)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
     pub outlines_path: Option<String>,
@@ -678,6 +693,13 @@ pub struct Settings {
     /// Linear isotropic hardening modulus (Pa per unit accumulated plastic
     /// strain) of the MPMDAC model; 0 disables hardening.
     pub hardening_modulus: Option<f32>,
+    /// Volumetric bulk modulus (Pa) of the MPMDAC model. Non-zero makes the
+    /// flow material compressible: pressure responds elastically to
+    /// volumetric strain (0 = incompressible, the default is 2e4).
+    pub bulk_modulus: Option<f32>,
+    /// Compaction pressure (Pa) above which the MPMDAC material densifies
+    /// plastically (irreversibly); the volumetric pressure is capped there.
+    pub compaction_pressure: Option<f32>,
 
     pub enable_curvature: Option<bool>,
     pub enable_particle_interaction: Option<bool>,
@@ -820,6 +842,8 @@ mod tests {
             constitutive_model: Some(ConstitutiveModel::MuI),
             shear_modulus: Some(1234.5),
             hardening_modulus: Some(678.9),
+            bulk_modulus: Some(246.8),
+            compaction_pressure: Some(135.7),
             dem_path: Some(String::from("dem.png")),
             release_areas_path: Some(String::from("release_area.png")),
             output_path: Some(String::from("output")),
@@ -851,6 +875,8 @@ mod tests {
         assert_eq!(sim_settings.constitutive_model, 1);
         assert_eq!(sim_settings.shear_modulus, 1234.5);
         assert_eq!(sim_settings.hardening_modulus, 678.9);
+        assert_eq!(sim_settings.bulk_modulus, 246.8);
+        assert_eq!(sim_settings.compaction_pressure, 135.7);
         assert_eq!(sim_settings.grid_shape_x, dem.width as u32);
         assert_eq!(sim_settings.grid_shape_y, dem.height as u32);
         assert_eq!(sim_settings.cell_size, dem.cell_size);

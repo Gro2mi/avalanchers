@@ -109,6 +109,10 @@ struct Args {
     #[arg(long)]
     hardening_modulus: Option<f32>,
     #[arg(long)]
+    bulk_modulus: Option<f32>,
+    #[arg(long)]
+    compaction_pressure: Option<f32>,
+    #[arg(long)]
     cfl: Option<f32>,
     #[arg(long)]
     min_slope_angle: Option<f32>,
@@ -219,6 +223,12 @@ impl Args {
         }
         if let Some(value) = self.hardening_modulus {
             settings.hardening_modulus = Some(value);
+        }
+        if let Some(value) = self.bulk_modulus {
+            settings.bulk_modulus = Some(value);
+        }
+        if let Some(value) = self.compaction_pressure {
+            settings.compaction_pressure = Some(value);
         }
         if let Some(value) = self.basal_friction_angle {
             settings.basal_friction_angle = Some(value);
@@ -436,6 +446,8 @@ mod tests {
             constitutive_model: None,
             shear_modulus: None,
             hardening_modulus: None,
+            bulk_modulus: None,
+            compaction_pressure: None,
             cfl: None,
             min_slope_angle: None,
             max_slope_angle: None,

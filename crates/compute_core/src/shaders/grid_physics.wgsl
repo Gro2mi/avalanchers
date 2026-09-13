@@ -282,6 +282,9 @@ struct SimSettings {
     constitutive_model: u32,
     shear_modulus: f32,
     hardening_modulus: f32,
+    // MPMDAC compressibility; bulk_modulus 0 = incompressible
+    bulk_modulus: f32,
+    compaction_pressure: f32,
 };
 
 struct AtomicValues {

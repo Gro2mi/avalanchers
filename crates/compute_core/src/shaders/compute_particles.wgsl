@@ -239,6 +239,7 @@ fn compute_particles(
         state = sim_info.timestep;
         state |= PARTICLE_STOPPED;
         state |= PARTICLE_IS_NAN;
+        position.z = elevation;
         particles_state[particleId] = state;
         atomicAdd(&atomic_values.stopped_particles, 1u);
         sim_info.flags |= SIM_INFO_IS_NAN;
@@ -249,6 +250,7 @@ fn compute_particles(
         state = sim_info.timestep;
         state |= PARTICLE_STOPPED;
         state |= PARTICLE_IS_NAN;
+        position.z = elevation;
         particles_state[particleId] = state;
         atomicAdd(&atomic_values.stopped_particles, 1u);
         sim_info.flags |= SIM_INFO_IS_NAN;
@@ -259,6 +261,7 @@ fn compute_particles(
     if (state & PARTICLE_STOPPED) != 0u || length(velocity) < sim_settings.velocity_threshold {
         state = sim_info.timestep;
         state |= PARTICLE_STOPPED;
+        position.z = elevation;
         atomicAdd(&atomic_values.stopped_particles, 1u);
         update_particle(particleId, position, velocity, state);
         return;
@@ -271,6 +274,7 @@ fn compute_particles(
         state = sim_info.timestep;
         state |= PARTICLE_STOPPED;
         state |= PARTICLE_OUT_OF_BOUNDS;
+        position.z = elevation;
         atomicAdd(&atomic_values.stopped_particles, 1u);
         update_particle(particleId, position, velocity, state);
         sim_info.flags |= SIM_INFO_OUT_OF_BOUNDS;
@@ -536,6 +540,9 @@ struct SimSettings {
     constitutive_model: u32,
     shear_modulus: f32,
     hardening_modulus: f32,
+    // MPMDAC compressibility; bulk_modulus 0 = incompressible
+    bulk_modulus: f32,
+    compaction_pressure: f32,
 };
 
 struct AtomicValues {

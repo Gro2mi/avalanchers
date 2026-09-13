@@ -2248,6 +2248,15 @@ pub fn create_shader_configs(
                         min_binding_size: None,
                     },
                 ),
+                // Binding 13:
+                (
+                    BufferName::ParticlesVolumetricStrain.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
             ],
             &[("WG_SIZE_1D", max_compute_invocations_per_workgroup as f64)],
         )?,

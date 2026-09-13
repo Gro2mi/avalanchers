@@ -120,6 +120,9 @@ pub enum BufferName {
     /// (symmetric mat2x2: tau_xx, tau_xy, tau_yy) in [0][0], [0][1], [1][0]
     /// and the cumulative plastic strain in [1][1]
     ParticlesStress,
+    /// per-particle volumetric state of the MPMDAC model:
+    /// (elastic volumetric strain, plastic compaction strain)
+    ParticlesVolumetricStrain,
 
     /// timestep data of the 0 index particle
     TimestepData,
@@ -170,6 +173,7 @@ impl BufferName {
             BufferName::ParticlesElevation => "particles_elevation",
             BufferName::ParticlesAffineMatrix => "particles_affine_matrix",
             BufferName::ParticlesStress => "particles_stress",
+            BufferName::ParticlesVolumetricStrain => "particles_volumetric_strain",
             BufferName::ParticlesVelocityZ => "particles_velocity_z",
             BufferName::TimestepData => "timestep_data",
             BufferName::GridMass => "grid_mass",
@@ -224,6 +228,7 @@ impl std::str::FromStr for BufferName {
             "particles_velocity_z" => Ok(BufferName::ParticlesVelocityZ),
             "particles_affine_matrix" => Ok(BufferName::ParticlesAffineMatrix),
             "particles_stress" => Ok(BufferName::ParticlesStress),
+            "particles_volumetric_strain" => Ok(BufferName::ParticlesVolumetricStrain),
             "timestep_data" => Ok(BufferName::TimestepData),
             "grid_mass" => Ok(BufferName::GridMass),
             "grid_mass_previous" => Ok(BufferName::GridMassPrevious),

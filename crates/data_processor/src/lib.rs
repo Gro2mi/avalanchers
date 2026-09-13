@@ -1123,6 +1123,11 @@ mod tests {
             center_of_mass_biggest_blob: Some(true),
             release_area_fraction: None,
             crown_line_method: None,
+            shear_modulus: Some(1e6),
+            hardening_modulus: Some(2e5),
+            bulk_modulus: Some(2e8),
+            compaction_pressure: Some(1e3),
+            constitutive_model: Some(compute_core::settings::ConstitutiveModel::DruckerPrager),
         };
         let file = NamedTempFile::new().unwrap();
         let path = file.path().to_str().unwrap();
@@ -1161,6 +1166,14 @@ mod tests {
         assert_eq!(loaded.grain_diameter, Some(0.5));
         assert_eq!(loaded.internal_friction_angle, Some(30.0));
         assert_eq!(loaded.basal_friction_angle, Some(45.0));
+        assert_eq!(loaded.bulk_modulus, Some(2e8));
+        assert_eq!(loaded.compaction_pressure, Some(1e3));
+        assert_eq!(loaded.shear_modulus, Some(1e6));
+        assert_eq!(loaded.hardening_modulus, Some(2e5));
+        assert_eq!(
+            loaded.constitutive_model,
+            Some(compute_core::settings::ConstitutiveModel::DruckerPrager)
+        );
     }
 
     // Helper to create a valid minimal PNG for testing

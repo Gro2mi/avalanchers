@@ -1339,6 +1339,15 @@ impl ComputeOrchestrator {
                     &init_stress_state,
                     BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
                 );
+                // per-particle volumetric state, zero-initialized
+                // (no elastic volumetric strain, no compaction)
+                let init_volumetric_state: Vec<f32> =
+                    vec![0.0; number_release_particles as usize * 2];
+                self.add_buffer_with_data(
+                    BufferName::ParticlesVolumetricStrain,
+                    &init_volumetric_state,
+                    BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+                );
             }
             3_u32..=u32::MAX => {
                 return Err(anyhow!(

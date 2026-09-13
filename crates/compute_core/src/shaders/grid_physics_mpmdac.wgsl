@@ -98,7 +98,10 @@ fn grid_physics_mpmdac(@builtin(global_invocation_id) id: vec3u) {
         grid_peak_velocity[idx] = max(grid_peak_velocity[idx], v_mag);
     }
 
-    let expected_cell_velocity = v_mag + sqrt(g * h);
+    // CFL signal speed: shallow-water gravity wave plus, for a compressible
+    // material, the volumetric wave speed sqrt(K / rho)
+    let expected_cell_velocity = v_mag + sqrt(g * h)
+        + sqrt(sim_settings.bulk_modulus / sim_settings.snow_density);
     if !is_nan(expected_cell_velocity) && h > 1e-3 && bitcast<u32>(expected_cell_velocity) > atomicLoad(&atomic_values.expected_max_velocity) {
         atomicMax(&atomic_values.expected_max_velocity, bitcast<u32>(expected_cell_velocity));
     }
@@ -242,6 +245,9 @@ struct SimSettings {
     constitutive_model: u32,
     shear_modulus: f32,
     hardening_modulus: f32,
+    // MPMDAC compressibility; bulk_modulus 0 = incompressible
+    bulk_modulus: f32,
+    compaction_pressure: f32,
 };
 
 struct AtomicValues {

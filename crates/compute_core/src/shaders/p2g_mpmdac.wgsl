@@ -17,6 +17,9 @@
 // per-particle stress state: column 0 = (tau_xx, tau_xy), column 1 =
 // (tau_yy, cumulative plastic strain); the deviatoric stress is symmetric
 @group(0) @binding(12) var<storage, read_write> particles_stress: array<mat2x2<f32>>;
+// per-particle volumetric state: (elastic volumetric strain, plastic
+// compaction strain); compaction strain > 0 means the material densified
+@group(0) @binding(13) var<storage, read_write> particles_volumetric_strain: array<vec2<f32>>;
 
 override WG_SIZE_1D: u32 = 1u;
 @compute @workgroup_size(WG_SIZE_1D, 1, 1)
@@ -97,7 +100,50 @@ fn transfer_p2g_mpmdac(p_idx: u32, cell: vec2u) {
     let velocity_gradient = affine_matrix * (1.0 / sim_settings.cell_size);
     let eps_dot = strain_rate_tensor(velocity_gradient);
     let eps_dot_dev = mat2_deviatoric(eps_dot);
-    let pressure = 0.5 * sim_settings.snow_density * g_perp * h_p;
+
+    // Volumetric (compressible) response: the elastic volumetric strain
+    // evolves with the APIC divergence; its stress adds to the lithostatic
+    // pressure so compression stiffens and dilation relieves the flow.
+    // One-sided plastic compaction: above the compaction pressure the
+    // material densifies irreversibly (the elastic part relaxes onto the
+    // compaction plateau), dilation stays elastic and clamped.
+    let volumetric_state = particles_volumetric_strain[p_idx];
+    var eps_v_e = volumetric_state.x;
+    var eps_v_p = volumetric_state.y;
+    var p_vol = 0.0;
+    if sim_settings.bulk_modulus > 0.0 {
+        let divergence = velocity_gradient[0][0] + velocity_gradient[1][1];
+        let d_eps_v = clamp(sim_info.dt * divergence, -0.5, 0.5);
+        eps_v_e = eps_v_e + d_eps_v;
+        p_vol = -sim_settings.bulk_modulus * eps_v_e;
+        if p_vol > sim_settings.compaction_pressure {
+            let delta = eps_v_e + sim_settings.compaction_pressure / sim_settings.bulk_modulus;
+            eps_v_p = eps_v_p + delta;
+            eps_v_e = -sim_settings.compaction_pressure / sim_settings.bulk_modulus;
+            p_vol = sim_settings.compaction_pressure;
+        }
+        if eps_v_e > 0.5 {
+            eps_v_e = 0.5;
+            p_vol = -sim_settings.bulk_modulus * eps_v_e;
+        }
+        if is_nan(eps_v_e) {
+            eps_v_e = 0.0;
+            p_vol = 0.0;
+        }
+    }
+    particles_volumetric_strain[p_idx] = vec2f(eps_v_e, eps_v_p);
+
+    // plastic compaction densifies the material; the particle volume in the
+    // force scatter shrinks accordingly
+    let density_ratio = max(1.0 + eps_v_p, 0.5);
+    let particle_volume = p_mass / (sim_settings.snow_density * density_ratio);
+
+    // total mean pressure: lithostatic (from the grid depth) plus the elastic
+    // volumetric response, floored at zero (no tension)
+    let pressure = max(
+        0.5 * sim_settings.snow_density * g_perp * h_p + p_vol,
+        0.0
+    );
 
     // 1. elastic predictor: trial stress = old stress + 2G * dt * eps_dot_dev
     let stress_state = particles_stress[p_idx];
@@ -140,10 +186,9 @@ fn transfer_p2g_mpmdac(p_idx: u32, cell: vec2u) {
         vec2f(tau_new[1][0], plastic_strain + delta_plastic_strain)
     );
 
-    // total stress = deviatoric + lithostatic compression, depth-integrated
+    // total stress = deviatoric + mean compression, depth-integrated
     let sigma = tau_new - pressure * identity_2x2();
     let stress_integral = h_p * sigma;
-    let particle_volume = p_mass / sim_settings.snow_density;
 
     for (var i: u32 = 0; i < 3; i++) {
         for (var j: u32 = 0; j < 3; j++) {
@@ -292,6 +337,9 @@ struct SimSettings {
     constitutive_model: u32,
     shear_modulus: f32,
     hardening_modulus: f32,
+    // MPMDAC compressibility; bulk_modulus 0 = incompressible
+    bulk_modulus: f32,
+    compaction_pressure: f32,
 };
 
 struct AtomicValues {
