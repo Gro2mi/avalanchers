@@ -49,6 +49,7 @@ fn grid_physics_curvilinear(@builtin(global_invocation_id) id: vec3u) {
 
     // 1. Decode height and velocity
     let mass = f32(grid_mass_atomic[idx]) * INV_MASS_FACTOR; // no_atomic_float
+    // atomic_float let mass = grid_mass_atomic[idx];
     // Nodes holding less mass than the p2g quantization floor carry no
     // meaningful velocity: their mass can round to 0 while the momentum
     // quantization still survives, and momentum/mass then explodes (this
@@ -56,7 +57,6 @@ fn grid_physics_curvilinear(@builtin(global_invocation_id) id: vec3u) {
     let node_is_empty = mass < 1e-2;
     var u = select(f32(grid_momentum_atomic[idx * 2]) * INV_MOMENTUM_FACTOR / (mass + 1e-6), 0.0, node_is_empty); // no_atomic_float
     var v = select(f32(grid_momentum_atomic[idx * 2 + 1]) * INV_MOMENTUM_FACTOR / (mass + 1e-6), 0.0, node_is_empty); // no_atomic_float
-    // atomic_float let mass = grid_mass_atomic[idx];
     // atomic_float var u = grid_momentum_atomic[idx * 2] / mass;
     // atomic_float var v = grid_momentum_atomic[idx * 2 + 1] / mass;
     let h = mass / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size * J);

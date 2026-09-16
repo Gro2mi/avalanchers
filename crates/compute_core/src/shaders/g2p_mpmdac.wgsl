@@ -191,7 +191,6 @@ fn transfer_g2p(p_idx: u32) -> G2PUpdate {
     }
     return G2PUpdate(interpolated_velocity, new_affine_matrix);
 }
-
 // END transfer_g2p_affine.wgsl
 // import utils.wgsl;
 // BEGIN utils.wgsl

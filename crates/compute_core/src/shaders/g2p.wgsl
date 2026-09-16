@@ -290,7 +290,6 @@ fn transfer_g2p(p_idx: u32) -> vec2f {
     }
     return interpolated_velocity;
 }
-
 // END transfer_g2p.wgsl
 
 // import utils.wgsl;

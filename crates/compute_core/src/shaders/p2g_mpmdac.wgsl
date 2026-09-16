@@ -254,7 +254,6 @@ fn mu_inertial(strain_rate_magnitude: f32, pressure: f32) -> f32 {
         + (sim_settings.mu2 - sim_settings.mu0)
             / (sim_settings.i0 / max(inertial_number, 1e-9) + 1.0);
 }
-
 // END constitutive.wgsl
 // import utils.wgsl;
 // BEGIN utils.wgsl

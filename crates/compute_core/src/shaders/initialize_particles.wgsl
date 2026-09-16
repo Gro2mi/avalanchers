@@ -334,5 +334,4 @@ fn rand3(seed: ptr<function, u32>) -> vec3f {
 fn rand4(seed: ptr<function, u32>) -> vec4f {
     return vec4f(next_rand(seed), next_rand(seed), next_rand(seed), next_rand(seed));
 }
-
 // END random.wgsl

@@ -61,7 +61,7 @@ fn grid_physics_mpmdac(@builtin(global_invocation_id) id: vec3u) {
     if h > 1e-4 {
         let force_x = f32(grid_forces_atomic[idx * 2u]) * INV_FORCE_FACTOR; // no_atomic_float
         let force_y = f32(grid_forces_atomic[idx * 2u + 1u]) * INV_FORCE_FACTOR; // no_atomic_float
-        // atomic_float let force_acceleration = vec2f(grid_forces_atomic[idx * 2u], grid_forces_atomic[idx * 2u + 1u]) / (mass + 1e-6);
+        // atomic_float var force_acceleration = vec2f(grid_forces_atomic[idx * 2u], grid_forces_atomic[idx * 2u + 1u]) / (mass + 1e-6);
         var force_acceleration = vec2f(force_x, force_y) / (mass + 1e-6); // no_atomic_float
         // safety cap: plastic pressure waves are O(g); anything far above
         // indicates numerical breakdown and must not launch the flow
@@ -162,7 +162,6 @@ fn basal_friction_acceleration(g_perp: f32, proposed_speed: f32, h: f32) -> f32 
 
     return shear_stress / max(mass_per_area, 1e-6);
 }
-
 // END friction.wgsl
 // import utils.wgsl;
 // BEGIN utils.wgsl
