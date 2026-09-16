@@ -1,198 +1,130 @@
-// MPMDAC (MPM depth-averaged curvilinear) grid-to-particle transfer: APIC
-// velocity gather and terrain-following advection.
-struct TimestepDataArray {
-    trajectories: array<TimestepData, 3>,
+struct RelaxParams {
+    num_particles: u32,
+    // fraction of the overlap corrected per iteration
+    move_factor: f32,
+    // per-iteration displacement limit as a fraction of the target spacing
+    max_step_fraction: f32,
+    _padding: u32,
 };
 
-struct TimestepData {
-    velocity: vec3f,
-    dt: f32,
-    acceleration_tangential: vec3f,
-    acceleration_friction_magnitude: f32,
-    position: vec3f,
-    elevation: f32,
-    normal: vec3f,
-    g_eff: f32,
-    acceleration_normal: vec3f,
-    _pad1: f32,
-    uv: vec2f,
-    _pad2: vec2f,
-};
+@group(0) @binding(1) var<uniform> relax_params: RelaxParams;
+// written by the relax kernel; the previous iteration's positions are read from
+// the snapshot so every thread sees a consistent state
+@group(0) @binding(2) var<storage, read_write> particles_position: array<vec2<f32>>;
+@group(0) @binding(3) var<storage> particles_position_snapshot: array<vec2<f32>>;
+@group(0) @binding(4) var<storage, read_write> particles_velocity: array<vec2<f32>>;
+@group(0) @binding(5) var<storage> release_areas: array<f32>;
+// fixed hash grid over the simulation cells, chained through particle_next:
+// grid_head[cell] is the index of the first particle in the cell or
+// LINKED_LIST_END; lets each particle find its neighbors in O(cell occupancy)
+// instead of scanning all particles
+@group(0) @binding(6) var<storage, read_write> grid_head: array<atomic<u32>>;
+@group(0) @binding(7) var<storage, read_write> particle_next: array<u32>;
 
-@group(0) @binding(1) var<storage, read_write> sim_info: SimInfo;
-@group(0) @binding(2) var terrain_geometry_texture: texture_2d<f32>;
-@group(0) @binding(3) var tex_sampler: sampler;
-@group(0) @binding(4) var<storage, read_write> particles_position: array<vec2<f32>>;
-@group(0) @binding(5) var<storage, read_write> particles_velocity: array<vec2<f32>>;
-@group(0) @binding(6) var<storage, read_write> particles_state: array<u32>;
-@group(0) @binding(7) var<storage, read> grid_velocity: array<vec2<f32>>;
-@group(0) @binding(8) var<storage, read_write> atomic_values: AtomicValues;
-@group(0) @binding(9) var<storage, read_write> out_timestep_data: array<TimestepDataArray>; // trajectory data, fixed size 3
-@group(0) @binding(10) var<storage, read_write> out_debug: array<f32>;
-@group(0) @binding(11) var<storage, read_write> particles_affine_matrix: array<mat2x2<f32>>;
-@group(0) @binding(12) var dem_texture: texture_2d<f32>;
-@group(0) @binding(13) var<storage, read_write> particles_elevation: array<f32>;
+const LINKED_LIST_END: u32 = 0xFFFFFFFFu;
 
 override WG_SIZE_1D: u32 = 1u;
+
+fn clamp_to_grid(cellf: vec2f) -> vec2u {
+    let max_cell = vec2f(sim_settings.grid_shape) - 1.0;
+    return vec2u(clamp(cellf, vec2f(0.0), max_cell));
+}
+
+// true if p lies inside a cell with snow (a release cell)
+fn is_release_position(p: vec2f) -> bool {
+    let cellf = floor(p / sim_settings.cell_size);
+    if (cellf.x < 0.0 || cellf.y < 0.0
+        || cellf.x >= f32(sim_settings.grid_shape.x)
+        || cellf.y >= f32(sim_settings.grid_shape.y)) {
+        return false;
+    }
+    return release_areas[xy_to_idx(vec2u(cellf))] > 0.01;
+}
+
+@compute @workgroup_size(WG_SIZE_2D, WG_SIZE_2D, 1)
+fn relax_clear_grid(@builtin(global_invocation_id) cell: vec3<u32>) {
+    if cell.x >= sim_settings.grid_shape.x || cell.y >= sim_settings.grid_shape.y {
+        return;
+    }
+    atomicStore(&grid_head[xy_to_idx(cell.xy)], LINKED_LIST_END);
+}
+
 @compute @workgroup_size(WG_SIZE_1D, 1, 1)
-fn g2p_mpmdac(
-    @builtin(global_invocation_id) pId: vec3<u32>
-) {
-    let particleId = pId.x;
-
-    if particleId >= sim_info.number_particles {
+fn relax_build_grid(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let index = global_id.x;
+    if (index >= relax_params.num_particles) {
         return;
     }
-    if (sim_info.flags & SIM_INFO_STOPPED) != 0u {
-        return;
-    }
-    if (particles_state[particleId] & PARTICLE_STOPPED) != 0u {
-        return;
-    }
-    var position = particles_position[particleId];
-    let uv = position_to_uv(position);
-    let terrain_data = textureSampleLevel(terrain_geometry_texture, tex_sampler, uv, 0);
-    let normal = normalize(terrain_data.xyz);
-
-    if is_nan(normal.x) {
-        var state = sim_info.timestep;
-        state |= PARTICLE_STOPPED;
-        particles_state[particleId] = state;
-        atomicAdd(&atomic_values.stopped_particles, 1u);
-        sim_info.flags |= SIM_INFO_PARTICLE_OUT_OF_DEM_DATA;
-        return;
-    }
-
-    // affine (APIC) transfer
-    let update = transfer_g2p(particleId);
-    let new_velocity = update.velocity;
-    let new_affine_matrix = update.affine_matrix;
-
-    var dt = sim_info.dt;
-
-    // The per-particle deviatoric stress (with its accumulated plastic
-    // strain) lives in ParticlesStress and is updated by the constitutive
-    // model in p2g_mpmdac; here only the APIC state and position are carried.
-
-    position = position + new_velocity * dt;
-
-    particles_position[particleId] = position;
-    particles_velocity[particleId] = new_velocity;
-    particles_affine_matrix[particleId] = new_affine_matrix;
-    let uv_new = position_to_uv(position);
-    let elevation = get_elevation(uv_new);
-    particles_elevation[particleId] = elevation;
-
-    if particleId == sim_info.number_particles / 2u {
-        var current: TimestepData;
-        current.position = vec3f(position, elevation);
-        current.velocity = vec3f(new_velocity, 0.0);
-        current.uv = uv;
-        current.dt = dt;
-        current.acceleration_tangential = vec3f(0.0);
-        current.acceleration_friction_magnitude = 0.0;
-        current.elevation = 0.0;
-        current.normal = vec3f(normal);
-        current.g_eff = 0.0;
-        current.acceleration_normal = vec3f(0.0);
-        current._pad1 = 0.0;
-        current._pad2 = vec2f(0.0);
-        update_output_data(0u, sim_info.timestep - 1, current);
-    }
-    if particleId == sim_info.number_particles / 2u {
-        out_debug[0] = f32(position.x);
-        out_debug[1] = f32(position.y);
-        out_debug[2] = f32(uv.x);
-        out_debug[3] = f32(uv.y);
-        out_debug[4] = length(new_affine_matrix[0]) + length(new_affine_matrix[1]);
-        out_debug[5] = f32(sim_info.timestep);
-        out_debug[6] = f32(sim_info.number_particles);
-        out_debug[7] = f32(sim_settings.released_particles_per_cell);
-        out_debug[8] = f32(sim_settings.grid_shape.x);
-        out_debug[9] = f32(sim_settings.grid_shape.y);
-        out_debug[10] = f32(sim_settings.world_size.x);
-        out_debug[11] = f32(sim_settings.world_size.y);
-        out_debug[12] = f32(sim_settings.internal_friction_angle);
-    }
-
-    if dot(new_velocity, new_velocity) < sim_settings.velocity_threshold * sim_settings.velocity_threshold {
-        var state = sim_info.timestep;
-        state |= PARTICLE_STOPPED;
-        particles_state[particleId] = state;
-        atomicAdd(&atomic_values.stopped_particles, 1u);
-        return;
-    }
-
-    if is_nan(position.x) {
-        var state = sim_info.timestep;
-        state |= PARTICLE_STOPPED;
-        state |= PARTICLE_OUT_OF_DEM_DATA;
-        particles_state[particleId] = state;
-        atomicAdd(&atomic_values.stopped_particles, 1u);
-        sim_info.flags |= SIM_INFO_IS_NAN;
-        sim_info.flags |= SIM_INFO_PARTICLE_OUT_OF_DEM_DATA;
-        return;
-    }
-    if is_nan(new_velocity.x) {
-        var state = sim_info.timestep;
-        state |= PARTICLE_STOPPED;
-        state |= PARTICLE_OUT_OF_DEM_DATA;
-        particles_state[particleId] = state;
-        atomicAdd(&atomic_values.stopped_particles, 1u);
-        sim_info.flags |= SIM_INFO_IS_NAN;
-        return;
-    }
-
-    // we leave a two cell boundary
-    if position.x < 2.0 * sim_settings.cell_size
-        || position.x > sim_settings.world_size.x - 2.0 * sim_settings.cell_size
-        || position.y < 2.0 * sim_settings.cell_size
-        || position.y > sim_settings.world_size.y - 2.0 * sim_settings.cell_size {
-        var state = sim_info.timestep;
-        state |= PARTICLE_STOPPED;
-        state |= PARTICLE_OUT_OF_BOUNDS;
-        particles_state[particleId] = state;
-        atomicAdd(&atomic_values.stopped_particles, 1u);
-        sim_info.flags |= SIM_INFO_OUT_OF_BOUNDS;
-        return;
-    }
+    let cell = clamp_to_grid(floor(particles_position_snapshot[index] / sim_settings.cell_size));
+    // lock-free push onto the cell's linked list
+    particle_next[index] = atomicExchange(&grid_head[xy_to_idx(cell)], index);
 }
 
-fn get_elevation(uv: vec2f) -> f32 {
-    // TODO: fix interpolation at the edges of the texture
-    return textureSampleLevel(dem_texture, tex_sampler, uv, 0).x;
-}
-fn update_output_data(trajectory: u32, timestep: u32, timestep_data: TimestepData) {
-    out_timestep_data[timestep].trajectories[trajectory] = timestep_data;
-}
+@compute @workgroup_size(WG_SIZE_1D, 1, 1)
+fn relax_particles(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let index = global_id.x;
+    if (index >= relax_params.num_particles) {
+        return;
+    }
 
-// import transfer_g2p_affine.wgsl;
-// BEGIN transfer_g2p_affine.wgsl
-fn transfer_g2p(p_idx: u32) -> G2PUpdate {
-    let grid_pos = particles_position[p_idx] / sim_settings.cell_size - vec2f(0.5);
-    let base_node = vec2u(floor(grid_pos - vec2f(0.5)));
-    
-    var interpolated_velocity = vec2f(0.0);
-    var new_affine_matrix = mat2x2<f32>(vec2<f32>(0.0), vec2<f32>(0.0));
+    // hexagonal packing: each particle owns A_particle = A_cell / N =
+    // sqrt(3)/2 * h^2, so the equilibrium center spacing is h; h <= cell_size
+    // for N >= 2, so the 3x3 cell neighborhood always contains every particle
+    // within the target spacing
+    let particles_per_cell = max(sim_settings.released_particles_per_cell, 1u);
+    let target_spacing = sim_settings.cell_size
+        * sqrt(2.0 / (sqrt(3.0) * f32(particles_per_cell)));
 
-    for (var i: u32 = 0; i < 3; i++) {
-        for (var j: u32 = 0; j < 3; j++) {
-            let node_coords = base_node + vec2u(i, j);
-            let distance = calculate_distance_to_node(grid_pos, node_coords);
-            let weight = calculate_weight(distance);
-            let idx = xy_to_idx(node_coords);
-            let grid_vel = grid_velocity[idx];
-            interpolated_velocity += weight * grid_vel;
-            new_affine_matrix += 4.0 * weight * mat2x2<f32>(
-                grid_vel * distance.x,
-                grid_vel * distance.y
-            );
+    let position = particles_position_snapshot[index];
+    let base_cellf = floor(position / sim_settings.cell_size);
+    var displacement = vec2f(0.0);
+
+    for (var dy: i32 = -1; dy <= 1; dy++) {
+        for (var dx: i32 = -1; dx <= 1; dx++) {
+            let cellf = base_cellf + vec2f(f32(dx), f32(dy));
+            // skip cells outside the grid instead of clamping, so edge cells
+            // are not visited (and their particles not repelled) multiple times
+            if (cellf.x < 0.0 || cellf.y < 0.0
+                || cellf.x >= f32(sim_settings.grid_shape.x)
+                || cellf.y >= f32(sim_settings.grid_shape.y)) {
+                continue;
+            }
+            var j = atomicLoad(&grid_head[xy_to_idx(vec2u(cellf))]);
+            loop {
+                if (j == LINKED_LIST_END) {
+                    break;
+                }
+                if (j != index) {
+                    let diff = position - particles_position_snapshot[j];
+                    let dist = length(diff);
+                    // repulsion if closer than the desired equilibrium spacing
+                    if (dist < target_spacing && dist > 1e-4) {
+                        let overlap = target_spacing - dist;
+                        displacement += diff / dist * (relax_params.move_factor * overlap);
+                    }
+                }
+                j = particle_next[j];
+            }
         }
     }
-    return G2PUpdate(interpolated_velocity, new_affine_matrix);
+
+    // clamp the per-iteration displacement for stability
+    let max_step = relax_params.max_step_fraction * target_spacing;
+    let displacement_len = length(displacement);
+    if (displacement_len > max_step) {
+        displacement = displacement / displacement_len * max_step;
+    }
+
+    let relaxed = position + displacement;
+    if (is_release_position(relaxed)) {
+        particles_position[index] = relaxed;
+    } else {
+        // hard clamp back to the last valid position
+        particles_position[index] = position;
+        particles_velocity[index] = vec2f(0.0);
+    }
 }
 
-// END transfer_g2p_affine.wgsl
 // import utils.wgsl;
 // BEGIN utils.wgsl
 const WG_SIZE_2D: u32 = 16u;

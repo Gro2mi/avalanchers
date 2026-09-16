@@ -1,6 +1,6 @@
 use crate::buffers::{
     AtomicValues, BufferName, CenterOfMassResult, ChamferParams, EvaluationResult, GpuResources,
-    TextureName, create_buffers_and_texture_descriptions,
+    RelaxParams, TextureName, create_buffers_and_texture_descriptions,
 };
 use crate::settings::{SimFlags, SimModel};
 use crate::shaders::{ComputeShaderConfig, ShaderName, generate_shader_report};
@@ -436,6 +436,14 @@ pub async fn list_devices() -> Result<Vec<String>> {
 }
 
 const WORKGROUP_SIZE_2D: u32 = 16;
+
+// soft sphere relaxation of the freshly initialized particles: overlapping
+// particles repel each other until they reach the hexagonal packing spacing
+const RELAXATION_ITERATIONS: u32 = 30;
+/// fraction of the overlap corrected per iteration
+const RELAX_MOVE_FACTOR: f32 = 0.3;
+/// per-iteration displacement limit as a fraction of the target spacing
+const RELAX_MAX_STEP_FRACTION: f32 = 0.5;
 
 struct SimulationPipelines {
     reset_grid: ComputePipeline,
@@ -1223,6 +1231,7 @@ impl ComputeOrchestrator {
         &mut self,
         sim_settings: &settings::SimSettings,
         number_release_particles: u32,
+        relax_particles: bool,
     ) -> Result<u32> {
         if sim_settings.sim_model > 2 {
             return Err(anyhow!(
@@ -1365,6 +1374,11 @@ impl ComputeOrchestrator {
         )
         .await?;
 
+        if relax_particles {
+            self.relax_particles(sim_settings, number_release_particles)
+                .await?;
+        }
+
         let estimated_release_volume: u32 = self
             .read_buffer::<AtomicValues>(BufferName::AtomicValues)
             .await?
@@ -1373,6 +1387,92 @@ impl ComputeOrchestrator {
             .estimated_release_volume;
         info!("Estimated release volume: {}", estimated_release_volume);
         Ok(estimated_release_volume)
+    }
+
+    /// Relaxes the freshly initialized particles with a soft sphere
+    /// repulsion so overlapping particles settle at the hexagonal packing
+    /// spacing before the simulation starts: each particle owns the cell
+    /// area divided by released_particles_per_cell, which corresponds to an
+    /// equilibrium center spacing of h = cell_size * sqrt(2/(sqrt(3) * N)).
+    /// Positions may only move into release cells; rejected moves are
+    /// clamped back to the last valid position.
+    ///
+    /// Each iteration works on a snapshot of the positions so all threads
+    /// see a consistent state. Neighbors are found through a fixed hash
+    /// grid over the simulation cells (linked lists built per iteration),
+    /// so every particle only checks the 3x3 cells around it instead of
+    /// scanning all particles.
+    async fn relax_particles(
+        &mut self,
+        sim_settings: &settings::SimSettings,
+        number_release_particles: u32,
+    ) -> Result<()> {
+        if number_release_particles == 0 {
+            return Ok(());
+        }
+        let grid_cell_count = usize::try_from(sim_settings.grid_shape_x)
+            .ok()
+            .and_then(|width| {
+                usize::try_from(sim_settings.grid_shape_y)
+                    .ok()
+                    .and_then(|height| width.checked_mul(height))
+            })
+            .ok_or_else(|| anyhow!("Grid buffer size overflow"))?;
+        // recreated on every call, so the sizes always match the current
+        // grid and particle count
+        self.add_buffer(
+            BufferName::ParticlesPositionRelax,
+            number_release_particles as usize * size_of::<[f32; 2]>(),
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+        );
+        self.add_buffer(
+            BufferName::RelaxGridHead,
+            grid_cell_count * size_of::<u32>(),
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+        );
+        self.add_buffer(
+            BufferName::ParticleNext,
+            number_release_particles as usize * size_of::<u32>(),
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+        );
+        self.add_buffer(
+            BufferName::RelaxParams,
+            size_of::<RelaxParams>(),
+            BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+        );
+        self.write_buffer(
+            BufferName::RelaxParams,
+            &[RelaxParams {
+                num_particles: number_release_particles,
+                move_factor: RELAX_MOVE_FACTOR,
+                max_step_fraction: RELAX_MAX_STEP_FRACTION,
+                _padding: 0,
+            }],
+        )
+        .await?;
+        let dispatch_particles_1d =
+            number_release_particles.div_ceil(self.max_compute_invocations_per_workgroup);
+        let dispatch_grid_x = sim_settings.grid_shape_x.div_ceil(WORKGROUP_SIZE_2D);
+        let dispatch_grid_y = sim_settings.grid_shape_y.div_ceil(WORKGROUP_SIZE_2D);
+        for _ in 0..RELAXATION_ITERATIONS {
+            // all threads read the snapshot of the previous iteration
+            self.copy_buffer(
+                BufferName::ParticlesPosition,
+                BufferName::ParticlesPositionRelax,
+            )?;
+            self.run_shader(
+                &ShaderName::RelaxClearGrid,
+                dispatch_grid_x,
+                dispatch_grid_y,
+                1,
+            )
+            .await?;
+            self.run_shader(&ShaderName::RelaxBuildGrid, dispatch_particles_1d, 1, 1)
+                .await?;
+            self.run_shader(&ShaderName::RelaxParticles, dispatch_particles_1d, 1, 1)
+                .await?;
+        }
+        Ok(())
     }
 
     async fn prepare_simulation(
@@ -3065,15 +3165,15 @@ mod tests {
             );
         } else {
             // momentum transfer is not accurate without float32 atomics, but we can at least check that the maths is correct
-            assert_eq!(test_output[20], 3.0, "test_output[20] failed");
-            assert_eq!(test_output[21], 14.0, "test_output[21] failed");
-            assert_eq!(test_output[22], 2.0, "test_output[22] failed");
-            assert_eq!(test_output[23], 25.0, "test_output[23] failed");
-            assert_eq!(test_output[24], 111.0, "test_output[24] failed");
-            assert_eq!(test_output[25], 13.0, "test_output[25] failed");
-            assert_eq!(test_output[26], 5.0, "test_output[26] failed");
-            assert_eq!(test_output[27], 23.0, "test_output[27] failed");
-            assert_eq!(test_output[28], 3.0, "test_output[28] failed");
+            assert_eq!(test_output[20], 32564.0, "test_output[20] failed");
+            assert_eq!(test_output[21], 143961.0, "test_output[21] failed");
+            assert_eq!(test_output[22], 17076.0, "test_output[22] failed");
+            assert_eq!(test_output[23], 251089.0, "test_output[23] failed");
+            assert_eq!(test_output[24], 1110046.0, "test_output[24] failed");
+            assert_eq!(test_output[25], 131665.0, "test_output[25] failed");
+            assert_eq!(test_output[26], 52747.0, "test_output[26] failed");
+            assert_eq!(test_output[27], 233193.0, "test_output[27] failed");
+            assert_eq!(test_output[28], 27660.0, "test_output[28] failed");
         }
 
         info!(
@@ -3128,15 +3228,15 @@ mod tests {
             );
         } else {
             // momentum transfer is not accurate without float32 atomics, but we can at least check that the maths is correct
-            assert_eq!(test_output[30], 5.0, "test_output[30] failed");
-            assert_eq!(test_output[31], 22.0, "test_output[31] failed");
-            assert_eq!(test_output[32], 3.0, "test_output[32] failed");
-            assert_eq!(test_output[33], 38.0, "test_output[33] failed");
-            assert_eq!(test_output[34], 167.0, "test_output[34] failed");
-            assert_eq!(test_output[35], 20.0, "test_output[35] failed");
-            assert_eq!(test_output[36], 8.0, "test_output[36] failed");
-            assert_eq!(test_output[37], 35.0, "test_output[37] failed");
-            assert_eq!(test_output[38], 4.0, "test_output[38] failed");
+            assert_eq!(test_output[30], 48845.0, "test_output[30] failed");
+            assert_eq!(test_output[31], 215942.0, "test_output[31] failed");
+            assert_eq!(test_output[32], 25613.0, "test_output[32] failed");
+            assert_eq!(test_output[33], 376633.0, "test_output[33] failed");
+            assert_eq!(test_output[34], 1665069.0, "test_output[34] failed");
+            assert_eq!(test_output[35], 197498.0, "test_output[35] failed");
+            assert_eq!(test_output[36], 79121.0, "test_output[36] failed");
+            assert_eq!(test_output[37], 349789.0, "test_output[37] failed");
+            assert_eq!(test_output[38], 41489.0, "test_output[38] failed");
         }
     }
 }

@@ -58,6 +58,18 @@ pub struct ChamferParams {
     pub _padding: [u32; 3],
 }
 
+/// GPU layout mirror of the RelaxParams struct in relax_particles.wgsl
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct RelaxParams {
+    pub num_particles: u32,
+    /// fraction of the overlap corrected per iteration
+    pub move_factor: f32,
+    /// per-iteration displacement limit as a fraction of the target spacing
+    pub max_step_fraction: f32,
+    pub _padding: u32,
+}
+
 /// GPU layout mirror of the unified evaluation result buffer. The sections
 /// are written by the evaluation shaders:
 /// - counts + extremes by evaluate_mass_movement(_points).wgsl
@@ -110,6 +122,9 @@ pub enum BufferName {
     SimSettings,
 
     ParticlesPosition,
+    /// read-only snapshot of ParticlesPosition used by the particle
+    /// relaxation shader so all threads see the previous iteration's state
+    ParticlesPositionRelax,
     ParticlesElevation,
     ParticlesVelocity,
     ParticlesVelocityZ,
@@ -153,6 +168,14 @@ pub enum BufferName {
     ChamferNearestRoiSnapshot,
     ChamferNearestSim,
     ChamferNearestSimSnapshot,
+
+    // soft sphere relaxation of the freshly initialized particles
+    RelaxParams,
+    /// linked list heads over the simulation cells for the relaxation
+    /// neighbor search (one u32 per grid cell, LINKED_LIST_END = cleared)
+    RelaxGridHead,
+    /// linked list tails of RelaxGridHead (one u32 per particle)
+    ParticleNext,
 
     TestOutput,
 }
@@ -199,6 +222,10 @@ impl BufferName {
             BufferName::ChamferNearestRoiSnapshot => "chamfer_nearest_roi_snapshot",
             BufferName::ChamferNearestSim => "chamfer_nearest_sim",
             BufferName::ChamferNearestSimSnapshot => "chamfer_nearest_sim_snapshot",
+            BufferName::RelaxParams => "relax_params",
+            BufferName::RelaxGridHead => "relax_grid_head",
+            BufferName::ParticleNext => "particle_next",
+            BufferName::ParticlesPositionRelax => "particles_position_relax",
         }
     }
 }
@@ -253,6 +280,10 @@ impl std::str::FromStr for BufferName {
             "chamfer_nearest_roi_snapshot" => Ok(BufferName::ChamferNearestRoiSnapshot),
             "chamfer_nearest_sim" => Ok(BufferName::ChamferNearestSim),
             "chamfer_nearest_sim_snapshot" => Ok(BufferName::ChamferNearestSimSnapshot),
+            "relax_params" => Ok(BufferName::RelaxParams),
+            "relax_grid_head" => Ok(BufferName::RelaxGridHead),
+            "particle_next" => Ok(BufferName::ParticleNext),
+            "particles_position_relax" => Ok(BufferName::ParticlesPositionRelax),
             _ => Err(format!("Unknown buffer name: {}", name)),
         }
     }

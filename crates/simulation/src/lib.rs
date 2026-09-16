@@ -121,6 +121,9 @@ pub struct SimulationLoadResult {
     pub settings: SimSettings,
     /// Whether to track the center of mass during the run.
     pub enable_center_of_mass: bool,
+    /// Whether freshly initialized particles are relaxed to the hexagonal
+    /// packing spacing before the run.
+    pub enable_particle_relaxation: bool,
     /// Loaded digital elevation model.
     pub dem: Dem,
     /// Region-of-interest (area that should be considered for release areas, e.g. avalanche outline) cell mask, `width * height` long.
@@ -156,6 +159,11 @@ pub struct Simulation {
     pub settings: SimSettings,
     /// Whether the center-of-mass trajectory is tracked on the GPU.
     pub enable_center_of_mass: bool,
+    /// Whether freshly initialized particles are relaxed to the hexagonal
+    /// packing spacing with a soft sphere repulsion before the simulation
+    /// starts. Measurement sims (e.g. crown line detection) keep the plain
+    /// random initialization for comparable counts.
+    pub enable_particle_relaxation: bool,
     /// Path the DEM was loaded from; empty when set programmatically.
     pub dem_path: String,
     /// The digital elevation model the simulation runs on.
@@ -199,6 +207,7 @@ impl Simulation {
             orchestrator,
             settings: SimSettings::default(),
             enable_center_of_mass: true,
+            enable_particle_relaxation: true,
             output_path: "avalanchers".to_string(),
             dem_path: String::new(),
             dem: Dem::default(),
@@ -298,6 +307,7 @@ impl Simulation {
         Ok(SimulationLoadResult {
             settings: settings_result,
             enable_center_of_mass: settings.enable_center_of_mass.unwrap_or(true),
+            enable_particle_relaxation: settings.enable_particle_relaxation.unwrap_or(true),
             dem: dem_result,
             roi: outline,
             batch_compute_steps: settings.batch_compute_steps,
@@ -315,6 +325,7 @@ impl Simulation {
     pub fn apply_data(&mut self, data: SimulationLoadResult) {
         self.settings = data.settings;
         self.enable_center_of_mass = data.enable_center_of_mass;
+        self.enable_particle_relaxation = data.enable_particle_relaxation;
         self.orchestrator
             .set_enable_center_of_mass(self.enable_center_of_mass);
         if let Some(batch_steps) = data.batch_compute_steps {
@@ -1106,6 +1117,9 @@ impl Simulation {
 
         let mut detection_sim = Simulation::new().await?;
         detection_sim.create(settings).await?;
+        // keep the plain random particle initialization so the entry counts
+        // stay comparable with the tuned crown line thresholds
+        detection_sim.enable_particle_relaxation = false;
         detection_sim.set_dem(
             &masked_dem,
             self.dem.width,
@@ -1293,7 +1307,11 @@ impl Simulation {
         self.gpu_cache.reset_simulation_result();
         // set parameters that depend on the number of particles
         self.orchestrator
-            .run_initialize_particles(&self.settings, self.number_particles)
+            .run_initialize_particles(
+                &self.settings,
+                self.number_particles,
+                self.enable_particle_relaxation,
+            )
             .await?;
         self.state = SimulationState::ParticlesInitialized;
         Ok(())
@@ -3058,6 +3076,7 @@ mod tests {
         let estimated_release_volume = block_on(sim.orchestrator.run_initialize_particles(
             &sim.settings,
             number_release_cells * sim.settings.released_particles_per_cell,
+            true,
         ))
         .expect("Failed to run initialize_particles shader");
         info!("Estimated release volume: {}", estimated_release_volume);

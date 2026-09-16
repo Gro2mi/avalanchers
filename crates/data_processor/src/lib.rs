@@ -1118,6 +1118,7 @@ mod tests {
             enable_curvature: Some(true),
             enable_entrainment: Some(true),
             enable_particle_interaction: Some(true),
+            enable_particle_relaxation: Some(true),
             enable_earth_pressure_coefficient: Some(true),
             enable_center_of_mass: Some(true),
             center_of_mass_biggest_blob: Some(true),

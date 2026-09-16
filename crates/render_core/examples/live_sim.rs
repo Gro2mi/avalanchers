@@ -127,6 +127,7 @@ fn apply_panel_defaults(settings: &mut Settings) {
         .get_or_insert(FrictionModel::Voellmy);
     settings.enable_curvature.get_or_insert(true);
     settings.enable_particle_interaction.get_or_insert(true);
+    settings.enable_particle_relaxation.get_or_insert(true);
     settings
         .enable_earth_pressure_coefficient
         .get_or_insert(true);
@@ -1342,6 +1343,11 @@ impl ApplicationHandler for Viewer {
                                     ui,
                                     "particle interaction",
                                     &mut draft.enable_particle_interaction,
+                                );
+                                bool_checkbox(
+                                    ui,
+                                    "particle relaxation",
+                                    &mut draft.enable_particle_relaxation,
                                 );
                                 bool_checkbox(
                                     ui,

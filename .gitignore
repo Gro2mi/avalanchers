@@ -3,6 +3,7 @@ web_output/
 dtm_cache.zarr
 cole_considerations/
 .zcode
+outputs
 test.html
 js/test.js
 wgsl/test.wgsl

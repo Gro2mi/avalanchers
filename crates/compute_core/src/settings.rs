@@ -706,6 +706,10 @@ pub struct Settings {
     pub enable_earth_pressure_coefficient: Option<bool>,
     pub enable_entrainment: Option<bool>,
     pub enable_center_of_mass: Option<bool>,
+    /// Relax freshly initialized particles to the hexagonal packing spacing
+    /// with a soft sphere repulsion before the simulation starts (defaults
+    /// to true).
+    pub enable_particle_relaxation: Option<bool>,
     /// Center the mass of the biggest connected mass blob instead of the
     /// whole grid (defaults to true).
     pub center_of_mass_biggest_blob: Option<bool>,
@@ -849,6 +853,7 @@ mod tests {
             output_path: Some(String::from("output")),
             enable_curvature: Some(false),
             enable_particle_interaction: Some(false),
+            enable_particle_relaxation: Some(false),
             enable_earth_pressure_coefficient: Some(false),
             enable_entrainment: Some(false),
             enable_center_of_mass: Some(true),

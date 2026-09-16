@@ -778,8 +778,8 @@
                             <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
                                 <label for="simModelDropdown" class="control-label mb-0">Simulation model:</label>
                                 <select id="simModelDropdown" class="form-select w-auto">
-                                    <option value="particle" selected>Particle</option>
-                                    <option value="mpm">MPM</option>
+                                    <option value="terrain-following">Terrain-following</option>
+                                    <option value="curvilinear" selected>Curvilinear</option>
                                 </select>
                             </div>
                             <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
@@ -790,6 +790,12 @@
                                 <label for="enable_particle_interaction" class="control-label mb-0">Particle
                                     interaction:</label>
                                 <input type="checkbox" id="enable_particle_interaction" class="form-check-input mt-0"
+                                    checked>
+                            </div>
+                            <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
+                                <label for="enable_particle_relaxation" class="control-label mb-0">Particle
+                                    relaxation:</label>
+                                <input type="checkbox" id="enable_particle_relaxation" class="form-check-input mt-0"
                                     checked>
                             </div>
                             <div class="mb-3 d-flex align-items-center flex-wrap gap-2">

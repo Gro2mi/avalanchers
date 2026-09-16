@@ -13,8 +13,19 @@ use wgpu::{
 };
 pub const SHADER_UTILS: &str = include_str!("shaders/utils.wgsl");
 
+/// Resolves to the entry point when one is declared, else to the source file
+/// stem (the entry point defaults to the shader name).
+macro_rules! shader_name_or_entry {
+    ($_filename:literal, $entry:literal) => {
+        $entry
+    };
+    ($_filename:literal,) => {
+        $_filename
+    };
+}
+
 macro_rules! define_shaders {
-    ($($variant:ident => $filename:expr),* $(,)?) => {
+    ($($variant:ident => $filename:literal $(entry_point $entry:literal)?),* $(,)?) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
         pub enum ShaderName {
             $($variant),*
@@ -24,18 +35,33 @@ macro_rules! define_shaders {
             type Err = String;
 
             fn from_str(s: &str) -> Result<Self, Self::Err> {
-                match s {
-                    $($filename => Ok(ShaderName::$variant),)*
-                    _ => Err(format!("'{}' is not a valid ShaderName", s)),
-                }
+                $(
+                    if s == ShaderName::$variant.to_str() {
+                        return Ok(ShaderName::$variant);
+                    }
+                )*
+                Err(format!("'{}' is not a valid ShaderName", s))
             }
         }
 
         impl ShaderName {
-            // Added: Helper to go from string (like "compute_normals") to Enum
+            /// The shader's canonical name: the declared entry point if any,
+            /// else the source file stem. Unique per variant; used for string
+            /// parsing, labels, and as the dispatched WGSL entry point.
             pub fn to_str(&self) -> &'static str {
                 match self {
-                    $(ShaderName::$variant => $filename,)*
+                    $(ShaderName::$variant => {
+                        shader_name_or_entry!($filename, $($entry)?)
+                    })*
+                }
+            }
+
+            /// The WGSL source file providing this shader's entry point.
+            /// Several entry points can share one file (see `entry_point` in
+            /// [`define_shaders!`]).
+            pub fn source_file(&self) -> &'static str {
+                match self {
+                    $(ShaderName::$variant => $filename),*
                 }
             }
 
@@ -51,7 +77,7 @@ macro_rules! define_shaders {
                 {
                     tracing::debug!("Loading shader source for {:?} from disk", self);
                     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                        .join("src").join("shaders").join(format!("{}.wgsl", self.to_str()));
+                        .join("src").join("shaders").join(format!("{}.wgsl", self.source_file()));
                     match std::fs::read_to_string(&path) {
                         Ok(source) => source,
                         Err(error) => {
@@ -87,6 +113,11 @@ define_shaders! {
     EvaluateMassMovement => "evaluate_mass_movement",
     EvaluateMassMovementPoints => "evaluate_mass_movement_points",
     InitializeParticles => "initialize_particles",
+    // the three relaxation kernels share one source file; each entry point
+    // dispatches one kernel from relax_particles.wgsl
+    RelaxParticles => "relax_particles",
+    RelaxClearGrid => "relax_particles" entry_point "relax_clear_grid",
+    RelaxBuildGrid => "relax_particles" entry_point "relax_build_grid",
     ComputeParticles => "compute_particles",
     G2P => "g2p",
     G2PMPMDAC => "g2p_mpmdac",
@@ -1259,6 +1290,111 @@ pub fn create_shader_configs(
                     },
                 ),
             ],
+        )?,
+    );
+    // all three relaxation kernels share one bind group layout; the clear and
+    // build kernels only use a subset of the bindings
+    let relax_bindings = vec![
+        // Binding 0:
+        (
+            BufferName::SimSettings.to_string(),
+            BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+        ),
+        // Binding 1:
+        (
+            BufferName::RelaxParams.to_string(),
+            BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+        ),
+        // Binding 2:
+        (
+            BufferName::ParticlesPosition.to_string(),
+            BindingType::Buffer {
+                ty: BufferBindingType::Storage { read_only: false },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+        ),
+        // Binding 3:
+        (
+            BufferName::ParticlesPositionRelax.to_string(),
+            BindingType::Buffer {
+                ty: BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+        ),
+        // Binding 4:
+        (
+            BufferName::ParticlesVelocity.to_string(),
+            BindingType::Buffer {
+                ty: BufferBindingType::Storage { read_only: false },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+        ),
+        // Binding 5:
+        (
+            BufferName::ReleaseAreas.to_string(),
+            BindingType::Buffer {
+                ty: BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+        ),
+        // Binding 6:
+        (
+            BufferName::RelaxGridHead.to_string(),
+            BindingType::Buffer {
+                ty: BufferBindingType::Storage { read_only: false },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+        ),
+        // Binding 7:
+        (
+            BufferName::ParticleNext.to_string(),
+            BindingType::Buffer {
+                ty: BufferBindingType::Storage { read_only: false },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+        ),
+    ];
+    shader_configs.insert(
+        ShaderName::RelaxParticles,
+        ComputeShaderConfig::new_with_constants(
+            device,
+            ShaderName::RelaxParticles,
+            load_shader_source(ShaderName::RelaxParticles, has_float32_atomic),
+            &relax_bindings,
+            &[("WG_SIZE_1D", max_compute_invocations_per_workgroup as f64)],
+        )?,
+    );
+    shader_configs.insert(
+        ShaderName::RelaxClearGrid,
+        ComputeShaderConfig::new(
+            device,
+            ShaderName::RelaxClearGrid,
+            load_shader_source(ShaderName::RelaxClearGrid, has_float32_atomic),
+            &relax_bindings,
+        )?,
+    );
+    shader_configs.insert(
+        ShaderName::RelaxBuildGrid,
+        ComputeShaderConfig::new_with_constants(
+            device,
+            ShaderName::RelaxBuildGrid,
+            load_shader_source(ShaderName::RelaxBuildGrid, has_float32_atomic),
+            &relax_bindings,
+            &[("WG_SIZE_1D", max_compute_invocations_per_workgroup as f64)],
         )?,
     );
     shader_configs.insert(

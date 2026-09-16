@@ -228,13 +228,17 @@ const g: f32 = 9.81;
 const MAX_VELOCITY_FACTOR: f32 = 1e7; // u32 limit is 430 m/s
 const MASS_FACTOR: f32 = 1e1; // u32 limit is 4.3t thickness
 const H_FACTOR: f32 = 1e6;
-// TODO calculate momentum factor 
-// 2147483647.0 / (120.0 * 100.0 * 25 * 200)
-// use override
-const MOMENTUM_FACTOR: f32 =  1e-2; 
+// Momentum is quantized per particle->node contribution before atomicAdd, so
+// MOMENTUM_FACTOR sets the velocity resolution of that contribution:
+// the smallest non-zero contribution is v = 1 / (particle_mass * weight * MOMENTUM_FACTOR).
+// It must stay far below the slow hydrostatic spreading velocities (~0.01-0.1 m/s)
+// or p2g rounds them to zero every step and the flow never spreads laterally.
+// i32 budget: node sum = node_mass * v_max * MOMENTUM_FACTOR
+//   (rho*cell^2*h*J ~ 6e4 kg * 40 m/s * 1e2 = 2.4e8 < 2.1e9)
+const MOMENTUM_FACTOR: f32 = 1e2;
 const INV_MAX_VELOCITY_FACTOR: f32 = 1 / MAX_VELOCITY_FACTOR; // u32 limit is 430 m/s
 const INV_MASS_FACTOR: f32 = 1 / MASS_FACTOR; // u32 limit is 4.3km thickness
-const INV_H_FACTOR: f32 = 1 / H_FACTOR; 
+const INV_H_FACTOR: f32 = 1 / H_FACTOR;
 const INV_MOMENTUM_FACTOR: f32 = 1 / MOMENTUM_FACTOR;
 // depth-integrated internal force (h * sigma * grad_w * area, ~1e4..1e5 N per node contribution)
 const FORCE_FACTOR: f32 = 1e-3; // i32 limit is 2.1e6 N per node
