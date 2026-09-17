@@ -2929,6 +2929,93 @@ mod tests {
         // info!("{:#?}", test_output.iter().take(50).collect::<Vec<_>>());
     }
 
+    /// Dispatches the friction test shader and verifies all basal friction
+    /// models against the same formula evaluated on the CPU for a fixed test
+    /// case (g_eff = 9.81 m/s^2, density = 200 kg/m^3, speed = 10 m/s, h = 1 m).
+    #[test_log::test]
+    fn test_friction_models() {
+        let mut orchestrator: ComputeOrchestrator =
+            block_on(ComputeOrchestrator::new()).expect("Failed to create ComputeOrchestrator");
+        let sim_settings = settings::SimSettings {
+            velocity_threshold: 0.1,
+            friction_coefficient: 0.1,
+            drag_coefficient: 1000.0,
+            grain_diameter: 0.01,
+            i0: 0.05,
+            mu0: 0.1,
+            mu2: 0.4,
+            ..Default::default()
+        };
+        orchestrator
+            .create_buffers_and_texture_descriptions(&sim_settings)
+            .unwrap();
+        block_on(orchestrator.write_buffer(BufferName::SimSettings, sim_settings.as_bytes()))
+            .expect("Failed to write simulation settings");
+        orchestrator.add_buffer(
+            BufferName::TestOutput,
+            400 as usize,
+            BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+        );
+
+        block_on(orchestrator.run_shader(&ShaderName::TestFriction, 1, 1, 1))
+            .expect("Failed to run friction test shader");
+        let test_output =
+            block_on(orchestrator.read_buffer::<f32>(BufferName::TestOutput)).expect("msg");
+
+        let (g_eff, density, proposed_speed, h) = (9.81f32, 200.0f32, 10.0f32, 1.0f32);
+        let mass_per_area = density * h.max(1e-3);
+        let normal_stress = g_eff * mass_per_area;
+        assert!(normal_stress > 0.0);
+
+        for model in 0..6u32 {
+            let shear_stress = match model {
+                0 | 1 | 2 => sim_settings.friction_coefficient * normal_stress,
+                3 => {
+                    let rs0 = 0.222f32;
+                    let rs = density * proposed_speed * proposed_speed / (normal_stress + 0.001);
+                    let coulomb_like = normal_stress
+                        * sim_settings.friction_coefficient
+                        * (1.0 + rs0 / (rs0 + rs));
+                    // runup-limited turbulent drag
+                    let kappa_inv = 2.32558f32;
+                    let r_inv = 20.0f32;
+                    let b = 4.13f32;
+                    let mut div = (h * r_inv).max(1.0);
+                    div = div.ln() * kappa_inv + b;
+                    coulomb_like + density * proposed_speed * proposed_speed / (div * div)
+                }
+                // voellmy with cohesion is a stub and must produce zero
+                4 => 0.0,
+                5 => {
+                    let inertial_number = 2.5 * proposed_speed.sqrt() / h
+                        * sim_settings.grain_diameter
+                        / (g_eff.max(1e-6) * h).sqrt();
+                    let mu_i = sim_settings.mu0
+                        + (sim_settings.mu2 - sim_settings.mu0)
+                            / (sim_settings.i0 / inertial_number + 1.0);
+                    mu_i * normal_stress
+                }
+                _ => unreachable!(),
+            };
+            let mut shear_stress = shear_stress;
+            if model == 1 || model == 2 {
+                shear_stress += density * proposed_speed * proposed_speed * 9.81
+                    / sim_settings.drag_coefficient;
+            }
+            if model == 2 {
+                shear_stress += 70.0;
+            }
+            let expected = shear_stress / mass_per_area.max(1e-6);
+            let actual = test_output[model as usize];
+            assert!(
+                (actual - expected).abs() <= expected.abs() * 1e-4,
+                "friction model {model}: gpu {actual} != cpu {expected}"
+            );
+        }
+        assert_eq!(test_output[4], 0.0, "stub model 4 must produce zero");
+        let preview = &test_output[..test_output.len().min(6)];
+        println!("{:#?}", preview)
+    }
     #[test_log::test]
     fn test_shader_transfer() {
         let mut orchestrator: ComputeOrchestrator =

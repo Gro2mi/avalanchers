@@ -27,7 +27,7 @@ settings = {
     
     "max_steps": 5000,
     "batch_compute_steps": 300,
-    "sim_model": 0,
+    "sim_model": "terrain-following",
     "released_particles_per_cell": 4,
     "friction_model": "voellmy",
     "density": 200.0,
@@ -43,6 +43,7 @@ settings = {
     "enable_curvature": True,
     "enable_particle_interaction": True,
     "enable_entrainment": True,
+    "peak_flow_thickness_threshold": 0.2,
 }
 sim = avalanchers.PySimulation.new()
 sim.create(settings)
@@ -51,7 +52,6 @@ sim.create(settings)
 # sim.create_example("frontend/data/avaframe/avaMal.png")
 sim.run()
 positions = sim.particles_position
-
 end = time.time()
 
 print(f"Execution time without plotting: {end - start:.2f} seconds")
@@ -60,11 +60,11 @@ print(f"Execution time without plotting: {end - start:.2f} seconds")
 # avalanchers.plot3d(sim, "dem")
 
 
-avalanchers.plot3d(sim, "peak_flow_thickness", False, blur_passes=3)
+# avalanchers.plot3d(sim, "peak_flow_thickness", True)
 # avalanchers.plot3d(sim, "cell_count")
-avalanchers.plot3d(sim, "peak_velocity", blur_passes=3)
-avalanchers.plot_overview(sim)
+# avalanchers.plot3d(sim, "peak_velocity")
+# avalanchers.plot_overview(sim)
 
-# avalanchers.plot2d(sim, "peak_flow_thickness")
+avalanchers.plot2d(sim, "peak_flow_thickness")
 # avalanchers.plot2d(sim, "peak_velocity", particles=True)
 # avalanchers.plot2d(sim, "normals_x")

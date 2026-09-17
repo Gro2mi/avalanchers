@@ -147,9 +147,12 @@ fn compute_particles(
     velocity = 0.99 * velocity;
 
     // --- compute resisting accelerations ---
-    var acceleration_normal_friction_magnitude = acceleration_by_normal_friction(effective_acceleration_normal, mass, velocity, interpolated_h);
-    let acceleration_drag_friction_magnitude = acceleration_by_drag_friction(effective_acceleration_normal, mass, velocity, interpolated_h);
-    var acceleration_friction_magnitude = acceleration_drag_friction_magnitude + acceleration_normal_friction_magnitude;
+    // particle-equivalent flow depth: density * h_particle reproduces the
+    // particle's share of the local column mass per unit area
+    let h_particle = mass / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size)
+        * f32(sim_settings.released_particles_per_cell);
+    let velocity_magnitude = length(velocity);
+    let acceleration_friction_magnitude = basal_friction_acceleration(effective_acceleration_normal, sim_settings.snow_density, velocity_magnitude, h_particle, sim_settings.friction_model);
 
     // --- update velocity with resisting accelerations ---
     let velocity_length = length(velocity);
@@ -331,87 +334,6 @@ fn update_output_data(trajectory: u32, timestep: u32, timestep_data: TimestepDat
     out_timestep_data[timestep].trajectories[trajectory] = timestep_data;
 }
 
-fn acceleration_by_normal_friction(effective_acceleration_normal: f32, mass: f32, velocity: vec3f, h: f32) -> f32 {
-    let mass_per_area = mass / (sim_settings.cell_size * sim_settings.cell_size) * f32(sim_settings.released_particles_per_cell);
-    let velocity_magnitude = length(velocity);
-    let model = sim_settings.friction_model;
-    if velocity_magnitude < sim_settings.velocity_threshold || model >= 6u {
-        return 0.0f;
-    }
-    // standard 0.155, samos: standard 0.155, small 0.22, medium 0.17
-    let friction_coefficient = sim_settings.friction_coefficient;
-    let normal_stress = effective_acceleration_normal * mass_per_area;
-    const min_shear_stress = 70f;
-    var shear_stress = 0.0f;
-    //actually: friction model: 0 coulomb, 1 voellmy, 2 voellmy minshear, 3 samosAt, 4 voellmy with cohesion
-    // Coulomb friction model
-    if model == 0u || model == 1u || model == 2u {
-        shear_stress = friction_coefficient * normal_stress;
-    }
-    // samosAT friction model
-    else if model == 3 {
-        let rs0 = 0.222;
-        let rs = sim_settings.snow_density * velocity_magnitude * velocity_magnitude / (normal_stress + 0.001);
-        shear_stress = normal_stress * friction_coefficient * (1.0 + rs0 / (rs0 + rs));
-    }
-    // check https://ramms.ch/ramms-avalanche/friction-parameters/
-    else if model == 4u {
-        // let n0 = sim_settings.n0;
-        // shear_stress = friction_coefficient * normal_stress + (1 - friction_coefficient) * n0 - (1 - friction_coefficient) * n0 * exp(-normal_stress / n0);
-    }
-    // mu(I) friction model
-    else if model == 5u {
-        let grain_diameter = sim_settings.grain_diameter;
-        let i0 = sim_settings.i0;
-        let mu0 = sim_settings.mu0;
-        let mu2 = sim_settings.mu2;
-        let inertial_number = 2.5 * sqrt(velocity_magnitude) / h * grain_diameter / sqrt(max(effective_acceleration_normal, 1e-6) * h);
-        let muI = mu0 + (mu2 - mu0) / (i0 / inertial_number + 1.0);
-        shear_stress = muI * normal_stress;
-    }
-    let acceleration_magnitude = shear_stress / max(mass_per_area, 1e-6);
-    return acceleration_magnitude;
-}
-
-fn acceleration_by_drag_friction(effective_acceleration_normal: f32, mass: f32, velocity: vec3f, h: f32) -> f32 {
-    let model = sim_settings.friction_model;
-    if model == 0u || model >= 4u {
-        return 0.0f;
-    }
-    let velocity_magnitude2 = dot(velocity, velocity);
-    if velocity_magnitude2 < 1e-8 {
-        return 0.0f;
-    }
-    let mass_per_area = mass / (sim_settings.cell_size * sim_settings.cell_size) * f32(sim_settings.released_particles_per_cell);
-    var shear_stress = 0.0f;
-    let density_velocity_magnitude2 = sim_settings.snow_density * velocity_magnitude2;
-    // friction model: 0 coulomb, 1 voellmy, 2 voellmy minshear, 3 samosAt
-    // Voellmy friction model
-    if model == 1u {
-        shear_stress = density_velocity_magnitude2 * g / sim_settings.drag_coefficient;
-    }
-    // Voellmy min shear friction model
-    else if model == 2u {
-        const min_shear_stress = 70f;
-        shear_stress = min_shear_stress + density_velocity_magnitude2 * g / sim_settings.drag_coefficient;
-    }
-    // samosAT friction model
-    else if model == 3u {
-        let min_shear_stress_samosat = 0f;
-        let rs0 = 0.222;
-        let kappa_inv = 2.32558; // 1/kappa, standard kappa = 0.43
-        let r_inv = 20.0; // 1/r, standard r = 0.05
-        let b = 4.13;
-        let normal_stress = effective_acceleration_normal * mass_per_area;
-        let rs = density_velocity_magnitude2 / (normal_stress + 0.001);
-        var div = max(h * r_inv, 1.0);
-        div = log(div) * kappa_inv + b;
-        shear_stress = min_shear_stress_samosat + density_velocity_magnitude2 / (div * div);
-    }
-    let acceleration_magnitude = shear_stress / mass_per_area;
-    return acceleration_magnitude;
-}
-
 const TEXTURE_GATHER_OFFSET = 1.0f / 512.0f;
 // Samples height texture with bilinear filtering.
 fn get_elevation(uv: vec2f) -> f32 {
@@ -426,6 +348,76 @@ fn get_curvature(uv: vec2f) -> vec3f {
     return textureSampleLevel(curvature_texture, tex_sampler, uv, 0).xyz;
 }
 
+// import friction.wgsl;
+// BEGIN friction.wgsl
+// Shared basal friction models.
+// Pure library module: it is textually imported and relies on the importing
+// module providing the utils.wgsl symbols (sim_settings, g).
+// Returns a deceleration magnitude (m/s^2) acting against the flow direction,
+// given the effective bed-normal acceleration g_eff (m/s^2), the flow density
+// (kg/m^3), the proposed flow speed (m/s) and the flow depth h (m).
+// model: 0 coulomb, 1 voellmy, 2 voellmy minshear, 3 samosAT,
+// 4 voellmy with cohesion (stub), 5 mu(I)
+fn basal_friction_acceleration(g_eff: f32, density: f32, proposed_speed: f32, h: f32, model: u32) -> f32 {
+
+    let model = sim_settings.friction_model;
+    if proposed_speed < sim_settings.velocity_threshold || model >= 6u {
+        return 0.0;
+    }
+    // normal stress is a magnitude: some callers (curvilinear) pass the
+    // bed-normal acceleration with a negative sign convention
+    let g_eff_magnitude = abs(g_eff);
+
+    let mass_per_area = density * max(h, 1e-3);
+    let normal_stress = g_eff_magnitude * mass_per_area;
+    let friction_coefficient = sim_settings.friction_coefficient;
+    var shear_stress = 0.0;
+    // Coulomb friction model
+    if model == 0u || model == 1u || model == 2u {
+        shear_stress = friction_coefficient * normal_stress;
+    }
+    // samosAT friction model: Coulomb-like shear term with a density/speed
+    // dependent correction plus a runup-limited turbulent drag term
+    else if model == 3u {
+        let rs0 = 0.222;
+        let rs = density * proposed_speed * proposed_speed / (normal_stress + 0.001);
+        shear_stress = normal_stress * friction_coefficient * (1.0 + rs0 / (rs0 + rs));
+        let kappa_inv = 2.32558; // 1/kappa, standard kappa = 0.43
+        let r_inv = 20.0; // 1/r, standard r = 0.05
+        let b = 4.13;
+        var div = max(h * r_inv, 1.0);
+        div = log(div) * kappa_inv + b;
+        shear_stress = shear_stress + density * proposed_speed * proposed_speed / (div * div);
+    }
+    // check https://ramms.ch/ramms-avalanche/friction-parameters/
+    else if model == 4u {
+        // let n0 = sim_settings.n0;
+        // shear_stress = friction_coefficient * normal_stress + (1 - friction_coefficient) * n0 - (1 - friction_coefficient) * n0 * exp(-normal_stress / n0);
+    }
+    // mu(I) friction model
+    else if model == 5u {
+        let grain_diameter = sim_settings.grain_diameter;
+        let i0 = sim_settings.i0;
+        let mu0 = sim_settings.mu0;
+        let mu2 = sim_settings.mu2;
+        let inertial_number = 2.5 * sqrt(proposed_speed) / h * grain_diameter / sqrt(max(g_eff_magnitude, 1e-6) * h);
+        let mu_i = mu0 + (mu2 - mu0) / (i0 / inertial_number + 1.0);
+        shear_stress = mu_i * normal_stress;
+    }
+
+    // Voellmy-style turbulent drag contribution
+    if model == 1u || model == 2u {
+        shear_stress = shear_stress + density * proposed_speed * proposed_speed * g / sim_settings.drag_coefficient;
+    }
+    // Voellmy min shear: a constant basal shear independent of load
+    if model == 2u {
+        shear_stress = shear_stress + 70.0;
+    }
+
+    return shear_stress / max(mass_per_area, 1e-6);
+}
+
+// END friction.wgsl
 // import random.wgsl;
 // BEGIN random.wgsl
 // A high-quality 32-bit hash (PCG)

@@ -207,6 +207,10 @@ def make_settings(dem_path, mu):
         "cfl": 0.05,
         "velocity_threshold": 0.01,
         "enable_particle_interaction": True,
+        # hexagonal-packing relaxation of freshly initialized particles
+        # (defaults to true; pinned here so the validation runs are
+        # independent of the default)
+        "enable_particle_relaxation": True,
     }
 
 

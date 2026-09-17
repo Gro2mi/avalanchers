@@ -3614,3 +3614,105 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod avawog_diagnostics {
+    use super::*;
+    use pollster::block_on;
+
+    /// Runs the avaWog avalanche with the curvilinear model and default
+    /// Voellmy friction (mu = 0.2, xi = 2000) and verifies that the flow
+    /// comes to rest on the track: most particles must stop, the maximum
+    /// speed must decay, and neither NaN nor out-of-DEM flags may appear.
+    #[test_log::test]
+    fn test_curvilinear_diagnostic_avawog() {
+        if std::env::var("GITHUB_ACTIONS").is_ok() {
+            println!("Skipping heavy GPU test on CI (macOS/Windows)");
+            return;
+        }
+        let mut sim = block_on(Simulation::new()).expect("Failed to create Simulation");
+        let settings = Settings::loads(
+            r#"{
+                "dem_path": "C:/git/avalanchers/data/avaframe/avaWog.png",
+                "release_areas_path": "C:/git/avalanchers/data/avaframe/avaWogreleaseTexture.png",
+                "sim_model": "curvilinear",
+                "friction_model": "voellmy",
+                "max_steps": 3000,
+                "released_particles_per_cell": 4,
+                "slab_thickness_factor": 1.0,
+                "friction_coefficient": 0.2,
+                "drag_coefficient": 2000.0,
+                "velocity_threshold": 0.1,
+                "enable_center_of_mass": false
+            }"#,
+        )
+        .expect("Failed to parse settings");
+        block_on(sim.create(settings)).expect("Failed to load avaWog data");
+        info!(
+            "DIAG settings: friction_model={} density={} fc={} drag={} vt={}",
+            sim.settings.friction_model,
+            sim.settings.density,
+            sim.settings.friction_coefficient,
+            sim.settings.drag_coefficient,
+            sim.settings.velocity_threshold
+        );
+
+        let total_particles = sim.number_particles as usize;
+        let mut final_max_speed = 0.0f32;
+        let mut final_stopped = 0usize;
+        for step in 1..=3000u32 {
+            let info = block_on(sim.run_n_steps(1)).expect("step failed");
+            if step % 250 != 0 && step != 3000 {
+                continue;
+            }
+            let flags = info.parsed_flags();
+            assert!(
+                !flags.contains(SimInfoFlags::IS_NAN),
+                "NaN flag set at step {}",
+                info.timestep
+            );
+            assert!(
+                !flags.contains(SimInfoFlags::PARTICLE_OUT_OF_DEM_DATA),
+                "out of DEM flag set at step {}",
+                info.timestep
+            );
+            let states = block_on(sim.fetch_particles_state())
+                .expect("states")
+                .clone();
+            let velocities = block_on(sim.fetch_particles_velocity())
+                .expect("velocities")
+                .clone();
+            assert!(
+                velocities
+                    .iter()
+                    .all(|v| v[0].is_finite() && v[1].is_finite()),
+                "non-finite particle velocity at step {}",
+                info.timestep
+            );
+            final_stopped = states.iter().filter(|state| state.stopped).count();
+            final_max_speed = velocities
+                .iter()
+                .map(|v| (v[0] * v[0] + v[1] * v[1]).sqrt())
+                .fold(0.0f32, f32::max);
+            info!(
+                "DIAG step {} dt{:.4} stopped {}/{} max_speed {:.2}",
+                info.timestep,
+                info.dt,
+                final_stopped,
+                states.len(),
+                final_max_speed
+            );
+        }
+
+        // the flow must come to rest on the track instead of racing into the
+        // runout zone at 30+ m/s
+        assert!(
+            final_stopped * 2 > total_particles,
+            "only {final_stopped} of {total_particles} particles stopped"
+        );
+        assert!(
+            final_max_speed < 20.0,
+            "particles still move at {final_max_speed} m/s after 3000 steps"
+        );
+    }
+}

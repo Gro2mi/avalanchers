@@ -138,6 +138,7 @@ define_shaders! {
     TransferP2G => "transfer_p2g",
     TestTransforms => "test_transforms",
     TestSampling => "test_sampling",
+    TestFriction => "test_friction",
     TestUtils => "test_utils",
 }
 
@@ -2531,6 +2532,34 @@ fn create_test_shader_configs(
                     BufferName::ParticlesAffineMatrix.to_string(),
                     BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+            ],
+        )?,
+    );
+    shader_configs.insert(
+        ShaderName::TestFriction,
+        ComputeShaderConfig::new(
+            device,
+            ShaderName::TestFriction,
+            load_shader_source(ShaderName::TestFriction, has_float32_atomic),
+            &[
+                // Binding 0:
+                (
+                    BufferName::SimSettings.to_string(),
+                    BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                // Binding 1:
+                (
+                    BufferName::TestOutput.to_string(),
+                    BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
