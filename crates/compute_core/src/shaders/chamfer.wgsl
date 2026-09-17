@@ -1,20 +1,64 @@
-// Seeds the nearest-neighbor fields for the chamfer distance computation:
-// - chamfer_nearest_roi: per cell, the coordinates of the nearest region-of-interest
-//   cell (bitmask in region_of_interest)
-// - chamfer_nearest_sim: per cell, the coordinates of the nearest simulated cell
-//   (grid_peak_flow_thickness > sim_settings.peak_flow_thickness_threshold)
-// Cells that are seeds store their own coordinates, all others store NO_SEED
-// until chamfer_flood propagates the nearest seeds.
+// Chamfer distance between the simulated cells
+// (grid_peak_flow_thickness > sim_settings.peak_flow_thickness_threshold)
+// and the region-of-interest bitmask, in three kernels sharing this module:
+// - chamfer_prepare: seeds the nearest-neighbor fields. Per cell, both fields
+//   store the cell's own coordinates if it is a seed (region_of_interest bit
+//   set, respectively a simulated cell), NO_SEED otherwise.
+// - chamfer_flood: one pass of the jump flooding algorithm (Rong & Tan, "Jump
+//   Flooding in GPU with Applications to Voronoi Diagram and Distance
+//   Transform") on both nearest-seed fields. The run method dispatches this
+//   kernel once per step size, with chamfer_params.step going n/2, n/4, ..., 1
+//   for n the next power of two >= the larger grid dimension. The fields are
+//   read from the snapshot buffers written by the previous pass, so every
+//   invocation sees a consistent state and the result is the exact
+//   nearest-seed Voronoi.
+// - chamfer_reduce: accumulates the raw sums (sum/count of simulated cells to
+//   their nearest region-of-interest cell and vice versa) into the unified
+//   evaluation result buffer. Runs as a single workgroup with a strided loop,
+//   so no atomics are needed. Dispatch exactly one workgroup; the CPU combines
+//   the sums into the diagonal-normalized chamfer distance.
+
+struct ChamferParams {
+    step: u32,
+    _padding_a: u32,
+    _padding_b: u32,
+    _padding_c: u32,
+}
+
+// The first 32 bytes of the unified evaluation result buffer hold the mass
+// movement counts written by the evaluate shaders; the chamfer sums follow.
+struct ChamferDistanceResult {
+    _evaluation_counts: array<u32, 8>,
+    sum_sim_to_roi: f32,
+    count_sim: f32,
+    sum_roi_to_sim: f32,
+    count_roi: f32,
+}
 
 const NO_SEED: u32 = 0xFFFFFFFFu;
+const MAX_DISTANCE_SQUARED: i32 = 2147483647;
+const WG_SIZE: u32 = 256u;
 
-@group(0) @binding(1) var<storage, read> grid_peak_flow_thickness: array<f32>;
-@group(0) @binding(2) var<storage, read> region_of_interest: array<u32>;
-@group(0) @binding(3) var<storage, read_write> chamfer_nearest_roi: array<vec2u>;
-@group(0) @binding(4) var<storage, read_write> chamfer_nearest_sim: array<vec2u>;
+@group(0) @binding(1) var<uniform> chamfer_params: ChamferParams;
+@group(0) @binding(2) var<storage, read> grid_peak_flow_thickness: array<f32>;
+@group(0) @binding(3) var<storage, read> region_of_interest: array<u32>;
+@group(0) @binding(4) var<storage, read_write> chamfer_nearest_roi: array<vec2u>;
+@group(0) @binding(5) var<storage, read> chamfer_nearest_roi_snapshot: array<vec2u>;
+@group(0) @binding(6) var<storage, read_write> chamfer_nearest_sim: array<vec2u>;
+@group(0) @binding(7) var<storage, read> chamfer_nearest_sim_snapshot: array<vec2u>;
+@group(0) @binding(8) var<storage, read_write> chamfer_result: ChamferDistanceResult;
 
 fn bit_is_set(word: u32, index: u32) -> bool {
     return (word & (1u << (index % 32u))) != 0u;
+}
+
+fn distance_squared(cell: vec2i, seed: vec2i) -> i32 {
+    let d = seed - cell;
+    return d.x * d.x + d.y * d.y;
+}
+
+fn cell_distance(cell: vec2u, seed: vec2u) -> f32 {
+    return length(vec2f(seed) - vec2f(cell)) * sim_settings.cell_size;
 }
 
 @compute @workgroup_size(WG_SIZE_2D, WG_SIZE_2D, 1)
@@ -31,6 +75,106 @@ fn chamfer_prepare(@builtin(global_invocation_id) id: vec3u) {
         id.xy,
         grid_peak_flow_thickness[idx] > sim_settings.peak_flow_thickness_threshold,
     );
+}
+
+@compute @workgroup_size(WG_SIZE_2D, WG_SIZE_2D, 1)
+fn chamfer_flood(@builtin(global_invocation_id) id: vec3u) {
+    if id.x >= sim_settings.grid_shape.x || id.y >= sim_settings.grid_shape.y {
+        return;
+    }
+    let cell = vec2i(id.xy);
+    let step = i32(chamfer_params.step);
+    let idx = xy_to_idx(id.xy);
+
+    var best_roi = chamfer_nearest_roi_snapshot[idx];
+    var best_roi_d = select(distance_squared(cell, vec2i(best_roi)), MAX_DISTANCE_SQUARED, best_roi.x == NO_SEED);
+    var best_sim = chamfer_nearest_sim_snapshot[idx];
+    var best_sim_d = select(distance_squared(cell, vec2i(best_sim)), MAX_DISTANCE_SQUARED, best_sim.x == NO_SEED);
+
+    for (var dy = -step; dy <= step; dy = dy + step) {
+        for (var dx = -step; dx <= step; dx = dx + step) {
+            if dx == 0 && dy == 0 {
+                continue;
+            }
+            let n = cell + vec2i(dx, dy);
+            if n.x < 0 || n.y < 0 || n.x >= i32(sim_settings.grid_shape.x) || n.y >= i32(sim_settings.grid_shape.y) {
+                continue;
+            }
+            let nidx = u32(n.y) * sim_settings.grid_shape.x + u32(n.x);
+
+            let neighbor_roi = chamfer_nearest_roi_snapshot[nidx];
+            if neighbor_roi.x != NO_SEED {
+                let d = distance_squared(cell, vec2i(neighbor_roi));
+                if d < best_roi_d {
+                    best_roi_d = d;
+                    best_roi = neighbor_roi;
+                }
+            }
+
+            let neighbor_sim = chamfer_nearest_sim_snapshot[nidx];
+            if neighbor_sim.x != NO_SEED {
+                let d = distance_squared(cell, vec2i(neighbor_sim));
+                if d < best_sim_d {
+                    best_sim_d = d;
+                    best_sim = neighbor_sim;
+                }
+            }
+        }
+    }
+
+    chamfer_nearest_roi[idx] = best_roi;
+    chamfer_nearest_sim[idx] = best_sim;
+}
+
+var<workgroup> wg_partial: array<vec4f, WG_SIZE>;
+
+@compute @workgroup_size(WG_SIZE, 1, 1)
+fn chamfer_reduce(@builtin(local_invocation_index) li: u32) {
+    let num_cells = sim_settings.grid_shape.x * sim_settings.grid_shape.y;
+
+    // x: sum_sim_to_roi, y: count_sim, z: sum_roi_to_sim, w: count_roi
+    var partial = vec4f(0.0, 0.0, 0.0, 0.0);
+    for (var i = li; i < num_cells; i = i + WG_SIZE) {
+        let simulated = grid_peak_flow_thickness[i] > sim_settings.peak_flow_thickness_threshold;
+        let reference = bit_is_set(region_of_interest[i / 32u], i);
+
+        if simulated {
+            let seed = chamfer_nearest_roi[i];
+            if seed.x != NO_SEED {
+                partial.x = partial.x + cell_distance(idx_to_xy(i), seed);
+            }
+            partial.y = partial.y + 1.0;
+        }
+        if reference {
+            let seed = chamfer_nearest_sim[i];
+            if seed.x != NO_SEED {
+                partial.z = partial.z + cell_distance(idx_to_xy(i), seed);
+            }
+            partial.w = partial.w + 1.0;
+        }
+    }
+    wg_partial[li] = partial;
+    workgroupBarrier();
+
+    // tree reduction of the per-thread partial sums
+    var stride_size = WG_SIZE / 2u;
+    loop {
+        if li < stride_size {
+            wg_partial[li] = wg_partial[li] + wg_partial[li + stride_size];
+        }
+        workgroupBarrier();
+        if stride_size == 1u {
+            break;
+        }
+        stride_size = stride_size >> 1u;
+    }
+
+    if li == 0u {
+        chamfer_result.sum_sim_to_roi = wg_partial[0].x;
+        chamfer_result.count_sim = wg_partial[0].y;
+        chamfer_result.sum_roi_to_sim = wg_partial[0].z;
+        chamfer_result.count_roi = wg_partial[0].w;
+    }
 }
 
 // import utils.wgsl;

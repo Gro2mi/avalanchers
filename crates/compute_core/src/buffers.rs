@@ -29,7 +29,7 @@ pub struct AtomicValues {
     pub stopped_particles: u32,
 }
 
-/// GPU layout mirror of the CenterOfMassResult struct in compute_center_of_mass.wgsl
+/// GPU layout mirror of the CenterOfMassResult struct in center_of_mass.wgsl
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct CenterOfMassResult {
@@ -50,7 +50,7 @@ impl Default for CenterOfMassResult {
     }
 }
 
-/// GPU layout mirror of the ChamferParams struct in chamfer_flood.wgsl
+/// GPU layout mirror of the ChamferParams struct in chamfer.wgsl
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable, Default)]
 pub struct ChamferParams {
@@ -73,7 +73,7 @@ pub struct RelaxParams {
 /// GPU layout mirror of the unified evaluation result buffer. The sections
 /// are written by the evaluation shaders:
 /// - counts + extremes by evaluate_mass_movement(_points).wgsl
-/// - chamfer sums by chamfer_reduce.wgsl
+/// - chamfer sums by the chamfer_reduce kernel
 /// - beeline distance by compute_beeline_distance.wgsl
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable, Default)]

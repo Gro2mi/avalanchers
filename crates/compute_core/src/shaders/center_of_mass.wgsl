@@ -1,4 +1,17 @@
-// Computes the center of mass of the flattened grid mass buffer.
+// Center of mass of the flattened grid mass buffer, in three kernels sharing
+// this module:
+// - center_of_mass_seed: seeds the blob label buffer for the biggest-blob
+//   mode. Every mass-holding cell gets its own cell index as label, all
+//   others are marked NO_BLOB.
+// - center_of_mass_propagate: propagates the minimum blob label across each
+//   blob after the seed. Each invocation performs a fixed number of rounds of
+//   8-neighbor hooking plus pointer compression (adopting the label that its
+//   own label points to), which shrinks the remaining label distance
+//   exponentially per round - long, sinuous blobs converge in a handful of
+//   rounds instead of one pass per path length.
+// - compute_center_of_mass: the final reduction stage, dispatched as exactly
+//   one workgroup after seed and propagate have filled the label buffer
+//   (both early-out when the whole-grid mode is selected).
 //
 // Two modes, selected with sim_settings flag bit 4 (the
 // center_of_mass_biggest_blob setting):
@@ -7,18 +20,19 @@
 //   mass, 8-connected) is detected first and only its cells contribute.
 // - whole grid (bit clear): every mass cell contributes.
 //
-// This is the final reduction stage of a three-shader pipeline and must be
-// dispatched as exactly one workgroup after center_of_mass_seed and
-// center_of_mass_propagate have filled the label buffer (both early-out when
-// the whole-grid mode is selected). Blob mode then:
+// Blob mode in the reduction:
 // 1. verifies the blob labels converged (unit-step hooking with pointer
 //    compression until nothing changes - usually one pass)
 // 2. accumulates the encoded mass per blob label
 // 3. picks the label of the biggest blob and accumulates its center of mass
 //
-// Runs as a single workgroup with a strided loop over all cells, so the
-// workgroup barriers provide full global synchronization and no atomics on
-// f32 are needed.
+// Labels can only decrease, so racing with other invocations updating
+// neighbor cells within the same dispatch is safe. The final reduction
+// verifies convergence and guarantees exactness.
+//
+// The reduction runs as a single workgroup with a strided loop over all
+// cells, so the workgroup barriers provide full global synchronization and no
+// atomics on f32 are needed.
 //
 // Output: total_mass in the same unit as the decoded grid mass,
 // com in world coordinates (same units as sim_settings.cell_size);
@@ -30,20 +44,20 @@ struct CenterOfMassResult {
 }
 
 const CENTER_OF_MASS_BIGGEST_BLOB: u32 = 1u << 4u;
+const WG_SIZE: u32 = 256u;
+const NO_BLOB: u32 = 0xFFFFFFFFu;
+const PROPAGATION_ROUNDS: u32 = 16u;
 
 @group(0) @binding(1) var<storage, read> mass_buffer: array<u32>; // no_atomic_float
 // atomic_float @group(0) @binding(1) var<storage, read> mass_buffer: array<f32>;
 @group(0) @binding(2) var<storage, read_write> center_of_mass: array<CenterOfMassResult>;
-@group(0) @binding(3) var<storage> sim_info: SimInfo;
+@group(0) @binding(3) var<storage, read_write> sim_info: SimInfo;
 @group(0) @binding(4) var dem_texture: texture_2d<f32>;
 @group(0) @binding(5) var tex_sampler: sampler;
 @group(0) @binding(6) var<storage, read_write> atomic_values: AtomicValues;
 @group(0) @binding(7) var<storage, read_write> blob_labels: array<u32>;
 @group(0) @binding(8) var<storage, read_write> blob_mass: array<atomic<u32>>; // no_atomic_float
 // atomic_float @group(0) @binding(8) var<storage, read_write> blob_mass: array<atomic<f32>>;
-
-const WG_SIZE: u32 = 256u;
-const NO_BLOB: u32 = 0xFFFFFFFFu;
 
 var<workgroup> wg_mass: array<f32, WG_SIZE>;
 var<workgroup> wg_moment: array<vec2f, WG_SIZE>;
@@ -66,6 +80,54 @@ fn min_neighbor_label(cell: vec2i, label: u32, grid_shape: vec2i) -> u32 {
         }
     }
     return best;
+}
+
+fn get_elevation(position_xy: vec2f) -> f32 {
+    let uv = position_to_uv(position_xy);
+    return textureSampleLevel(dem_texture, tex_sampler, uv, 0).x;
+}
+
+@compute @workgroup_size(WG_SIZE_2D, WG_SIZE_2D, 1)
+fn center_of_mass_seed(@builtin(global_invocation_id) id: vec3u) {
+    if (sim_info.flags & SIM_INFO_STOPPED) != 0u {
+        return;
+    }
+    if (sim_settings.flags & CENTER_OF_MASS_BIGGEST_BLOB) == 0u {
+        return;
+    }
+    if id.x >= sim_settings.grid_shape.x || id.y >= sim_settings.grid_shape.y {
+        return;
+    }
+    let idx = xy_to_idx(id.xy);
+    let has_mass = mass_buffer[idx] > 0u; // no_atomic_float
+    // atomic_float let has_mass = mass_buffer[idx] > 0.0;
+    blob_labels[idx] = select(NO_BLOB, idx, has_mass);
+}
+
+@compute @workgroup_size(WG_SIZE_2D, WG_SIZE_2D, 1)
+fn center_of_mass_propagate(@builtin(global_invocation_id) id: vec3u) {
+    if (sim_info.flags & SIM_INFO_STOPPED) != 0u {
+        return;
+    }
+    if (sim_settings.flags & CENTER_OF_MASS_BIGGEST_BLOB) == 0u {
+        return;
+    }
+    if id.x >= sim_settings.grid_shape.x || id.y >= sim_settings.grid_shape.y {
+        return;
+    }
+    let idx = xy_to_idx(id.xy);
+    var label = blob_labels[idx];
+    if label == NO_BLOB {
+        return;
+    }
+    let cell = vec2i(id.xy);
+    let grid_shape_i = vec2i(sim_settings.grid_shape);
+    for (var round = 0u; round < PROPAGATION_ROUNDS; round = round + 1u) {
+        label = min(label, min_neighbor_label(cell, label, grid_shape_i));
+        // pointer compression: adopt the label our label points to
+        label = min(label, blob_labels[label]);
+        blob_labels[idx] = label;
+    }
 }
 
 @compute @workgroup_size(WG_SIZE, 1, 1)
@@ -212,10 +274,6 @@ fn compute_center_of_mass(@builtin(local_invocation_index) li: u32) {
         center_of_mass[timestep].total_mass = total_mass;
         center_of_mass[timestep].com = select(vec3f(0.0, 0.0, 0.0), vec3f(x, y, elevation), total_mass > 0.0);
     }
-}
-fn get_elevation(position_xy: vec2f) -> f32 {
-    let uv = position_to_uv(position_xy);
-    return textureSampleLevel(dem_texture, tex_sampler, uv, 0).x;
 }
 
 // import utils.wgsl;

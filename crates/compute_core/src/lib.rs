@@ -1194,13 +1194,6 @@ impl ComputeOrchestrator {
         let dispatch_y = sim_settings.grid_shape_y.div_ceil(WORKGROUP_SIZE_2D);
         self.run_shader(&ShaderName::EvaluateMassMovement, dispatch_x, dispatch_y, 1)
             .await?;
-        self.run_shader(
-            &ShaderName::EvaluateMassMovementPoints,
-            dispatch_x,
-            dispatch_y,
-            1,
-        )
-        .await?;
         self.dispatch_chamfer_distance(sim_settings).await?;
         self.run_shader(&ShaderName::ComputeBeelineDistance, 1, 1, 1)
             .await?;

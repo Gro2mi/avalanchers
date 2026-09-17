@@ -1,3 +1,9 @@
+// Evaluates the simulation against the region of interest: classifies every
+// cell as intersection (region of interest AND simulated), undershoot (region
+// of interest only) or overshoot (simulated only) and accumulates the three
+// counts atomically into the unified evaluation result buffer. The CPU
+// combines the counts into the final MassMovementEvaluation.
+
 struct EvaluationCounts {
     intersection: atomic<u32>,
     undershoot: atomic<u32>,
