@@ -359,8 +359,6 @@ fn get_curvature(uv: vec2f) -> vec3f {
 // model: 0 coulomb, 1 voellmy, 2 voellmy minshear, 3 samosAT,
 // 4 voellmy with cohesion (stub), 5 mu(I)
 fn basal_friction_acceleration(g_eff: f32, density: f32, proposed_speed: f32, h: f32, model: u32) -> f32 {
-
-    let model = sim_settings.friction_model;
     if proposed_speed < sim_settings.velocity_threshold || model >= 6u {
         return 0.0;
     }
@@ -448,6 +446,7 @@ fn rand3(seed: ptr<function, u32>) -> vec3f {
 fn rand4(seed: ptr<function, u32>) -> vec4f {
     return vec4f(next_rand(seed), next_rand(seed), next_rand(seed), next_rand(seed));
 }
+
 // END random.wgsl
 
 // import utils.wgsl;

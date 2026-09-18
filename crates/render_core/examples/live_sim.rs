@@ -8,11 +8,11 @@
 //! Controls: left drag orbits, right drag pans, scroll zooms, `R` restarts the
 //! simulation, `V` resets the view, `0` hides the overlay, `1` peak flow velocity, `2`
 //! peak flow thickness, `3` grid mass, `4` release areas, `5` slope angle, `6` slope
-//! aspect, `7` roughness, `P` toggles particles. The egui panel switches the testcase
-//! (the DEM pngs next to the configured one), the simulation model and the other
-//! simulation settings; sliders fine-tune with the arrow keys once focused (click
-//! the slider or its label, or `Tab` to it), and double-clicking a slider's label
-//! resets the value to its default.
+//! aspect, `7` roughness, `8` grid momentum, `P` toggles particles. The egui panel
+//! switches the testcase (the DEM pngs next to the configured one), the simulation
+//! model and the other simulation settings; sliders fine-tune with the arrow keys once
+//! focused (click the slider or its label, or `Tab` to it), and double-clicking a
+//! slider's label resets the value to its default.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -50,10 +50,11 @@ const RELEASE_TEXTURE_SUFFIX: &str = "releaseTexture";
 const WINDOW_ICON: &[u8] = include_bytes!("../../../frontend/icons/android-chrome-512x512.png");
 
 /// Grid buffers cloned from the simulation, both at startup and after a restart.
-const GRID_BUFFERS: [BufferName; 7] = [
+const GRID_BUFFERS: [BufferName; 8] = [
     BufferName::GridPeakVelocity,
     BufferName::GridPeakFlowThickness,
     BufferName::GridMass,
+    BufferName::GridMomentum,
     BufferName::ReleaseAreas,
     BufferName::SlopeAngle,
     BufferName::SlopeAspect,
@@ -198,6 +199,7 @@ enum Overlay {
     PeakFlowVelocity,
     PeakFlowThickness,
     GridMass,
+    GridMomentum,
     ReleaseAreas,
     SlopeAngle,
     SlopeAspect,
@@ -211,6 +213,7 @@ impl Overlay {
             Overlay::PeakFlowVelocity => Some(BufferName::GridPeakVelocity),
             Overlay::PeakFlowThickness => Some(BufferName::GridPeakFlowThickness),
             Overlay::GridMass => Some(BufferName::GridMass),
+            Overlay::GridMomentum => Some(BufferName::GridMomentum),
             Overlay::ReleaseAreas => Some(BufferName::ReleaseAreas),
             Overlay::SlopeAngle => Some(BufferName::SlopeAngle),
             Overlay::SlopeAspect => Some(BufferName::SlopeAspect),
@@ -231,6 +234,12 @@ impl Overlay {
             Overlay::GridMass => OverlayRange::new(0.0, 5_000.0)
                 .with_threshold(1.0)
                 .with_unit("kg"),
+            // Per-cell momentum magnitude, mass x velocity. Typical fast flow on a
+            // ~5 m grid reaches ~1e5 kg·m/s per cell; the shader computes the
+            // magnitude of the quantized (u, v) pair.
+            Overlay::GridMomentum => OverlayRange::new(0.0, 200_000.0)
+                .with_threshold(100.0)
+                .with_unit("kg·m/s"),
             // Slab thickness in metres; release textures typically hold 1.0 m.
             Overlay::ReleaseAreas => OverlayRange::new(0.0, 2.0)
                 .with_threshold(0.01)
@@ -253,11 +262,28 @@ impl Overlay {
             Overlay::PeakFlowVelocity => "peak flow velocity",
             Overlay::PeakFlowThickness => "peak flow thickness",
             Overlay::GridMass => "grid mass",
+            Overlay::GridMomentum => "grid momentum",
             Overlay::ReleaseAreas => "release areas",
             Overlay::SlopeAngle => "slope angle",
             Overlay::SlopeAspect => "slope aspect",
             Overlay::Roughness => "roughness",
         }
+    }
+}
+
+/// Attaches `overlay`'s grid buffer to the renderer. The momentum overlay needs
+/// the interleaved-i32 shader mode; every other grid is a plain scalar field.
+fn attach_overlay(
+    renderer: &mut Renderer,
+    device: &wgpu::Device,
+    overlay: Overlay,
+    buffer: Option<&wgpu::Buffer>,
+) {
+    match overlay {
+        Overlay::GridMomentum => {
+            renderer.set_grid_momentum_overlay(device, buffer, overlay.range())
+        }
+        _ => renderer.set_grid_overlay(device, buffer, overlay.range()),
     }
 }
 
@@ -585,10 +611,11 @@ fn write_snapshot(sim: &SimulationView, overlay: Overlay, path: &str) -> anyhow:
         HEIGHT,
         &sim.terrain,
     );
-    renderer.set_grid_overlay(
+    attach_overlay(
+        &mut renderer,
         &sim.device,
+        overlay,
         overlay.buffer_name().map(|name| sim.grid(&name)),
-        overlay.range(),
     );
     renderer.set_particles(
         &sim.device,
@@ -752,8 +779,7 @@ impl Viewer {
             return;
         };
         let buffer = self.overlay.buffer_name().map(|name| self.sim.grid(&name));
-        view.renderer
-            .set_grid_overlay(&self.sim.device, buffer, self.overlay.range());
+        attach_overlay(&mut view.renderer, &self.sim.device, self.overlay, buffer);
         self.dirty = true;
         tracing::info!("overlay: {}", self.overlay.label());
     }
@@ -1029,6 +1055,10 @@ impl ApplicationHandler for Viewer {
                     }
                     Key::Character("7") => {
                         self.overlay = Overlay::Roughness;
+                        self.apply_overlay();
+                    }
+                    Key::Character("8") => {
+                        self.overlay = Overlay::GridMomentum;
                         self.apply_overlay();
                     }
                     Key::Character("p" | "P") => {

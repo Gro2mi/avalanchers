@@ -173,6 +173,7 @@ fn basal_friction_acceleration(g_eff: f32, density: f32, proposed_speed: f32, h:
 
     return shear_stress / max(mass_per_area, 1e-6);
 }
+
 // END friction.wgsl
 // import utils.wgsl;
 // BEGIN utils.wgsl

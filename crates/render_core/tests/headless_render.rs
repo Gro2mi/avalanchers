@@ -200,6 +200,60 @@ fn grid_overlay_tints_only_cells_above_the_threshold() {
 }
 
 #[test]
+fn momentum_overlay_tints_by_the_magnitude_of_interleaved_i32_pairs() {
+    let Ok(ctx) = pollster::block_on(GpuContext::headless()) else {
+        eprintln!("skipping: no GPU adapter available");
+        return;
+    };
+
+    let terrain = sloped_terrain(32, 32);
+    let plain = read_rendered_pixels(&ctx, &terrain);
+    let changed_pixels =
+        |a: &[[u8; 4]], b: &[[u8; 4]]| a.iter().zip(b).filter(|(x, y)| x != y).count();
+
+    let render_momentum = |momentum: &[i32]| {
+        let momentum = momentum.to_vec();
+        render_with(&ctx, &terrain, |renderer, device| {
+            let buffer = storage_buffer(device, &momentum);
+            renderer.set_grid_momentum_overlay(
+                device,
+                Some(&buffer),
+                OverlayRange::new(0.0, 8.0).with_threshold(1.0),
+            );
+        })
+    };
+
+    // Attaching the overlay also enables the colour bar legend, so a zero buffer
+    // still differs from plain terrain — that render is the baseline.
+    let baseline = render_momentum(&vec![0i32; 32 * 32 * 2]);
+    assert!(
+        changed_pixels(&plain, &baseline) > 0,
+        "attaching the overlay must enable the legend"
+    );
+
+    // One cell carries momentum (u, v) = (300, 400): the shader decodes the
+    // quantized pair to a magnitude of 500 * 1e-2 = 5.0, mid-ramp for 0..8. Its
+    // tenth (30, 40) decodes to 0.5 and must stay under the threshold of 1.0.
+    let mut slow = vec![0i32; 32 * 32 * 2];
+    let mut fast = vec![0i32; 32 * 32 * 2];
+    let cell = 2 * (8 * 32 + 8);
+    (slow[cell], slow[cell + 1]) = (30, 40);
+    (fast[cell], fast[cell + 1]) = (300, 400);
+
+    let slow_render = render_momentum(&slow);
+    let fast_render = render_momentum(&fast);
+    assert_eq!(
+        changed_pixels(&plain, &slow_render),
+        changed_pixels(&plain, &baseline),
+        "momentum below the threshold must not tint the terrain"
+    );
+    assert!(
+        changed_pixels(&plain, &fast_render) > changed_pixels(&plain, &baseline),
+        "the decoded momentum magnitude must tint the terrain"
+    );
+}
+
+#[test]
 fn disabling_the_overlay_restores_plain_terrain() {
     let Ok(ctx) = pollster::block_on(GpuContext::headless()) else {
         eprintln!("skipping: no GPU adapter available");

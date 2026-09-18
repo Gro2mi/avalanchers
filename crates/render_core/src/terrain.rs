@@ -245,6 +245,17 @@ impl OverlayRange {
     }
 }
 
+/// How the shader interprets the overlay buffer. The values must match the
+/// `u.overlay.x` modes in `terrain.wgsl` (0 = off).
+#[derive(Clone, Copy)]
+enum OverlayMode {
+    /// One `f32` per cell, indexed as `y * width + x`.
+    Scalar = 1,
+    /// Two interleaved `i32` values `(u, v)` per cell — the p2g momentum pair,
+    /// quantized by `MOMENTUM_FACTOR` (1e2); shown as the magnitude in kg·m/s.
+    Momentum = 2,
+}
+
 /// Draws a DEM as a shaded height field, optionally tinted by a scalar simulation grid.
 /// The grid is expanded on the GPU from the vertex index, so no vertex or index buffers
 /// are uploaded.
@@ -450,8 +461,31 @@ impl TerrainRenderer {
         buffer: Option<&wgpu::Buffer>,
         range: OverlayRange,
     ) {
+        self.bind_overlay(device, buffer, OverlayMode::Scalar, range);
+    }
+
+    /// Like [`Self::set_overlay`], but for the simulation's momentum grid: two
+    /// interleaved `i32` values `(u, v)` per cell, as quantized by the p2g
+    /// pass's `MOMENTUM_FACTOR` (1e2). The terrain is tinted by the magnitude
+    /// of the pair, in kg·m/s.
+    pub fn set_momentum_overlay(
+        &mut self,
+        device: &wgpu::Device,
+        buffer: Option<&wgpu::Buffer>,
+        range: OverlayRange,
+    ) {
+        self.bind_overlay(device, buffer, OverlayMode::Momentum, range);
+    }
+
+    fn bind_overlay(
+        &mut self,
+        device: &wgpu::Device,
+        buffer: Option<&wgpu::Buffer>,
+        mode: OverlayMode,
+        range: OverlayRange,
+    ) {
         self.uniforms.overlay = match buffer {
-            Some(_) => [1.0, range.min, range.max, range.threshold],
+            Some(_) => [mode as u32 as f32, range.min, range.max, range.threshold],
             None => [0.0, range.min, range.max, range.threshold],
         };
         self.bind_group = create_bind_group(

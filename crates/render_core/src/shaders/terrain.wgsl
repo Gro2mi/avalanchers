@@ -96,7 +96,16 @@ fn sample_overlay(x: i32, y: i32) -> f32 {
     if (u.overlay.x < 0.5) {
         return 0.0;
     }
-    return overlay_grid[u32(y) * u32(u.grid.x) + u32(x)];
+    let cell = u32(y) * u32(u.grid.x) + u32(x);
+    // Overlay mode 2: interleaved i32 momentum pairs (u, v per cell), as
+    // quantized by MOMENTUM_FACTOR = 1e2 in the simulation's p2g pass. Show
+    // the magnitude in kg·m/s.
+    if (u.overlay.x > 1.5) {
+        let mu = f32(bitcast<i32>(overlay_grid[cell * 2u]));
+        let mv = f32(bitcast<i32>(overlay_grid[cell * 2u + 1u]));
+        return length(vec2<f32>(mu, mv)) * 0.01;
+    }
+    return overlay_grid[cell];
 }
 
 // Blue to red heat ramp for simulation values.

@@ -112,7 +112,7 @@ define_shaders! {
     ChamferFlood => "chamfer" entry_point "chamfer_flood",
     ChamferReduce => "chamfer" entry_point "chamfer_reduce",
     ComputeBeelineDistance => "compute_beeline_distance",
-    EvaluateMassMovement => "evaluate_mass_movement" entry_point "evaluate_mass_movement",
+    EvaluateMassMovement => "evaluate_mass_movement",
     InitializeParticles => "initialize_particles",
     // the three relaxation kernels share one source file; each entry point
     // dispatches one kernel from relax_particles.wgsl

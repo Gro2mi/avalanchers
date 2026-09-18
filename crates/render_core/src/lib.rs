@@ -144,6 +144,19 @@ impl Renderer {
         self.colorbar.set_enabled_range(buffer.is_some(), range);
     }
 
+    /// Like [`Self::set_grid_overlay`], but for the simulation's current momentum
+    /// grid (`BufferName::GridMomentum`): two interleaved `i32` values `(u, v)`
+    /// per cell as quantized by the p2g pass, tinted by their magnitude.
+    pub fn set_grid_momentum_overlay(
+        &mut self,
+        device: &wgpu::Device,
+        buffer: Option<&wgpu::Buffer>,
+        range: OverlayRange,
+    ) {
+        self.terrain.set_momentum_overlay(device, buffer, range);
+        self.colorbar.set_enabled_range(buffer.is_some(), range);
+    }
+
     /// Attaches the simulation's particle buffers. Passing `None` hides the particles.
     pub fn set_particles(&mut self, device: &wgpu::Device, buffers: Option<ParticleBuffers<'_>>) {
         self.particles.set_buffers(device, buffers);
