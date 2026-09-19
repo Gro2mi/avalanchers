@@ -23,6 +23,7 @@ impl SimFlags {
         particle_interaction: bool,
         earth_pressure_coefficient: bool,
         entrainment: bool,
+        center_of_mass_biggest_blob: bool,
     ) -> Self {
         let mut mask = 0u32;
         if curvature {
@@ -36,6 +37,9 @@ impl SimFlags {
         }
         if entrainment {
             mask |= 1 << 3;
+        }
+        if center_of_mass_biggest_blob {
+            mask |= 1 << 4;
         }
 
         SimFlags { mask }
@@ -56,6 +60,9 @@ impl SimFlags {
     }
     pub fn is_entrainment_enabled(&self) -> bool {
         (self.mask & (1 << 3)) != 0
+    }
+    pub fn is_center_of_mass_biggest_blob_enabled(&self) -> bool {
+        (self.mask & (1 << 4)) != 0
     }
 }
 #[repr(C)]
@@ -90,6 +97,15 @@ pub struct SimSettings {
     pub velocity_threshold: f32,
     pub roughness_threshold: f32,
     pub flags: u32,
+    pub release_max_elevation: f32,
+    pub peak_flow_thickness_threshold: f32,
+    // MPMDAC constitutive model
+    pub constitutive_model: u32,
+    pub shear_modulus: f32,
+    pub hardening_modulus: f32,
+    // MPMDAC compressibility; bulk_modulus 0 = incompressible
+    pub bulk_modulus: f32,
+    pub compaction_pressure: f32,
 }
 
 impl Hash for SimSettings {
@@ -122,6 +138,14 @@ impl Hash for SimSettings {
         self.release_min_elevation.to_bits().hash(state);
         self.velocity_threshold.to_bits().hash(state);
         self.roughness_threshold.to_bits().hash(state);
+        self.peak_flow_thickness_threshold.to_bits().hash(state);
+        // MPMDAC constitutive model
+        self.constitutive_model.hash(state);
+        self.shear_modulus.to_bits().hash(state);
+        self.hardening_modulus.to_bits().hash(state);
+        // MPMDAC compressibility
+        self.bulk_modulus.to_bits().hash(state);
+        self.compaction_pressure.to_bits().hash(state);
         // Flags
         self.flags.hash(state);
     }
@@ -143,7 +167,7 @@ impl SimSettings {
     pub fn new() -> Self {
         Self {
             max_steps: 6000,
-            sim_model: SimModel::ParticleInteraction.as_int(),
+            sim_model: SimModel::TerrainFollowing.as_int(),
             friction_model: FrictionModel::Voellmy.as_int(),
             released_particles_per_cell: 8,
             grid_shape_x: 1,
@@ -167,11 +191,21 @@ impl SimSettings {
             cell_size: 1.0,
             velocity_threshold: 0.1,
             roughness_threshold: 0.01,
-            flags: SimFlags::new(true, true, true, true).mask,
+            flags: SimFlags::new(true, true, true, true, false).mask,
 
             min_slope_angle: 28.0,
             max_slope_angle: 60.0,
             release_min_elevation: 1500.0,
+            release_max_elevation: 8848.0,
+
+            peak_flow_thickness_threshold: 0.1,
+
+            constitutive_model: ConstitutiveModel::DruckerPrager.as_int(),
+            shear_modulus: 5.0e4,
+            hardening_modulus: 0.0,
+
+            bulk_modulus: 2.0e4,
+            compaction_pressure: 2.0e3,
         }
     }
 
@@ -246,11 +280,32 @@ impl SimSettings {
         if let Some(val) = patch.release_min_elevation {
             settings.release_min_elevation = val;
         }
+        if let Some(val) = patch.release_max_elevation {
+            settings.release_max_elevation = val;
+        }
         if let Some(val) = patch.velocity_threshold {
             settings.velocity_threshold = val;
         }
         if let Some(val) = patch.roughness_threshold {
             settings.roughness_threshold = val;
+        }
+        if let Some(val) = patch.peak_flow_thickness_threshold {
+            settings.peak_flow_thickness_threshold = val;
+        }
+        if let Some(val) = patch.constitutive_model {
+            settings.constitutive_model = val.as_int();
+        }
+        if let Some(val) = patch.shear_modulus {
+            settings.shear_modulus = val;
+        }
+        if let Some(val) = patch.hardening_modulus {
+            settings.hardening_modulus = val;
+        }
+        if let Some(val) = patch.bulk_modulus {
+            settings.bulk_modulus = val;
+        }
+        if let Some(val) = patch.compaction_pressure {
+            settings.compaction_pressure = val;
         }
         if let Some(val) = patch.enable_curvature {
             if val {
@@ -278,6 +333,13 @@ impl SimSettings {
                 settings.flags |= 1 << 3;
             } else {
                 settings.flags &= !(1 << 3);
+            }
+        }
+        if let Some(val) = patch.center_of_mass_biggest_blob {
+            if val {
+                settings.flags |= 1 << 4;
+            } else {
+                settings.flags &= !(1 << 4);
             }
         }
         settings.set_dem(dem);
@@ -378,27 +440,103 @@ impl<'de> Deserialize<'de> for FrictionModel {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SimModel {
-    Block,
-    ParticleInteraction,
-    MPM,
+pub enum ConstitutiveModel {
+    /// pressure-dependent Drucker-Prager / Mohr-Coulomb yield
+    DruckerPrager,
+    /// rate-dependent mu(I) inertial rheology
+    MuI,
 }
 
-impl SimModel {
+impl ConstitutiveModel {
     pub fn from_int(value: u32) -> Option<Self> {
         match value {
-            0 => Some(Self::Block),
-            1 => Some(Self::ParticleInteraction),
-            2 => Some(Self::MPM),
+            0 => Some(ConstitutiveModel::DruckerPrager),
+            1 => Some(ConstitutiveModel::MuI),
             _ => None,
         }
     }
 
     pub fn as_int(&self) -> u32 {
         match self {
-            Self::Block => 0,
-            Self::ParticleInteraction => 1,
-            Self::MPM => 2,
+            ConstitutiveModel::DruckerPrager => 0,
+            ConstitutiveModel::MuI => 1,
+        }
+    }
+}
+
+impl FromStr for ConstitutiveModel {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_lowercase().as_str() {
+            "drucker-prager" | "drucker_prager" | "dp" | "mohr-coulomb" => Ok(Self::DruckerPrager),
+            "mu-i" | "mui" | "mu(i)" | "mu-i-rheology" => Ok(Self::MuI),
+            _ => Err(format!("unknown constitutive model: {value}")),
+        }
+    }
+}
+
+impl fmt::Display for ConstitutiveModel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::DruckerPrager => "drucker-prager",
+            Self::MuI => "mu-i",
+        })
+    }
+}
+
+impl Serialize for ConstitutiveModel {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for ConstitutiveModel {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Value {
+            Int(u32),
+            String(String),
+        }
+
+        match Value::deserialize(deserializer)? {
+            Value::Int(value) => Self::from_int(value)
+                .ok_or_else(|| D::Error::custom(format!("invalid constitutive model: {value}"))),
+
+            Value::String(value) => value.parse::<Self>().map_err(D::Error::custom),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SimModel {
+    TerrainFollowing,
+    Curvilinear,
+    MpmDaC,
+}
+
+impl SimModel {
+    pub fn from_int(value: u32) -> Option<Self> {
+        match value {
+            0 => Some(Self::TerrainFollowing),
+            1 => Some(Self::Curvilinear),
+            2 => Some(Self::MpmDaC),
+            _ => None,
+        }
+    }
+
+    pub fn as_int(&self) -> u32 {
+        match self {
+            Self::TerrainFollowing => 0,
+            Self::Curvilinear => 1,
+            Self::MpmDaC => 2,
         }
     }
 }
@@ -408,9 +546,9 @@ impl FromStr for SimModel {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value.to_lowercase().as_str() {
-            "block" => Ok(Self::Block),
-            "particle-interaction" | "particleinteraction" => Ok(Self::ParticleInteraction),
-            "mpm" => Ok(Self::MPM),
+            "terrain-following" | "terrain" | "t" => Ok(Self::TerrainFollowing),
+            "curvilinear" | "curvi" | "c" => Ok(Self::Curvilinear),
+            "mpmdac" | "mpm-dac" | "mpm_depth_averaged_curvilinear" => Ok(Self::MpmDaC),
             _ => Err(format!("unknown simulation model: {value}")),
         }
     }
@@ -419,9 +557,9 @@ impl FromStr for SimModel {
 impl fmt::Display for SimModel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::Block => "block",
-            Self::ParticleInteraction => "particle-interaction",
-            Self::MPM => "mpm",
+            Self::TerrainFollowing => "terrain-following",
+            Self::Curvilinear => "curvilinear",
+            Self::MpmDaC => "mpmdac",
         })
     }
 }
@@ -456,7 +594,54 @@ impl<'de> Deserialize<'de> for SimModel {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Default, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrownLineMethod {
+    FlowRouting,
+    ParticleSimulation,
+}
+
+impl FromStr for CrownLineMethod {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_lowercase().replace('_', "-").as_str() {
+            "flow-routing" | "flow" | "d8" => Ok(Self::FlowRouting),
+            "particle-simulation" | "particle" => Ok(Self::ParticleSimulation),
+            _ => Err(format!("unknown crown line method: {value}")),
+        }
+    }
+}
+
+impl fmt::Display for CrownLineMethod {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(match self {
+            Self::FlowRouting => "flow-routing",
+            Self::ParticleSimulation => "particle-simulation",
+        })
+    }
+}
+
+impl Serialize for CrownLineMethod {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for CrownLineMethod {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        String::deserialize(deserializer)?
+            .parse::<Self>()
+            .map_err(D::Error::custom)
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
     pub outlines_path: Option<String>,
@@ -485,13 +670,49 @@ pub struct Settings {
     pub min_slope_angle: Option<f32>,
     pub max_slope_angle: Option<f32>,
     pub release_min_elevation: Option<f32>,
+    pub release_max_elevation: Option<f32>,
+    /// Target release area as a fraction of the outline area (0.2 - 0.3 is a
+    /// common range). When set, release areas are estimated by detecting the
+    /// outline's crown line and filling this share below it, instead of the
+    /// terrain-threshold classification.
+    pub release_area_fraction: Option<f32>,
+    /// How the crown line is detected for `release_area_fraction`: D8 flow
+    /// routing on the CPU (default) or a GPU particle simulation released
+    /// everywhere outside the outline.
+    pub crown_line_method: Option<CrownLineMethod>,
     pub velocity_threshold: Option<f32>,
     pub roughness_threshold: Option<f32>,
+    pub peak_flow_thickness_threshold: Option<f32>,
+
+    /// Constitutive law of the MPMDAC model: pressure-dependent
+    /// Drucker-Prager (default) or the rate-dependent mu(I) rheology.
+    pub constitutive_model: Option<ConstitutiveModel>,
+    /// Deviatoric shear modulus (Pa) of the MPMDAC model's elastic
+    /// predictor; large values approach the rigid-plastic limit.
+    pub shear_modulus: Option<f32>,
+    /// Linear isotropic hardening modulus (Pa per unit accumulated plastic
+    /// strain) of the MPMDAC model; 0 disables hardening.
+    pub hardening_modulus: Option<f32>,
+    /// Volumetric bulk modulus (Pa) of the MPMDAC model. Non-zero makes the
+    /// flow material compressible: pressure responds elastically to
+    /// volumetric strain (0 = incompressible, the default is 2e4).
+    pub bulk_modulus: Option<f32>,
+    /// Compaction pressure (Pa) above which the MPMDAC material densifies
+    /// plastically (irreversibly); the volumetric pressure is capped there.
+    pub compaction_pressure: Option<f32>,
 
     pub enable_curvature: Option<bool>,
     pub enable_particle_interaction: Option<bool>,
     pub enable_earth_pressure_coefficient: Option<bool>,
     pub enable_entrainment: Option<bool>,
+    pub enable_center_of_mass: Option<bool>,
+    /// Relax freshly initialized particles to the hexagonal packing spacing
+    /// with a soft sphere repulsion before the simulation starts (defaults
+    /// to true).
+    pub enable_particle_relaxation: Option<bool>,
+    /// Center the mass of the biggest connected mass blob instead of the
+    /// whole grid (defaults to true).
+    pub center_of_mass_biggest_blob: Option<bool>,
 }
 
 impl Settings {
@@ -549,7 +770,7 @@ mod tests {
     fn test_simsettings_new_defaults() {
         let settings = SimSettings::new();
         assert_eq!(settings.max_steps, 6000);
-        assert_eq!(settings.sim_model, SimModel::ParticleInteraction.as_int());
+        assert_eq!(settings.sim_model, SimModel::TerrainFollowing.as_int());
         assert_eq!(settings.friction_model, FrictionModel::Voellmy.as_int());
         assert_eq!(settings.released_particles_per_cell, 8);
         assert_eq!(settings.grid_shape_x, 1);
@@ -565,8 +786,10 @@ mod tests {
         assert_eq!(settings.min_slope_angle, 28.0);
         assert_eq!(settings.max_slope_angle, 60.0);
         assert_eq!(settings.release_min_elevation, 1500.0);
+        assert_eq!(settings.release_max_elevation, 8848.0);
         assert_eq!(settings.velocity_threshold, 0.1);
         assert_eq!(settings.roughness_threshold, 0.01);
+        assert_eq!(settings.peak_flow_thickness_threshold, 0.1);
     }
 
     #[test_log::test]
@@ -595,7 +818,7 @@ mod tests {
             outlines_path: Some("path/to/outlines".to_string()),
             outlines_padding: Some(10.0),
             max_steps: Some(42),
-            sim_model: Some(SimModel::ParticleInteraction),
+            sim_model: Some(SimModel::Curvilinear),
             friction_model: Some(FrictionModel::VoellmyMinShear),
             released_particles_per_cell: Some(3),
             density: Some(123.4),
@@ -614,15 +837,27 @@ mod tests {
             min_slope_angle: Some(10.0),
             max_slope_angle: Some(20.0),
             release_min_elevation: Some(100.0),
+            release_max_elevation: Some(200.0),
+            release_area_fraction: Some(0.25),
+            crown_line_method: Some(CrownLineMethod::ParticleSimulation),
             velocity_threshold: Some(0.001),
             roughness_threshold: Some(0.002),
+            peak_flow_thickness_threshold: Some(1.5),
+            constitutive_model: Some(ConstitutiveModel::MuI),
+            shear_modulus: Some(1234.5),
+            hardening_modulus: Some(678.9),
+            bulk_modulus: Some(246.8),
+            compaction_pressure: Some(135.7),
             dem_path: Some(String::from("dem.png")),
             release_areas_path: Some(String::from("release_area.png")),
             output_path: Some(String::from("output")),
             enable_curvature: Some(false),
             enable_particle_interaction: Some(false),
+            enable_particle_relaxation: Some(false),
             enable_earth_pressure_coefficient: Some(false),
             enable_entrainment: Some(false),
+            enable_center_of_mass: Some(true),
+            center_of_mass_biggest_blob: Some(false),
         };
         let dem = create_test_dem();
         let mut sim_settings = SimSettings::from_settings(&patch, &dem);
@@ -638,8 +873,15 @@ mod tests {
         assert_eq!(sim_settings.min_slope_angle, 10.0);
         assert_eq!(sim_settings.max_slope_angle, 20.0);
         assert_eq!(sim_settings.release_min_elevation, 100.0);
+        assert_eq!(sim_settings.release_max_elevation, 200.0);
         assert_eq!(sim_settings.velocity_threshold, 0.001);
         assert_eq!(sim_settings.roughness_threshold, 0.002);
+        assert_eq!(sim_settings.peak_flow_thickness_threshold, 1.5);
+        assert_eq!(sim_settings.constitutive_model, 1);
+        assert_eq!(sim_settings.shear_modulus, 1234.5);
+        assert_eq!(sim_settings.hardening_modulus, 678.9);
+        assert_eq!(sim_settings.bulk_modulus, 246.8);
+        assert_eq!(sim_settings.compaction_pressure, 135.7);
         assert_eq!(sim_settings.grid_shape_x, dem.width as u32);
         assert_eq!(sim_settings.grid_shape_y, dem.height as u32);
         assert_eq!(sim_settings.cell_size, dem.cell_size);
@@ -654,7 +896,7 @@ mod tests {
         assert_eq!(sim_settings.basal_friction_angle, 45.0);
         assert_eq!(
             sim_settings.flags,
-            SimFlags::new(false, false, false, false).mask
+            SimFlags::new(false, false, false, false, false).mask
         );
 
         // Test enabling flags one by one
@@ -662,28 +904,35 @@ mod tests {
         sim_settings = SimSettings::from_settings(&patch, &dem);
         assert_eq!(
             sim_settings.flags,
-            SimFlags::new(true, false, false, false).mask
+            SimFlags::new(true, false, false, false, false).mask
         );
 
         patch.enable_particle_interaction = Some(true);
         sim_settings = SimSettings::from_settings(&patch, &dem);
         assert_eq!(
             sim_settings.flags,
-            SimFlags::new(true, true, false, false).mask
+            SimFlags::new(true, true, false, false, false).mask
         );
 
         patch.enable_earth_pressure_coefficient = Some(true);
         sim_settings = SimSettings::from_settings(&patch, &dem);
         assert_eq!(
             sim_settings.flags,
-            SimFlags::new(true, true, true, false).mask
+            SimFlags::new(true, true, true, false, false).mask
         );
 
         patch.enable_entrainment = Some(true);
         sim_settings = SimSettings::from_settings(&patch, &dem);
         assert_eq!(
             sim_settings.flags,
-            SimFlags::new(true, true, true, true).mask
+            SimFlags::new(true, true, true, true, false).mask
+        );
+
+        patch.center_of_mass_biggest_blob = Some(true);
+        sim_settings = SimSettings::from_settings(&patch, &dem);
+        assert_eq!(
+            sim_settings.flags,
+            SimFlags::new(true, true, true, true, true).mask
         );
     }
 
@@ -726,10 +975,18 @@ mod tests {
             settings.release_min_elevation,
             deserialized.release_min_elevation
         );
+        assert_eq!(
+            settings.release_max_elevation,
+            deserialized.release_max_elevation
+        );
         assert_eq!(settings.velocity_threshold, deserialized.velocity_threshold);
         assert_eq!(
             settings.roughness_threshold,
             deserialized.roughness_threshold
+        );
+        assert_eq!(
+            settings.peak_flow_thickness_threshold,
+            deserialized.peak_flow_thickness_threshold
         );
         assert_eq!(settings.flags, deserialized.flags);
     }
@@ -765,9 +1022,9 @@ mod tests {
     #[test]
     fn sim_model_int_roundtrip() {
         let models = [
-            SimModel::Block,
-            SimModel::ParticleInteraction,
-            SimModel::MPM,
+            SimModel::TerrainFollowing,
+            SimModel::Curvilinear,
+            SimModel::MpmDaC,
         ];
 
         for model in models {
@@ -780,9 +1037,9 @@ mod tests {
 
     #[test]
     fn sim_model_from_int() {
-        assert_eq!(SimModel::from_int(0), Some(SimModel::Block));
-        assert_eq!(SimModel::from_int(1), Some(SimModel::ParticleInteraction));
-        assert_eq!(SimModel::from_int(2), Some(SimModel::MPM));
+        assert_eq!(SimModel::from_int(0), Some(SimModel::TerrainFollowing));
+        assert_eq!(SimModel::from_int(1), Some(SimModel::Curvilinear));
+        assert_eq!(SimModel::from_int(2), Some(SimModel::MpmDaC));
 
         assert_eq!(SimModel::from_int(3), None);
         assert_eq!(SimModel::from_int(u32::MAX), None);
@@ -791,9 +1048,9 @@ mod tests {
     #[test]
     fn sim_model_string_roundtrip() {
         let models = [
-            (SimModel::Block, "block"),
-            (SimModel::ParticleInteraction, "particle-interaction"),
-            (SimModel::MPM, "mpm"),
+            (SimModel::TerrainFollowing, "terrain-following"),
+            (SimModel::Curvilinear, "curvilinear"),
+            (SimModel::MpmDaC, "mpmdac"),
         ];
 
         for (model, string) in models {
@@ -804,13 +1061,15 @@ mod tests {
 
     #[test]
     fn sim_model_string_aliases() {
-        assert_eq!(
-            SimModel::from_str("particleinteraction"),
-            Ok(SimModel::ParticleInteraction)
-        );
-
-        assert_eq!(SimModel::from_str("BLOCK"), Ok(SimModel::Block));
-        assert_eq!(SimModel::from_str("MPM"), Ok(SimModel::MPM));
+        for value in ["terrain-following", "terrain", "t", "TERRAIN"] {
+            assert_eq!(SimModel::from_str(value), Ok(SimModel::TerrainFollowing));
+        }
+        for value in ["curvilinear", "curvi", "c", "CURVI"] {
+            assert_eq!(SimModel::from_str(value), Ok(SimModel::Curvilinear));
+        }
+        for value in ["mpmdac", "MPM-DAC", "mpm_depth_averaged_curvilinear"] {
+            assert_eq!(SimModel::from_str(value), Ok(SimModel::MpmDaC));
+        }
     }
 
     #[test]
@@ -866,6 +1125,39 @@ mod tests {
     }
 
     #[test]
+    fn constitutive_model_roundtrip() {
+        assert_eq!(
+            ConstitutiveModel::from_int(0),
+            Some(ConstitutiveModel::DruckerPrager)
+        );
+        assert_eq!(ConstitutiveModel::from_int(1), Some(ConstitutiveModel::MuI));
+        assert_eq!(ConstitutiveModel::from_int(2), None);
+
+        assert_eq!(
+            ConstitutiveModel::DruckerPrager.to_string(),
+            "drucker-prager"
+        );
+        assert_eq!(ConstitutiveModel::MuI.to_string(), "mu-i");
+        assert_eq!(
+            ConstitutiveModel::from_str("drucker-prager"),
+            Ok(ConstitutiveModel::DruckerPrager)
+        );
+        assert_eq!(
+            ConstitutiveModel::from_str("dp"),
+            Ok(ConstitutiveModel::DruckerPrager)
+        );
+        assert_eq!(
+            ConstitutiveModel::from_str("mohr-coulomb"),
+            Ok(ConstitutiveModel::DruckerPrager)
+        );
+        assert_eq!(
+            ConstitutiveModel::from_str("mui"),
+            Ok(ConstitutiveModel::MuI)
+        );
+        assert!(ConstitutiveModel::from_str("invalid").is_err());
+    }
+
+    #[test]
     fn friction_model_string_aliases() {
         assert_eq!(
             FrictionModel::from_str("voellmyminshear"),
@@ -887,6 +1179,41 @@ mod tests {
     fn friction_model_invalid_string() {
         assert!(FrictionModel::from_str("invalid").is_err());
         assert!(FrictionModel::from_str("").is_err());
+    }
+
+    #[test]
+    fn crown_line_method_string_roundtrip() {
+        let methods = [
+            (CrownLineMethod::FlowRouting, "flow-routing"),
+            (CrownLineMethod::ParticleSimulation, "particle-simulation"),
+        ];
+
+        for (method, string) in methods {
+            assert_eq!(method.to_string(), string);
+            assert_eq!(CrownLineMethod::from_str(string), Ok(method));
+        }
+    }
+
+    #[test]
+    fn crown_line_method_string_aliases() {
+        assert_eq!(
+            CrownLineMethod::from_str("flow_routing"),
+            Ok(CrownLineMethod::FlowRouting)
+        );
+        assert_eq!(
+            CrownLineMethod::from_str("D8"),
+            Ok(CrownLineMethod::FlowRouting)
+        );
+        assert_eq!(
+            CrownLineMethod::from_str("particle"),
+            Ok(CrownLineMethod::ParticleSimulation)
+        );
+    }
+
+    #[test]
+    fn crown_line_method_invalid_string() {
+        assert!(CrownLineMethod::from_str("invalid").is_err());
+        assert!(CrownLineMethod::from_str("").is_err());
     }
 
     #[test]

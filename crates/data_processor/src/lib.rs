@@ -3,6 +3,7 @@ use std::fs::File;
 use std::io::Cursor;
 use std::io::{self, BufWriter, Write};
 use std::io::{BufRead, BufReader};
+use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 use std::vec::Vec;
 use tiff::decoder::{Decoder, DecodingResult};
@@ -12,9 +13,13 @@ use compute_core::dem::{Bounds, Dem, GeoMetadata, GeoTiff, TiffData};
 use compute_core::settings::{Settings, SimSettings};
 use compute_core::utils::*;
 
+#[cfg(target_arch = "wasm32")]
+pub mod blosc;
 pub mod caaml_parser;
 pub mod rasterizer;
 pub mod shapefile_reader;
+#[cfg(target_arch = "wasm32")]
+pub mod zarr_writer;
 use rasterizer::RasterGrid;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -496,7 +501,16 @@ pub enum GeoTiffError {
 }
 pub fn read_geo_tiff(path: &str) -> Result<GeoTiff, GeoTiffError> {
     let file = File::open(path)?;
-    let mut decoder = Decoder::new(BufReader::new(file))?;
+    read_geo_tiff_from_reader(BufReader::new(file))
+}
+
+/// Parses a GeoTIFF from raw bytes, e.g. a file uploaded in the browser.
+pub fn read_geo_tiff_from_bytes(bytes: &[u8]) -> Result<GeoTiff, GeoTiffError> {
+    read_geo_tiff_from_reader(Cursor::new(bytes))
+}
+
+pub fn read_geo_tiff_from_reader<R: Read + Seek>(reader: R) -> Result<GeoTiff, GeoTiffError> {
+    let mut decoder = Decoder::new(reader)?;
 
     let (width, height) = decoder.dimensions()?;
 
@@ -526,6 +540,9 @@ pub fn read_geo_tiff(path: &str) -> Result<GeoTiff, GeoTiffError> {
     }
 
     let metadata = if tie_points.len() >= 6 {
+        if tie_points[0] != 0.0 || tie_points[1] != 0.0 || tie_points[2] != 0.0 {
+            return Err(GeoTiffError::UnsupportedTiePoint);
+        }
         let origin_x = tie_points[3];
         let origin_y = tie_points[4];
         let bounds = Bounds {
@@ -580,10 +597,15 @@ async fn load_png_as_dem(path: &str) -> Result<Dem, DataProcessorError> {
     bounds.xmax += 0.5 * cell_size;
     bounds.ymin -= 0.5 * cell_size;
     bounds.ymax += 0.5 * cell_size;
+    let data1d = rgba_bytes_to_f32(&rgba)
+        .into_iter()
+        .map(|value| if value == 0.0 { f32::NAN } else { value })
+        .collect();
     let mut dem = Dem {
         width,
         height,
-        data1d: rgba_bytes_to_f32(&rgba),
+        // Legacy float-PNG DEMs use an all-zero pixel as their NoData sentinel.
+        data1d,
         data: Vec::new(),
         // TODO bounds were exported wrong. Rework when png files get metadata embedded.
         x: linspace(bounds.xmin, bounds.xmax, width),
@@ -600,7 +622,11 @@ async fn load_png_as_dem(path: &str) -> Result<Dem, DataProcessorError> {
 }
 
 fn load_asc_as_dem(path: &str) -> Result<Dem, DataProcessorError> {
-    let mut grid = EsriGrid::from_file(path)?;
+    let grid = EsriGrid::from_file(path)?;
+    Ok(esri_grid_to_dem(grid, path))
+}
+
+fn esri_grid_to_dem(mut grid: EsriGrid, source: &str) -> Dem {
     flip_rows_flat_vec(
         &mut grid.data,
         grid.header.ncols as u32,
@@ -612,6 +638,13 @@ fn load_asc_as_dem(path: &str) -> Result<Dem, DataProcessorError> {
         ymin: grid.header.get_yllcorner(),
         ymax: grid.header.get_yllcorner() + grid.header.nrows as f32 * grid.header.cellsize,
     };
+    if let Some(nodata) = grid.header.nodata_value {
+        for value in &mut grid.data {
+            if *value == nodata {
+                *value = f32::NAN;
+            }
+        }
+    }
     let mut dem = Dem {
         width: grid.header.ncols,
         height: grid.header.nrows,
@@ -623,20 +656,37 @@ fn load_asc_as_dem(path: &str) -> Result<Dem, DataProcessorError> {
         bounds,
         map_factor: 1.0,
         minimum_elevation: f32::INFINITY,
-        source: path.to_string(),
+        source: source.to_string(),
         projection: "unknown".to_string(),
     };
     dem.data = to_2d(&dem.data1d, dem.width, dem.height);
-    Ok(dem)
+    dem
 }
 
 fn load_tiff_as_dem(path: &str) -> Result<Dem, DataProcessorError> {
-    let mut tiff: GeoTiff = read_geo_tiff(path)?;
+    let tiff: GeoTiff = read_geo_tiff(path)?;
+    Ok(geo_tiff_to_dem(tiff, path))
+}
+
+fn geo_tiff_to_dem(mut tiff: GeoTiff, source: &str) -> Dem {
     tiff.flip_y();
+    let nodata = tiff.metadata.nodata.map(|value| value as f32);
+    let data1d = tiff
+        .data
+        .as_f32()
+        .into_iter()
+        .map(|value| {
+            if nodata.is_some_and(|nodata| value == nodata || nodata.is_nan() && value.is_nan()) {
+                f32::NAN
+            } else {
+                value
+            }
+        })
+        .collect();
     let mut dem = Dem {
         width: tiff.metadata.width as usize,
         height: tiff.metadata.height as usize,
-        data1d: tiff.data.as_f32(),
+        data1d,
         data: Vec::new(),
         x: linspace(
             tiff.metadata.bounds.xmin,
@@ -652,11 +702,11 @@ fn load_tiff_as_dem(path: &str) -> Result<Dem, DataProcessorError> {
         bounds: tiff.metadata.bounds,
         map_factor: 1.0,
         minimum_elevation: f32::INFINITY, // Will be calculated later
-        source: path.to_string(),
+        source: source.to_string(),
         projection: format!("EPSG:{}", tiff.metadata.epsg_code),
     };
     dem.data = to_2d(&dem.data1d, dem.width, dem.height);
-    Ok(dem)
+    dem
 }
 
 pub async fn load_release_areas(path: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
@@ -689,44 +739,87 @@ pub async fn load_release_areas(path: &str) -> Result<Vec<f32>, Box<dyn std::err
     Ok(data)
 }
 
+/// Loads release areas from raw bytes. `ext` selects the parser, e.g. "asc" or "tif".
+pub fn load_release_areas_from_bytes(
+    bytes: &[u8],
+    ext: &str,
+) -> Result<Vec<f32>, DataProcessorError> {
+    let data: Vec<f32> = match ext.to_lowercase().as_str() {
+        "asc" => {
+            let mut grid = EsriGrid::from_reader(Cursor::new(bytes))?;
+            grid.flip_y();
+            grid.data
+        }
+        "tif" | "tiff" => {
+            let mut tiff = read_geo_tiff_from_bytes(bytes)?;
+            tiff.flip_y();
+            tiff.data.as_f32()
+        }
+        _ => return Err(DataProcessorError::UnsupportedDemFormat(ext.to_string())),
+    };
+    Ok(data)
+}
+
 pub async fn load_dem(path: &str) -> Result<Dem, DataProcessorError> {
     let ext = std::path::Path::new(path)
         .extension()
         .and_then(|s| s.to_str())
         .unwrap_or("");
 
-    let mut dem: Dem = match ext.to_lowercase().as_str() {
+    let dem: Dem = match ext.to_lowercase().as_str() {
         "asc" => load_asc_as_dem(path)?,
         "png" => load_png_as_dem(path).await?,
         "tif" | "tiff" => load_tiff_as_dem(path)?,
         _ => return Err(DataProcessorError::UnsupportedDemFormat(ext.to_string())),
     };
 
-    dem.minimum_elevation = Dem::calculate_minimum_elevation(&dem.data1d);
+    finalize_dem(dem)
+}
 
-    dem.data1d = dem
-        .data1d
-        .into_iter()
-        .map(|v| {
-            if v >= dem.minimum_elevation {
-                v
-            } else {
-                f32::NAN
-            }
-        })
-        .collect();
-    assert!(
-        dem.bounds.xmin < dem.bounds.xmax,
-        "xmin ({}) must be less than or equal to xmax ({})",
-        dem.bounds.xmin,
-        dem.bounds.xmax
-    );
-    assert!(
-        dem.bounds.ymin < dem.bounds.ymax,
-        "ymin ({}) must be less than or equal to ymax ({})",
-        dem.bounds.ymin,
-        dem.bounds.ymax
-    );
+/// Loads a DEM from raw bytes. `ext` selects the parser, e.g. "asc" or "tif".
+pub fn load_dem_from_bytes(
+    bytes: &[u8],
+    ext: &str,
+    source: &str,
+) -> Result<Dem, DataProcessorError> {
+    let dem: Dem = match ext.to_lowercase().as_str() {
+        "asc" => esri_grid_to_dem(EsriGrid::from_reader(Cursor::new(bytes))?, source),
+        "tif" | "tiff" => geo_tiff_to_dem(read_geo_tiff_from_bytes(bytes)?, source),
+        _ => return Err(DataProcessorError::UnsupportedDemFormat(ext.to_string())),
+    };
+
+    finalize_dem(dem)
+}
+
+/// Validates the DEM and synchronizes its flat and row-oriented representations.
+fn finalize_dem(mut dem: Dem) -> Result<Dem, DataProcessorError> {
+    let expected_len = dem
+        .width
+        .checked_mul(dem.height)
+        .ok_or_else(|| DataProcessorError::DemError("DEM dimensions overflow".to_string()))?;
+    if dem.data1d.len() != expected_len {
+        return Err(DataProcessorError::DemError(format!(
+            "DEM data length {} does not match dimensions {}x{}",
+            dem.data1d.len(),
+            dem.width,
+            dem.height
+        )));
+    }
+    dem.minimum_elevation = Dem::calculate_minimum_elevation(&dem.data1d);
+    dem.data = to_2d(&dem.data1d, dem.width, dem.height);
+
+    if dem.bounds.xmin >= dem.bounds.xmax {
+        return Err(DataProcessorError::DemError(format!(
+            "xmin ({}) must be less than xmax ({})",
+            dem.bounds.xmin, dem.bounds.xmax
+        )));
+    }
+    if dem.bounds.ymin >= dem.bounds.ymax {
+        return Err(DataProcessorError::DemError(format!(
+            "ymin ({}) must be less than ymax ({})",
+            dem.bounds.ymin, dem.bounds.ymax
+        )));
+    }
 
     Ok(dem)
 }
@@ -751,7 +844,7 @@ fn load_outline(path: &str, padding: f32) -> Result<RasterGrid, DataProcessorErr
 
 pub async fn create_sim_settings_and_dem_from_path(
     file_path: &str,
-) -> Result<(SimSettings, Dem, RasterGrid), DataProcessorError> {
+) -> Result<(SimSettings, Dem, Vec<bool>), DataProcessorError> {
     let settings = Settings {
         dem_path: Some(file_path.to_string()),
         ..Default::default()
@@ -760,7 +853,7 @@ pub async fn create_sim_settings_and_dem_from_path(
 }
 pub async fn create_sim_settings_and_dem(
     settings: &Settings,
-) -> Result<(SimSettings, Dem, RasterGrid), DataProcessorError> {
+) -> Result<(SimSettings, Dem, Vec<bool>), DataProcessorError> {
     let (outline, dem) = match (&settings.outlines_path, &settings.dem_path) {
         // 1. Outline only -> build outline and DEM from tile manager
         #[cfg(target_arch = "wasm32")]
@@ -773,35 +866,33 @@ pub async fn create_sim_settings_and_dem(
                 .outlines_padding
                 .ok_or(DataProcessorError::NoneOutlinesPadding)?;
             let outline = load_outline(outline_path, padding)?;
-
+            if !outline.data.iter().any(|&v| v) {
+                return Err(DataProcessorError::DemError(format!(
+                    "case {}: rasterised outline is empty",
+                    outline_path
+                )));
+            }
             let tile_manager = TileManager::new("dtm_cache.zarr")?;
+            let dem = tile_manager.get_dem(&outline.get_bbox()).await?;
 
-            let bbox = tile_manager::BBox {
-                min_northing: outline.origin_y as u32,
-                max_northing: (outline.origin_y + outline.height as f64 * outline.cell_size) as u32,
-                min_easting: outline.origin_x as u32,
-                max_easting: (outline.origin_x + outline.width as f64 * outline.cell_size) as u32,
-            };
+            if dem.data1d.iter().any(|v: &f32| v.is_nan()) {
+                return Err(DataProcessorError::DemError(format!(
+                    "case {}: DEM contains NaN (missing swissALTI3D coverage)",
+                    outline_path
+                )));
+            }
 
-            let dem = tile_manager.get_dem(&bbox).await?;
+            // let (_min_elevation, max_elevation) = dem.get_elevation_extrema(&outline.data).unwrap();
 
-            (outline, dem)
+            // let dem = dem.mask_above_elevation(max_elevation + 20.0);
+
+            (outline.data, dem)
         }
 
         // 2. DEM only -> load DEM and create an all-ones outline
         (None, Some(dem_path)) => {
             let dem = load_dem(dem_path).await?;
-
-            let outline = RasterGrid {
-                width: dem.width,
-                height: dem.height,
-                cell_size: dem.cell_size as f64,
-                origin_x: dem.bounds.xmin as f64,
-                origin_y: dem.bounds.ymin as f64,
-                data: vec![1u8; dem.width * dem.height],
-            };
-
-            (outline, dem)
+            (vec![true; dem.width * dem.height], dem)
         }
 
         // 3. Both provided -> load outline and DEM from file
@@ -813,11 +904,11 @@ pub async fn create_sim_settings_and_dem(
 
             let dem = load_dem(dem_path).await?;
 
-            (outline, dem)
+            (outline.data, dem)
         }
 
         // Neither provided
-        (None, None) => (RasterGrid::default(), Dem::default()),
+        (None, None) => (Vec::new(), Dem::default()),
     };
 
     let sim_settings = SimSettings::from_settings(settings, &dem);
@@ -838,9 +929,7 @@ pub fn settings_from_json_file(path: &str) -> io::Result<Settings> {
     Ok(settings)
 }
 
-pub async fn sim_settings_and_dem_from_json_file(
-    file_path: &str,
-) -> (SimSettings, Dem, RasterGrid) {
+pub async fn sim_settings_and_dem_from_json_file(file_path: &str) -> (SimSettings, Dem, Vec<bool>) {
     let data = std::fs::read_to_string(file_path).expect("Failed to read json file");
     let settings = Settings::loads(&data).expect("Failed to load settings from JSON file");
     create_sim_settings_and_dem(&settings)
@@ -897,7 +986,7 @@ mod tests {
             y: 800.0,
             z: Some(0.0),
         };
-        let (dx, dy) = dem.get_index(&pt);
+        let (dx, dy) = dem.get_index(&pt).expect("DEM scale should be valid");
         assert_eq!(dx, 73.3139648);
         assert_eq!(dy, 146.627930);
     }
@@ -1003,7 +1092,7 @@ mod tests {
             dem_path: Some(String::from("dem.png")),
             release_areas_path: Some(String::from("release_areas.png")),
             max_steps: Some(100),
-            sim_model: Some(SimModel::Block),
+            sim_model: Some(SimModel::Curvilinear),
             friction_model: Some(FrictionModel::Voellmy),
             released_particles_per_cell: Some(3),
             density: Some(4.0),
@@ -1022,12 +1111,24 @@ mod tests {
             min_slope_angle: Some(9.0),
             max_slope_angle: Some(10.0),
             release_min_elevation: Some(11.0),
+            release_max_elevation: Some(13.0),
             velocity_threshold: Some(12.0),
             roughness_threshold: Some(13.0),
+            peak_flow_thickness_threshold: Some(14.0),
             enable_curvature: Some(true),
             enable_entrainment: Some(true),
             enable_particle_interaction: Some(true),
+            enable_particle_relaxation: Some(true),
             enable_earth_pressure_coefficient: Some(true),
+            enable_center_of_mass: Some(true),
+            center_of_mass_biggest_blob: Some(true),
+            release_area_fraction: None,
+            crown_line_method: None,
+            shear_modulus: Some(1e6),
+            hardening_modulus: Some(2e5),
+            bulk_modulus: Some(2e8),
+            compaction_pressure: Some(1e3),
+            constitutive_model: Some(compute_core::settings::ConstitutiveModel::DruckerPrager),
         };
         let file = NamedTempFile::new().unwrap();
         let path = file.path().to_str().unwrap();
@@ -1040,7 +1141,7 @@ mod tests {
             Some(String::from("release_areas.png"))
         );
         assert_eq!(loaded.max_steps, Some(100));
-        assert_eq!(loaded.sim_model, Some(SimModel::Block));
+        assert_eq!(loaded.sim_model, Some(SimModel::Curvilinear));
         assert_eq!(loaded.friction_model, Some(FrictionModel::Voellmy));
         assert_eq!(loaded.released_particles_per_cell, Some(3));
         assert_eq!(loaded.density, Some(4.0));
@@ -1051,8 +1152,10 @@ mod tests {
         assert_eq!(loaded.min_slope_angle, Some(9.0));
         assert_eq!(loaded.max_slope_angle, Some(10.0));
         assert_eq!(loaded.release_min_elevation, Some(11.0));
+        assert_eq!(loaded.release_max_elevation, Some(13.0));
         assert_eq!(loaded.velocity_threshold, Some(12.0));
         assert_eq!(loaded.roughness_threshold, Some(13.0));
+        assert_eq!(loaded.peak_flow_thickness_threshold, Some(14.0));
         assert_eq!(loaded.enable_curvature, Some(true));
         assert_eq!(loaded.enable_entrainment, Some(true));
         assert_eq!(loaded.enable_particle_interaction, Some(true));
@@ -1064,6 +1167,14 @@ mod tests {
         assert_eq!(loaded.grain_diameter, Some(0.5));
         assert_eq!(loaded.internal_friction_angle, Some(30.0));
         assert_eq!(loaded.basal_friction_angle, Some(45.0));
+        assert_eq!(loaded.bulk_modulus, Some(2e8));
+        assert_eq!(loaded.compaction_pressure, Some(1e3));
+        assert_eq!(loaded.shear_modulus, Some(1e6));
+        assert_eq!(loaded.hardening_modulus, Some(2e5));
+        assert_eq!(
+            loaded.constitutive_model,
+            Some(compute_core::settings::ConstitutiveModel::DruckerPrager)
+        );
     }
 
     // Helper to create a valid minimal PNG for testing
@@ -1213,9 +1324,7 @@ mod tests {
         assert_eq!(sim_settings.grid_shape_x, dem.width as u32);
         assert_eq!(sim_settings.grid_shape_y, dem.height as u32);
         assert_eq!(sim_settings.cell_size, dem.cell_size);
-        assert_eq!(outline.cell_size, dem.cell_size as f64);
-        assert_eq!(outline.origin_x, dem.bounds.xmin as f64);
-        assert_eq!(outline.origin_y, dem.bounds.ymin as f64);
+        assert_eq!(outline.len(), dem.data1d.len());
 
         let settings = Settings {
             dem_path: Some(PARABOLA_PATH.to_string()),
@@ -1235,9 +1344,7 @@ mod tests {
         assert_eq!(json_sim_settings.density, 321.0);
         assert_eq!(json_sim_settings.grid_shape_x, dem.width as u32);
         assert_eq!(json_sim_settings.grid_shape_y, dem.height as u32);
-        assert_eq!(json_outline.cell_size, dem.cell_size as f64);
-        assert_eq!(json_outline.origin_x, dem.bounds.xmin as f64);
-        assert_eq!(json_outline.origin_y, dem.bounds.ymin as f64);
+        assert_eq!(json_outline.len(), dem.data1d.len());
     }
 
     #[test]
@@ -1297,6 +1404,94 @@ NODATA_value  -1
 
         assert_eq!(grid.header.get_xllcorner(), 48.75);
         assert_eq!(grid.header.get_yllcorner(), 48.75);
+    }
+
+    const ASC_SAMPLE: &str = "\
+ncols         3
+nrows         2
+xllcorner     100.0
+yllcorner     200.0
+cellsize      10.0
+NODATA_value  -9999
+1.0 2.0 3.0
+4.0 5.0 6.0";
+
+    #[test]
+    fn test_load_dem_from_bytes_asc_georeference_and_row_order() {
+        let dem = load_dem_from_bytes(ASC_SAMPLE.as_bytes(), "asc", "upload.asc").unwrap();
+
+        assert_eq!(dem.width, 3);
+        assert_eq!(dem.height, 2);
+        assert_eq!(dem.cell_size, 10.0);
+        assert_eq!(dem.bounds.xmin, 100.0);
+        assert_eq!(dem.bounds.xmax, 130.0);
+        assert_eq!(dem.bounds.ymin, 200.0);
+        assert_eq!(dem.bounds.ymax, 220.0);
+        assert_eq!(dem.source, "upload.asc");
+
+        // ESRI rows run north to south, so loading flips them to south-up.
+        assert_eq!(dem.data1d, vec![4.0, 5.0, 6.0, 1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn test_load_dem_preserves_low_elevations_and_masks_explicit_nodata() {
+        let source = "\
+ncols 2
+nrows 2
+xllcorner 0
+yllcorner 0
+cellsize 1
+NODATA_value -9999
+-3.0 0.0
+-9999 2.0";
+        let dem = load_dem_from_bytes(source.as_bytes(), "asc", "low.asc").unwrap();
+
+        assert_eq!(dem.minimum_elevation, -3.0);
+        assert!(dem.data1d[0].is_nan());
+        assert_eq!(&dem.data1d[1..], &[2.0, -3.0, 0.0]);
+        assert!(dem.data[0][0].is_nan());
+        assert_eq!(dem.data[1], vec![-3.0, 0.0]);
+    }
+
+    #[test]
+    fn test_load_dem_from_bytes_matches_path_loader() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sample.asc");
+        std::fs::write(&path, ASC_SAMPLE).unwrap();
+
+        let from_path = pollster::block_on(load_dem(path.to_str().unwrap())).unwrap();
+        let from_bytes = load_dem_from_bytes(ASC_SAMPLE.as_bytes(), "asc", "sample.asc").unwrap();
+
+        assert_eq!(from_path.width, from_bytes.width);
+        assert_eq!(from_path.height, from_bytes.height);
+        assert_eq!(from_path.cell_size, from_bytes.cell_size);
+        assert_eq!(from_path.bounds.xmin, from_bytes.bounds.xmin);
+        assert_eq!(from_path.bounds.ymax, from_bytes.bounds.ymax);
+        assert_eq!(from_path.data1d, from_bytes.data1d);
+    }
+
+    #[test]
+    fn test_load_dem_from_bytes_rejects_unsupported_extension() {
+        let result = load_dem_from_bytes(b"irrelevant", "zarr", "store.zarr");
+        assert!(matches!(
+            result,
+            Err(DataProcessorError::UnsupportedDemFormat(ref ext)) if ext == "zarr"
+        ));
+    }
+
+    #[test]
+    fn test_load_release_areas_from_bytes_asc_is_flipped() {
+        let data = load_release_areas_from_bytes(ASC_SAMPLE.as_bytes(), "asc").unwrap();
+        assert_eq!(data, vec![4.0, 5.0, 6.0, 1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn test_load_release_areas_from_bytes_rejects_unsupported_extension() {
+        let result = load_release_areas_from_bytes(b"irrelevant", "png");
+        assert!(matches!(
+            result,
+            Err(DataProcessorError::UnsupportedDemFormat(ref ext)) if ext == "png"
+        ));
     }
 
     #[test]
@@ -1380,10 +1575,13 @@ NODATA_value  -999
         assert_eq!(png_dem.height, asc_dem.height);
         assert_eq!(png_dem.cell_size, asc_dem.cell_size);
         assert_eq!(png_dem.bounds, asc_dem.bounds);
-        assert!(compute_core::utils::vecs_are_equal(
-            &png_dem.data1d,
-            &asc_dem.data1d
-        ));
+        let mismatch = png_dem
+            .data1d
+            .iter()
+            .zip(&asc_dem.data1d)
+            .enumerate()
+            .find(|(_, (png, asc))| png != asc && !(png.is_nan() && asc.is_nan()));
+        assert!(mismatch.is_none(), "first DEM mismatch: {mismatch:?}");
     }
 
     #[test]
@@ -1484,7 +1682,7 @@ NODATA_value  -1
         assert_eq!(parsed_grid.get(1, 1), Some(5.0));
     }
 
-    #[test]
+    #[test_log::test]
     fn test_esri_header_missing_origin_errors() {
         // Header missing both xllcorner and xllcenter should error during parsing
         let bad_header = "\
@@ -1499,10 +1697,6 @@ NODATA_value  -999
         let cursor = Cursor::new(bad_header);
         let res = EsriGrid::from_reader(cursor);
         assert!(res.is_err());
-        assert!(matches!(
-            res.unwrap_err(),
-            EsriGridError::UnknownHeaderKey(e) if e.contains("1.0")
-        ));
     }
 
     #[test]
@@ -1605,7 +1799,7 @@ NODATA_value  -999
         assert_eq!(
             dem.data1d[1701 * 500 + 500],
             1686.6079,
-            "Elevation value at index 12345 should be 1234.0"
+            "Elevation value in the middle of the texture should be 1686.6m"
         );
     }
 

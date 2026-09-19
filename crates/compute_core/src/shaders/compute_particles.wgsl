@@ -22,18 +22,24 @@ struct TimestepData {
 @group(0) @binding(2) var dem_texture: texture_2d<f32>;
 @group(0) @binding(3) var normals_texture: texture_2d<f32>;
 @group(0) @binding(4) var tex_sampler: sampler;
-@group(0) @binding(5) var<storage, read_write> particles: array<Particle>;
+@group(0) @binding(5) var<storage, read_write> particles_position: array<vec2<f32>>;
+@group(0) @binding(6) var<storage, read_write> particles_elevation: array<f32>;
+@group(0) @binding(7) var<storage, read_write> particles_velocity: array<vec2<f32>>;
+@group(0) @binding(8) var<storage, read_write> particles_velocity_z: array<f32>;
+@group(0) @binding(9) var<storage, read_write> particles_mass: array<f32>;
+@group(0) @binding(10) var<storage, read_write> particles_state: array<u32>;
 
-@group(0) @binding(6) var<storage, read_write> atomic_values: AtomicValues;
+@group(0) @binding(11) var<storage, read_write> atomic_values: AtomicValues;
 
-@group(0) @binding(7) var<storage, read_write> grid_cell_count_buffer: array<atomic<u32>>; // trajectory texture
-@group(0) @binding(8) var<storage, read_write> grid_peak_velocity_buffer: array<atomic<u32>>; // trajectory texture
-@group(0) @binding(9) var<storage, read_write> out_timestep_data: array<TimestepDataArray>; // trajectory data, fixed size 3
+@group(0) @binding(12) var<storage, read_write> grid_peak_velocity_buffer: array<atomic<u32>>; // trajectory texture
+@group(0) @binding(13) var<storage, read_write> out_timestep_data: array<TimestepDataArray>; // trajectory data, fixed size 3
 
-@group(0) @binding(10) var curvature_texture: texture_2d<f32>;
-@group(0) @binding(11) var<storage, read_write> out_debug: array<f32>;
-@group(0) @binding(12) var<storage, read_write> grid_mass_atomic: array<u32>;
-@group(0) @binding(13) var<storage, read> grad_h: array<vec2f>;
+@group(0) @binding(14) var curvature_texture: texture_2d<f32>;
+@group(0) @binding(15) var<storage, read_write> out_debug: array<f32>;
+@group(0) @binding(16) var<storage, read_write> grid_mass_atomic: array<u32>; // no_atomic_float
+// atomic_float @group(0) @binding(16) var<storage, read_write> grid_mass_atomic: array<f32>; // atomic_float
+@group(0) @binding(17) var<storage, read> grad_h: array<vec2f>;
+@group(0) @binding(18) var<storage, read> grid_velocity_buffer: array<vec2f>;
 // @group(0) @binding(11) var<storage, read_write> atomicBuffer: AtomicData;
 
 override WG_SIZE_1D: u32 = 1u;
@@ -48,31 +54,41 @@ fn compute_particles(
     if particleId >= sim_info.number_particles {
         return;
     }
-    if sim_info.flags >= SIM_INFO_STOPPED {
+    if (sim_info.flags & SIM_INFO_STOPPED) != 0u {
         return;
     }
-    var p = particles[particleId];
-    if p.stopped != 0u {
+    var state = particles_state[particleId];
+    if (state & PARTICLE_STOPPED) != 0u {
         return;
     }
-    let use_curvature: bool = (sim_settings.flags & (1u << 0u)) != 0u;
-    let use_particle_interaction: bool = (sim_settings.flags & (1u << 1u)) != 0u;
-    let use_earth_pressure_coefficient: bool = (sim_settings.flags & (1u << 2u)) != 0u;
-    let use_entrainment: bool = (sim_settings.flags & (1u << 3u)) != 0u;
-    let uv = position_to_uv(p.position);
+    let p = particles_position[particleId];
+    var position = vec3f(p.x, p.y, particles_elevation[particleId]);
+    let uv = position_to_uv(position.xy);
 
     let normal = get_normal(uv);
 
     if is_nan(normal.x) {
-        particles[particleId].stopped = 1000000000u + sim_info.timestep;
+        state = sim_info.timestep;
+        state |= PARTICLE_OUT_OF_DEM_DATA;
+        particles_state[particleId] = state;
         atomicAdd(&atomic_values.stopped_particles, 1u);
         sim_info.flags |= SIM_INFO_PARTICLE_OUT_OF_DEM_DATA;
         return;
     }
+
+    let use_curvature: bool = (sim_settings.flags & (1u << 0u)) != 0u;
+    let use_particle_interaction: bool = (sim_settings.flags & (1u << 1u)) != 0u;
+    let use_earth_pressure_coefficient: bool = (sim_settings.flags & (1u << 2u)) != 0u;
+    let use_entrainment: bool = (sim_settings.flags & (1u << 3u)) != 0u;
+
+    let mass = particles_mass[particleId];
+    let velocity_xy = particles_velocity[particleId];
+    let velocity_z = particles_velocity_z[particleId];
+    var velocity = vec3f(velocity_xy.x, velocity_xy.y, velocity_z);
     // --- project velocity onto tangent plane ---
-    p.velocity = p.velocity - dot(p.velocity, normal) * normal;
-    let v_prev = p.velocity;
-    let v = p.velocity;
+    velocity = velocity - dot(velocity, normal) * normal;
+    let v_prev = velocity;
+    let v = velocity;
 
     // --- compute driving accelerations ---
     const acceleration_gravity = vec3f(0.0, 0.0, -g);
@@ -81,94 +97,100 @@ fn compute_particles(
     // uKu, K curvature matrix
     var centrifugal_acceleration = 0f;
     if use_curvature {
-        centrifugal_acceleration = get_bed_curvature(p.position, p.velocity) * dot(p.velocity, p.velocity);
+        centrifugal_acceleration = get_bed_curvature(position, velocity) * dot(velocity, velocity);
     }
     let effective_acceleration_normal = max(0f, centrifugal_acceleration + length(acceleration_normal));
 
     // pressure acceleration, G2P step, TODO account for slope angle in P2G and G2P
-    var interpolated_f = vec2f(0.0);
+    var interpolated_grad_h = vec2f(0.0);
     var interpolated_h = 0.0;
 
-    let cell_pos = p.position / sim_settings.cell_size;
-    let base_node = get_base_node(cell_pos.xy);
+    let cell_pos = position.xy / sim_settings.cell_size;
+    let base_node = get_base_node(cell_pos);
 
     var accel_lateral = vec3f(0.0, 0.0, 0.0);
     if use_particle_interaction {
         var interpolated_mass = 0.0;
         let safe_normal_z = max(1e-3, normal.z);
-        for (var i = 0; i < 3; i++) {
-            for (var j = 0; j < 3; j++) {
-                let node_coords = base_node + vec2i(i, j);
-
-                if node_coords.x < 0 ||
-                node_coords.y < 0 ||
-                node_coords.x >= i32(sim_settings.grid_shape.x) ||
-                node_coords.y >= i32(sim_settings.grid_shape.y) {
-                    continue;
-                }
-
-                let weight = calculate_weight(cell_pos.xy, node_coords);
-
-                let node_idx = xy_to_idx(u32(node_coords.x), u32(node_coords.y));
-                interpolated_f += weight * grad_h[node_idx];
-                // interpolated_h += weight * f32(atomicLoad(&grid_mass_atomic[node_idx])) * INV_MASS_FACTOR / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size);
-
-                interpolated_mass += weight * f32(grid_mass_atomic[node_idx]) * INV_MASS_FACTOR;
+        let grid_pos = position.xy / sim_settings.cell_size - vec2f(0.5);
+        let base_node = vec2u(floor(grid_pos - vec2f(0.5)));
+        let inv_factor = 1 / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size) * safe_normal_z;
+        for (var i: u32 = 0; i < 3; i++) {
+            for (var j: u32 = 0; j < 3; j++) {
+                let node_coords = base_node + vec2u(i, j);
+                let distance = calculate_distance_to_node(grid_pos, node_coords);
+                let weight = calculate_weight(distance);
+                let node_idx = xy_to_idx(node_coords);
+                interpolated_grad_h += weight * grad_h[node_idx];
+                
+                interpolated_mass += weight * f32(grid_mass_atomic[node_idx]) * INV_MASS_FACTOR; // no_atomic_float
+                // atomic_float interpolated_h += weight * grid_mass_atomic[node_idx];
             }
         }
         interpolated_h = interpolated_mass / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size) * safe_normal_z;
+        accel_lateral = vec3f(interpolated_grad_h.x, interpolated_grad_h.y, (normal.x * interpolated_grad_h.x + normal.y * interpolated_grad_h.y) / safe_normal_z) * min(g*normal.z, effective_acceleration_normal);
+        // accel_lateral = vec3f(interpolated_grad_h.x, interpolated_grad_h.y, (normal.x * interpolated_grad_h.x + normal.y * interpolated_grad_h.y) / safe_normal_z);
 
-        accel_lateral = vec3f(interpolated_f.x, interpolated_f.y, (normal.x * interpolated_f.x + normal.y * interpolated_f.y) / safe_normal_z) * min(g*normal.z, effective_acceleration_normal);
-        // accel_lateral = vec3f(interpolated_f.x, interpolated_f.y, (normal.x * interpolated_f.x + normal.y * interpolated_f.y) / safe_normal_z);
 
-
-        // accel_lateral = force_local_to_world(interpolated_f, normal) * effective_acceleration_normal;
-        // accel_lateral = vec3interpolated_f * effective_acceleration_normal;
+        // accel_lateral = force_local_to_world(interpolated_grad_h, normal) * effective_acceleration_normal;
+        // accel_lateral = vec3interpolated_grad_h * effective_acceleration_normal;
         // accel_lateral = (accel_lateral - dot(accel_lateral, normal) * normal);
     }
     // var dt = sim_settings.cfl * sim_settings.cell_size / (sim_info.max_velocity + sim_settings.velocity_threshold);
     var dt = sim_info.dt;
 
     // --- update velocity with driving accelerations ---
-    p.velocity = p.velocity + (acceleration_tangential + accel_lateral) * dt;
+    velocity = velocity + (acceleration_tangential + accel_lateral) * dt;
+    let grid_velocity_buffer_value = grid_velocity_buffer[position_to_idx(position.xy)];
+    let visc_factor = 0.001 * (length(velocity) - length(grid_velocity_buffer_value));
+    // velocity = velocity * (1 - visc_factor);
+    velocity = 0.99 * velocity;
 
     // --- compute resisting accelerations ---
-    var acceleration_normal_friction_magnitude = acceleration_by_normal_friction(effective_acceleration_normal, p, interpolated_h);
-    let acceleration_drag_friction_magnitude = acceleration_by_drag_friction(effective_acceleration_normal, p, interpolated_h);
-    var acceleration_friction_magnitude = acceleration_drag_friction_magnitude + acceleration_normal_friction_magnitude;
+    // particle-equivalent flow depth: density * h_particle reproduces the
+    // particle's share of the local column mass per unit area
+    let h_particle = mass / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size)
+        * f32(sim_settings.released_particles_per_cell);
+    let velocity_magnitude = length(velocity);
+    let acceleration_friction_magnitude = basal_friction_acceleration(effective_acceleration_normal, sim_settings.snow_density, velocity_magnitude, h_particle, sim_settings.friction_model);
 
     // --- update velocity with resisting accelerations ---
-    let velocity_length = length(p.velocity);
+    let velocity_length = length(velocity);
     if velocity_length < acceleration_friction_magnitude * dt {
         dt = velocity_length / max(acceleration_friction_magnitude, 1e-6);
-        p.stopped = sim_info.timestep;
+        state = sim_info.timestep;
+        state |= PARTICLE_STOPPED;
     }
     if velocity_length > sim_settings.velocity_threshold {
-        p.velocity -= acceleration_friction_magnitude * (p.velocity / velocity_length) * dt;
+        velocity -= acceleration_friction_magnitude * (velocity / velocity_length) * dt;
     }
-
-    p.velocity = p.velocity * 0.99;
-    let speed = length(p.velocity);
+    let speed = length(velocity);
     let s = speed * dt;
-    let kappa = normal.z * get_bed_curvature(p.position, p.velocity);
+    let kappa = normal.z * get_bed_curvature(position, velocity);
     let tangent_scale = s - (kappa * kappa * s * s * s) / 6.0;
     let normal_scale = (kappa * s * s) / 2.0;
-    let p_star = p.position + (tangent_scale * normalize(p.velocity)) - (normal_scale * normal);
+    let p_star = position + (tangent_scale * normalize(velocity)) - (normal_scale * normal);
 
     // --- update position ---
-    var relative_trajectory = (p.velocity + v_prev) * 0.5 * dt;
-    var new_position = p.position + relative_trajectory;
-    var new_uv = position_to_uv(new_position);
-    new_position = p_star;
+    var relative_trajectory = (velocity + v_prev) * 0.5 * dt;
+    var new_position = p_star + relative_trajectory;
+    var new_uv = position_to_uv(new_position.xy);
+    // new_position = p_star;
     var elevation = get_elevation(new_uv);
-    p.position = new_position;
+    position = new_position;
     // TODO more sophisticated projection methods
-    p.position.z = elevation;
+    
+    let seed = 42u;
+    var rng_seed = pcg_hash((pId.x * 73856093u) ^
+    (pId.y * 19349663u) ^
+    seed);
+    // randomize the height within the interpolated_h range for viz
+    position.z = elevation + interpolated_h * rand1(&rng_seed)*1;
 
     if particleId == sim_info.number_particles / 2u {
         var current: TimestepData;
-        current.position = p.position;
-        current.velocity = p.velocity;
+        current.position = position;
+        current.velocity = velocity;
         current.dt = dt;
         current.acceleration_tangential = acceleration_tangential;
         current.acceleration_friction_magnitude = acceleration_friction_magnitude;
@@ -183,22 +205,23 @@ fn compute_particles(
     }
 
     // --- update output ---
-    let v_mag = length(p.velocity);
-    let converted_velocity = u32(MAX_VELOCITY_FACTOR * v_mag);
+    let v_mag = length(velocity);
 
-    if converted_velocity > atomicLoad(&atomic_values.peak_velocity) {
-        atomicMax(&atomic_values.peak_velocity, converted_velocity);
+    if is_finite(v_mag) && bitcast<u32>(v_mag) > atomicLoad(&atomic_values.peak_velocity) {
+        atomicMax(&atomic_values.peak_velocity, bitcast<u32>(v_mag));
     }
 
-    let cell_index = uv_to_cell_index(new_uv);
-    atomicAdd(&grid_cell_count_buffer[cell_index], 1u);
-    if converted_velocity > atomicLoad(&grid_peak_velocity_buffer[cell_index]) {
-        atomicMax(&grid_peak_velocity_buffer[cell_index], converted_velocity); // ensure that the velocity is not zero, this is needed for the next step
-    }
+    let cell_index = uv_to_idx(new_uv);
+    // atomicAdd(&grid_cell_count_buffer[cell_index], 1u);
+    // the host reads this buffer as f32, positive floats keep their ordering when bitcast to u32
+    if is_finite(v_mag) && bitcast<u32>(v_mag) > atomicLoad(&grid_peak_velocity_buffer[cell_index]) {
+            atomicMax(&grid_peak_velocity_buffer[cell_index], bitcast<u32>(v_mag)); 
+        }
+   
     if particleId == sim_info.number_particles / 2u {
         // atomicMax(&atomicBuffer.counter, step_count);
-        out_debug[0] = f32(p.position.x);
-        out_debug[1] = f32(p.position.y);
+        out_debug[0] = f32(position.x);
+        out_debug[1] = f32(position.y);
         out_debug[2] = f32(new_uv.x);
         out_debug[3] = f32(new_uv.y);
         out_debug[5] = f32(sim_info.timestep);
@@ -209,49 +232,62 @@ fn compute_particles(
         out_debug[10] = f32(sim_settings.world_size.x);
         out_debug[11] = f32(sim_settings.world_size.y);
         out_debug[12] = f32(sim_settings.friction_coefficient);
-        out_debug[13] = (f32(atomicLoad(&atomic_values.peak_flow_thickness)) * INV_H_FACTOR);
+        out_debug[13] = bitcast<f32>(atomicLoad(&atomic_values.peak_flow_thickness));
         out_debug[14] = f32(uv_to_cell(new_uv).x);
         out_debug[15] = f32(uv_to_cell(new_uv).y);
-        out_debug[16] = f32(uv_to_cell_index(new_uv));
+        out_debug[16] = f32(uv_to_idx(new_uv));
     }
 
-    if is_nan(p.position.x) {
-        particles[particleId].stopped = 1100000000u + sim_info.timestep;
+    if is_nan(position.x) {
+        state = sim_info.timestep;
+        state |= PARTICLE_STOPPED;
+        state |= PARTICLE_IS_NAN;
+        position.z = elevation;
+        particles_state[particleId] = state;
         atomicAdd(&atomic_values.stopped_particles, 1u);
         sim_info.flags |= SIM_INFO_IS_NAN;
         sim_info.flags |= SIM_INFO_PARTICLE_OUT_OF_DEM_DATA;
         return;
     }
-    if is_nan(p.velocity.x) {
-        particles[particleId].stopped = 1200000000u + sim_info.timestep;
+    if is_nan(velocity.x) {
+        state = sim_info.timestep;
+        state |= PARTICLE_STOPPED;
+        state |= PARTICLE_IS_NAN;
+        position.z = elevation;
+        particles_state[particleId] = state;
         atomicAdd(&atomic_values.stopped_particles, 1u);
         sim_info.flags |= SIM_INFO_IS_NAN;
         return;
     }
 
     // stop criterion friction
-    if p.stopped != 0u || length(p.velocity) < sim_settings.velocity_threshold {
-        p.stopped = sim_info.timestep;
+    if (state & PARTICLE_STOPPED) != 0u || length(velocity) < sim_settings.velocity_threshold {
+        state = sim_info.timestep;
+        state |= PARTICLE_STOPPED;
+        position.z = elevation;
         atomicAdd(&atomic_values.stopped_particles, 1u);
-        particles[particleId] = p;
+        update_particle(particleId, position, velocity, state);
         return;
     }
-    // we leave one cell boundary
-    if p.position.x < 1.1 * sim_settings.cell_size 
-        || p.position.x > sim_settings.world_size.x - 1.1 * sim_settings.cell_size
-        || p.position.y < 1.1 * sim_settings.cell_size 
-        || p.position.y > sim_settings.world_size.y - 1.1 * sim_settings.cell_size {//|| elevation < sim_info.elevation_threshold {
-        p.stopped = sim_info.timestep;
+    // we leave two cells boundary
+    if position.x < 2.1 * sim_settings.cell_size 
+        || position.x > sim_settings.world_size.x - 2.1 * sim_settings.cell_size
+        || position.y < 2.1 * sim_settings.cell_size 
+        || position.y > sim_settings.world_size.y - 2.1 * sim_settings.cell_size {//|| elevation < sim_info.elevation_threshold {
+        state = sim_info.timestep;
+        state |= PARTICLE_STOPPED;
+        state |= PARTICLE_OUT_OF_BOUNDS;
+        position.z = elevation;
         atomicAdd(&atomic_values.stopped_particles, 1u);
-        particles[particleId] = p;
+        update_particle(particleId, position, velocity, state);
         sim_info.flags |= SIM_INFO_OUT_OF_BOUNDS;
         return;
     }
-    particles[particleId] = p;
+    update_particle(particleId, position, velocity, state);
 }
 
 fn get_bed_curvature(position: vec3f, velocity: vec3f) -> f32 {
-    let uv = position_to_uv(position);
+    let uv = position_to_uv(position.xy);
     let K = textureSampleLevel(curvature_texture, tex_sampler, uv, 0.0).rgb;
 
     let Kxx = K.r;
@@ -284,40 +320,74 @@ fn force_local_to_world(
          + 0f * normal;
 }
 
-fn is_nan(x: f32) -> bool {
-    // https://marktension.nl/blog/detecting-nans-on-webgpu/
-    // if one operand is a NaN, the other is returned.
-    let highVal = 1e38;
-    let x2 = min(x, highVal);
-    return x2 == highVal;
+fn update_particle(particleId: u32, position: vec3f, velocity: vec3f, state: u32) {
+    particles_position[particleId] = position.xy;
+    particles_elevation[particleId] = position.z;
+    particles_velocity[particleId] = velocity.xy;
+    particles_velocity_z[particleId] = velocity.z;
+    particles_state[particleId] = state;
+    // mass is constant for now
+    // particles_mass[particleId] = mass; 
 }
 
 fn update_output_data(trajectory: u32, timestep: u32, timestep_data: TimestepData) {
     out_timestep_data[timestep].trajectories[trajectory] = timestep_data;
 }
 
-fn acceleration_by_normal_friction(effective_acceleration_normal: f32, particle: Particle, h: f32) -> f32 {
-    let mass_per_area = particle.mass / (sim_settings.cell_size * sim_settings.cell_size) * f32(sim_settings.released_particles_per_cell);
-    let velocity_magnitude = length(particle.velocity);
+const TEXTURE_GATHER_OFFSET = 1.0f / 512.0f;
+// Samples height texture with bilinear filtering.
+fn get_elevation(uv: vec2f) -> f32 {
+    return textureSampleLevel(dem_texture, tex_sampler, uv, 0).x;
+}
+
+fn get_normal(uv: vec2f) -> vec3f {
+    return normalize(textureSampleLevel(normals_texture, tex_sampler, uv, 0).xyz);
+}
+
+fn get_curvature(uv: vec2f) -> vec3f {
+    return textureSampleLevel(curvature_texture, tex_sampler, uv, 0).xyz;
+}
+
+// import friction.wgsl;
+// BEGIN friction.wgsl
+// Shared basal friction models.
+// Pure library module: it is textually imported and relies on the importing
+// module providing the utils.wgsl symbols (sim_settings, g).
+// Returns a deceleration magnitude (m/s^2) acting against the flow direction,
+// given the effective bed-normal acceleration g_eff (m/s^2), the flow density
+// (kg/m^3), the proposed flow speed (m/s) and the flow depth h (m).
+// model: 0 coulomb, 1 voellmy, 2 voellmy minshear, 3 samosAT,
+// 4 voellmy with cohesion (stub), 5 mu(I)
+fn basal_friction_acceleration(g_eff: f32, density: f32, proposed_speed: f32, h: f32, model: u32) -> f32 {
+
     let model = sim_settings.friction_model;
-    if velocity_magnitude < sim_settings.velocity_threshold || model >= 6u {
-        return 0.0f;
+    if proposed_speed < sim_settings.velocity_threshold || model >= 6u {
+        return 0.0;
     }
-    // standard 0.155, samos: standard 0.155, small 0.22, medium 0.17
+    // normal stress is a magnitude: some callers (curvilinear) pass the
+    // bed-normal acceleration with a negative sign convention
+    let g_eff_magnitude = abs(g_eff);
+
+    let mass_per_area = density * max(h, 1e-3);
+    let normal_stress = g_eff_magnitude * mass_per_area;
     let friction_coefficient = sim_settings.friction_coefficient;
-    let normal_stress = effective_acceleration_normal * mass_per_area;
-    const min_shear_stress = 70f;
-    var shear_stress = 0.0f;
-    //actually: friction model: 0 coulomb, 1 voellmy, 2 voellmy minshear, 3 samosAt, 4 voellmy with cohesion
+    var shear_stress = 0.0;
     // Coulomb friction model
     if model == 0u || model == 1u || model == 2u {
         shear_stress = friction_coefficient * normal_stress;
     }
-    // samosAT friction model
-    else if model == 3 {
+    // samosAT friction model: Coulomb-like shear term with a density/speed
+    // dependent correction plus a runup-limited turbulent drag term
+    else if model == 3u {
         let rs0 = 0.222;
-        let rs = sim_settings.snow_density * velocity_magnitude * velocity_magnitude / (normal_stress + 0.001);
+        let rs = density * proposed_speed * proposed_speed / (normal_stress + 0.001);
         shear_stress = normal_stress * friction_coefficient * (1.0 + rs0 / (rs0 + rs));
+        let kappa_inv = 2.32558; // 1/kappa, standard kappa = 0.43
+        let r_inv = 20.0; // 1/r, standard r = 0.05
+        let b = 4.13;
+        var div = max(h * r_inv, 1.0);
+        div = log(div) * kappa_inv + b;
+        shear_stress = shear_stress + density * proposed_speed * proposed_speed / (div * div);
     }
     // check https://ramms.ch/ramms-avalanche/friction-parameters/
     else if model == 4u {
@@ -330,67 +400,55 @@ fn acceleration_by_normal_friction(effective_acceleration_normal: f32, particle:
         let i0 = sim_settings.i0;
         let mu0 = sim_settings.mu0;
         let mu2 = sim_settings.mu2;
-        let inertial_number = 2.5 * sqrt(velocity_magnitude) / h * grain_diameter / sqrt(max(length(effective_acceleration_normal), 1e-6) * h);
-        let muI = mu0 + (mu2 - mu0) / (i0 / inertial_number + 1.0);
-        shear_stress = muI * normal_stress;
+        let inertial_number = 2.5 * sqrt(proposed_speed) / h * grain_diameter / sqrt(max(g_eff_magnitude, 1e-6) * h);
+        let mu_i = mu0 + (mu2 - mu0) / (i0 / inertial_number + 1.0);
+        shear_stress = mu_i * normal_stress;
     }
-    let acceleration_magnitude = shear_stress / max(mass_per_area, 1e-6);
-    return acceleration_magnitude;
+
+    // Voellmy-style turbulent drag contribution
+    if model == 1u || model == 2u {
+        shear_stress = shear_stress + density * proposed_speed * proposed_speed * g / sim_settings.drag_coefficient;
+    }
+    // Voellmy min shear: a constant basal shear independent of load
+    if model == 2u {
+        shear_stress = shear_stress + 70.0;
+    }
+
+    return shear_stress / max(mass_per_area, 1e-6);
 }
 
-fn acceleration_by_drag_friction(effective_acceleration_normal: f32, particle: Particle, h: f32) -> f32 {
-    let model = sim_settings.friction_model;
-    if model == 0u || model >= 4u {
-        return 0.0f;
-    }
-    let velocity_magnitude2 = dot(particle.velocity, particle.velocity);
-    if velocity_magnitude2 < 1e-8 {
-        return 0.0f;
-    }
-    let mass_per_area = particle.mass / (sim_settings.cell_size * sim_settings.cell_size) * f32(sim_settings.released_particles_per_cell);
-    var shear_stress = 0.0f;
-    let density_velocity_magnitude2 = sim_settings.snow_density * velocity_magnitude2;
-    // friction model: 0 coulomb, 1 voellmy, 2 voellmy minshear, 3 samosAt
-    // Voellmy friction model
-    if model == 1u {
-        shear_stress = density_velocity_magnitude2 * g / sim_settings.drag_coefficient;
-    }
-    // Voellmy min shear friction model
-    else if model == 2u {
-        const min_shear_stress = 70f;
-        shear_stress = min_shear_stress + density_velocity_magnitude2 * g / sim_settings.drag_coefficient;
-    }
-    // samosAT friction model
-    else if model == 3u {
-        let min_shear_stress_samosat = 0f;
-        let rs0 = 0.222;
-        let kappa_inv = 2.32558; // 1/kappa, standard kappa = 0.43
-        let r_inv = 20.0; // 1/r, standard r = 0.05
-        let b = 4.13;
-        let normal_stress = effective_acceleration_normal * mass_per_area;
-        let rs = density_velocity_magnitude2 / (normal_stress + 0.001);
-        var div = max(h * r_inv, 1.0);
-        div = log(div) * kappa_inv + b;
-        shear_stress = min_shear_stress_samosat + density_velocity_magnitude2 / (div * div);
-    }
-    let acceleration_magnitude = shear_stress / mass_per_area;
-    return acceleration_magnitude;
+// END friction.wgsl
+// import random.wgsl;
+// BEGIN random.wgsl
+// A high-quality 32-bit hash (PCG)
+fn pcg_hash(input: u32) -> u32 {
+    var state = input * 747796405u + 2891336453u;
+    var word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
 }
 
-const TEXTURE_GATHER_OFFSET = 1.0f / 512.0f;
-// Samples height texture with bilinear filtering.
-fn get_elevation(uv: vec2f) -> f32 {
-    // TODO: fix interpolation at the edges of the texture
-    return textureSampleLevel(dem_texture, tex_sampler, uv, 0).x;
+// Advances the seed and returns a float 0.0 -> 1.0
+fn next_rand(seed: ptr<function, u32>) -> f32 {
+    *seed = pcg_hash(*seed);
+    return f32(*seed) / f32(0xffffffffu);
 }
 
-fn get_normal(uv: vec2f) -> vec3f {
-    return normalize(textureSampleLevel(normals_texture, tex_sampler, uv, 0).xyz);
+fn rand1(seed: ptr<function, u32>) -> f32 {
+    return next_rand(seed);
 }
 
-fn get_curvature(uv: vec2f) -> vec3f {
-    return textureSampleLevel(curvature_texture, tex_sampler, uv, 0).xyz;
+fn rand2(seed: ptr<function, u32>) -> vec2f {
+    return vec2f(next_rand(seed), next_rand(seed));
 }
+
+fn rand3(seed: ptr<function, u32>) -> vec3f {
+    return vec3f(next_rand(seed), next_rand(seed), next_rand(seed));
+}
+
+fn rand4(seed: ptr<function, u32>) -> vec4f {
+    return vec4f(next_rand(seed), next_rand(seed), next_rand(seed), next_rand(seed));
+}
+// END random.wgsl
 
 // import utils.wgsl;
 // BEGIN utils.wgsl
@@ -402,26 +460,23 @@ const g: f32 = 9.81;
 const MAX_VELOCITY_FACTOR: f32 = 1e7; // u32 limit is 430 m/s
 const MASS_FACTOR: f32 = 1e1; // u32 limit is 4.3t thickness
 const H_FACTOR: f32 = 1e6;
-const MOMENTUM_FACTOR: f32 = 1e2; 
+// Momentum is quantized per particle->node contribution before atomicAdd, so
+// MOMENTUM_FACTOR sets the velocity resolution of that contribution:
+// the smallest non-zero contribution is v = 1 / (particle_mass * weight * MOMENTUM_FACTOR).
+// It must stay far below the slow hydrostatic spreading velocities (~0.01-0.1 m/s)
+// or p2g rounds them to zero every step and the flow never spreads laterally.
+// i32 budget: node sum = node_mass * v_max * MOMENTUM_FACTOR
+//   (rho*cell^2*h*J ~ 6e4 kg * 40 m/s * 1e2 = 2.4e8 < 2.1e9)
+const MOMENTUM_FACTOR: f32 = 1e2;
 const INV_MAX_VELOCITY_FACTOR: f32 = 1 / MAX_VELOCITY_FACTOR; // u32 limit is 430 m/s
 const INV_MASS_FACTOR: f32 = 1 / MASS_FACTOR; // u32 limit is 4.3km thickness
-const INV_H_FACTOR: f32 = 1 / H_FACTOR; 
+const INV_H_FACTOR: f32 = 1 / H_FACTOR;
 const INV_MOMENTUM_FACTOR: f32 = 1 / MOMENTUM_FACTOR;
+// depth-integrated internal force (h * sigma * grad_w * area, ~1e4..1e5 N per node contribution)
+const FORCE_FACTOR: f32 = 1e-3; // i32 limit is 2.1e6 N per node
+const INV_FORCE_FACTOR: f32 = 1 / FORCE_FACTOR;
 
 // TODO precompute often used values on the cpu and pass them as uniforms to avoid redundant calculations on the gpu
-
-struct Particle {
-    position: vec3f,
-    mass: f32,
-    velocity: vec3f,
-    stopped: u32,
-    travel_length: f32,
-};
-
-struct ParticleAlpha {
-    alpha: f32,
-    start_elevation: f32,
-};
 
 struct SimInfo {
     timestep: u32,
@@ -441,6 +496,12 @@ const SIM_INFO_PARTICLE_OUT_OF_DEM_DATA: u32 = 1u << 3u;
 const SIM_INFO_STOPPED: u32 = 1u << 31u;
 const SIM_INFO_ALL_PARTICLES_STOPPED: u32 = 1u << 30u;
 const SIM_INFO_NO_NEW_CELLS: u32 = 1u << 29u;
+
+const PARTICLE_FLYING: u32 = 1u << 27u;
+const PARTICLE_OUT_OF_BOUNDS: u32 = 1u << 28u;
+const PARTICLE_IS_NAN: u32 = 1u << 29u;
+const PARTICLE_OUT_OF_DEM_DATA: u32 = 1u << 30u;
+const PARTICLE_STOPPED: u32 = 1u << 31u;
 
 struct SimSettings {
     num_steps: u32,
@@ -468,12 +529,21 @@ struct SimSettings {
     velocity_threshold: f32,
     roughness_threshold: f32,
     flags: u32,
+    release_max_elevation: f32,
+    peak_flow_thickness_threshold: f32,
+    // MPMDAC constitutive model (must mirror the Rust POD layout)
+    constitutive_model: u32,
+    shear_modulus: f32,
+    hardening_modulus: f32,
+    // MPMDAC compressibility; bulk_modulus 0 = incompressible
+    bulk_modulus: f32,
+    compaction_pressure: f32,
 };
 
 struct AtomicValues {
     peak_velocity: atomic<u32>,
     peak_flow_thickness: atomic<u32>,
-    alpha: atomic<u32>,
+    expected_max_velocity: atomic<u32>,
     travel_length: atomic<u32>,
     release_volume: atomic<u32>,
     number_release_cells: atomic<u32>,
@@ -481,7 +551,27 @@ struct AtomicValues {
     stopped_particles: atomic<u32>,
 };
 
+struct G2PUpdate {
+    velocity: vec2f,
+    affine_matrix: mat2x2<f32>,
+};
+
 @group(0) @binding(0) var<uniform> sim_settings: SimSettings;
+
+fn is_nan(x: f32) -> bool {
+    let bits: u32 = bitcast<u32>(x);
+    return (bits & 0x7F800000u) == 0x7F800000u
+          && (bits & 0x007FFFFFu) != 0u;
+}
+
+fn is_inf(x: f32) -> bool {
+    let bits: u32 = bitcast<u32>(x);
+    return (bits == 0x7F800000u || bits == 0xFF800000u);
+}
+
+fn is_finite(x: f32) -> bool {
+    return !is_nan(x) && !is_inf(x);
+}
 
 fn cell_to_uv(cell: vec2u) -> vec2f {
     return (vec2f(cell) + 0.5) / vec2f(sim_settings.grid_shape);
@@ -493,7 +583,11 @@ fn cellf_to_uv(cell: vec2f) -> vec2f {
     return (cell + 0.5) / vec2f(sim_settings.grid_shape);
 }
 
-fn position_to_cell(position: vec3f) -> vec2u {
+fn position3_to_cell(position: vec3f) -> vec2u {
+    return position_to_cell(position.xy);
+}
+
+fn position_to_cell(position: vec2f) -> vec2u {
     return vec2u(
         floor(position.xy / sim_settings.cell_size)
     );
@@ -503,28 +597,42 @@ fn cell_center_xy(cell: vec2u) -> vec2f {
     return (vec2f(cell) + 0.5) * sim_settings.cell_size;
 }
 
-fn position_to_uv(position: vec3f) -> vec2f {
-    return (position.xy + 0.5 * sim_settings.cell_size) / (vec2f(sim_settings.world_size)); // add some padding to ensure particles outside the world bounds are still captured in the simulation info
+fn position_to_uv(position: vec2f) -> vec2f {
+    return (position.xy) / (vec2f(sim_settings.world_size)); // add some padding to ensure particles outside the world bounds are still captured in the simulation info
 }
 
-fn position_to_cell_index(position: vec3f) -> u32 {
+fn position_to_idx(position: vec2f) -> u32 {
     let uv = position_to_uv(position);
-    return uv_to_cell_index(uv);
+    return uv_to_idx(uv);
 }
 
 fn uv_to_cell(uv: vec2f) -> vec2u {
-    return vec2u(clamp(uv * vec2f(sim_settings.grid_shape), vec2f(0.0), vec2f(sim_settings.grid_shape - 1u)));
+    let epsilon = 1e-5f; // A tiny offset to counteract negative rounding bias
+    let scaled_uv = uv * vec2f(sim_settings.grid_shape) + epsilon;
+    let max_bound = vec2f(sim_settings.grid_shape - 1u);
+
+    return vec2u(clamp(scaled_uv, vec2f(0.0), max_bound));
 }
 
-fn uv_to_cell_index(uv: vec2f) -> u32 {
+fn uv_to_idx(uv: vec2f) -> u32 {
     let cell = uv_to_cell(uv);
     // return cell.x * sim_settings.grid_shape.y + cell.y;
     return (cell.y % sim_settings.grid_shape.y * sim_settings.grid_shape.x +
               (cell.x % sim_settings.grid_shape.x));
 }
 
-fn xy_to_idx(x: u32, y: u32) -> u32 {
+fn x_y_to_idx(x: u32, y: u32) -> u32 {
     return y * sim_settings.grid_shape.x + x;
+}
+
+fn xy_to_idx(xy: vec2<u32>) -> u32 {
+    return xy.y * sim_settings.grid_shape.x + xy.x;
+}
+
+fn idx_to_xy(idx: u32) -> vec2<u32> {
+    let x = idx % sim_settings.grid_shape.x;
+    let y = idx / sim_settings.grid_shape.x;
+    return vec2u(x, y);
 }
 
 fn quadratic_weight(d: f32) -> f32 {
@@ -537,13 +645,43 @@ fn quadratic_weight(d: f32) -> f32 {
     return 0.0;
 }
 
-fn calculate_weight(particle_position: vec2f, node_position: vec2i) -> f32 {
-    let dist = particle_position - vec2f(node_position);
-    return quadratic_weight(dist.x) * quadratic_weight(dist.y);
+fn calculate_weight(distance: vec2f) -> f32 {
+    return quadratic_weight(distance.x) * quadratic_weight(distance.y);
 }
 
-fn get_base_node(grid_pos: vec2f) -> vec2i {
-    return vec2i(floor(grid_pos - vec2f(0.5)));
+// derivative of quadratic_weight with respect to its (cell-unit) argument
+fn quadratic_weight_gradient(d: f32) -> f32 {
+    let abs_d = abs(d);
+    if abs_d < 0.5 {
+        return -2.0 * d;
+    } else if abs_d < 1.5 {
+        return -sign(d) * (1.5 - abs_d);
+    }
+    return 0.0;
+}
+
+// physical gradient of the 2D B-spline weight, in 1/m
+fn calculate_weight_gradient(distance: vec2f) -> vec2f {
+    return vec2f(
+        quadratic_weight_gradient(distance.x) * quadratic_weight(distance.y),
+        quadratic_weight(distance.x) * quadratic_weight_gradient(distance.y)
+    ) / sim_settings.cell_size;
+}
+
+fn determinant_2x2(m: mat2x2<f32>) -> f32 {
+    return m[0][0] * m[1][1] - m[0][1] * m[1][0];
+}
+
+fn identity_2x2() -> mat2x2<f32> {
+    return mat2x2<f32>(vec2f(1.0, 0.0), vec2f(0.0, 1.0));
+}
+
+fn calculate_distance_to_node(particle_position: vec2f, node_position: vec2u) -> vec2f {
+    return particle_position - vec2f(node_position);
+}
+
+fn get_base_node(grid_pos: vec2f) -> vec2u {
+    return vec2u(floor(grid_pos - vec2f(0.5)));
 }
 
 fn compute_centroid(points: ptr<function, array<vec2<f32>, 256>>, count: u32) -> vec2<f32> {

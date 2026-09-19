@@ -44,8 +44,7 @@ def plot3d(
     sim,
     parameter,
     particles=False,
-    threshold_value=1e-2,
-    particle_threshold=0,
+    threshold_value=1e-3,
     blur_passes=0,
 ):
     try:
@@ -60,18 +59,7 @@ def plot3d(
 
     data[dem_mask] = np.nan
     data[data < threshold_value] = np.nan
-    if particle_threshold > 0:
-        data[sim.cell_count < particle_threshold * sim.released_particles_per_cell] = (
-            np.nan
-        )
-    # data[sim.peak_flow_thickness < 1.5 / sim.released_particles_per_cell/2] = np.nan
 
-    if parameter == "cell_count":
-        data = np.log10(data)
-    # if parameter == "peak_velocity":
-    #     data[sim.peak_velocity < 1] = np.nan
-    # if parameter == "peak_flow_thickness":
-    #     data[sim.peak_flow_thickness < 0.5] = np.nan
 
     if blur_passes > 0:
         data = blur_nan_grid(data, passes=blur_passes)
@@ -102,7 +90,8 @@ def plot3d(
     )
     if particles:
         # add particles
-        positions = sim.positions.copy()
+        
+        positions = sim.particles_position.copy()
         positions[:, 2] *= 1.3
         poly = pv.PolyData(positions)
         plotter.add_mesh(
@@ -119,19 +108,44 @@ def plot3d(
 
 def plot_dem(sim, ax, dark=True):
     import_plt()
-    xx, yy, dem, dem_mask = create_mesh(sim)
-    cmap_contours = "Greys_r" if dark else "Greys"
-    color_lines = "white" if dark else "black"
-    levels_dem = np.arange(0, 4000, 200)
-    ax.set_aspect("equal")
-    ax.contourf(xx, yy, dem, levels=levels_dem, cmap=cmap_contours)
-    CS = ax.contour(xx, yy, dem, levels=levels_dem, linewidths=0.5, colors=color_lines)
-    ax.clabel(CS, fontsize=10)
+    xx, yy, dem, dem_mask = create_mesh(sim)    
+    ls = LightSource(azdeg=315, altdeg=45)
+
+    ax.imshow(
+        ls.hillshade(dem),
+        cmap="gray",
+        alpha=0.5,
+        vmin=0,
+        vmax=1,
+        extent=[xx.min(), xx.max(), yy.max(), yy.min()],
+        origin="upper",
+    )
+    ax.contour(
+        xx, yy, 
+        dem,
+        levels=np.arange(0, 5000, 100),
+        colors="grey",
+        linewidths=0.8,
+        alpha=0.65,
+    )
+    # ax.clabel(cs100, inline=True, fontsize=14, fmt="%d m", use_clabeltext=True)
+
+    # Major contours
+    cs = ax.contour(
+        xx, yy, 
+        dem,
+        levels=np.arange(0, 5000, 500),
+        colors="black",
+        linewidths=0.8,
+        alpha=0.65,
+    )
+    ax.clabel(cs, inline=True, fontsize=14, fmt="%d m", use_clabeltext=True)
+    ax.invert_yaxis()
     return xx, yy, dem, dem_mask
 
 
 def import_plt():
-    global plt, make_axes_locatable, ListedColormap, mpltPath
+    global plt, make_axes_locatable, ListedColormap, mpltPath, LightSource
     try:
         import matplotlib.path as _mpltPath
         import matplotlib.pyplot as _plt
@@ -141,6 +155,7 @@ def import_plt():
         plt = _plt
         make_axes_locatable = _make_axes_locatable
         ListedColormap = importlib.import_module("matplotlib.colors").ListedColormap
+        LightSource = importlib.import_module("matplotlib.colors").LightSource
         mpltPath = _mpltPath
     except ImportError:
         raise ImportError(
@@ -148,68 +163,57 @@ def import_plt():
             "Install it using: pip install 'avalanchers[viz]'"
         )
 
-
-def plot2d(
-    sim,
-    parameter,
-    title="Avalanche Simulation",
-    threshold_value=1e-2,
-    particle_threshold=0,
-):
+def plot2d(sim, parameter, title="Avalanche Simulation", threshold_value=1e-3, particles=False, roi=False): 
     import_plt()
     fig, ax = plt.subplots(figsize=(10, 8))
-    ax, surf = ax2d(ax, sim, parameter, title, threshold_value, particle_threshold)
+    ax, surf, x, y = ax2d(ax, sim, parameter, title, threshold_value)
     divider = make_axes_locatable(ax)
     cax = divider.append_axes("right", size="5%", pad=0.1)
     cbar = fig.colorbar(surf, ax=ax, cax=cax)
     cbar.set_label(parameter.replace("_", " ").title())
-    if not is_jupyter():
+    if particles:
+        positions = sim.particles_position.copy()
+        velocities = sim.particles_velocity.copy()
+        speed = np.linalg.norm(velocities, axis=1)
+        mask = speed > 0
+        ax.scatter(positions[mask, 0], positions[mask, 1], c=speed[mask], s=2, alpha=0.7, cmap='Blues')
+    if roi:
+        ax.contour(x, y, sim.roi, levels=[0.99], colors='red')
+        ax.legend(
+            handles=[
+                plt.Line2D([0], [0], color="cyan", lw=2, label="Release Areas"),
+                plt.Line2D([0], [0], color="red", lw=2, label="Mapped Outline")
+            ]
+        )
+    if not is_jupyter():    
         plt.show()
-    return fig, ax
+    return fig, ax, x, y
 
-
-def ax2d(
-    ax,
-    sim,
-    parameter,
-    title="Avalanche Simulation",
-    threshold_value=1e-3,
-    particle_threshold=0,
-):
+def ax2d(ax, sim, parameter, title="Avalanche Simulation", threshold_value=1e-3):
     import_plt()
     data = getattr(sim, parameter).astype(np.float32)
     ax.set_aspect("equal")
     x, y, _, dem_mask = plot_dem(sim, ax, dark=False)
     data[dem_mask] = np.nan
     data[data < threshold_value] = np.nan
-    if sim.state == "Finished":
-        # Mask based on particle count threshold
-        data[sim.cell_count < particle_threshold * sim.released_particles_per_cell] = (
-            np.nan
-        )
-    surf = ax.contourf(x, y, data, cmap="magma")
-    ax.contour(
-        x,
-        y,
-        sim.release_areas.astype(np.float32),
-        colors="cyan",
-        linewidths=1,
-        alpha=0.3,
+    surf = ax.contourf(x, y, data, cmap='magma')
+    ax.contour(x, y, sim.release_areas.astype(np.float32), colors='cyan', linewidths=1, alpha=0.3)
+    ax.legend(
+        handles=[plt.Line2D([0], [0], color="cyan", lw=1, alpha=0.8, label="Release Areas")],
     )
     ax.set(title=title)
-    return ax, surf
+    return ax, surf, x, y
 
-
-def plot_overview(sim, threshold_value=1e-3, particle_threshold=0):
+def plot_overview(sim, threshold_value=1e-3):
     # Setup parameters, titles, and distinct colormaps
-    params = ["peak_velocity", "peak_flow_thickness", "cell_count"]
-    colormaps = ["magma", "viridis", "plasma"]
-
+    params = ['peak_velocity', 'peak_flow_thickness']
+    colormaps = ['magma', 'viridis']
+    
     import_plt()
 
     # Create a figure with 3 subplots
-    fig, axes = plt.subplots(1, 3, figsize=(22, 7))
-
+    fig, axes = plt.subplots(1, 2, figsize=(15, 7))
+    
     for i, (param, cmap) in enumerate(zip(params, colormaps)):
         ax = axes[i]
         ax.set_aspect("equal")
@@ -223,15 +227,10 @@ def plot_overview(sim, threshold_value=1e-3, particle_threshold=0):
 
         # Apply thresholds
         data[data < threshold_value] = np.nan
-        if sim.state == "Finished":
-            # Mask based on particle count threshold
-            data[
-                sim.cell_count < particle_threshold * sim.released_particles_per_cell
-            ] = np.nan
-
+            
         if param == "cell_count":
             data = np.log10(data)
-
+        
         # 3. Plot Simulation Results
         surf = ax.contourf(x, y, data, cmap=cmap)
 
@@ -285,21 +284,13 @@ def calculate_dice(model_a, model_b):
     return (2.0 * intersection) / total_area
 
 
-def plot_comparison_binary(
-    sim,
-    parameter,
-    reference_array,
-    threshold_value=1,
-    particle_threshold=0,
-    title="Avalanche Simulation Comparison",
-):
+def plot_comparison_binary(sim, parameter, reference_array, threshold_value=1, title="Avalanche Simulation Comparison"):
     import_plt()
     data = getattr(sim, parameter).astype(np.float32)
     fig, ax = plt.subplots(figsize=(10, 8))
     x, y, _dem, dem_mask = plot_dem(sim, ax, dark=False)
     data[dem_mask] = np.nan
     data[data < threshold_value] = np.nan
-    data[sim.cell_count < particle_threshold * sim.released_particles_per_cell] = np.nan
     only_reference = ~(data > 0) & (reference_array > 0)
     only_sim = (data > 0) & ~(reference_array > 0)
     both = (data > 0) & (reference_array > 0)
@@ -324,20 +315,12 @@ def plot_comparison_binary(
     print(f"Dice coefficient: {dice:.4f}")
     return fig, ax
 
-
-def plot_comparison(
-    sim,
-    parameter,
-    reference_array,
-    particle_threshold=0,
-    title="Avalanche Simulation Comparison",
-):
+def plot_comparison(sim, parameter, reference_array, title="Avalanche Simulation Comparison"):
     import_plt()
     data = getattr(sim, parameter).astype(np.float32)
     fig, ax = plt.subplots(figsize=(10, 8))
     x, y, _dem, dem_mask = plot_dem(sim, ax, dark=False)
     data[dem_mask] = np.nan
-    data[sim.cell_count < particle_threshold * sim.released_particles_per_cell] = np.nan
     diff = reference_array - data
     diff[diff == 0] = np.nan
     # diff[(data == 0) | (reference_array == 0)] = np.nan

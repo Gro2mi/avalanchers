@@ -1,7 +1,11 @@
-@group(0) @binding(1) var<storage, read> particles: array<Particle>;
-@group(0) @binding(2) var<storage, read_write> grid_mass_atomic: array<atomic<u32>>;
-@group(0) @binding(3) var<storage, read_write> grid_momentum_atomic: array<atomic<i32>>; // Combined u, v
-@group(0) @binding(4) var<storage, read_write> sim_info: SimInfo;
+@group(0) @binding(1) var<storage, read_write> sim_info: SimInfo;
+@group(0) @binding(2) var<storage> particles_position: array<vec2<f32>>;
+@group(0) @binding(3) var<storage> particles_velocity: array<vec2<f32>>;
+@group(0) @binding(4) var<storage> particles_mass: array<f32>;
+// atomic_float @group(0) @binding(5) var<storage, read_write> grid_mass_atomic: array<atomic<f32>>;
+// atomic_float @group(0) @binding(6) var<storage, read_write> grid_momentum_atomic: array<atomic<f32>>; 
+@group(0) @binding(5) var<storage, read_write> grid_mass_atomic: array<atomic<u32>>;  // no_atomic_float 
+@group(0) @binding(6) var<storage, read_write> grid_momentum_atomic: array<atomic<i32>>;  // no_atomic_float 
 
 override WG_SIZE_1D: u32 = 1u;
 @compute @workgroup_size(WG_SIZE_1D, 1, 1)
@@ -9,46 +13,60 @@ fn p2g(@builtin(global_invocation_id) id: vec3u) {
     if id.x >= sim_info.number_particles {
         return;
     }
-    if sim_info.flags >= SIM_INFO_STOPPED {
+    if (sim_info.flags & SIM_INFO_STOPPED) != 0u {
+        return;
+    }    
+    let use_particle_interaction: bool = (sim_settings.flags & (1u << 1u)) != 0u;
+    if sim_settings.model_type == 0 && !use_particle_interaction {
+        return;
+    }
+    let cell = position_to_cell(particles_position[id.x].xy);
+    if cell.x < 3 || cell.x >= (sim_settings.grid_shape.x - 3) || cell.y < 3 || cell.y >= (sim_settings.grid_shape.y - 3) {
         return;
     }
     
-    let use_particle_interaction: bool = (sim_settings.flags & (1u << 1u)) != 0u;
-    if !use_particle_interaction {
-        return;
-    }
-    let p = particles[id.x];
+    transfer_p2g(id.x);
+}
 
-    let grid_pos = p.position.xy / sim_settings.cell_size;
+// import transfer_p2g.wgsl;
+// BEGIN transfer_p2g.wgsl
+fn quantize_momentum_component(value: f32) -> i32 {
+    // Keep conversion inside i32 range before atomicAdd.
+    let i32_max_f = 2147483647.0;
+    let clamped = clamp(value, -i32_max_f, i32_max_f);
+    return i32(round(clamped));
+}
 
-    let base_node = get_base_node(grid_pos);
+fn transfer_p2g(p_idx: u32) {
+    // the stencil is offset by half a cell as it is in the middle of the cell
+    let grid_pos = particles_position[p_idx] / sim_settings.cell_size - vec2f(0.5);
+    let base_node = vec2u(floor(grid_pos - vec2f(0.5)));
+    
+    let p_mass = particles_mass[p_idx];
+    let p_velocity = particles_velocity[p_idx];
+    // let affine_matrix = particles_affine_matrix[p_idx];
 
-    for (var i: i32 = 0; i < 3; i++) {
-        for (var j: i32 = 0; j < 3; j++) {
+    for (var i: u32 = 0; i < 3; i++) {
+        for (var j: u32 = 0; j < 3; j++) {
+            let node_coords = base_node + vec2u(i, j);
+            let distance = calculate_distance_to_node(grid_pos, node_coords);
+            let weight = calculate_weight(distance);
+            let idx = xy_to_idx(node_coords);
+            // let affine_velocity = p_velocity + (affine_matrix * distance);
 
-            let node_coords = base_node + vec2i(i, j);
+            
+            
+             atomicAdd(&grid_mass_atomic[idx], p_mass * weight);
+             atomicAdd(&grid_momentum_atomic[idx * 2u], p_mass * p_velocity.x * weight);
+             atomicAdd(&grid_momentum_atomic[idx * 2u + 1u], p_mass * p_velocity.y * weight);
+            // for affine transfer
+            // atomicAdd(&grid_momentum_atomic[idx * 2u], p_mass * affine_velocity.x * weight);
+            // atomicAdd(&grid_momentum_atomic[idx * 2u + 1u], p_mass * affine_velocity.y * weight);
 
-            if node_coords.x < 0 ||
-                node_coords.y < 0 ||
-                node_coords.x >= i32(sim_settings.grid_shape.x) ||
-                node_coords.y >= i32(sim_settings.grid_shape.y) {
-                continue;
-            }
-
-            let weight = calculate_weight(grid_pos, node_coords);
-
-            let idx = u32(node_coords.y) * sim_settings.grid_shape.x +
-                u32(node_coords.x);
-
-            atomicAdd(
-                &grid_mass_atomic[idx],
-                u32(round(p.mass * weight * MASS_FACTOR))
-            );
-            atomicAdd(&grid_momentum_atomic[idx * 2], i32(round(p.mass * p.velocity.x * weight * MOMENTUM_FACTOR)));
-            atomicAdd(&grid_momentum_atomic[idx * 2 + 1], i32(round(p.mass * p.velocity.y * weight * MOMENTUM_FACTOR)));
         }
     }
 }
+// END transfer_p2g.wgsl
 
 // import utils.wgsl;
 // BEGIN utils.wgsl
@@ -60,26 +78,23 @@ const g: f32 = 9.81;
 const MAX_VELOCITY_FACTOR: f32 = 1e7; // u32 limit is 430 m/s
 const MASS_FACTOR: f32 = 1e1; // u32 limit is 4.3t thickness
 const H_FACTOR: f32 = 1e6;
-const MOMENTUM_FACTOR: f32 = 1e2; 
+// Momentum is quantized per particle->node contribution before atomicAdd, so
+// MOMENTUM_FACTOR sets the velocity resolution of that contribution:
+// the smallest non-zero contribution is v = 1 / (particle_mass * weight * MOMENTUM_FACTOR).
+// It must stay far below the slow hydrostatic spreading velocities (~0.01-0.1 m/s)
+// or p2g rounds them to zero every step and the flow never spreads laterally.
+// i32 budget: node sum = node_mass * v_max * MOMENTUM_FACTOR
+//   (rho*cell^2*h*J ~ 6e4 kg * 40 m/s * 1e2 = 2.4e8 < 2.1e9)
+const MOMENTUM_FACTOR: f32 = 1e2;
 const INV_MAX_VELOCITY_FACTOR: f32 = 1 / MAX_VELOCITY_FACTOR; // u32 limit is 430 m/s
 const INV_MASS_FACTOR: f32 = 1 / MASS_FACTOR; // u32 limit is 4.3km thickness
-const INV_H_FACTOR: f32 = 1 / H_FACTOR; 
+const INV_H_FACTOR: f32 = 1 / H_FACTOR;
 const INV_MOMENTUM_FACTOR: f32 = 1 / MOMENTUM_FACTOR;
+// depth-integrated internal force (h * sigma * grad_w * area, ~1e4..1e5 N per node contribution)
+const FORCE_FACTOR: f32 = 1e-3; // i32 limit is 2.1e6 N per node
+const INV_FORCE_FACTOR: f32 = 1 / FORCE_FACTOR;
 
 // TODO precompute often used values on the cpu and pass them as uniforms to avoid redundant calculations on the gpu
-
-struct Particle {
-    position: vec3f,
-    mass: f32,
-    velocity: vec3f,
-    stopped: u32,
-    travel_length: f32,
-};
-
-struct ParticleAlpha {
-    alpha: f32,
-    start_elevation: f32,
-};
 
 struct SimInfo {
     timestep: u32,
@@ -99,6 +114,12 @@ const SIM_INFO_PARTICLE_OUT_OF_DEM_DATA: u32 = 1u << 3u;
 const SIM_INFO_STOPPED: u32 = 1u << 31u;
 const SIM_INFO_ALL_PARTICLES_STOPPED: u32 = 1u << 30u;
 const SIM_INFO_NO_NEW_CELLS: u32 = 1u << 29u;
+
+const PARTICLE_FLYING: u32 = 1u << 27u;
+const PARTICLE_OUT_OF_BOUNDS: u32 = 1u << 28u;
+const PARTICLE_IS_NAN: u32 = 1u << 29u;
+const PARTICLE_OUT_OF_DEM_DATA: u32 = 1u << 30u;
+const PARTICLE_STOPPED: u32 = 1u << 31u;
 
 struct SimSettings {
     num_steps: u32,
@@ -126,12 +147,21 @@ struct SimSettings {
     velocity_threshold: f32,
     roughness_threshold: f32,
     flags: u32,
+    release_max_elevation: f32,
+    peak_flow_thickness_threshold: f32,
+    // MPMDAC constitutive model (must mirror the Rust POD layout)
+    constitutive_model: u32,
+    shear_modulus: f32,
+    hardening_modulus: f32,
+    // MPMDAC compressibility; bulk_modulus 0 = incompressible
+    bulk_modulus: f32,
+    compaction_pressure: f32,
 };
 
 struct AtomicValues {
     peak_velocity: atomic<u32>,
     peak_flow_thickness: atomic<u32>,
-    alpha: atomic<u32>,
+    expected_max_velocity: atomic<u32>,
     travel_length: atomic<u32>,
     release_volume: atomic<u32>,
     number_release_cells: atomic<u32>,
@@ -139,7 +169,27 @@ struct AtomicValues {
     stopped_particles: atomic<u32>,
 };
 
+struct G2PUpdate {
+    velocity: vec2f,
+    affine_matrix: mat2x2<f32>,
+};
+
 @group(0) @binding(0) var<uniform> sim_settings: SimSettings;
+
+fn is_nan(x: f32) -> bool {
+    let bits: u32 = bitcast<u32>(x);
+    return (bits & 0x7F800000u) == 0x7F800000u
+          && (bits & 0x007FFFFFu) != 0u;
+}
+
+fn is_inf(x: f32) -> bool {
+    let bits: u32 = bitcast<u32>(x);
+    return (bits == 0x7F800000u || bits == 0xFF800000u);
+}
+
+fn is_finite(x: f32) -> bool {
+    return !is_nan(x) && !is_inf(x);
+}
 
 fn cell_to_uv(cell: vec2u) -> vec2f {
     return (vec2f(cell) + 0.5) / vec2f(sim_settings.grid_shape);
@@ -151,7 +201,11 @@ fn cellf_to_uv(cell: vec2f) -> vec2f {
     return (cell + 0.5) / vec2f(sim_settings.grid_shape);
 }
 
-fn position_to_cell(position: vec3f) -> vec2u {
+fn position3_to_cell(position: vec3f) -> vec2u {
+    return position_to_cell(position.xy);
+}
+
+fn position_to_cell(position: vec2f) -> vec2u {
     return vec2u(
         floor(position.xy / sim_settings.cell_size)
     );
@@ -161,28 +215,42 @@ fn cell_center_xy(cell: vec2u) -> vec2f {
     return (vec2f(cell) + 0.5) * sim_settings.cell_size;
 }
 
-fn position_to_uv(position: vec3f) -> vec2f {
-    return (position.xy + 0.5 * sim_settings.cell_size) / (vec2f(sim_settings.world_size)); // add some padding to ensure particles outside the world bounds are still captured in the simulation info
+fn position_to_uv(position: vec2f) -> vec2f {
+    return (position.xy) / (vec2f(sim_settings.world_size)); // add some padding to ensure particles outside the world bounds are still captured in the simulation info
 }
 
-fn position_to_cell_index(position: vec3f) -> u32 {
+fn position_to_idx(position: vec2f) -> u32 {
     let uv = position_to_uv(position);
-    return uv_to_cell_index(uv);
+    return uv_to_idx(uv);
 }
 
 fn uv_to_cell(uv: vec2f) -> vec2u {
-    return vec2u(clamp(uv * vec2f(sim_settings.grid_shape), vec2f(0.0), vec2f(sim_settings.grid_shape - 1u)));
+    let epsilon = 1e-5f; // A tiny offset to counteract negative rounding bias
+    let scaled_uv = uv * vec2f(sim_settings.grid_shape) + epsilon;
+    let max_bound = vec2f(sim_settings.grid_shape - 1u);
+
+    return vec2u(clamp(scaled_uv, vec2f(0.0), max_bound));
 }
 
-fn uv_to_cell_index(uv: vec2f) -> u32 {
+fn uv_to_idx(uv: vec2f) -> u32 {
     let cell = uv_to_cell(uv);
     // return cell.x * sim_settings.grid_shape.y + cell.y;
     return (cell.y % sim_settings.grid_shape.y * sim_settings.grid_shape.x +
               (cell.x % sim_settings.grid_shape.x));
 }
 
-fn xy_to_idx(x: u32, y: u32) -> u32 {
+fn x_y_to_idx(x: u32, y: u32) -> u32 {
     return y * sim_settings.grid_shape.x + x;
+}
+
+fn xy_to_idx(xy: vec2<u32>) -> u32 {
+    return xy.y * sim_settings.grid_shape.x + xy.x;
+}
+
+fn idx_to_xy(idx: u32) -> vec2<u32> {
+    let x = idx % sim_settings.grid_shape.x;
+    let y = idx / sim_settings.grid_shape.x;
+    return vec2u(x, y);
 }
 
 fn quadratic_weight(d: f32) -> f32 {
@@ -195,13 +263,43 @@ fn quadratic_weight(d: f32) -> f32 {
     return 0.0;
 }
 
-fn calculate_weight(particle_position: vec2f, node_position: vec2i) -> f32 {
-    let dist = particle_position - vec2f(node_position);
-    return quadratic_weight(dist.x) * quadratic_weight(dist.y);
+fn calculate_weight(distance: vec2f) -> f32 {
+    return quadratic_weight(distance.x) * quadratic_weight(distance.y);
 }
 
-fn get_base_node(grid_pos: vec2f) -> vec2i {
-    return vec2i(floor(grid_pos - vec2f(0.5)));
+// derivative of quadratic_weight with respect to its (cell-unit) argument
+fn quadratic_weight_gradient(d: f32) -> f32 {
+    let abs_d = abs(d);
+    if abs_d < 0.5 {
+        return -2.0 * d;
+    } else if abs_d < 1.5 {
+        return -sign(d) * (1.5 - abs_d);
+    }
+    return 0.0;
+}
+
+// physical gradient of the 2D B-spline weight, in 1/m
+fn calculate_weight_gradient(distance: vec2f) -> vec2f {
+    return vec2f(
+        quadratic_weight_gradient(distance.x) * quadratic_weight(distance.y),
+        quadratic_weight(distance.x) * quadratic_weight_gradient(distance.y)
+    ) / sim_settings.cell_size;
+}
+
+fn determinant_2x2(m: mat2x2<f32>) -> f32 {
+    return m[0][0] * m[1][1] - m[0][1] * m[1][0];
+}
+
+fn identity_2x2() -> mat2x2<f32> {
+    return mat2x2<f32>(vec2f(1.0, 0.0), vec2f(0.0, 1.0));
+}
+
+fn calculate_distance_to_node(particle_position: vec2f, node_position: vec2u) -> vec2f {
+    return particle_position - vec2f(node_position);
+}
+
+fn get_base_node(grid_pos: vec2f) -> vec2u {
+    return vec2u(floor(grid_pos - vec2f(0.5)));
 }
 
 fn compute_centroid(points: ptr<function, array<vec2<f32>, 256>>, count: u32) -> vec2<f32> {
