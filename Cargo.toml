@@ -5,6 +5,7 @@ members = [
     "crates/wasm_bindings", 
     "crates/compute_core", 
     "crates/python_bindings", 
+    "crates/render_core", 
     "crates/simulation"
 ]
 resolver = "3"
@@ -28,7 +29,9 @@ pollster = "0.4" # For async execution in native
 
 simulation = { path = "crates/simulation" }
 compute_core = { path = "crates/compute_core" }
+render_core = { path = "crates/render_core" }
 wgpu = "30.0"
+winit = "0.30"
 regex = "1.11"
 rand = "0.10"
 bytemuck = { version = "1.25", features = ["derive"] }
@@ -54,6 +57,7 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "def
 tokio = { version = "1", features = ["rt", "macros", "sync"] }
 wiremock = "0.6"
 tiff = "0.11"
+weezl = "0.2"
 
 # python
 pyo3 = { version = "0.28", features = ["auto-initialize", "abi3-py37"] }
@@ -73,6 +77,11 @@ serde-wasm-bindgen = "0.6"
 
 # cli
 clap = { version = "4.6", features = ["derive"] }
+
+# gui
+egui = "0.36"
+egui-wgpu = { version = "0.36", default-features = false }
+egui-winit = "0.36"
 
 criterion = { version = "0.5", features = ["html_reports"] }
 

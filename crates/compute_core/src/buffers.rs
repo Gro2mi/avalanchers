@@ -19,14 +19,87 @@ use crate::utils::split_channels;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable, Default)]
 pub struct AtomicValues {
-    pub grid_peak_velocity: u32,
-    pub grid_peak_flow_thickness: u32,
-    pub alpha: u32,
-    pub travel_length: u32,
-    pub release_volume: u32,
+    pub grid_peak_velocity: f32,
+    pub grid_peak_flow_thickness: f32,
+    pub expected_max_velocity: f32,
+    pub travel_length: f32,
+    pub estimated_release_volume: u32,
     pub number_release_cells: u32,
     pub number_release_particles: u32,
     pub stopped_particles: u32,
+}
+
+/// GPU layout mirror of the CenterOfMassResult struct in center_of_mass.wgsl
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct CenterOfMassResult {
+    pub com_x: f32,
+    pub com_y: f32,
+    pub elevation: f32,
+    pub total_mass: f32,
+}
+
+impl Default for CenterOfMassResult {
+    fn default() -> Self {
+        Self {
+            com_x: f32::NAN,
+            com_y: f32::NAN,
+            elevation: f32::NAN,
+            total_mass: f32::NAN,
+        }
+    }
+}
+
+/// GPU layout mirror of the ChamferParams struct in chamfer.wgsl
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable, Default)]
+pub struct ChamferParams {
+    pub step: u32,
+    pub _padding: [u32; 3],
+}
+
+/// GPU layout mirror of the RelaxParams struct in relax_particles.wgsl
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct RelaxParams {
+    pub num_particles: u32,
+    /// fraction of the overlap corrected per iteration
+    pub move_factor: f32,
+    /// per-iteration displacement limit as a fraction of the target spacing
+    pub max_step_fraction: f32,
+    pub _padding: u32,
+}
+
+/// GPU layout mirror of the unified evaluation result buffer. The sections
+/// are written by the evaluation shaders:
+/// - counts + extremes by evaluate_mass_movement(_points).wgsl
+/// - chamfer sums by the chamfer_reduce kernel
+/// - beeline distance by compute_beeline_distance.wgsl
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable, Default)]
+pub struct EvaluationResult {
+    // mass movement counts (atomic in the shaders)
+    pub intersection: u32,
+    pub undershoot: u32,
+    pub overshoot: u32,
+    pub _padding0: u32,
+    /// ordered-bits encoded, u32::MAX-initialized minimum
+    pub min_elevation: u32,
+    pub max_elevation: u32,
+    pub min_cell: u32,
+    pub max_cell: u32,
+    // chamfer distance sums
+    pub sum_sim_to_roi: f32,
+    pub count_sim: f32,
+    pub sum_roi_to_sim: f32,
+    pub count_roi: f32,
+    // beeline distance between the highest and lowest avalanche point
+    pub beeline_distance: f32,
+    pub beeline_min_elevation: f32,
+    pub beeline_max_elevation: f32,
+    pub beeline_min_cell: u32,
+    pub beeline_max_cell: u32,
+    pub _padding: [u32; 3],
 }
 
 #[derive(Eq, Hash, PartialEq, Clone)]
@@ -39,38 +112,120 @@ pub enum BufferName {
     GridPeakVelocity,
     GridPeakFlowThickness,
     GridMass,
+    /// snapshot of the previous step's GridMass, used by the MPMDAC
+    /// model to derive a smooth clump-aware particle depth
+    GridMassPrevious,
     GridMomentum,
+    GridVelocity,
     GridForces,
     // settings/initialization dependent buffers
     SimSettings,
-    Particles,
+
+    ParticlesPosition,
+    /// read-only snapshot of ParticlesPosition used by the particle
+    /// relaxation shader so all threads see the previous iteration's state
+    ParticlesPositionRelax,
+    ParticlesElevation,
+    ParticlesVelocity,
+    ParticlesVelocityZ,
+    ParticlesMass,
+    ParticlesState,
+    ParticlesAffineMatrix,
+    /// per-particle stress state of the MPMDAC model: deviatoric stress
+    /// (symmetric mat2x2: tau_xx, tau_xy, tau_yy) in [0][0], [0][1], [1][0]
+    /// and the cumulative plastic strain in [1][1]
+    ParticlesStress,
+    /// per-particle volumetric state of the MPMDAC model:
+    /// (elastic volumetric strain, plastic compaction strain)
+    ParticlesVolumetricStrain,
+
     /// timestep data of the 0 index particle
     TimestepData,
     // Debug buffers
-    OutDebugNormals,
-    OutDebugRelease,
+    Debug,
     AtomicValues,
     NewCellsRollingWindow,
+
+    SlopeAngle,
+    SlopeAspect,
+    Roughness,
+    ReleaseAreas,
+    RegionOfInterest,
+
+    /// unified evaluation metrics buffer written by the evaluation shaders
+    EvaluationResult,
+
+    CenterOfMass,
+
+    /// per-cell blob label for the biggest-blob detection in compute_center_of_mass
+    CenterOfMassLabels,
+    /// per-blob accumulated encoded mass for the biggest-blob detection
+    CenterOfMassBlobMass,
+
+    // chamfer distance between simulated cells and the region of interest
+    ChamferParams,
+    ChamferNearestRoi,
+    ChamferNearestRoiSnapshot,
+    ChamferNearestSim,
+    ChamferNearestSimSnapshot,
+
+    // soft sphere relaxation of the freshly initialized particles
+    RelaxParams,
+    /// linked list heads over the simulation cells for the relaxation
+    /// neighbor search (one u32 per grid cell, LINKED_LIST_END = cleared)
+    RelaxGridHead,
+    /// linked list tails of RelaxGridHead (one u32 per particle)
+    ParticleNext,
+
+    TestOutput,
 }
 
 impl BufferName {
     pub fn to_str(&self) -> &'static str {
         match self {
-            BufferName::OutDebugNormals => "out_debug_normals",
-            BufferName::OutDebugRelease => "out_debug_release",
+            BufferName::Debug => "debug",
             BufferName::SimInfo => "sim_info",
             BufferName::SimSettings => "sim_settings",
             BufferName::GridCellCount => "grid_cell_count",
             BufferName::GridPeakVelocity => "grid_peak_velocity",
             BufferName::ParticleIndex => "particle_index",
-            BufferName::Particles => "particles",
+            BufferName::ParticlesPosition => "particles_position",
+            BufferName::ParticlesVelocity => "particles_velocity",
+            BufferName::ParticlesMass => "particles_mass",
+            BufferName::ParticlesState => "particles_state",
+            BufferName::ParticlesElevation => "particles_elevation",
+            BufferName::ParticlesAffineMatrix => "particles_affine_matrix",
+            BufferName::ParticlesStress => "particles_stress",
+            BufferName::ParticlesVolumetricStrain => "particles_volumetric_strain",
+            BufferName::ParticlesVelocityZ => "particles_velocity_z",
             BufferName::TimestepData => "timestep_data",
             BufferName::GridMass => "grid_mass",
+            BufferName::GridMassPrevious => "grid_mass_previous",
             BufferName::GridMomentum => "grid_momentum",
-            BufferName::GridForces => "grid_forces",
+            BufferName::GridVelocity => "grid_velocity",
             BufferName::GridPeakFlowThickness => "grid_peak_flow_thickness",
             BufferName::AtomicValues => "atomic_values",
             BufferName::NewCellsRollingWindow => "new_cells_rolling_window",
+            BufferName::SlopeAngle => "slope_angle",
+            BufferName::SlopeAspect => "slope_aspect",
+            BufferName::Roughness => "roughness",
+            BufferName::ReleaseAreas => "release_areas",
+            BufferName::TestOutput => "test_output",
+            BufferName::GridForces => "grid_forces",
+            BufferName::RegionOfInterest => "region_of_interest",
+            BufferName::EvaluationResult => "evaluation_result",
+            BufferName::CenterOfMass => "center_of_mass",
+            BufferName::CenterOfMassLabels => "center_of_mass_labels",
+            BufferName::CenterOfMassBlobMass => "center_of_mass_blob_mass",
+            BufferName::ChamferParams => "chamfer_params",
+            BufferName::ChamferNearestRoi => "chamfer_nearest_roi",
+            BufferName::ChamferNearestRoiSnapshot => "chamfer_nearest_roi_snapshot",
+            BufferName::ChamferNearestSim => "chamfer_nearest_sim",
+            BufferName::ChamferNearestSimSnapshot => "chamfer_nearest_sim_snapshot",
+            BufferName::RelaxParams => "relax_params",
+            BufferName::RelaxGridHead => "relax_grid_head",
+            BufferName::ParticleNext => "particle_next",
+            BufferName::ParticlesPositionRelax => "particles_position_relax",
         }
     }
 }
@@ -86,21 +241,49 @@ impl std::str::FromStr for BufferName {
 
     fn from_str(name: &str) -> Result<Self, Self::Err> {
         match name {
-            "out_debug_normals" => Ok(BufferName::OutDebugNormals),
-            "out_debug_release" => Ok(BufferName::OutDebugRelease),
+            "debug" => Ok(BufferName::Debug),
             "sim_info" => Ok(BufferName::SimInfo),
             "sim_settings" => Ok(BufferName::SimSettings),
             "grid_cell_count" => Ok(BufferName::GridCellCount),
             "grid_peak_velocity" => Ok(BufferName::GridPeakVelocity),
             "particle_index" => Ok(BufferName::ParticleIndex),
-            "particles" => Ok(BufferName::Particles),
+            "particles_position" => Ok(BufferName::ParticlesPosition),
+            "particles_velocity" => Ok(BufferName::ParticlesVelocity),
+            "particles_mass" => Ok(BufferName::ParticlesMass),
+            "particles_state" => Ok(BufferName::ParticlesState),
+            "particles_elevation" => Ok(BufferName::ParticlesElevation),
+            "particles_velocity_z" => Ok(BufferName::ParticlesVelocityZ),
+            "particles_affine_matrix" => Ok(BufferName::ParticlesAffineMatrix),
+            "particles_stress" => Ok(BufferName::ParticlesStress),
+            "particles_volumetric_strain" => Ok(BufferName::ParticlesVolumetricStrain),
             "timestep_data" => Ok(BufferName::TimestepData),
             "grid_mass" => Ok(BufferName::GridMass),
+            "grid_mass_previous" => Ok(BufferName::GridMassPrevious),
             "grid_momentum" => Ok(BufferName::GridMomentum),
-            "grid_forces" => Ok(BufferName::GridForces),
+            "grid_velocity" => Ok(BufferName::GridVelocity),
             "grid_peak_flow_thickness" => Ok(BufferName::GridPeakFlowThickness),
             "atomic_values" => Ok(BufferName::AtomicValues),
             "new_cells_rolling_window" => Ok(BufferName::NewCellsRollingWindow),
+            "slope_angle" => Ok(BufferName::SlopeAngle),
+            "slope_aspect" => Ok(BufferName::SlopeAspect),
+            "roughness" => Ok(BufferName::Roughness),
+            "release_areas" => Ok(BufferName::ReleaseAreas),
+            "test_output" => Ok(BufferName::TestOutput),
+            "grid_forces" => Ok(BufferName::GridForces),
+            "region_of_interest" => Ok(BufferName::RegionOfInterest),
+            "evaluation_result" => Ok(BufferName::EvaluationResult),
+            "center_of_mass" => Ok(BufferName::CenterOfMass),
+            "center_of_mass_labels" => Ok(BufferName::CenterOfMassLabels),
+            "center_of_mass_blob_mass" => Ok(BufferName::CenterOfMassBlobMass),
+            "chamfer_params" => Ok(BufferName::ChamferParams),
+            "chamfer_nearest_roi" => Ok(BufferName::ChamferNearestRoi),
+            "chamfer_nearest_roi_snapshot" => Ok(BufferName::ChamferNearestRoiSnapshot),
+            "chamfer_nearest_sim" => Ok(BufferName::ChamferNearestSim),
+            "chamfer_nearest_sim_snapshot" => Ok(BufferName::ChamferNearestSimSnapshot),
+            "relax_params" => Ok(BufferName::RelaxParams),
+            "relax_grid_head" => Ok(BufferName::RelaxGridHead),
+            "particle_next" => Ok(BufferName::ParticleNext),
+            "particles_position_relax" => Ok(BufferName::ParticlesPositionRelax),
             _ => Err(format!("Unknown buffer name: {}", name)),
         }
     }
@@ -108,32 +291,18 @@ impl std::str::FromStr for BufferName {
 
 #[derive(Eq, Hash, PartialEq, Clone)]
 pub enum TextureName {
-    Wind,
-    Normals,
-    Slope,
-    Roughness,
-    ReleaseAreas,
-    Landcover,
-    StagingBuffer,
     Dem,
-    ReleaseAreasInput,
-    CellCount,
+    /// either normals in xyz or  x = l_x, y = l_y, z = J, w = g_y
+    TerrainGeometry,
+    // x = K_xx, y = K_yy, z = K_xy, w = g_x
     Curvature,
 }
 
 impl TextureName {
     pub fn to_str(&self) -> &'static str {
         match self {
-            TextureName::Wind => "wind",
-            TextureName::Normals => "normals",
-            TextureName::Slope => "slope",
-            TextureName::Roughness => "roughness",
-            TextureName::ReleaseAreas => "release_areas",
-            TextureName::Landcover => "landcover",
-            TextureName::StagingBuffer => "staging_buffer",
             TextureName::Dem => "dem",
-            TextureName::ReleaseAreasInput => "release_areas_input",
-            TextureName::CellCount => "cell_count",
+            TextureName::TerrainGeometry => "terrain_geometry",
             TextureName::Curvature => "curvature",
         }
     }
@@ -149,16 +318,8 @@ impl std::str::FromStr for TextureName {
 
     fn from_str(name: &str) -> Result<Self, Self::Err> {
         match name {
-            "wind" => Ok(TextureName::Wind),
-            "normals" => Ok(TextureName::Normals),
-            "slope" => Ok(TextureName::Slope),
-            "roughness" => Ok(TextureName::Roughness),
-            "release_areas" => Ok(TextureName::ReleaseAreas),
-            "landcover" => Ok(TextureName::Landcover),
-            "staging_buffer" => Ok(TextureName::StagingBuffer),
             "dem" => Ok(TextureName::Dem),
-            "release_areas_input" => Ok(TextureName::ReleaseAreasInput),
-            "cell_count" => Ok(TextureName::CellCount),
+            "terrain_geometry" => Ok(TextureName::TerrainGeometry),
             "curvature" => Ok(TextureName::Curvature),
             _ => Err(format!("Unknown texture name: {}", name)),
         }
@@ -193,7 +354,7 @@ impl GpuResources {
         }
     }
 
-    pub fn get_total_allocated_memory_mb(&self) -> f32 {
+    pub fn get_total_allocated_memory_mb(&self) -> f64 {
         let mut total_allocated_memory = 0;
         for buffer in self.buffers.values() {
             total_allocated_memory += buffer.size();
@@ -204,21 +365,22 @@ impl GpuResources {
                 * texture.size().depth_or_array_layers as u64
                 * texture.format().block_copy_size(None).unwrap_or(4) as u64; // Approximate size for tracking
         }
-        total_allocated_memory as f32 / (1024.0 * 1024.0)
+        total_allocated_memory as f64 / (1024.0 * 1024.0)
     }
 
-    fn poll(&self, device: &Device) {
+    fn poll(&self, device: &Device) -> Result<()> {
         #[cfg(not(target_arch = "wasm32"))]
         device
             .poll(wgpu::PollType::Wait {
                 submission_index: None,
                 timeout: None,
             })
-            .expect("Failed to poll device");
+            .map_err(|error| anyhow!("Failed to poll device: {error:?}"))?;
         #[cfg(target_arch = "wasm32")]
         device
             .poll(wgpu::PollType::Poll)
-            .expect("Failed to poll device");
+            .map_err(|error| anyhow!("Failed to poll device: {error:?}"))?;
+        Ok(())
     }
 
     pub fn get_sampler(&self, name: &str) -> Option<&Sampler> {
@@ -282,6 +444,14 @@ impl GpuResources {
         self.buffers.get_mut(&name)
     }
 
+    /// Returns the currently allocated buffers and their GPU allocation sizes.
+    pub fn buffer_sizes(&self) -> Vec<(String, u64)> {
+        self.buffers
+            .iter()
+            .map(|(name, buffer)| (name.to_string(), buffer.size()))
+            .collect()
+    }
+
     pub async fn read_buffer<T: bytemuck::Pod + Send + Sync>(
         &self,
         device: &Device,
@@ -314,11 +484,11 @@ impl GpuResources {
         let (sender, receiver) = futures_intrusive::channel::shared::oneshot_channel();
 
         buffer_slice.map_async(MapMode::Read, move |result| {
-            sender.send(result).unwrap();
+            let _ = sender.send(result);
         });
 
         // Poll again to ensure the map_async callback is processed
-        self.poll(device);
+        self.poll(device)?;
 
         // Await the mapping result
         receiver
@@ -407,7 +577,7 @@ impl GpuResources {
         let view = texture.create_view(&TextureViewDescriptor::default());
         let bytes_per_pixel = format
             .block_copy_size(None)
-            .expect("msg: Unsupported texture format for copying");
+            .ok_or_else(|| anyhow!("Unsupported texture format for copying: {format:?}"))?;
         let unpadded_bytes_per_row = texture_size.width * bytes_per_pixel;
         let padded_bytes_per_row = align_up(unpadded_bytes_per_row, COPY_BYTES_PER_ROW_ALIGNMENT);
 
@@ -527,10 +697,10 @@ impl GpuResources {
         let buffer_slice = staging_buffer.slice(..);
         let (sender, receiver) = futures_intrusive::channel::shared::oneshot_channel();
         buffer_slice.map_async(MapMode::Read, move |res| {
-            sender.send(res).unwrap();
+            let _ = sender.send(res);
         });
 
-        self.poll(device);
+        self.poll(device)?;
         receiver
             .receive()
             .await
@@ -593,7 +763,7 @@ impl GpuResources {
         // Calculate how many bytes one row of pixels actually takes in memory
         let bytes_per_pixel = format
             .block_copy_size(None)
-            .expect("Unsupported texture format");
+            .ok_or_else(|| anyhow!("Unsupported texture format: {format:?}"))?;
         let bytes_per_row = size.width * bytes_per_pixel;
 
         queue.write_texture(
@@ -638,7 +808,7 @@ pub fn create_buffers_and_texture_descriptions(
     device: &Device,
     texture_size: Extent3d,
     has_float32_filterable: bool,
-) -> GpuResources {
+) -> Result<GpuResources> {
     let mut gpu_resources = GpuResources::default();
     let filter_mode = if has_float32_filterable {
         wgpu::FilterMode::Linear
@@ -671,62 +841,34 @@ pub fn create_buffers_and_texture_descriptions(
         | TextureUsages::COPY_DST
         | TextureUsages::COPY_SRC;
 
-    let texture_usage_input = TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST;
-    let texture_usage_output =
-        TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_SRC | TextureUsages::STORAGE_BINDING;
+    // let texture_usage_input = TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST;
+    // let texture_usage_output =
+    //     TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_SRC | TextureUsages::STORAGE_BINDING;
     let buffer_usage_output = BufferUsages::STORAGE | BufferUsages::COPY_SRC;
-    let atomic_grid_size = (texture_size.width * texture_size.height * 4) as usize;
+    let grid_bytes_size = usize::try_from(texture_size.width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(texture_size.height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .and_then(|cells| cells.checked_mul(size_of::<f32>()))
+        .ok_or_else(|| anyhow!("Grid buffer size overflow"))?;
 
     gpu_resources.add_texture(
         device,
-        TextureName::Wind,
+        TextureName::TerrainGeometry,
         texture_size,
         TextureFormat::Rgba32Float,
-        texture_usage_input,
-    );
-    gpu_resources.add_texture(
-        device,
-        TextureName::Normals,
-        texture_size,
-        TextureFormat::Rgba32Float,
-        texture_usage_output,
-    );
-    gpu_resources.add_texture(
-        device,
-        TextureName::Slope,
-        texture_size,
-        TextureFormat::Rgba32Float,
-        texture_usage_output,
+        texture_usage_default,
     );
     gpu_resources.add_texture(
         device,
         TextureName::Curvature,
         texture_size,
         TextureFormat::Rgba32Float,
-        texture_usage_output,
-    );
-    gpu_resources.add_texture(
-        device,
-        TextureName::Roughness,
-        texture_size,
-        TextureFormat::Rgba32Float,
         texture_usage_default,
     );
-    gpu_resources.add_texture(
-        device,
-        TextureName::ReleaseAreas,
-        texture_size,
-        TextureFormat::Rgba32Float,
-        texture_usage_default,
-    );
-    gpu_resources.add_texture(
-        device,
-        TextureName::Landcover,
-        texture_size,
-        TextureFormat::Rgba8Uint,
-        texture_usage_input,
-    );
-
     gpu_resources.add_buffer(
         device,
         BufferName::SimSettings,
@@ -735,14 +877,7 @@ pub fn create_buffers_and_texture_descriptions(
     );
     gpu_resources.add_buffer(
         device,
-        BufferName::OutDebugNormals,
-        DEBUG_BUFFER_SIZE,
-        buffer_usage_output,
-    );
-
-    gpu_resources.add_buffer(
-        device,
-        BufferName::OutDebugRelease,
+        BufferName::Debug,
         DEBUG_BUFFER_SIZE,
         buffer_usage_output,
     );
@@ -755,37 +890,78 @@ pub fn create_buffers_and_texture_descriptions(
     gpu_resources.add_buffer(
         device,
         BufferName::GridCellCount,
-        atomic_grid_size,
+        grid_bytes_size,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC,
     );
     gpu_resources.add_buffer(
         device,
         BufferName::GridPeakVelocity,
-        atomic_grid_size,
+        grid_bytes_size,
+        BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+    );
+    gpu_resources.add_buffer(
+        device,
+        BufferName::RegionOfInterest,
+        grid_bytes_size,
+        BufferUsages::STORAGE | BufferUsages::COPY_DST,
+    );
+    gpu_resources.add_buffer(
+        device,
+        BufferName::EvaluationResult,
+        ((size_of::<EvaluationResult>() - 1) / 16 + 1) * 16,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
     );
     gpu_resources.add_buffer(
         device,
         BufferName::GridMass,
-        atomic_grid_size,
+        grid_bytes_size,
+        BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+    );
+    // previous-step mass snapshot for the MPMDAC model's particle depth
+    gpu_resources.add_buffer(
+        device,
+        BufferName::GridMassPrevious,
+        grid_bytes_size,
+        BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+    );
+    // scratch for the biggest-blob detection in compute_center_of_mass
+    gpu_resources.add_buffer(
+        device,
+        BufferName::CenterOfMassLabels,
+        grid_bytes_size,
+        BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+    );
+    gpu_resources.add_buffer(
+        device,
+        BufferName::CenterOfMassBlobMass,
+        grid_bytes_size,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
     );
     gpu_resources.add_buffer(
         device,
         BufferName::GridMomentum,
-        atomic_grid_size * 2,
+        grid_bytes_size * 2,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
     );
     gpu_resources.add_buffer(
         device,
+        BufferName::GridVelocity,
+        grid_bytes_size * 2,
+        BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+    );
+    // per-cell force vector: written by grid_physics for the terrain-following
+    // model, atomically accumulated by p2g_mpmdac for the MPMDAC model,
+    // zeroed by reset_grid for every model
+    gpu_resources.add_buffer(
+        device,
         BufferName::GridForces,
-        atomic_grid_size * 2,
+        grid_bytes_size * 2,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
     );
     gpu_resources.add_buffer(
         device,
         BufferName::GridPeakFlowThickness,
-        atomic_grid_size,
+        grid_bytes_size,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
     );
     gpu_resources.add_buffer(
@@ -797,11 +973,35 @@ pub fn create_buffers_and_texture_descriptions(
     gpu_resources.add_buffer_with_data(
         device,
         BufferName::NewCellsRollingWindow,
-        &[999999999u32; 40],
+        &[40u32; 40],
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
     );
+    gpu_resources.add_buffer(
+        device,
+        BufferName::SlopeAngle,
+        grid_bytes_size,
+        BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+    );
+    gpu_resources.add_buffer(
+        device,
+        BufferName::SlopeAspect,
+        grid_bytes_size,
+        BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+    );
+    gpu_resources.add_buffer(
+        device,
+        BufferName::Roughness,
+        grid_bytes_size,
+        BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+    );
+    gpu_resources.add_buffer(
+        device,
+        BufferName::ReleaseAreas,
+        grid_bytes_size,
+        BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+    );
 
-    gpu_resources
+    Ok(gpu_resources)
 }
 
 #[cfg(test)]
@@ -812,22 +1012,52 @@ mod tests {
     #[test]
     fn buffer_name_to_str_covers_all_variants() {
         let cases = [
-            (BufferName::OutDebugNormals, "out_debug_normals"),
-            (BufferName::OutDebugRelease, "out_debug_release"),
+            (BufferName::Debug, "debug"),
             (BufferName::SimInfo, "sim_info"),
             (BufferName::SimSettings, "sim_settings"),
             (BufferName::GridCellCount, "grid_cell_count"),
             (BufferName::GridPeakVelocity, "grid_peak_velocity"),
             (BufferName::GridMass, "grid_mass"),
-            (BufferName::GridForces, "grid_forces"),
+            (BufferName::GridMomentum, "grid_momentum"),
+            (BufferName::GridVelocity, "grid_velocity"),
             (
                 BufferName::GridPeakFlowThickness,
                 "grid_peak_flow_thickness",
             ),
             (BufferName::AtomicValues, "atomic_values"),
             (BufferName::ParticleIndex, "particle_index"),
-            (BufferName::Particles, "particles"),
+            (BufferName::ParticlesPosition, "particles_position"),
+            (BufferName::ParticlesVelocity, "particles_velocity"),
+            (BufferName::ParticlesMass, "particles_mass"),
+            (BufferName::ParticlesState, "particles_state"),
+            (BufferName::ParticlesElevation, "particles_elevation"),
+            (BufferName::ParticlesAffineMatrix, "particles_affine_matrix"),
             (BufferName::TimestepData, "timestep_data"),
+            (
+                BufferName::NewCellsRollingWindow,
+                "new_cells_rolling_window",
+            ),
+            (BufferName::SlopeAngle, "slope_angle"),
+            (BufferName::SlopeAspect, "slope_aspect"),
+            (BufferName::Roughness, "roughness"),
+            (BufferName::ReleaseAreas, "release_areas"),
+            (BufferName::TestOutput, "test_output"),
+            (BufferName::GridForces, "grid_forces"),
+            (BufferName::CenterOfMass, "center_of_mass"),
+            (BufferName::CenterOfMassLabels, "center_of_mass_labels"),
+            (BufferName::CenterOfMassBlobMass, "center_of_mass_blob_mass"),
+            (BufferName::ChamferParams, "chamfer_params"),
+            (BufferName::ChamferNearestRoi, "chamfer_nearest_roi"),
+            (
+                BufferName::ChamferNearestRoiSnapshot,
+                "chamfer_nearest_roi_snapshot",
+            ),
+            (BufferName::ChamferNearestSim, "chamfer_nearest_sim"),
+            (
+                BufferName::ChamferNearestSimSnapshot,
+                "chamfer_nearest_sim_snapshot",
+            ),
+            (BufferName::EvaluationResult, "evaluation_result"),
         ];
 
         for (name, expected) in cases {
@@ -839,17 +1069,9 @@ mod tests {
     #[test]
     fn texture_name_to_str_covers_all_variants() {
         let cases = [
-            (TextureName::Wind, "wind"),
-            (TextureName::Normals, "normals"),
-            (TextureName::Slope, "slope"),
-            (TextureName::Curvature, "curvature"),
-            (TextureName::Roughness, "roughness"),
-            (TextureName::ReleaseAreas, "release_areas"),
-            (TextureName::Landcover, "landcover"),
-            (TextureName::StagingBuffer, "staging_buffer"),
             (TextureName::Dem, "dem"),
-            (TextureName::ReleaseAreasInput, "release_areas_input"),
-            (TextureName::CellCount, "cell_count"),
+            (TextureName::TerrainGeometry, "terrain_geometry"),
+            (TextureName::Curvature, "curvature"),
         ];
 
         for (name, expected) in cases {
@@ -913,13 +1135,13 @@ mod tests {
             depth_or_array_layers: 1,
         };
         let desc = texture_descriptor(
-            &TextureName::Normals,
+            &TextureName::TerrainGeometry,
             size,
             TextureFormat::Rgba32Float,
             TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
         );
 
-        assert_eq!(desc.label, Some("normals"));
+        assert_eq!(desc.label, Some("terrain_geometry"));
         assert_eq!(desc.size.width, 64);
         assert_eq!(desc.size.height, 32);
         assert_eq!(desc.size.depth_or_array_layers, 1);
@@ -936,8 +1158,12 @@ mod tests {
     fn compute_buffers_default_starts_empty() {
         let buffers = GpuResources::default();
         assert!(buffers.get_buffer(&BufferName::SimInfo).is_none());
-        assert!(buffers.get_texture(&TextureName::Wind).is_none());
-        assert!(buffers.get_texture_view(&TextureName::Wind).is_none());
+        assert!(buffers.get_texture(&TextureName::TerrainGeometry).is_none());
+        assert!(
+            buffers
+                .get_texture_view(&TextureName::TerrainGeometry)
+                .is_none()
+        );
     }
 
     #[test]

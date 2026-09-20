@@ -8,10 +8,12 @@ start = time.time()
 example_case = "avaWog"
 # example_case = "avaMal"
 # example_case = "avaKot"
+# example_case = "avaParabola"
 # example_case = "avaInclinedPlane"
 # example_case = "avaFlatPlane"
 # example_case = "avaHockeyChannel"
 # example_case = "avaHelixChannel"
+# example_case = "avaPyramid"
 
 settings = {
     # mandatory: path to the DEM, currently only custom encoded png files are supported
@@ -25,7 +27,7 @@ settings = {
     
     "max_steps": 5000,
     "batch_compute_steps": 300,
-    "sim_model": 0,
+    "sim_model": "terrain-following",
     "released_particles_per_cell": 4,
     "friction_model": "voellmy",
     "density": 200.0,
@@ -41,6 +43,7 @@ settings = {
     "enable_curvature": True,
     "enable_particle_interaction": True,
     "enable_entrainment": True,
+    "peak_flow_thickness_threshold": 0.2,
 }
 sim = avalanchers.PySimulation.new()
 sim.create(settings)
@@ -48,8 +51,7 @@ sim.create(settings)
 # or easier for examples
 # sim.create_example("frontend/data/avaframe/avaMal.png")
 sim.run()
-positions = sim.positions
-
+positions = sim.particles_position
 end = time.time()
 
 print(f"Execution time without plotting: {end - start:.2f} seconds")
@@ -58,11 +60,11 @@ print(f"Execution time without plotting: {end - start:.2f} seconds")
 # avalanchers.plot3d(sim, "dem")
 
 
-avalanchers.plot3d(sim, "peak_flow_thickness", False, blur_passes=3)
+# avalanchers.plot3d(sim, "peak_flow_thickness", True)
 # avalanchers.plot3d(sim, "cell_count")
-avalanchers.plot3d(sim, "peak_velocity", blur_passes=3)
-avalanchers.plot_overview(sim)
+# avalanchers.plot3d(sim, "peak_velocity")
+# avalanchers.plot_overview(sim)
 
-# avalanchers.plot2d(sim, "peak_flow_thickness")
-# avalanchers.plot2d(sim, "peak_velocity")
+avalanchers.plot2d(sim, "peak_flow_thickness")
+# avalanchers.plot2d(sim, "peak_velocity", particles=True)
 # avalanchers.plot2d(sim, "normals_x")

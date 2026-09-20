@@ -44,6 +44,16 @@ jobs:
           # Force the use of the Software Rasterizer
           VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
         run: |
+          # The hosted runner may contain a stale Google Chrome source. Chrome
+          # is not required by this workflow, so remove it before refreshing
+          # the package indexes.
+          sudo find /etc/apt/sources.list.d -maxdepth 1 -type f \
+            \( -iname '*chrome*' -o -iname '*google*' \) -delete
+          if [ -f /etc/apt/sources.list ]; then
+            sudo sed -i '/dl\.google\.com\/linux\/chrome/d' /etc/apt/sources.list
+          fi
+          sudo find /var/lib/apt/lists -maxdepth 1 -type f \
+            \( -iname '*chrome*' -o -iname '*google*' \) -delete
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             libegl1-mesa-dev \
@@ -195,6 +205,23 @@ jobs:
       - name: Build WASM (Ubuntu Only)
         if: matrix.os == 'ubuntu-latest'
         run: wasm-pack build crates/wasm_bindings --target web --release --out-dir wasm_dist
+
+      - name: Test WASM Bindings (Node)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cd crates/wasm_bindings
+          wasm-pack test --node
+
+      - name: Test frontend JS
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          node --check frontend/js/main.js
+          node --check frontend/js/plot.js
+          node --check frontend/js/plotly_dark.js
+          node --check frontend/js/sources.js
+          node --check frontend/js/tile_utils.js
+          node --check frontend/js/utils.js
+          node --check frontend/js/viewer.js
         
 
       # --- UPLOAD ---

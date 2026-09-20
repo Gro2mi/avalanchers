@@ -8,6 +8,16 @@ pub enum RasterizerError {
     RasterGridIsEmpty,
 }
 
+/// Bounding box of a raster grid in projected coordinates. Lives here rather than
+/// in `tile_manager` because the rasterizer also compiles for wasm.
+#[derive(Debug, Clone)]
+pub struct BBox {
+    pub min_northing: u32,
+    pub max_northing: u32,
+    pub min_easting: u32,
+    pub max_easting: u32,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Point2D {
     pub x: f64,
@@ -25,7 +35,7 @@ pub struct RasterGrid {
     pub cell_size: f64, // Grid resolution (e.g., 0.5m, 1.0m, 2.0m)
     pub width: usize,
     pub height: usize,
-    pub data: Vec<u8>, // Flat 1D vector minimal fit
+    pub data: Vec<bool>, // Flat 1D vector minimal fit
 }
 
 impl RasterGrid {
@@ -75,7 +85,7 @@ impl RasterGrid {
         let width = ((max_x - origin_x) / cell_size).ceil() as usize;
         let height = ((max_y - origin_y) / cell_size).ceil() as usize;
 
-        let data = vec![0; width * height];
+        let data = vec![false; width * height];
 
         let mut grid = Self {
             origin_x,
@@ -94,6 +104,15 @@ impl RasterGrid {
         y * self.width + x
     }
 
+    pub fn get_bbox(&self) -> BBox {
+        BBox {
+            min_easting: self.origin_x as u32,
+            max_easting: (self.origin_x + self.width as f64 * self.cell_size) as u32,
+            min_northing: self.origin_y as u32,
+            max_northing: (self.origin_y + self.height as f64 * self.cell_size) as u32,
+        }
+    }
+
     /// Generates a separate, zero-padded 1D flat vector matching the exact
     /// dimensions and origin of a specific target DTM / swissALTI3D tile.
     pub fn to_padded_tile(
@@ -102,9 +121,9 @@ impl RasterGrid {
         tile_origin_y: f64,
         tile_width: usize,
         tile_height: usize,
-    ) -> Vec<u8> {
+    ) -> Vec<bool> {
         // Allocate the target flat tile filled entirely with zeroes
-        let mut tile_data = vec![0; tile_width * tile_height];
+        let mut tile_data = vec![false; tile_width * tile_height];
 
         // Calculate the discrete integer cell offset between the tile and this minimal grid.
         // Rounding handles any minuscule floating-point inaccuracies safely.
@@ -130,9 +149,9 @@ impl RasterGrid {
 
                 // Map local grid data index to target padded tile index
                 let local_idx = self.get_index(x, y);
-                if self.data[local_idx] == 1 {
+                if self.data[local_idx] {
                     let tile_idx = (target_y as usize) * tile_width + (target_x as usize);
-                    tile_data[tile_idx] = 1;
+                    tile_data[tile_idx] = true;
                 }
             }
         }
@@ -184,7 +203,7 @@ impl RasterGrid {
                     // 3. Fill the cells whose centers are strictly inside the intersection pair
                     for x in start_x..end_x {
                         let idx = self.get_index(x, y);
-                        self.data[idx] = 1;
+                        self.data[idx] = true;
                     }
                 }
             }
@@ -206,7 +225,7 @@ impl RasterGrid {
         }
         let new_width = self.width + 2 * padding_cells;
         let new_height = self.height + 2 * padding_cells;
-        let mut new_data = vec![0; new_width * new_height];
+        let mut new_data = vec![false; new_width * new_height];
         for y in 0..self.height {
             let old_start = y * self.width;
             let old_end = old_start + self.width;
@@ -230,7 +249,7 @@ impl RasterGrid {
             self.height,
             self.width as f64 * self.cell_size,
             self.height as f64 * self.cell_size,
-            self.cell_size * self.cell_size * self.data.iter().filter(|&&v| v == 1).count() as f64
+            self.cell_size * self.cell_size * self.data.iter().filter(|&&v| v).count() as f64
         );
         println!("Origin: {}, {}", self.origin_x, self.origin_y);
         println!("Cell Size: {}", self.cell_size);
@@ -251,11 +270,11 @@ impl Default for RasterGrid {
     }
 }
 
-pub fn print_grid(data: &[u8], width: usize) {
+pub fn print_grid(data: &[bool], width: usize) {
     for row in data.chunks(width) {
         let line: String = row
             .iter()
-            .map(|&val| if val == 1 { "██" } else { "xx" })
+            .map(|&val| if val { "██" } else { "xx" })
             .collect();
         println!("{}", line);
     }
@@ -293,7 +312,7 @@ mod tests {
         let mut grid = RasterGrid::from_polygon(&poly, 5.0);
         grid.rasterize(&poly);
         // grid.debug_print();
-        let raster_area = grid.data.iter().filter(|&&v| v == 1).count() * 25; // Each cell is 5m x 5m = 25 m²
+        let raster_area = grid.data.iter().filter(|&&v| v).count() * 25; // Each cell is 5m x 5m = 25 m²
         let polygon_area = 800.0 * 500.0 / 2.0;
         println!(
             "Area filled: {}, Area polygon: {}, Relative Error: {}",
@@ -311,7 +330,7 @@ mod tests {
         let mut grid = RasterGrid::from_polygon(&poly, 1.0);
         grid.rasterize(&poly);
         // grid.debug_print();
-        let raster_area = grid.data.iter().filter(|&&v| v == 1).count();
+        let raster_area = grid.data.iter().filter(|&&v| v).count();
         let polygon_area = l * l / 2.0;
         grid.print();
         println!(
@@ -330,7 +349,7 @@ mod tests {
         let mut grid = RasterGrid::from_polygon(&poly, 1.0);
         grid.rasterize(&poly);
         // grid.debug_print();
-        let raster_area = grid.data.iter().filter(|&&v| v == 1).count();
+        let raster_area = grid.data.iter().filter(|&&v| v).count();
         let polygon_area = l * l / 2.0;
         grid.print();
         println!(
@@ -349,7 +368,7 @@ mod tests {
         let mut grid = RasterGrid::from_polygon(&poly, 5.0);
         grid.rasterize(&poly);
         grid.print();
-        let raster_area = grid.data.iter().filter(|&&v| v == 1).count() * 25; // Each cell is 5m x 5m = 25 m²
+        let raster_area = grid.data.iter().filter(|&&v| v).count() * 25; // Each cell is 5m x 5m = 25 m²
         let polygon_area = l * l;
         println!(
             "Area filled: {}, Area polygon: {}, Relative Error: {}",
@@ -412,7 +431,7 @@ mod tests {
         // Should be flat, width 10, height 0 (or 1 depending on ceiling rules for flat bounds)
         assert!(grid.width > 0);
         // Ensure data vector contains purely zeros because scanline needs pairs to fill
-        assert!(grid.data.iter().all(|&v| v == 0));
+        assert!(grid.data.iter().all(|&v| !v));
     }
 
     // =========================================================================
@@ -434,7 +453,7 @@ mod tests {
 
         // Because the scanline checks Y = 1.0 (the center), and our poly is between Y=1.2 and 1.8,
         // it must NOT rasterize it (evaluates to 0). This is expected behavior for discrete grids.
-        assert_eq!(grid.data[0], 0);
+        assert_eq!(grid.data[0], false);
     }
 
     #[test]
@@ -445,7 +464,7 @@ mod tests {
         grid.rasterize(&poly);
 
         // It hits the Y=1.0 scanline, so it should be painted
-        assert_eq!(grid.data[0], 1);
+        assert_eq!(grid.data[0], true);
     }
 
     // =========================================================================
@@ -462,7 +481,7 @@ mod tests {
         let padded = grid.to_padded_tile(2.0, 2.0, 2, 2);
 
         assert_eq!(padded.len(), 4);
-        assert!(padded.iter().all(|&v| v == 1));
+        assert!(padded.iter().all(|&v| v));
     }
 
     #[test]
@@ -478,7 +497,7 @@ mod tests {
 
         assert_eq!(padded.len(), 100);
         // The function must safely discard the data without crashing, leaving a completely zeroed tile
-        assert!(padded.iter().all(|&v| v == 0));
+        assert!(padded.iter().all(|&v| !v));
     }
 
     #[test]
@@ -496,7 +515,7 @@ mod tests {
 
         assert_eq!(padded.len(), 4);
         // The parts overlapping the tile (0.0 to 4.0) should be fully painted
-        assert!(padded.iter().all(|&v| v == 1));
+        assert!(padded.iter().all(|&v| v));
     }
 
     #[test]
@@ -517,25 +536,24 @@ mod tests {
         // Row 0 (y=0): [x=0, x=1] -> World Y mid-point is 1.0.
 
         // At y=0 (world_y=1.0): Polygon starts at Y=2.0, so this row is empty (0, 0)
-        assert_eq!(padded[0], 0); // (x=0, y=0)
-        assert_eq!(padded[1], 0); // (x=1, y=0)
+        assert_eq!(padded[0], false); // (x=0, y=0)
+        assert_eq!(padded[1], false); // (x=1, y=0)
 
         // At y=1 (world_y=3.0): Polygon covers X from 2.0 to 8.0.
         // Tile column 0 (world_x=1.0) is empty. Tile column 1 (world_x=3.0) intersects the polygon!
-        assert_eq!(padded[2], 0); // (x=0, y=1)
-        assert_eq!(padded[3], 1); // (x=1, y=1)
+        assert_eq!(padded[2], false); // (x=0, y=1)
+        assert_eq!(padded[3], true); // (x=1, y=1)
     }
 
     #[test]
     fn test_add_padding() {
         let poly = create_square_poly(2.0, 2.0, 6.0, 6.0); // 4x4 meters
         let mut grid = RasterGrid::from_polygon(&poly, 2.0); // origin: 2.0, 2.0. size: 2x2 cells
-        grid.rasterize(&poly);
 
         // Grid data is originally:
         // [1, 1,
         //  1, 1]
-        assert_eq!(grid.data, vec![1, 1, 1, 1]);
+        assert_eq!(grid.data, vec![true, true, true, true]);
 
         // Add a padding of 2.0 meters (which is 1 cell)
         grid.add_padding(2.0).expect("Failed to add padding");
@@ -548,7 +566,10 @@ mod tests {
         //  0, 0, 0, 0]
         assert_eq!(
             grid.data,
-            vec![0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0,]
+            vec![
+                false, false, false, false, false, true, true, false, false, true, true, false,
+                false, false, false, false,
+            ]
         );
     }
 
@@ -561,12 +582,29 @@ mod tests {
         // Grid data is originally:
         // [1, 1,
         //  1, 1]
-        assert_eq!(grid.data, vec![1, 1, 1, 1]);
+        assert_eq!(grid.data, vec![true, true, true, true]);
 
         // Add a padding of 0.0 should return PaddingMustBePositive error
         let res = grid.add_padding(0.0);
         assert!(matches!(res, Err(RasterizerError::PaddingMustBePositive)));
 
-        assert_eq!(grid.data, vec![1, 1, 1, 1]);
+        assert_eq!(grid.data, vec![true, true, true, true]);
+    }
+
+    #[test]
+    fn test_get_bbox() {
+        let poly = create_square_poly(12.0, 22.0, 16.0, 26.0);
+        let mut grid = RasterGrid::from_polygon(&poly, 2.0);
+        let mut bbox = grid.get_bbox();
+        assert_eq!(bbox.min_easting, 12);
+        assert_eq!(bbox.max_easting, 16);
+        assert_eq!(bbox.min_northing, 22);
+        assert_eq!(bbox.max_northing, 26);
+        grid.add_padding(4.0).unwrap();
+        bbox = grid.get_bbox();
+        assert_eq!(bbox.min_easting, 12 - 4);
+        assert_eq!(bbox.max_easting, 16 + 4);
+        assert_eq!(bbox.min_northing, 22 - 4);
+        assert_eq!(bbox.max_northing, 26 + 4);
     }
 }

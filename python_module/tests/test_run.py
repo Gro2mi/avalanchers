@@ -4,8 +4,9 @@ import numpy as np
 
 def test_simulation_run_with_settings():
     settings = {
-        "dem_path": "data/avaframe/avaMal.png",
-        "release_areas_path": "data/avaframe/avaMalreleaseTexture.png",
+        "dem_path": "data/avaframe/avaPfa.png",
+        "release_areas_path": "data/avaframe/avaPfareleaseTexture.png",
+        "released_particles_per_cell": 4
     }
     sim = avalanchers.PySimulation.new()
     sim.create(settings)
@@ -13,7 +14,7 @@ def test_simulation_run_with_settings():
 
 def test_simulation_run_with_example():
     sim = avalanchers.PySimulation.new()
-    sim.create_example("data/avaframe/avaMal.png")
+    sim.create_example("data/avaframe/avaPfa.png")
     sim.run()
 
 def test_np_array_as_dem_roundtrip():
