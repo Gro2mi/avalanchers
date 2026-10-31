@@ -99,6 +99,10 @@ wasm-pack build crates/wasm_bindings --target web --out-dir ../../frontend/js/pk
 The curvilinear solver stores horizontal velocities `(dx/dt, dy/dt)`. Gravity,
 pressure and friction use the full surface metric, including its cross term.
 APIC transfers preserve affine velocity variations between particles and grid.
+Geometric transport along curved terrain is always included.
+`enable_curvature` controls the additional centripetal basal normal load;
+the alpha-line energy benchmark disables that load correction to match its
+reference assumption.
 Particle xyz velocities reconstruct the vertical component from the terrain
 slope; xy velocities and grid momentum are horizontal components. Analytical
 comparisons convert these to surface-distance velocities where needed.

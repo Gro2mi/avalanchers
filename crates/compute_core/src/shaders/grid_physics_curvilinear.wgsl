@@ -59,14 +59,13 @@ fn grid_physics_curvilinear(@builtin(global_invocation_id) id: vec3u) {
     // atomic_float var u = grid_momentum_atomic[idx * 2] / mass;
     // atomic_float var v = grid_momentum_atomic[idx * 2 + 1] / mass;
 
-    // K_ij = B_ij / J. Curvature changes both the normal load and the
-    // horizontal acceleration needed to keep velocity tangent to the bed.
+    // Geometric transport is required even when the curvature correction
+    // to basal normal load is disabled.
+    let centripetal_acceleration = K_xx * u * u + 2.0 * K_xy * u * v + K_yy * v * v;
+    let curvature_acceleration = -slope * centripetal_acceleration / J;
     var g_normal_magnitude = g / J;
-    var curvature_acceleration = vec2f(0.0);
     if use_curvature {
-        let centripetal_acceleration = K_xx * u * u + 2.0 * K_xy * u * v + K_yy * v * v;
         g_normal_magnitude = max(g_normal_magnitude + centripetal_acceleration, 0.0);
-        curvature_acceleration = -slope * centripetal_acceleration / J;
     }
     let g_normal = -g_normal_magnitude;
 

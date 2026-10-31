@@ -341,3 +341,60 @@ timestep-control review.
 Step-5 validation passed: 23 focused Python regressions, all 145 Rust core
 tests, and 61 Rust simulation tests (two pre-existing ignored tests). The shared
 shader `SimInfo` layout and its generated import copies are synchronized.
+
+### Step 6: complete benchmark validation
+
+The first full benchmark run passed similarity, dam break, and rotation, but
+failed the energy-line guardrails. Investigation identified an analytical
+assumption mismatch: the alpha-line reference assumes basal normal load
+`m*g*cos(theta)`, whereas curvature-enabled Coulomb friction also includes
+`m*v^2*kappa`. That additional load dissipates energy beyond the alpha-line
+prediction.
+
+The energy-line benchmark now explicitly disables the additional curvature
+normal load. Geometric transport remains active: it is necessary to keep
+horizontal velocities consistent with the curved surface, independent of the
+normal-load flag. Two GPU regressions verify the geometric acceleration with
+the load correction both enabled and disabled.
+
+With the extra load enabled, the corrected model produces approximately
+1151.3 m runout and fails this particular alpha-line reference. With the
+reference-compatible load setting, runout is approximately 1214.2 m and all
+four benchmark suites pass their guardrails. The failed comparison was not
+resolved by relaxing thresholds.
+
+| Metric | Original review baseline | Final |
+| --- | ---: | ---: |
+| Similarity thickness relative L2 near 20 s | 0.614 | 0.0776 |
+| Dam-break thickness relative L2 near 20 s | 0.342 | 0.0903 |
+| Controlled 0/45-degree plane speed discrepancy | approximately 20% | approximately 0.0035% |
+| Minimum rotation Dice | 0.878 | 0.983 |
+| Maximum rotation runout difference [m] | 4.61 | 6.44 |
+| Energy-line runout error [m] | -7.46 | -1.83 |
+| Energy-line velocity-height RMSE [m] | 1.60 | 1.00 |
+
+Similarity and dam-break late-time thickness errors decreased by approximately
+87% and 74%, respectively. Rotation footprint overlap improved substantially,
+but the maximum runout difference did not improve; it remains approximately
+1.55% of the reference runout, within the 2% guardrail.
+
+The original energy-line run used a different curvature-load setting, so its
+before/after numbers are not a matched-configuration accuracy comparison.
+
+The [final report with plots and full tables](../verification/outputs/all_tests/curvilinear_20261031_metric_apic_final/report.md)
+was generated with:
+
+```text
+.venv\Scripts\python.exe verification\run_all_tests.py --sim-model curvilinear --no-sequences --out-dir verification\outputs\all_tests\curvilinear_20261031_metric_apic_final
+```
+
+The report and plots are generated, untracked verification outputs; this summary
+and all solver/test changes are committed. Resting/freezing and occupancy-based
+stopping remain explicitly deferred at the user's request. Flat-heap regressions
+exercise both continued spreading at zero threshold and the retained freezing
+behavior at the standard threshold.
+
+Final validation: all four numerical benchmark suites passed, all 40 Python
+package tests passed (27 focused solver/report regressions), and
+`cargo check --workspace` and Rust formatting checks passed. The earlier
+step-5 full Rust run passed 145 core and 61 simulation tests.

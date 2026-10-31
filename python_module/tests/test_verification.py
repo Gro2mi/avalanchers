@@ -11,7 +11,20 @@ VERIFICATION = pathlib.Path(__file__).resolve().parents[2] / "verification"
 sys.path.insert(0, str(VERIFICATION))
 
 
-def plane_simulation(angle, friction=0.0):
+def gather_grid(values, positions):
+    q = positions / 5.0 - 0.5
+    base = np.floor(q - 0.5).astype(int)
+    gathered = np.zeros_like(positions)
+    for i in range(3):
+        for j in range(3):
+            node = base + [i, j]
+            distance = np.abs(q - node)
+            weights = np.where(distance < 0.5, 0.75 - distance**2, 0.5 * (1.5 - distance)**2)
+            gathered += np.prod(weights, axis=1)[:, None] * values[node[:, 1], node[:, 0]]
+    return gathered
+
+
+def plane_simulation(angle, friction=0.0, **overrides):
     n = 64
     cell_size = 5.0
     y, x = np.mgrid[:n, :n]
@@ -35,6 +48,7 @@ def plane_simulation(angle, friction=0.0):
         "enable_curvature": False,
         "enable_particle_interaction": True,
         "enable_particle_relaxation": False,
+        **overrides,
     })
     sim.set_dem_with_bounds(dem, cell_size, 0.0, n * cell_size, 0.0, n * cell_size, 1.0)
     sim.set_release_areas(release)
@@ -76,17 +90,44 @@ def test_curvilinear_pressure_uses_normal_thickness_and_full_metric(angle):
     grad[1:-1, :, 1] = (h[2:, :] - h[:-2, :]) / 10.0
     inverse_grad = grad - slope * np.sum(grad * slope, axis=2, keepdims=True) / (1.0 + slope @ slope)
     acceleration = -9.81 * slope / (1.0 + slope @ slope) - 9.81 / jac[:, :, None] * inverse_grad
-    q = before / 5.0 - 0.5
-    base = np.floor(q - 0.5).astype(int)
-    expected = np.zeros_like(before)
-    for i in range(3):
-        for j in range(3):
-            node = base + [i, j]
-            distance = np.abs(q - node)
-            weights = np.where(distance < 0.5, 0.75 - distance**2, 0.5 * (1.5 - distance)**2)
-            weight = np.prod(weights, axis=1)
-            expected += weight[:, None] * acceleration[node[:, 1], node[:, 0]]
+    expected = gather_grid(acceleration, before)
     expected *= math.sqrt(2.0 * 0.05 * 5.0 / (9.81 * 0.866))
+    central = ((before > 100.0) & (before < 220.0)).all(axis=1)
+    actual = np.asarray(sim.particles_velocity_xy, dtype=np.float64)
+    np.testing.assert_allclose(actual[central], expected[central], atol=3e-5)
+
+
+@pytest.mark.parametrize("normal_load_correction", [False, True])
+def test_geometric_transport_is_independent_of_curvature_load_flag(normal_load_correction):
+    sim, _, _ = plane_simulation(
+        0.0, enable_particle_interaction=False, enable_curvature=normal_load_correction
+    )
+    _, x = np.mgrid[:64, :64]
+    x = (x + 0.5) * 5.0
+    dem = np.ascontiguousarray(
+        (1000.0 - math.tan(math.radians(35.0)) * x + 0.005 * (x - 160.0)**2).astype(np.float32)
+    )
+    release = np.zeros((64, 64), dtype=np.float32)
+    release[12:52, 12:52] = 1.0
+    sim.set_dem_with_bounds(dem, 5.0, 0.0, 320.0, 0.0, 320.0, 1.0)
+    sim.set_release_areas(release)
+    sim.prepare()
+    info = sim.run_n_steps(1)
+    used_dt = info.dt
+    before = np.asarray(sim.particles_position_xy, dtype=np.float64)
+    sim.run_n_steps(1)
+    mass = np.asarray(sim.grid_mass, dtype=np.float64).reshape((64, 64)) / 10.0
+    momentum = np.asarray(sim.grid_momentum, dtype=np.float64).reshape((64, 64, 2)) / 100.0
+    node_velocity = momentum / (mass[:, :, None] + 1e-6)
+    node_velocity[mass < 0.01] = 0.0
+    dem = dem.astype(np.float64)
+    slope = np.stack(np.gradient(dem, 5.0)[::-1], axis=2)
+    hessian_xx = np.zeros((64, 64))
+    hessian_xx[:, 1:-1] = (dem[:, 2:] - 2.0 * dem[:, 1:-1] + dem[:, :-2]) / 25.0
+    jac_squared = 1.0 + np.sum(slope**2, axis=2)
+    normal_acceleration = hessian_xx * node_velocity[:, :, 0]**2
+    acceleration = -slope * ((9.81 + normal_acceleration) / jac_squared)[:, :, None]
+    expected = gather_grid(node_velocity + used_dt * acceleration, before)
     central = ((before > 100.0) & (before < 220.0)).all(axis=1)
     actual = np.asarray(sim.particles_velocity_xy, dtype=np.float64)
     np.testing.assert_allclose(actual[central], expected[central], atol=3e-5)
@@ -115,6 +156,30 @@ def test_stopped_batch_preserves_last_grid_snapshot():
     assert mass == pytest.approx(np.asarray(sim.particles_mass).sum(), rel=0.01)
     final_time = info.elapsed_time
     assert sim.run_n_steps(1).elapsed_time == final_time
+
+
+@pytest.mark.parametrize("threshold", [0.0, 0.1])
+def test_flat_heap_spreading_and_retained_freezing_policy(threshold):
+    sim, _, _ = plane_simulation(0.0, velocity_threshold=threshold)
+    y, x = np.mgrid[:64, :64]
+    x, y = (x + 0.5) * 5.0, (y + 0.5) * 5.0
+    release = np.ascontiguousarray(
+        np.maximum(1.0 - ((x - 160.0) / 50.0)**2 - ((y - 160.0) / 50.0)**2, 0.0).astype(np.float32)
+    )
+    sim.set_dem_with_bounds(np.zeros((64, 64), dtype=np.float32), 5.0, 0.0, 320.0, 0.0, 320.0, 1.0)
+    sim.set_release_areas(release)
+    sim.prepare()
+    before = np.asarray(sim.particles_position_xy, dtype=np.float64)
+    initial_radius = np.sqrt(np.mean(np.sum((before - 160.0)**2, axis=1)))
+    info = sim.run_n_steps(100)
+    after = np.asarray(sim.particles_position_xy, dtype=np.float64)
+    final_radius = np.sqrt(np.mean(np.sum((after - 160.0)**2, axis=1)))
+    if threshold == 0.0:
+        assert not info.flags & (1 << 31)
+        assert final_radius > initial_radius + 1.0
+    else:
+        assert info.flags & (1 << 31)
+        assert final_radius < initial_radius + 0.2
 
 
 @pytest.mark.parametrize("error, final_time, expected", [

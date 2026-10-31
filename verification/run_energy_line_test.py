@@ -47,6 +47,9 @@ SETTINGS = {
     "released_particles_per_cell": 4,
     "max_steps": 6000,
     "velocity_threshold": 0.1,
+    # The alpha-line reference assumes N = m*g*cos(theta), without the
+    # velocity-dependent centripetal contribution to basal friction.
+    "enable_curvature": False,
 }
 
 # sample the center of mass path every N simulation steps
