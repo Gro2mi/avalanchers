@@ -150,8 +150,10 @@ def run_simulation(settings, cfg):
     release, _, _ = build_release(header, cfg)
     sim.set_release_areas(np.ascontiguousarray(release.astype(np.float32)))
 
-    sim_name = "%s_coulomb_delta%g" % (pathlib.Path(settings["dem_path"]).stem,
-                                       cfg["delta"])
+    sim_name = "%s_%s_%s_delta%g" % (pathlib.Path(settings["dem_path"]).stem,
+                                     settings["sim_model"],
+                                     settings["friction_model"],
+                                     cfg["delta"])
     print(f"=== Similarity solution test (Hutter et al. 1993) - {sim_name} ===")
     print(f"DEM: {settings['dem_path']}")
     print(f"plane {cfg['zeta']:.2f} deg, bed friction {cfg['delta']:.2f} deg "
@@ -163,7 +165,8 @@ def run_simulation(settings, cfg):
     pos = np.asarray(sim.particles_position_xy, dtype=np.float64)
     pos = pos[np.isfinite(pos).all(axis=1)]
     print(f"particles: {len(pos)}, heap centroid on map: "
-          f"({pos[:, 0].mean():+.1f}, {pos[:, 1].mean():+.1f}) m - expected (+0.0, +0.0)")
+          f"({pos[:, 0].mean() + xmin:+.1f}, {pos[:, 1].mean() + ymin:+.1f}) m "
+          f"- expected (+0.0, +0.0)")
 
     sol = sst.similarity_solution(cfg["zeta"], cfg["delta"], cfg["phi"],
                                   cfg["flag_earth"], cfg["l_x"], cfg["l_y"],
@@ -341,8 +344,6 @@ def main():
         sst.assemble_gif(contour_pngs, out_dir / (sim_name + "_contours.gif"))
         sst.assemble_gif(profile_pngs, out_dir / (sim_name + "_profiles.gif"))
 
-    sst.plot_error_time(samples["t"], err_h, err_h_max, err_vh, err_vh_max,
-                        relative, cfg["t_save"], sim_name, out_dir)
     sst.plot_simi_sol_summary(header, field, h_ana, limits,
                               {"h_l2": err_h, "h_lmax": err_h_max,
                                "vh_l2": err_vh, "vh_lmax": err_vh_max},

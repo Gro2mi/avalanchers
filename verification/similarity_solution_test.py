@@ -475,17 +475,6 @@ def add_error_time(ax1, times, h_err_l2, h_err_lmax, vh_err_l2, vh_err_lmax,
     return ax1, ax2
 
 
-def plot_error_time(times, h_err_l2, h_err_lmax, vh_err_l2, vh_err_lmax,
-                    relative, t_save, sim_name, out_dir):
-    """Standalone error-vs-time figure (port of plotErrorTime)."""
-    fig1, ax1 = plt.subplots(figsize=(2 * FIG_W, 2 * FIG_H))
-    title = " between analytical solution and avalanchers \n(simulation %s)" % sim_name
-    ax1.set_title(("Relative error difference" if relative else "Error difference") + title)
-    add_error_time(ax1, times, h_err_l2, h_err_lmax, vh_err_l2, vh_err_lmax,
-                   relative, t_save)
-    _save_fig(fig1, out_dir, "error_time_" + sim_name)
-
-
 def plot_profile_comparison(header, field, h_ana, limits, t, sim_name, out_dir):
     """Standalone profile comparison figure at one time step (port of
     saveSimiSolProfile): flow-direction and across-flow twin-axis profiles."""

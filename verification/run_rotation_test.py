@@ -183,7 +183,9 @@ def main():
     h0 = float(np.median(release[release > 0]))
     out_dir = pathlib.Path(args.out_dir)
     pics = out_dir / "pics"
-    sim_name = "%s_coulomb_mu%g" % (pathlib.Path(args.dem).stem, mu)
+    sim_name = "%s_%s_%s_mu%g" % (pathlib.Path(args.dem).stem,
+                                  SETTINGS["sim_model"],
+                                  SETTINGS["friction_model"], mu)
 
     print(f"=== Rotation test - {sim_name} ===")
     print(f"base DEM: {args.dem}")

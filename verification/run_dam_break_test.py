@@ -79,7 +79,7 @@ DAM_BREAK_CFG = {
     "t_end": 20.0,        # simulated end time [s] (ini: tEnd = 30)
     "save_interval": 1.0, # field sampling interval [s] (ini: dt = 0.1)
     "phi": None,          # slope angle [deg]; None = measure from the DEM
-    "delta": 12.0,        # bed friction angle [deg] (ini: 21, see docstring)
+    "delta": 21.0,        # bed friction angle [deg] (ini: 21, see docstring)
     # comparison domain, horizontal meters relative to the dam front
     "x_start": -200.0,
     "x_end": 220.0,
@@ -206,9 +206,10 @@ def run_simulation(settings, cfg):
     dam = build_geometry(sim, header, frame)
 
     mu = settings["friction_coefficient"]
-    sim_name = "%s_%s_delta%g" % (pathlib.Path(settings["dem_path"]).stem,
-                                  settings["friction_model"],
-                                  math.degrees(math.atan(mu)))
+    sim_name = "%s_%s_%s_delta%g" % (pathlib.Path(settings["dem_path"]).stem,
+                                     settings["sim_model"],
+                                     settings["friction_model"],
+                                     math.degrees(math.atan(mu)))
     print(f"=== Dam break test (Faccanoni & Mangeney 2012, dry bed) - {sim_name} ===")
     print(f"DEM: {settings['dem_path']}")
     print(f"plane {frame['phi_deg']:.2f} deg, bed friction "
@@ -300,6 +301,13 @@ def run_simulation(settings, cfg):
         samples[key] = np.asarray(samples[key])
     for key in errors:
         errors[key] = np.asarray(errors[key])
+    if len(samples["t"]) < 2:
+        raise RuntimeError(
+            "the dam did not move - only the initial field was sampled. The bed "
+            "friction angle (delta = %.1f deg) is too close to the slope angle "
+            "(%.1f deg): near-critical slopes stall in avalanchers' friction "
+            "solver. Lower delta for a meaningful comparison (e.g. --delta 12)."
+            % (cfg["delta"], frame["phi_deg"]))
     print(f"\nstopped after {info.timestep} steps, t = {info.elapsed_time:.2f} s "
           f"({len(samples['t'])} field samples)")
     return sim, dem, header, frame, dam, samples, errors, sim_name
@@ -355,14 +363,13 @@ def main():
         [{k: samples[k][i] for k in ("h", "u", "v")} for i in range(len(samples["t"]))],
         cfg["scale_coef"])
 
-    # analytic solution table for the analytic-only figures
+    # analytic solution over the whole run (drives the animation limits)
     times = np.arange(0.0, samples["t"][-1] + 1e-6, 0.1)
     s_axis = np.arange(cfg["x_start"] / frame["cos_phi"],
                        cfg["x_end"] / frame["cos_phi"], 0.5)
     h_ana, u_ana, _ = dam_break_test.dam_break_solution(
         frame["phi_deg"], cfg["delta"], dam["h_l"], times, s_axis,
         cfg["grav_acc"], x_back_rel=dam["x_back_rel"])
-    sol = {"t": times, "s": s_axis, "h": h_ana, "u": u_ana}
 
     # fixed axis limits for the animation: numeric and analytic maxima over
     # ALL times, so no panel rescales between frames
@@ -374,11 +381,10 @@ def main():
     }
 
     out_dir = pathlib.Path(args.out_dir) / "pics"
-    dam_break_test.plot_dam_ana_results(sol, cfg["t_save"], out_dir,
-                                        x_lim=cfg["x_lim"])
     if cfg["plot_sequence"]:
         # optional result: comparison cross-cut figure for every saved time
         # step (AvaFrame's plotSequence), stitched into an animated GIF
+        # (the individual frame figures are collapsed into the GIF)
         pngs = []
         for i in range(len(samples["t"])):
             sample0 = {k: samples[k][0] for k in ("h", "u", "v")}
@@ -386,15 +392,13 @@ def main():
             pngs.append(dam_break_test.plot_comparison_dam(
                 sample0, sample_t, frame, dam, samples["t"][i], cfg, sim_name,
                 out_dir))
-        dam_break_test.assemble_gif(pngs, out_dir / (sim_name + "_compare.gif"))
+        dam_break_test.assemble_gif(pngs, out_dir / (sim_name + "_compare.gif"),
+                                    cleanup=True)
     relative = cfg["relative_error"]
     err_h = errors["h_l2rel" if relative else "h_l2"]
     err_h_max = errors["h_lmaxrel" if relative else "h_lmax"]
     err_vh = errors["vh_l2rel" if relative else "vh_l2"]
     err_vh_max = errors["vh_lmaxrel" if relative else "vh_lmax"]
-    dam_break_test.plot_error_time(samples["t"], err_h, err_h_max, err_vh,
-                                   err_vh_max, relative, cfg["t_save"], sim_name,
-                                   out_dir)
     dam_break_test.plot_dam_break_summary(dem["rasterData"], header, frame, dam,
                                           samples,
                                           {"h_l2": err_h, "h_lmax": err_h_max,

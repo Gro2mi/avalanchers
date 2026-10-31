@@ -1,4 +1,6 @@
 import importlib.util
+import os
+from datetime import datetime, timezone
 from importlib.metadata import version
 
 import numpy as np
@@ -7,6 +9,230 @@ from ._avalanchers import *
 from .output import AvalanchersOutput, AvalanchersScenario  # noqa: F401
 
 __version__ = version("avalanchers")
+
+
+# Calibration-relevant simulation parameters and the engine defaults used
+# when a key is missing from the settings dictionary. Mirrors
+# `SimSettings::new()` in crates/compute_core/src/settings.rs.
+CALIBRATION_PARAMETER_DEFAULTS = {
+    "sim_model": "terrain-following",
+    "friction_model": "voellmy",
+    "constitutive_model": "drucker-prager",
+    "density": 200.0,
+    "slab_thickness_factor": 1.0,
+    "friction_coefficient": 0.2,
+    "drag_coefficient": 2000.0,
+    "n0": 70.0,
+    "i0": 0.29,
+    "mu0": 0.38,
+    "mu2": 0.65,
+    "grain_diameter": 0.002,
+    "internal_friction_angle": 40.0,
+    "basal_friction_angle": 25.0,
+    "shear_modulus": 5.0e4,
+    "hardening_modulus": 0.0,
+    "bulk_modulus": 2.0e4,
+    "compaction_pressure": 2.0e3,
+    "released_particles_per_cell": 8,
+    "cfl": 0.5,
+    "cell_size": 1.0,
+    "min_slope_angle": 28.0,
+    "max_slope_angle": 60.0,
+    "release_min_elevation": 1500.0,
+    "release_max_elevation": 8848.0,
+    "release_area_fraction": None,
+    "outlines_padding": None,
+    "velocity_threshold": 0.1,
+    "roughness_threshold": 0.01,
+    "peak_flow_thickness_threshold": 0.1,
+    "enable_curvature": True,
+    "enable_particle_interaction": True,
+    "enable_earth_pressure_coefficient": True,
+    "enable_entrainment": True,
+}
+
+# Metric names of PyEvaluation (see crates/python_bindings/src/lib.rs),
+# exported alongside the parameters. chamfer_distance is omitted because it
+# duplicates sim_to_roi/roi_to_sim/chamfer.
+EVALUATION_METRICS = (
+    "intersection",
+    "undershoot",
+    "overshoot",
+    "iou",
+    "horizontal_distance",
+    "vertical_drop",
+    "beeline_3d",
+    "horizontal_distance_ref",
+    "vertical_drop_ref",
+    "beeline_3d_ref",
+    "peak_velocity",
+    "sim_to_roi",
+    "roi_to_sim",
+    "chamfer",
+)
+
+# Aliases accepted by the FromStr implementations of the Rust settings
+# enums, normalized to the first canonical name of each group.
+_ENUM_ALIASES = {
+    "sim_model": {
+        "terrain-following": "terrain-following",
+        "terrain": "terrain-following",
+        "t": "terrain-following",
+        "curvilinear": "curvilinear",
+        "curvi": "curvilinear",
+        "c": "curvilinear",
+        "mpmdac": "mpmdac",
+        "mpm-dac": "mpmdac",
+        "mpm_depth_averaged_curvilinear": "mpmdac",
+    },
+    "friction_model": {
+        "coulomb": "coulomb",
+        "voellmy": "voellmy",
+        "voellmy-min-shear": "voellmy-min-shear",
+        "voellmyminshear": "voellmy-min-shear",
+        "samosat": "samosat",
+        "samos-at": "samosat",
+    },
+    "constitutive_model": {
+        "drucker-prager": "drucker-prager",
+        "dp": "drucker-prager",
+        "mohr-coulomb": "drucker-prager",
+        "mu-i": "mu-i",
+        "mui": "mu-i",
+        "mu(i)": "mu-i",
+        "mu-i-rheology": "mu-i",
+    },
+}
+
+
+def _normalize_enum(name, value):
+    aliases = _ENUM_ALIASES[name]
+    if isinstance(value, (int, np.integer)):
+        choices = list(dict.fromkeys(aliases.values()))
+        if 0 <= int(value) < len(choices):
+            return choices[int(value)]
+        raise ValueError(f"Invalid {name} index: {value}")
+    key = str(value).lower()
+    if key in aliases:
+        return aliases[key]
+    raise ValueError(f"Unknown {name}: '{value}'")
+
+
+def calibration_parameters(settings):
+    """Resolve the calibration-relevant parameters from a settings dictionary.
+
+    ``settings`` uses the same keys as :meth:`PySimulation.create`. Missing
+    keys fall back to the engine defaults (``SimSettings::new`` in
+    ``crates/compute_core/src/settings.rs``).
+
+    Returns:
+        dict: Parameter name -> value, with the model enums normalized to
+        their canonical names (e.g. ``"voellmy"`` instead of ``1``).
+    """
+    params = {}
+    for key, default in CALIBRATION_PARAMETER_DEFAULTS.items():
+        value = settings.get(key, default)
+        if key in _ENUM_ALIASES:
+            value = _normalize_enum(key, value)
+        params[key] = value
+    return params
+
+
+def evaluation_metrics(evaluation):
+    """Extract the results of a :class:`PyEvaluation` as a flat dict.
+
+    ``evaluation`` may be a ``PyEvaluation`` (as returned by
+    :meth:`PySimulation.evaluate`) or a dict of metrics, which may contain a
+    subset of the names.
+
+    Returns:
+        dict: Metric name -> value for all :data:`EVALUATION_METRICS`;
+        metrics missing from a dict input are ``None``.
+    """
+    return {
+        name: (evaluation.get(name) if isinstance(evaluation, dict) else evaluation[name])
+        for name in EVALUATION_METRICS
+    }
+
+
+def export_calibration_parameters(settings, path, run_name=None, append=True, evaluation=None):
+    """Export the parameters and results of a calibration run to a parquet file.
+
+    Each settings dictionary (the same schema as :meth:`PySimulation.create`)
+    becomes one row. Parameters that are not set explicitly are recorded
+    with their engine defaults, so the file fully describes what was
+    simulated. When a :class:`PyEvaluation` is given, its metrics (IoU,
+    chamfer distance, runout, peak velocity, ...) are stored in the same
+    row, pairing a run outcome with its parameters. By default new rows are
+    appended to an existing file, letting a calibration loop grow the table
+    run by run.
+
+    Args:
+        settings: Settings dict, or a list of dicts for a parameter sweep.
+        path: Destination ``.parquet`` file path.
+        run_name: Name (or list of names, one per settings dict) stored in
+            the ``run_name`` column. Defaults to ``run_1``, ``run_2``, ...
+            continuing the numbering of an existing file.
+        append: When True (default) and ``path`` exists, new rows are
+            appended; otherwise the file is overwritten.
+        evaluation: :class:`PyEvaluation` as returned by
+            :meth:`PySimulation.evaluate` (or a flat dict of metrics), or a
+            list of these matching ``settings``. Without an evaluation the
+            metric columns are written as null.
+
+    Returns:
+        pandas.DataFrame: The full parameter table written to ``path``.
+    """
+    try:
+        import pandas as pd
+        import pyarrow  # noqa: F401  (parquet engine)
+    except ImportError:
+        raise ImportError(
+            "The 'pandas' and 'pyarrow' packages are required to export "
+            "calibration parameters. Install them using: pip install pandas pyarrow"
+        )
+
+    configs = [settings] if isinstance(settings, dict) else list(settings)
+    if run_name is None:
+        start = len(pd.read_parquet(path, columns=["run_name"])) if append and os.path.exists(path) else 0
+        run_names = [f"run_{start + i + 1}" for i in range(len(configs))]
+    elif isinstance(run_name, str):
+        run_names = [run_name]
+    else:
+        run_names = list(run_name)
+    if len(run_names) != len(configs):
+        raise ValueError(
+            f"Got {len(run_names)} run names for {len(configs)} settings dicts"
+        )
+
+    if evaluation is None:
+        evaluations = [None] * len(configs)
+    elif isinstance(evaluation, (list, tuple)):
+        evaluations = list(evaluation)
+    else:
+        evaluations = [evaluation]
+    if len(evaluations) != len(configs):
+        raise ValueError(
+            f"Got {len(evaluations)} evaluations for {len(configs)} settings dicts"
+        )
+
+    rows = []
+    for config, result in zip(configs, evaluations):
+        row = calibration_parameters(config)
+        if result is not None:
+            row.update(evaluation_metrics(result))
+        rows.append(row)
+
+    columns = list(CALIBRATION_PARAMETER_DEFAULTS) + list(EVALUATION_METRICS)
+    frame = pd.DataFrame(rows, columns=columns)
+    frame.insert(0, "run_name", run_names)
+    frame.insert(1, "timestamp", datetime.now(timezone.utc).isoformat())
+    frame.insert(2, "avalanchers_version", __version__)
+
+    if append and os.path.exists(path):
+        frame = pd.concat([pd.read_parquet(path), frame], ignore_index=True)
+    frame.to_parquet(path, index=False)
+    return frame
 
 
 def create_mesh(sim):

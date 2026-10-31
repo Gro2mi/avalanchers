@@ -254,27 +254,6 @@ def _plot_dam_profile(ax, f, y_initial, data_initial, data_num, f_ana, y_ana,
     return ax
 
 
-def plot_dam_ana_results(sol, t_save, out_dir, x_lim=None):
-    """Plots of the analytic solution alone (port of plotDamAnaResults):
-    flow thickness and flow velocity at t = 0 and t = t_save."""
-    out_dir = _ensure_dir(out_dir)
-    dt_ind = min(int(np.searchsorted(sol["t"], t_save)), len(sol["t"]) - 1)
-    for var, name, unit, file_name in (
-            (sol["h"], NAME_FT, UNIT_FT, "dam_break_flow_thickness"),
-            (sol["u"], NAME_FV, UNIT_FV, "dam_break_flow_velocity")):
-        # var is (nt, nx): row 0 = t = 0, row dt_ind = t_save
-        fig = plt.figure(figsize=(FIG_W, FIG_H))
-        plt.title("Dry-Bed")
-        plt.plot(sol["s"], var[0], "k--", label="t = 0s")
-        plt.plot(sol["s"], var[dt_ind], label="t = %.1fs" % sol["t"][dt_ind])
-        plt.xlabel("s [m]")
-        plt.ylabel("%s [%s]" % (name, unit))
-        if x_lim is not None:
-            plt.xlim(x_lim)
-        plt.legend()
-        _save_fig(fig, out_dir, file_name)
-
-
 def plot_comparison_dam(sample0, sample_t, frame, dam, t, cfg, sim_name, out_dir):
     """1x3 comparison cross-cut figure (FT / FV / hv profiles) at one time
     step (port of plotComparisonDam). Returns the saved figure path."""
@@ -355,17 +334,6 @@ def add_error_time(ax1, times, h_err_l2, h_err_lmax, vh_err_l2, vh_err_lmax,
     ax1.text(t_save, 0.03, "%.2f s" % t_save, transform=trans, va="bottom",
              ha="center", color="grey", fontsize=FS - 2)
     return ax1, ax2
-
-
-def plot_error_time(times, h_err_l2, h_err_lmax, vh_err_l2, vh_err_lmax,
-                    relative, t_save, sim_name, out_dir):
-    """Standalone error-vs-time figure (port of plotErrorTime)."""
-    fig1, ax1 = plt.subplots(figsize=(2 * FIG_W, 2 * FIG_H))
-    title = " between dam break solution and avalanchers \n(simulation %s)" % sim_name
-    ax1.set_title(("Relative error difference" if relative else "Error difference") + title)
-    add_error_time(ax1, times, h_err_l2, h_err_lmax, vh_err_l2, vh_err_lmax,
-                   relative, t_save)
-    _save_fig(fig1, out_dir, "error_time_" + sim_name)
 
 
 def plot_dam_break_summary(dem, header, frame, dam, samples, errors, t_save,
@@ -520,14 +488,15 @@ def _save_fig(fig, out_dir, name):
     return path
 
 
-def assemble_gif(png_paths, out_path, duration_ms=500, max_width=1500):
+def assemble_gif(png_paths, out_path, duration_ms=500, max_width=1500,
+                 cleanup=False):
     """Stitch per-time-step figures (sorted by time) into a looping GIF.
 
     The frames are the comparison cross-cut figures of all saved time steps
     (AvaFrame's animated plotSequence figure). Frames are downscaled to
-    `max_width` pixels to keep the GIF a reasonable size; the individual
-    full-resolution PNGs are kept next to it. Returns the GIF path, or None
-    if pillow is unavailable.
+    `max_width` pixels to keep the GIF a reasonable size; with `cleanup` the
+    individual frame PNGs are deleted once the GIF is written. Returns the
+    GIF path, or None if pillow is unavailable.
     """
     try:
         from PIL import Image
@@ -546,5 +515,8 @@ def assemble_gif(png_paths, out_path, duration_ms=500, max_width=1500):
         frames.append(frame)
     frames[0].save(out_path, save_all=True, append_images=frames[1:],
                    duration=duration_ms, loop=0)
+    if cleanup:
+        for path in png_paths:
+            pathlib.Path(path).unlink(missing_ok=True)
     print("animation saved to %s (%d frames)" % (out_path, len(frames)))
     return out_path

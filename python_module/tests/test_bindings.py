@@ -165,6 +165,10 @@ def test_simulation_setters_and_getters():
         _ = sim.roi
     with pytest.raises(ValueError, match="crown line not available"):
         _ = sim.crown_line
+    with pytest.raises(ValueError, match="crown candidates not available"):
+        _ = sim.crown_candidates
+    with pytest.raises(ValueError, match="potential release areas not available"):
+        _ = sim.potential_release_areas
 
     for value in (
         sim.peak_velocity,

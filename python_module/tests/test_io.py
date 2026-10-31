@@ -3,8 +3,89 @@ import shutil
 
 import avalanchers
 import numpy as np
+import pandas as pd
 import xarray as xr
 from avalanchers import AvalanchersOutput
+
+
+def test_export_calibration_parameters(tmp_path):
+    path = str(tmp_path / "calibration.parquet")
+
+    frame = avalanchers.export_calibration_parameters(
+        {
+            "friction_model": "samosat",
+            "mu0": 0.42,
+            "enable_entrainment": False,
+            "release_area_fraction": 0.25,
+        },
+        path,
+        run_name="base",
+        evaluation={"iou": 0.75, "peak_velocity": 12.5},
+    )
+
+    assert frame.loc[0, "run_name"] == "base"
+    assert frame.loc[0, "friction_model"] == "samosat"
+    assert frame.loc[0, "mu0"] == 0.42
+    assert not frame.loc[0, "enable_entrainment"]
+    assert frame.loc[0, "release_area_fraction"] == 0.25
+    # Unset parameters are recorded with the engine defaults
+    assert frame.loc[0, "friction_coefficient"] == 0.2
+    assert frame.loc[0, "drag_coefficient"] == 2000.0
+    assert frame.loc[0, "sim_model"] == "terrain-following"
+    assert frame.loc[0, "avalanchers_version"] == avalanchers.__version__
+    # Evaluation results are stored in the same row, metrics without a
+    # value stay null
+    assert frame.loc[0, "iou"] == 0.75
+    assert frame.loc[0, "peak_velocity"] == 12.5
+    assert pd.isna(frame.loc[0, "chamfer"])
+    assert all(column in frame.columns for column in avalanchers.EVALUATION_METRICS)
+
+    # Appending accumulates one row per run and continues the numbering
+    avalanchers.export_calibration_parameters({"mu0": 0.5}, path)
+    reread = pd.read_parquet(path)
+    assert list(reread["run_name"]) == ["base", "run_2"]
+    assert reread.loc[1, "mu0"] == 0.5
+    assert reread.loc[1, "friction_model"] == "voellmy"
+    assert pd.isna(reread.loc[1, "iou"])
+
+    # Batch export of a sweep with explicit names
+    sweep = avalanchers.export_calibration_parameters(
+        [{"mu0": 0.4}, {"mu0": 0.6}], path, run_name=["low", "high"]
+    )
+    assert list(sweep["run_name"]) == ["base", "run_2", "low", "high"]
+
+
+def test_calibration_parameters_enum_normalization():
+    params = avalanchers.calibration_parameters(
+        {
+            "sim_model": 2,
+            "friction_model": "VoellmyMinShear",
+            "constitutive_model": "mui",
+        }
+    )
+    assert params["sim_model"] == "mpmdac"
+    assert params["friction_model"] == "voellmy-min-shear"
+    assert params["constitutive_model"] == "mu-i"
+
+
+def test_export_calibration_parameters_with_evaluation(tmp_path):
+    sim = avalanchers.PySimulation.new()
+    sim.create_example("data/avaframe/avaParabola.png")
+    sim.set_max_timesteps(3)
+    sim.run()
+    sim.post_process()
+    evaluation = sim.evaluate()
+
+    path = str(tmp_path / "calibration.parquet")
+    frame = avalanchers.export_calibration_parameters(
+        {"mu0": 0.44}, path, run_name="smoke", evaluation=evaluation
+    )
+
+    assert frame.loc[0, "iou"] == evaluation.iou
+    assert frame.loc[0, "beeline_3d"] == evaluation.beeline_3d
+    assert frame.loc[0, "chamfer"] == evaluation.chamfer
+    assert frame.loc[0, "peak_velocity"] == evaluation.peak_velocity
+    assert pd.notna(frame.loc[0, "horizontal_distance_ref"])
 
 
 def test_simulation_save():
