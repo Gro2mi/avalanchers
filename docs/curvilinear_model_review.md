@@ -398,3 +398,17 @@ Final validation: all four numerical benchmark suites passed, all 40 Python
 package tests passed (27 focused solver/report regressions), and
 `cargo check --workspace` and Rust formatting checks passed. The earlier
 step-5 full Rust run passed 145 core and 61 simulation tests.
+
+### Follow-up: rotation without curvature load and animated results
+
+The rotation benchmark now also sets `enable_curvature=False`, as requested.
+Geometric transport is still included. All four benchmarks pass on the rerun;
+rotation reference runout is 457.8 m, maximum runout difference is 7.84 m
+(approximately 1.71%), and minimum Dice is 0.979.
+
+The [updated report](../verification/outputs/all_tests/curvilinear_20261031_no_curvature_rotation_animations/report.md)
+embeds the dam-break comparison GIF (21 frames) and similarity profile and
+contour GIFs (20 frames each). Every animation frame was decoded successfully.
+The existing aggregate runner generates these sequences by default; omit
+`--no-sequences` when running it. Standalone runners generate them with
+`--plot-sequence`.

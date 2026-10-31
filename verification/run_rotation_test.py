@@ -59,6 +59,8 @@ SETTINGS = {
     "velocity_threshold": 0.1,
     "enable_particle_interaction": True,
     "enable_particle_relaxation": True,
+    # Match the alpha-line reference used for each rotated run.
+    "enable_curvature": False,
 }
 
 SAVE_STEPS = 25
