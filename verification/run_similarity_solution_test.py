@@ -190,7 +190,7 @@ def run_simulation(settings, cfg):
 
     def record(info):
         """Sample the grid fields, compare to the analytic solution."""
-        t = info.elapsed_time
+        t = info.grid_elapsed_time
         h, u, v, mass = sst.fields_from_grid(sim, dem.shape, cs, density, jac)
         samples["t"].append(t)
         samples["h"].append(h)
@@ -220,7 +220,7 @@ def run_simulation(settings, cfg):
     first_h, _, _, first_mass = sst.fields_from_grid(sim, dem.shape, cs,
                                                      density, jac)
     sst.check_grid_mass_consistency(
-        sim, first_h, np.asarray(sim.particles_mass, dtype=np.float64))
+        sim, first_mass, np.asarray(sim.particles_mass, dtype=np.float64))
     last_step = -1
     idx_time = 0
 
@@ -229,7 +229,7 @@ def run_simulation(settings, cfg):
           f"{'huL2rel':>10} {'huLMaxrel':>10} {'xCom sim/ana [m]':>20}")
     while idx_time < len(save_times) and info.timestep != last_step:
         last_step = info.timestep
-        while idx_time < len(save_times) and info.elapsed_time >= save_times[idx_time] - 1e-6:
+        while idx_time < len(save_times) and info.grid_elapsed_time >= save_times[idx_time] - 1e-6:
             t, h_l2r, h_lmaxr, vh_l2r, vh_lmaxr, x_com_sim, x_com_ana = record(info)
             print(f"{t:6.2f} {info.timestep:6d} {h_l2r:10.4f} {h_lmaxr:10.4f} "
                   f"{vh_l2r:10.4f} {vh_lmaxr:10.4f} {x_com_sim:9.1f}/{x_com_ana:<9.1f}")

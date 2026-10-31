@@ -17,7 +17,9 @@ analytic validation. ``--friction-model`` / ``--mu`` optionally override
 the friction (defaults: Coulomb with each test's documented angle).
 
 Each test runs in its own subfolder and a failure of one test does not stop
-the others - failures are reported in the markdown.
+the others - failures are reported in the markdown. Curvilinear/Coulomb runs
+also apply numerical regression guardrails; other models are labeled comparison
+runs rather than numerical passes.
 
 Usage:
     python run_all_tests.py                          # all 4 tests, curvilinear
@@ -161,6 +163,45 @@ RUNNERS = {
 }
 
 
+def _assessment(name, ret, args):
+    """Regression guardrails, not a claim of physical model certification."""
+    if args.sim_model not in ("curvilinear", "curvi", "c") or args.friction_model not in (None, "coulomb"):
+        return "comparison", ["Numerical acceptance is only evaluated for curvilinear/Coulomb."]
+    failures = []
+    if name in ("dam_break", "similarity_solution"):
+        samples, errors = ret
+        times = np.asarray(samples["t"])
+        required_time = 10.0 if args.quick else 20.0
+        if not len(times) or not np.isfinite(times).all() or times[-1] < required_time:
+            failures.append(f"Did not reach the required grid-snapshot time of {required_time:g} s.")
+        if len(times) > 1 and not (np.diff(times) > 0).all():
+            failures.append("Grid-snapshot times must be strictly increasing.")
+        for key, limit in (("h_l2rel", 0.15), ("vh_l2rel", 0.25)):
+            values = np.asarray(errors[key])
+            if not len(values) or not np.isfinite(values).all() or values[-1] > limit:
+                failures.append(f"Final {key} must be finite and <= {limit:g}.")
+    elif name == "energy_line":
+        result = ret[0]
+        for key, limit in (
+            ("runOutSError", 0.02 * abs(result["sEnd"])),
+            ("rmseVelocityElevation", 3.0),
+        ):
+            if not np.isfinite(result[key]) or abs(result[key]) > limit:
+                failures.append(f"{key} must be finite and within {limit:.3g}.")
+    elif name == "rotation":
+        if len(ret) < 2:
+            failures.append("At least two grid orientations are required.")
+        else:
+            reference = ret[0]["sEnd"]
+            for result in ret:
+                if not np.isfinite(result["sEnd"]) or abs(result["sEnd"] - reference) > 0.02 * abs(reference):
+                    failures.append(f"Runout at {result['angle']:g} degrees differs by more than 2%.")
+                dice = result["dice"]
+                if dice is not None and (not np.isfinite(dice) or dice < 0.85):
+                    failures.append(f"Dice at {result['angle']:g} degrees must be >= 0.85.")
+    return ("failed" if failures else "passed"), failures
+
+
 # ---------------------------------------------------------------------------
 # markdown report
 # ---------------------------------------------------------------------------
@@ -221,12 +262,14 @@ def _headline(test, ret):
     return ""
 
 
-def _test_section(name, test_dir, ret, output, error, args):
+def _test_section(name, test_dir, ret, output, error, args, assessment):
     lines = [f"## {TEST_TITLES[name]}", ""]
     if error is not None:
         lines += ["**FAILED**", "", "```", error.strip(), "```", ""]
     else:
-        lines += ["status: **ok**", ""]
+        lines += [f"status: **{assessment[0]}**", ""]
+        lines += [f"- {reason}" for reason in assessment[1]]
+        lines.append("")
     headline = _headline(name, ret) if error is None else ""
     if headline:
         lines += [headline, ""]
@@ -257,7 +300,7 @@ def write_report(run_dir, test_dirs, entries, args, elapsed, timestamp):
     summary_rows = []
     for name in args.tests:
         entry = entries[name]
-        status = "failed" if entry["error"] else "ok"
+        status = "error" if entry["error"] else entry["assessment"][0]
         headline = _headline(name, entry["ret"]) if not entry["error"] else ""
         summary_rows.append([TEST_TITLES[name], status, headline])
     doc = [
@@ -270,6 +313,10 @@ def write_report(run_dir, test_dirs, entries, args, elapsed, timestamp):
         + " (analytic references are exact for curvilinear + Coulomb only)",
         f"- timestamp: {timestamp}",
         f"- runtime: {elapsed / 60:.1f} min",
+        "- numerical guardrails: final thickness relative L2 <= 0.15, momentum relative L2 <= 0.25;",
+        "  required field time 20 s (10 s in quick mode); energy runout error <= 2%,",
+        "  velocity-height RMSE <= 3 m; rotation runout difference <= 2% and Dice >= 0.85.",
+        "- These are regression guardrails, not physical model certification.",
         "",
         "## Summary",
         "",
@@ -279,7 +326,7 @@ def write_report(run_dir, test_dirs, entries, args, elapsed, timestamp):
     for name in args.tests:
         entry = entries[name]
         doc.append(_test_section(name, test_dirs[name], entry["ret"],
-                                 entry["output"], entry["error"], args))
+                                 entry["output"], entry["error"], args, entry["assessment"]))
     report = run_dir / "report.md"
     report.write_text("\n".join(doc), encoding="utf-8")
     return report
@@ -321,16 +368,19 @@ def main():
         test_dirs[name] = test_dir
         print(f"\n--- {TEST_TITLES[name]} ---", flush=True)
         ret, output, error = RUNNERS[name](test_dir, args)
-        entries[name] = {"ret": ret, "output": output, "error": error}
-        status = "FAILED" if error else "ok"
+        assessment = ("error", []) if error else _assessment(name, ret, args)
+        entries[name] = {"ret": ret, "output": output, "error": error, "assessment": assessment}
+        status = assessment[0].upper()
         print(f"--- {TEST_TITLES[name]}: {status} ---", flush=True)
     elapsed = time.time() - start
 
     report = write_report(run_dir, test_dirs, entries, args, elapsed, timestamp)
     print(f"\nreport written to {report}")
     for name in args.tests:
-        if entries[name]["error"]:
+        if entries[name]["assessment"][0] in ("error", "failed"):
             print(f"WARNING: {name} FAILED - see the report")
+    if any(entry["assessment"][0] in ("error", "failed") for entry in entries.values()):
+        raise RuntimeError(f"Verification failed; results were saved to {report}")
     return report
 
 

@@ -106,6 +106,12 @@ comparisons convert these to surface-distance velocities where needed.
 See [the curvilinear model review](docs/curvilinear_model_review.md) for the
 diagnosis and staged correction results.
 
+`SimInfo.elapsed_time` is particle time after the executed step; `SimInfo.dt`
+is the next timestep. `SimInfo.grid_elapsed_time` timestamps the deposited
+grid mass/momentum snapshot before that step's advection. Verification uses
+the snapshot time and applies numerical regression guardrails instead of
+treating successful execution as numerical acceptance.
+
 ### Python
 
 `python avalanchers_example.py`

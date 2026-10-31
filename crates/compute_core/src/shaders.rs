@@ -1727,6 +1727,14 @@ pub fn create_shader_configs(
                         min_binding_size: None,
                     },
                 ),
+                (
+                    BufferName::SimInfo.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
             ],
         )?,
     );

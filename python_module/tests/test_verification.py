@@ -1,8 +1,14 @@
 import math
+import pathlib
+import sys
+from types import SimpleNamespace
 
 import avalanchers
 import numpy as np
 import pytest
+
+VERIFICATION = pathlib.Path(__file__).resolve().parents[2] / "verification"
+sys.path.insert(0, str(VERIFICATION))
 
 
 def plane_simulation(angle, friction=0.0):
@@ -84,3 +90,43 @@ def test_curvilinear_pressure_uses_normal_thickness_and_full_metric(angle):
     central = ((before > 100.0) & (before < 220.0)).all(axis=1)
     actual = np.asarray(sim.particles_velocity_xy, dtype=np.float64)
     np.testing.assert_allclose(actual[central], expected[central], atol=3e-5)
+
+
+def test_curvilinear_elapsed_time_uses_executed_timestep():
+    sim, _, _ = plane_simulation(45.0)
+    info = sim.run_n_steps(0)
+    for _ in range(3):
+        before = np.asarray(sim.particles_position_xy, dtype=np.float64)
+        start_time, used_dt = info.elapsed_time, info.dt
+        info = sim.run_n_steps(1)
+        assert info.grid_elapsed_time == pytest.approx(start_time)
+        assert info["grid_elapsed_time"] == info.grid_elapsed_time
+        assert info.elapsed_time - start_time == pytest.approx(used_dt, abs=1e-7)
+        after = np.asarray(sim.particles_position_xy, dtype=np.float64)
+        velocity = np.asarray(sim.particles_velocity_xy, dtype=np.float64)
+        np.testing.assert_allclose(after - before, velocity * used_dt, atol=2e-5)
+
+
+def test_stopped_batch_preserves_last_grid_snapshot():
+    sim, _, _ = plane_simulation(0.0, friction=10.0)
+    info = sim.run_n_steps(100)
+    assert info.flags & (1 << 31)
+    mass = np.asarray(sim.grid_mass, dtype=np.float64).sum() / 10.0
+    assert mass == pytest.approx(np.asarray(sim.particles_mass).sum(), rel=0.01)
+    final_time = info.elapsed_time
+    assert sim.run_n_steps(1).elapsed_time == final_time
+
+
+@pytest.mark.parametrize("error, final_time, expected", [
+    (0.15, 20.0, "passed"),
+    (0.1501, 20.0, "failed"),
+    (float("nan"), 20.0, "failed"),
+    (0.10, 19.9, "failed"),
+])
+def test_verification_guardrails_check_errors_and_end_time(error, final_time, expected):
+    import run_all_tests
+
+    args = SimpleNamespace(sim_model="curvilinear", friction_model=None, quick=False)
+    ret = ({"t": np.array([5.0, final_time])},
+           {"h_l2rel": np.array([0.08, error]), "vh_l2rel": np.array([0.1, 0.2])})
+    assert run_all_tests._assessment("similarity_solution", ret, args)[0] == expected

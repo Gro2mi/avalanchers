@@ -67,7 +67,7 @@ impl PySimInfo {
         self.inner.timestep
     }
 
-    /// Timestep length in seconds used for this step.
+    /// Length of the next simulation step in seconds.
     #[getter]
     fn dt(&self) -> f32 {
         self.inner.dt
@@ -77,6 +77,12 @@ impl PySimInfo {
     #[getter]
     fn elapsed_time(&self) -> f32 {
         self.inner.elapsed_time
+    }
+
+    /// Time of the deposited grid mass/momentum snapshot, before particle advection.
+    #[getter]
+    fn grid_elapsed_time(&self) -> f32 {
+        self.inner.grid_elapsed_time
     }
 
     /// Number of particles currently alive in the simulation.
@@ -115,6 +121,7 @@ impl PySimInfo {
             "timestep" => self.inner.timestep.into_py_any(py),
             "dt" => self.inner.dt.into_py_any(py),
             "elapsed_time" => self.inner.elapsed_time.into_py_any(py),
+            "grid_elapsed_time" => self.inner.grid_elapsed_time.into_py_any(py),
             "number_particles" => self.inner.number_particles.into_py_any(py),
             "elevation_threshold" => self.inner.elevation_threshold.into_py_any(py),
             "max_velocity" => self.inner.max_velocity.into_py_any(py),

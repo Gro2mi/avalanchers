@@ -230,7 +230,7 @@ def run_simulation(settings, cfg):
     def record(info, check_consistency=False):
         """Sample the fields, compare to the analytic solution, append."""
         nonlocal running_peak
-        t = info.elapsed_time
+        t = info.grid_elapsed_time
         sample, mass = sample_fields(sim, dem, header, frame, density)
         if check_consistency:
             dam_break_test.check_grid_mass_consistency(
@@ -277,23 +277,23 @@ def run_simulation(settings, cfg):
 
     def record_and_print(info, check_consistency=False):
         h_l2r, h_lmaxr, vh_l2r, vh_lmaxr = record(info, check_consistency)
-        print(f"{info.elapsed_time:6.2f} {info.timestep:6d} {h_l2r:10.4f} "
+        print(f"{info.grid_elapsed_time:6.2f} {info.timestep:6d} {h_l2r:10.4f} "
               f"{h_lmaxr:10.4f} {vh_l2r:10.4f} {vh_lmaxr:10.4f}")
 
     record_and_print(info, check_consistency=True)
     while True:
         if (info.flags & SIM_INFO_STOPPED) or sim.state == "Finished":
             break
-        if info.elapsed_time >= cfg["t_end"]:
+        if info.grid_elapsed_time >= cfg["t_end"]:
             break
         if info.timestep == last_timestep:
             print("simulation made no progress - stopping")
             break
         last_timestep = info.timestep
         info = sim.run_n_steps(BATCH_STEPS)
-        if info.elapsed_time >= next_save - 1e-6:
+        if info.grid_elapsed_time >= next_save - 1e-6:
             record_and_print(info)
-            while info.elapsed_time >= next_save - 1e-6:
+            while info.grid_elapsed_time >= next_save - 1e-6:
                 next_save += cfg["save_interval"]
 
     samples["t"] = np.asarray(samples["t"])

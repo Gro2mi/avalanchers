@@ -33,6 +33,7 @@ struct SimInfo {
     max_velocity: f32,
     max_flow_thickness: f32,
     flags: u32,
+    grid_elapsed_time: f32,
 };
 
 const SIM_INFO_OUT_OF_BOUNDS: u32 = 1u << 0u;

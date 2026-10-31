@@ -303,3 +303,41 @@ resting particles to reactivate, apply friction consistently at low speeds, and
 stop only at motionless equilibrium or the configured step limit. That proposal
 has not been implemented or accepted. In particular, very slow spreading runs
 can still freeze or terminate early under the retained policy.
+
+### Step 5: verification time accounting and guardrails
+
+Elapsed time now advances by the timestep actually executed, before the next
+timestep is selected. `SimInfo.grid_elapsed_time` explicitly timestamps the
+deposited mass/momentum snapshot before advection. Analytical field comparisons
+use that timestamp. Already-stopped batches preserve their last grid snapshot
+instead of clearing it during unused queued steps.
+
+The similarity consistency check now receives mass rather than thickness; the
+false quantization warning is gone.
+
+The aggregate runner distinguishes execution errors, numerical failures,
+numerical passes, and other-model comparison runs. Initial regression guardrails
+require:
+
+- Grid-snapshot coverage through 20 s, or 10 s in quick mode.
+- Final relative thickness L2 <= 0.15 and momentum L2 <= 0.25.
+- Energy-line runout error <= 2% and velocity-height RMSE <= 3 m.
+- Rotation runout difference <= 2% and Dice >= 0.85.
+
+The report retains measured results on numerical failure, and the CLI exits
+unsuccessfully. These guardrails are not physical model certification.
+
+At corrected snapshot times:
+
+| Test | Thickness L2 near 5 s | Thickness L2 near 20 s | Momentum L2 near 20 s |
+| --- | ---: | ---: | ---: |
+| Similarity | 0.0782 | 0.0776 | 0.0780 |
+| Dam break | 0.0895 | 0.0903 | 0.1202 |
+
+The existing stopping policy remains unchanged. The timestep floor and CFL
+signal accumulation are also unchanged; they remain considerations for a later
+timestep-control review.
+
+Step-5 validation passed: 23 focused Python regressions, all 145 Rust core
+tests, and 61 Rust simulation tests (two pre-existing ignored tests). The shared
+shader `SimInfo` layout and its generated import copies are synchronized.

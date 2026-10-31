@@ -195,6 +195,7 @@ pub struct SimInfo {
     pub max_velocity: f32,
     pub max_flow_thickness: f32,
     pub flags: u32,
+    pub grid_elapsed_time: f32,
 }
 
 impl SimInfo {
@@ -210,6 +211,7 @@ impl std::fmt::Debug for SimInfo {
             .field("timestep", &self.timestep)
             .field("dt", &self.dt)
             .field("elapsed_time", &self.elapsed_time)
+            .field("grid_elapsed_time", &self.grid_elapsed_time)
             .field("number_particles", &self.number_particles)
             .field("elevation_threshold", &self.elevation_threshold)
             .field("max_velocity", &self.max_velocity)

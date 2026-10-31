@@ -5,6 +5,11 @@
 
 @compute @workgroup_size(1, 1, 1)
 fn update_sim_info(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    if (sim_info.flags & SIM_INFO_STOPPED) != 0u {
+        return;
+    }
+    sim_info.grid_elapsed_time = sim_info.elapsed_time;
+    sim_info.elapsed_time = sim_info.elapsed_time + sim_info.dt;
     if atomicLoad(&atomic_values.stopped_particles) == sim_info.number_particles {
         sim_info.flags = sim_info.flags | SIM_INFO_ALL_PARTICLES_STOPPED;
         sim_info.flags = sim_info.flags | SIM_INFO_STOPPED;
@@ -37,7 +42,6 @@ fn update_sim_info(@builtin(global_invocation_id) global_id: vec3<u32>) {
     } else {
         sim_info.dt = expected_dt;
     }
-    sim_info.elapsed_time = sim_info.elapsed_time + sim_info.dt;
     sim_info.max_flow_thickness = max_flow_thickness;
 }
 
@@ -78,6 +82,7 @@ struct SimInfo {
     max_velocity: f32,
     max_flow_thickness: f32,
     flags: u32,
+    grid_elapsed_time: f32,
 };
 
 const SIM_INFO_OUT_OF_BOUNDS: u32 = 1u << 0u;
