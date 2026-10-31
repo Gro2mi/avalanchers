@@ -1539,7 +1539,7 @@ impl ComputeOrchestrator {
                 ShaderName::ComputeParticles,
             ),
             1 => (
-                ShaderName::P2G,
+                ShaderName::P2GCurvilinear,
                 ShaderName::GridPhysicsCurvilinear,
                 ShaderName::G2P,
             ),
@@ -2128,7 +2128,7 @@ mod tests {
                 ShaderName::ComputeReleaseAreas,
                 ShaderName::InitializeParticles,
                 ShaderName::ResetGrid,
-                ShaderName::P2G,
+                ShaderName::P2GCurvilinear,
                 ShaderName::GridPhysicsCurvilinear,
                 ShaderName::G2P,
                 ShaderName::UpdateSimInfo,

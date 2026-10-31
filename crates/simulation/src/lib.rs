@@ -3472,6 +3472,80 @@ mod tests {
     }
 
     #[test_log::test]
+    fn test_curvilinear_apic_preserves_affine_velocity() {
+        let mut sim = setup_simple_sim(0.0, 3.0);
+        sim.settings.sim_model = SimModel::Curvilinear.as_int();
+        sim.settings.flags = 0;
+        sim.settings.velocity_threshold = 0.0;
+        sim.settings.friction_model = 0;
+        sim.settings.friction_coefficient = 0.0;
+        sim.set_dem(&create_slope(24, 24, 3.0, 0.0), 24, 24, 3.0)
+            .expect("Failed to set flat DEM");
+        let mut release = vec![0.0; 24 * 24];
+        for y in 6..18 {
+            for x in 6..18 {
+                release[y * 24 + x] = 1.0;
+            }
+        }
+        sim.set_release_areas(&release)
+            .expect("Failed to set release");
+        block_on(sim.prepare()).expect("Failed to prepare APIC test");
+        let positions = block_on(sim.fetch_particles_position())
+            .expect("Failed to read positions")
+            .clone();
+        let velocities: Vec<[f32; 2]> = positions
+            .iter()
+            .map(|p| {
+                [
+                    0.5 + 0.02 * p[0] / 3.0 - 0.01 * p[1] / 3.0,
+                    0.4 + 0.01 * p[0] / 3.0 + 0.03 * p[1] / 3.0,
+                ]
+            })
+            .collect();
+        let affine = vec![[0.02f32, 0.01, -0.01, 0.03]; positions.len()];
+        block_on(
+            sim.orchestrator
+                .write_buffer(BufferName::ParticlesVelocity, &velocities),
+        )
+        .expect("Failed to seed affine velocities");
+        block_on(
+            sim.orchestrator
+                .write_buffer(BufferName::ParticlesAffineMatrix, &affine),
+        )
+        .expect("Failed to seed affine matrices");
+        block_on(sim.run_n_steps(1)).expect("Failed to advance APIC test");
+        let actual = block_on(sim.fetch_particles_velocity()).expect("Failed to read velocities");
+        for (p, (expected, actual)) in positions.iter().zip(velocities.iter().zip(actual)) {
+            if p.iter()
+                .all(|coordinate| *coordinate > 27.0 && *coordinate < 45.0)
+            {
+                for axis in 0..2 {
+                    assert!(
+                        (actual[axis] - expected[axis]).abs() < 3e-4,
+                        "affine velocity: expected {}, got {}",
+                        expected[axis],
+                        actual[axis]
+                    );
+                }
+            }
+        }
+        let matrices: Vec<[f32; 4]> = block_on(
+            sim.orchestrator
+                .read_buffer(BufferName::ParticlesAffineMatrix),
+        )
+        .expect("Failed to read affine matrices");
+        for (p, matrix) in positions.iter().zip(matrices) {
+            if p.iter()
+                .all(|coordinate| *coordinate > 27.0 && *coordinate < 45.0)
+            {
+                for (actual, expected) in matrix.iter().zip(affine[0]) {
+                    assert!((actual - expected).abs() < 5e-4);
+                }
+            }
+        }
+    }
+
+    #[test_log::test]
     fn test_mpmdac_velocity_z_is_synthetic_zero() {
         let mut sim = setup_simple_sim(40.0, 3.0);
         sim.settings.sim_model = SimModel::MpmDaC.as_int();

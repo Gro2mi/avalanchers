@@ -77,22 +77,10 @@ fn g2p(
         sim_info.flags |= SIM_INFO_PARTICLE_OUT_OF_DEM_DATA;
         return;
     }
-    let interpolated_velocity = transfer_g2p(particleId);
-    // affine transfer
-    // let update = transfer_g2p(particleId);
-    // let interpolated_velocity = update.velocity;
-    // let new_affine_matrix = update.affine_matrix;
-
-    // var dt = sim_settings.cfl * sim_settings.cell_size / (sim_info.max_velocity + sim_settings.velocity_threshold);
+    let update = transfer_g2p(particleId);
+    let interpolated_velocity = update.velocity;
     var dt = sim_info.dt;
 
-    // pseudo FLIP, take diff of particle velocity instead of grid velocity
-    // let old_velocity = particles_velocity[particleId];
-    // let flip_velocity = old_velocity + (interpolated_velocity - old_velocity); // simple delta approximation
-
-    // let new_velocity = mix(interpolated_velocity, old_velocity, 0.5);
-
-    // TODO PIC is very diffusive, try APIC or FLIP
     let new_velocity = interpolated_velocity;
     position = position + new_velocity * dt;
 
@@ -104,8 +92,8 @@ fn g2p(
     let slope_new = terrain_slope_at_uv(uv_new);
     particles_velocity_z[particleId] = dot(slope_new, new_velocity);
 
-    // affine transfer
-    // particles_affine_matrix[particleId] = new_affine_matrix;
+    // The shared gather uses particle-minus-node offsets; C uses node-minus-particle.
+    particles_affine_matrix[particleId] = update.affine_matrix * -1.0;
 
     if particleId == sim_info.number_particles / 2u {
         var current: TimestepData;
@@ -300,13 +288,14 @@ fn terrain_slope_at_uv(uv: vec2f) -> vec2f {
 }
 
 // END curvilinear_geometry.wgsl
-// import transfer_g2p.wgsl;
-// BEGIN transfer_g2p.wgsl
-fn transfer_g2p(p_idx: u32) -> vec2f {
+// import transfer_g2p_affine.wgsl;
+// BEGIN transfer_g2p_affine.wgsl
+fn transfer_g2p(p_idx: u32) -> G2PUpdate {
     let grid_pos = particles_position[p_idx] / sim_settings.cell_size - vec2f(0.5);
     let base_node = vec2u(floor(grid_pos - vec2f(0.5)));
     
     var interpolated_velocity = vec2f(0.0);
+    var new_affine_matrix = mat2x2<f32>(vec2<f32>(0.0), vec2<f32>(0.0));
 
     for (var i: u32 = 0; i < 3; i++) {
         for (var j: u32 = 0; j < 3; j++) {
@@ -314,14 +303,18 @@ fn transfer_g2p(p_idx: u32) -> vec2f {
             let distance = calculate_distance_to_node(grid_pos, node_coords);
             let weight = calculate_weight(distance);
             let idx = xy_to_idx(node_coords);
-            
-            interpolated_velocity += weight * grid_velocity[idx];
+            let grid_vel = grid_velocity[idx];
+            interpolated_velocity += weight * grid_vel;
+            new_affine_matrix += 4.0 * weight * mat2x2<f32>(
+                grid_vel * distance.x,
+                grid_vel * distance.y
+            );
         }
     }
-    return interpolated_velocity;
+    return G2PUpdate(interpolated_velocity, new_affine_matrix);
 }
 
-// END transfer_g2p.wgsl
+// END transfer_g2p_affine.wgsl
 
 // import utils.wgsl;
 // BEGIN utils.wgsl

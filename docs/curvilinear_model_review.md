@@ -274,3 +274,20 @@ particle interaction disables the pressure contribution.
 
 The pressure geometry is now consistent, but reduced pressure exposes the
 remaining PIC damping. Late-time accuracy is not yet acceptable.
+
+### Step 3: APIC transfer in both directions
+
+Curvilinear P2G now scatters affine momentum, and G2P gathers and stores the
+affine matrix. The matrix represents the horizontal velocity gradient in cell
+units. The existing PIC entry point and MPMDAC transfer convention are unchanged.
+
+- All 17 metric and pressure GPU regressions passed.
+- The Rust force-free APIC regression preserves an affine velocity field and
+  its matrix through the actual GPU scatter/gather.
+- Similarity relative thickness L2: 0.0605 near 5 s and 0.0947 near 20 s,
+  versus 0.614 before any corrections (approximately 85% lower late-time error).
+- Dam break relative thickness L2: 0.0912 near 5 s and 0.0948 near 20 s,
+  versus 0.342 before corrections (approximately 72% lower late-time error).
+
+This is the major spreading improvement. Resting, stopping, and verification
+time accounting still require separate corrections.

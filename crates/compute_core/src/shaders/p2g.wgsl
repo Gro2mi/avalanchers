@@ -6,6 +6,7 @@
 // atomic_float @group(0) @binding(6) var<storage, read_write> grid_momentum_atomic: array<atomic<f32>>; 
 @group(0) @binding(5) var<storage, read_write> grid_mass_atomic: array<atomic<u32>>;  // no_atomic_float 
 @group(0) @binding(6) var<storage, read_write> grid_momentum_atomic: array<atomic<i32>>;  // no_atomic_float 
+@group(0) @binding(7) var<storage> particles_affine_matrix: array<mat2x2f>;
 
 override WG_SIZE_1D: u32 = 1u;
 @compute @workgroup_size(WG_SIZE_1D, 1, 1)
@@ -28,6 +29,18 @@ fn p2g(@builtin(global_invocation_id) id: vec3u) {
     transfer_p2g(id.x);
 }
 
+@compute @workgroup_size(WG_SIZE_1D, 1, 1)
+fn p2g_curvilinear(@builtin(global_invocation_id) id: vec3u) {
+    if id.x >= sim_info.number_particles || (sim_info.flags & SIM_INFO_STOPPED) != 0u {
+        return;
+    }
+    let cell = position_to_cell(particles_position[id.x]);
+    if cell.x < 3 || cell.x >= sim_settings.grid_shape.x - 3 || cell.y < 3 || cell.y >= sim_settings.grid_shape.y - 3 {
+        return;
+    }
+    transfer_p2g_with_affine(id.x, particles_affine_matrix[id.x]);
+}
+
 // import transfer_p2g.wgsl;
 // BEGIN transfer_p2g.wgsl
 fn quantize_momentum_component(value: f32) -> i32 {
@@ -38,6 +51,10 @@ fn quantize_momentum_component(value: f32) -> i32 {
 }
 
 fn transfer_p2g(p_idx: u32) {
+    transfer_p2g_with_affine(p_idx, mat2x2f(vec2f(0.0), vec2f(0.0)));
+}
+
+fn transfer_p2g_with_affine(p_idx: u32, affine_matrix: mat2x2f) {
     // the stencil is offset by half a cell as it is in the middle of the cell
     let grid_pos = particles_position[p_idx] / sim_settings.cell_size - vec2f(0.5);
     let base_node = vec2u(floor(grid_pos - vec2f(0.5)));
@@ -52,20 +69,20 @@ fn transfer_p2g(p_idx: u32) {
             let distance = calculate_distance_to_node(grid_pos, node_coords);
             let weight = calculate_weight(distance);
             let idx = xy_to_idx(node_coords);
-            // let affine_velocity = p_velocity + (affine_matrix * distance);
+            let affine_velocity = p_velocity - affine_matrix * distance;
 
             
             
             // atomic_float atomicAdd(&grid_mass_atomic[idx], p_mass * weight);
-            // atomic_float atomicAdd(&grid_momentum_atomic[idx * 2u], p_mass * p_velocity.x * weight);
-            // atomic_float atomicAdd(&grid_momentum_atomic[idx * 2u + 1u], p_mass * p_velocity.y * weight);
+            // atomic_float atomicAdd(&grid_momentum_atomic[idx * 2u], p_mass * affine_velocity.x * weight);
+            // atomic_float atomicAdd(&grid_momentum_atomic[idx * 2u + 1u], p_mass * affine_velocity.y * weight);
             // for affine transfer
             // atomicAdd(&grid_momentum_atomic[idx * 2u], p_mass * affine_velocity.x * weight);
             // atomicAdd(&grid_momentum_atomic[idx * 2u + 1u], p_mass * affine_velocity.y * weight);
 
             atomicAdd(&grid_mass_atomic[idx], u32(round(p_mass * weight * MASS_FACTOR))); // no_atomic_float 
-            let momentum_x = p_mass * p_velocity.x * weight * MOMENTUM_FACTOR; // no_atomic_float 
-            let momentum_y = p_mass * p_velocity.y * weight * MOMENTUM_FACTOR; // no_atomic_float 
+            let momentum_x = p_mass * affine_velocity.x * weight * MOMENTUM_FACTOR; // no_atomic_float
+            let momentum_y = p_mass * affine_velocity.y * weight * MOMENTUM_FACTOR; // no_atomic_float
             atomicAdd(&grid_momentum_atomic[idx * 2u], quantize_momentum_component(momentum_x)); // no_atomic_float 
             atomicAdd(&grid_momentum_atomic[idx * 2u + 1u], quantize_momentum_component(momentum_y)); // no_atomic_float 
         }

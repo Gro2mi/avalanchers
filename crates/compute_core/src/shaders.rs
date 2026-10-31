@@ -123,6 +123,7 @@ define_shaders! {
     G2P => "g2p",
     G2PMPMDAC => "g2p_mpmdac",
     P2G => "p2g",
+    P2GCurvilinear => "p2g" entry_point "p2g_curvilinear",
     P2GMPMDAC => "p2g_mpmdac",
     GridPhysicsCurvilinear => "grid_physics_curvilinear",
     GridPhysicsMPMDAC => "grid_physics_mpmdac",
@@ -1846,6 +1847,33 @@ pub fn create_shader_configs(
                     },
                 ),
             ],
+            &[("WG_SIZE_1D", max_compute_invocations_per_workgroup as f64)],
+        )?,
+    );
+    let p2g = shader_configs
+        .get(&ShaderName::P2G)
+        .expect("P2G shader config was just inserted");
+    let mut curvilinear_p2g_bindings: Vec<_> = p2g
+        .binding_names
+        .iter()
+        .cloned()
+        .zip(p2g.binding_types.iter().copied())
+        .collect();
+    curvilinear_p2g_bindings.push((
+        BufferName::ParticlesAffineMatrix.to_string(),
+        BindingType::Buffer {
+            ty: BufferBindingType::Storage { read_only: true },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+    ));
+    shader_configs.insert(
+        ShaderName::P2GCurvilinear,
+        ComputeShaderConfig::new_with_constants(
+            device,
+            ShaderName::P2GCurvilinear,
+            load_shader_source(ShaderName::P2GCurvilinear, has_float32_atomic),
+            &curvilinear_p2g_bindings,
             &[("WG_SIZE_1D", max_compute_invocations_per_workgroup as f64)],
         )?,
     );
