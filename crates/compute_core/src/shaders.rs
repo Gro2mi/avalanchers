@@ -559,9 +559,10 @@ pub fn create_shader_configs(
                         min_binding_size: None,
                     },
                 ),
-                // Binding 1:
+                // Binding 1: DEM; normals are derived here because the terrain
+                // geometry texture layout depends on the simulation model
                 (
-                    TextureName::TerrainGeometry.to_string(),
+                    TextureName::Dem.to_string(),
                     BindingType::Texture {
                         multisampled: false,
                         view_dimension: wgpu::TextureViewDimension::D2,

@@ -138,6 +138,15 @@ pub struct SimulationLoadResult {
     /// Method used to estimate the crown line when `release_area_fraction`
     /// is set; `None` falls back to flow routing.
     pub crown_line_method: Option<CrownLineMethod>,
+    /// Exit distance threshold (fraction of the cell size) of the
+    /// gradient-step crown line method; `None` keeps the default.
+    pub crown_line_exit_distance: Option<f32>,
+    /// Elevation-band filter share of the crown components; `None` keeps the
+    /// default.
+    pub crown_elevation_band: Option<f32>,
+    /// Entry count threshold of the particle-simulation crown line method;
+    /// `None` keeps the default.
+    pub min_particles_per_crown_cell: Option<u32>,
     /// Number of compute steps dispatched per GPU submission. The OS might reset the GPU or interrupt the submission, if computing a batch takes too long.
     pub batch_compute_steps: Option<u32>,
     /// Destination for results written by [`Simulation::save`].
@@ -176,10 +185,21 @@ pub struct Simulation {
     release_areas_path: Option<String>,
     release_area_fraction: Option<f32>,
     crown_line_method: CrownLineMethod,
+    crown_line_exit_distance: Option<f32>,
+    crown_elevation_band: Option<f32>,
+    min_particles_per_crown_cell: Option<u32>,
     release_areas_array: Option<Vec<f32>>,
     /// Crown line detected by release area estimation; empty unless
     /// `release_area_fraction` was set.
     pub crown_line: Vec<bool>,
+    /// Crown candidates before component filtering (size and elevation
+    /// band); empty unless `release_area_fraction` was set.
+    pub crown_candidates: Vec<bool>,
+    /// Potential release areas inside the outline (slope, elevation and
+    /// roughness thresholds, computed on the GPU) from which the crown-line
+    /// estimation selects the release cells; empty unless
+    /// `release_area_fraction` was set.
+    pub potential_release_areas: Vec<bool>,
     sim_info: SimInfo,
     number_particles: u32,
     state: SimulationState,
@@ -220,8 +240,13 @@ impl Simulation {
             release_areas_path: None,
             release_area_fraction: None,
             crown_line_method: CrownLineMethod::FlowRouting,
+            crown_line_exit_distance: None,
+            crown_elevation_band: None,
+            min_particles_per_crown_cell: None,
             release_areas_array: None,
             crown_line: Vec::new(),
+            crown_candidates: Vec::new(),
+            potential_release_areas: Vec::new(),
             ava_mask: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             output: None,
@@ -251,6 +276,8 @@ impl Simulation {
         self.gpu_cache.reset_all();
         self.sim_info = SimInfo::default();
         self.crown_line = Vec::new();
+        self.crown_candidates = Vec::new();
+        self.potential_release_areas = Vec::new();
         self.state = if self.dem.data1d.is_empty() {
             SimulationState::DemMissing
         } else {
@@ -315,6 +342,9 @@ impl Simulation {
             release_areas_path: settings.release_areas_path.clone(),
             release_area_fraction: settings.release_area_fraction,
             crown_line_method: settings.crown_line_method,
+            crown_line_exit_distance: settings.crown_line_exit_distance,
+            crown_elevation_band: settings.crown_elevation_band,
+            min_particles_per_crown_cell: settings.min_particles_per_crown_cell,
             output_path: settings.output_path.clone(),
         })
     }
@@ -348,7 +378,12 @@ impl Simulation {
         self.crown_line_method = data
             .crown_line_method
             .unwrap_or(CrownLineMethod::FlowRouting);
+        self.crown_line_exit_distance = data.crown_line_exit_distance;
+        self.crown_elevation_band = data.crown_elevation_band;
+        self.min_particles_per_crown_cell = data.min_particles_per_crown_cell;
         self.crown_line = Vec::new();
+        self.crown_candidates = Vec::new();
+        self.potential_release_areas = Vec::new();
 
         self.gpu_cache.reset_all();
 
@@ -1073,6 +1108,7 @@ impl Simulation {
     async fn detect_crown_line_by_particle_simulation(
         &self,
         config: &release_estimation::ReleaseEstimationConfig,
+        terrain_metrics: &release_estimation::TerrainMetrics<'_>,
     ) -> Result<release_estimation::CrownDetection> {
         /// Particles per release cell for the detection simulation. Four
         /// entries per crown cell on planar inflow keep the entry counts well
@@ -1171,7 +1207,13 @@ impl Simulation {
             positions.len()
         );
 
-        release_estimation::crown_line_from_particle_counts(&counts, &self.dem, &self.roi, config)
+        release_estimation::crown_line_from_particle_counts_with_terrain_metrics(
+            &counts,
+            &self.dem,
+            &self.roi,
+            config,
+            terrain_metrics,
+        )
     }
 
     /// Determines the release areas and returns the number of release cells.
@@ -1220,32 +1262,94 @@ impl Simulation {
                             "Estimating release areas from crown line (fraction {fraction:.2}, method {})",
                             self.crown_line_method
                         );
+                        let defaults = release_estimation::ReleaseEstimationConfig::default();
                         let config = release_estimation::ReleaseEstimationConfig {
                             fraction,
                             slab_thickness: self.settings.slab_thickness_factor,
+                            crown_exit_distance: self
+                                .crown_line_exit_distance
+                                .unwrap_or(defaults.crown_exit_distance),
+                            crown_elevation_band: self
+                                .crown_elevation_band
+                                .unwrap_or(defaults.crown_elevation_band),
+                            min_particles_per_crown_cell: self
+                                .min_particles_per_crown_cell
+                                .unwrap_or(defaults.min_particles_per_crown_cell),
                             expected_crown_slope_range: (
                                 self.settings.min_slope_angle,
                                 self.settings.max_slope_angle,
                             ),
-                            ..Default::default()
+                            min_crown_slope_deg: self.settings.min_slope_angle,
+                            ..defaults
                         };
+                        // the threshold classification on the GPU marks every
+                        // outline cell that could release; the crown line then
+                        // picks the cells that actually did
+                        self.orchestrator
+                            .run_compute_roughness(&self.settings)
+                            .await?;
+                        let number_potential = self
+                            .orchestrator
+                            .run_compute_release_areas(&self.settings, &self.roi)
+                            .await?;
+                        let potential: Vec<bool> = self
+                            .orchestrator
+                            .read_buffer::<f32>(BufferName::ReleaseAreas)
+                            .await?
+                            .iter()
+                            .map(|&thickness| thickness > 1e-3)
+                            .collect();
+                        let slope_angles = self.fetch_slope_angle().await?.to_vec();
+                        let (gradient_x, gradient_y) = self.terrain_gradient().await?;
+                        let terrain_metrics = release_estimation::TerrainMetrics {
+                            slope_angles: &slope_angles,
+                            gradient_x: &gradient_x,
+                            gradient_y: &gradient_y,
+                        };
+                        info!(
+                            "Potential release areas: {number_potential} of {} outline cells",
+                            self.roi.iter().filter(|&&inside| inside).count()
+                        );
                         let detection = match self.crown_line_method {
-                            CrownLineMethod::FlowRouting => release_estimation::detect_crown_line(
-                                &self.dem, &self.roi, &config,
-                            )?,
+                            CrownLineMethod::FlowRouting => {
+                                release_estimation::detect_crown_line_with_terrain_metrics(
+                                    &self.dem,
+                                    &self.roi,
+                                    &config,
+                                    &terrain_metrics,
+                                )?
+                            }
                             CrownLineMethod::ParticleSimulation => {
                                 // Box::pin breaks the future type recursion:
                                 // run() -> load_release_areas() -> here -> run()
                                 // (the nested simulation is a separate instance,
                                 // so the indirection is purely a type-level fix)
-                                Box::pin(self.detect_crown_line_by_particle_simulation(&config))
-                                    .await?
+                                Box::pin(self.detect_crown_line_by_particle_simulation(
+                                    &config,
+                                    &terrain_metrics,
+                                ))
+                                .await?
+                            }
+                            CrownLineMethod::GradientStep => {
+                                release_estimation::detect_crown_line_by_gradient_step_with_terrain_metrics(
+                                    &self.dem,
+                                    &self.roi,
+                                    &config,
+                                    &terrain_metrics,
+                                )?
                             }
                         };
-                        let estimate = release_estimation::estimate_release_areas_with_crown(
-                            &self.dem, &self.roi, &detection, &config,
+                        let estimate = release_estimation::estimate_release_areas_with_crown_and_terrain_metrics(
+                            &self.dem,
+                            &self.roi,
+                            Some(&potential),
+                            &detection,
+                            &config,
+                            &terrain_metrics,
                         )?;
                         self.crown_line = estimate.crown_line;
+                        self.crown_candidates = estimate.crown_candidates;
+                        self.potential_release_areas = potential;
                         self.orchestrator
                             .write_buffer(BufferName::ReleaseAreas, &estimate.release_areas)
                             .await?;
@@ -1452,6 +1556,46 @@ impl Simulation {
         let k_y = self.fetch_terrain_curvature().await?.g.clone();
         let k_xy = self.fetch_terrain_curvature().await?.b.clone();
         Ok((k_x, k_y, k_xy))
+    }
+
+    /// Elevation gradient `(dz/dx, dz/dy)` per meter, recovered from the
+    /// terrain analysis textures.
+    async fn terrain_gradient(&mut self) -> Result<(Vec<f32>, Vec<f32>)> {
+        const GRAVITY: f32 = 9.81;
+        if self.settings.sim_model == SimModel::Curvilinear.as_int() {
+            // metric terms l = sqrt(1 + dz^2) lose the sign; the slope-parallel
+            // gravity g = -GRAVITY * dz / l restores it
+            let g_x = self.fetch_terrain_curvature().await?.a.clone();
+            let geometry = self.fetch_terrain_geometry_texture().await?;
+            let gradient_x = geometry
+                .r
+                .iter()
+                .zip(&g_x)
+                .map(|(l_x, g_x)| -g_x * l_x / GRAVITY)
+                .collect();
+            let gradient_y = geometry
+                .g
+                .iter()
+                .zip(&geometry.a)
+                .map(|(l_y, g_y)| -g_y * l_y / GRAVITY)
+                .collect();
+            return Ok((gradient_x, gradient_y));
+        }
+        // surface normal n = (-dz/dx, -dz/dy, 1) / |...|
+        let geometry = self.fetch_terrain_geometry_texture().await?;
+        let gradient_x = geometry
+            .r
+            .iter()
+            .zip(&geometry.b)
+            .map(|(n_x, n_z)| -n_x / n_z)
+            .collect();
+        let gradient_y = geometry
+            .g
+            .iter()
+            .zip(&geometry.b)
+            .map(|(n_y, n_z)| -n_y / n_z)
+            .collect();
+        Ok((gradient_x, gradient_y))
     }
 
     /// First channel of the terrain geometry texture: surface normal x
@@ -2347,13 +2491,83 @@ mod tests {
     }
 
     #[test_log::test]
+    fn test_roughness_is_model_independent_vector_ruggedness() {
+        let width = 24;
+        let height = 24;
+        let cell_size = 5.0;
+        let plane: Vec<f32> = (0..width * height)
+            .map(|idx| 2000.0 + (idx / width) as f32 * 3.0)
+            .collect();
+        // irregular bumps of up to 4 m (a checkerboard would cancel out in the
+        // central differences)
+        let bumpy: Vec<f32> = plane
+            .iter()
+            .enumerate()
+            .map(|(idx, &z)| z + ((idx % width * 7 + idx / width * 13) % 5) as f32)
+            .collect();
+        let interior = |idx: usize| {
+            let (x, y) = (idx % width, idx / width);
+            x > 0 && y > 0 && x + 1 < width && y + 1 < height
+        };
+
+        for model in [
+            SimModel::TerrainFollowing,
+            SimModel::Curvilinear,
+            SimModel::MpmDaC,
+        ] {
+            for (name, dem) in [("plane", &plane), ("bumpy", &bumpy)] {
+                let mut sim: Simulation =
+                    block_on(Simulation::new()).expect("Failed to create Simulation");
+                // thresholds wide open so every cell releases and prepare()
+                // succeeds on the rough surface too
+                let settings = Settings {
+                    sim_model: Some(model),
+                    min_slope_angle: Some(0.0),
+                    max_slope_angle: Some(90.0),
+                    roughness_threshold: Some(1.0),
+                    ..Default::default()
+                };
+                block_on(sim.create(settings)).expect("Failed to create simulation");
+                sim.set_dem(dem, width, height, cell_size)
+                    .expect("Failed to set DEM");
+                sim.set_roi(&vec![true; width * height])
+                    .expect("Failed to set ROI");
+                block_on(sim.prepare()).expect("Failed to prepare simulation");
+                let roughness = block_on(sim.fetch_roughness())
+                    .expect("Failed to fetch roughness")
+                    .clone();
+                for (idx, &r) in roughness.iter().enumerate() {
+                    assert!(
+                        (0.0..=1.0).contains(&r),
+                        "{model:?} {name}: roughness {r} outside [0, 1] at {idx}"
+                    );
+                    if !interior(idx) {
+                        continue;
+                    }
+                    if name == "plane" {
+                        assert!(r < 1e-5, "{model:?} plane: roughness {r} at {idx}");
+                    }
+                }
+                if name == "bumpy" {
+                    let interior_values: Vec<f32> = (0..roughness.len())
+                        .filter(|&idx| interior(idx))
+                        .map(|idx| roughness[idx])
+                        .collect();
+                    let mean = interior_values.iter().sum::<f32>() / interior_values.len() as f32;
+                    assert!(mean > 1e-3, "{model:?} bumpy: mean roughness {mean}");
+                }
+            }
+        }
+    }
+
+    #[test_log::test]
     fn test_release_estimation_crown_line_end_to_end() {
         let width = 24;
         let height = 24;
         let cell_size = 5.0;
         // inclined plane draining towards decreasing y
         let dem_data: Vec<f32> = (0..width * height)
-            .map(|idx| 100.0 + (idx / width) as f32 * 5.0)
+            .map(|idx| 2000.0 + (idx / width) as f32 * 5.0)
             .collect();
         let mut sim: Simulation = block_on(Simulation::new()).expect("Failed to create Simulation");
         block_on(sim.create(Settings::default())).expect("Failed to create simulation");
@@ -2386,13 +2600,52 @@ mod tests {
     }
 
     #[test_log::test]
+    fn test_release_estimation_gradient_crown_line_end_to_end() {
+        let width = 24;
+        let height = 24;
+        let cell_size = 5.0;
+        // inclined plane draining towards decreasing y
+        let dem_data: Vec<f32> = (0..width * height)
+            .map(|idx| 2000.0 + (idx / width) as f32 * 5.0)
+            .collect();
+        let mut sim: Simulation = block_on(Simulation::new()).expect("Failed to create Simulation");
+        block_on(sim.create(Settings::default())).expect("Failed to create simulation");
+        sim.set_dem(&dem_data, width, height, cell_size)
+            .expect("Failed to set DEM");
+        // outline rectangle, upstream edge at y = 19
+        let roi: Vec<bool> = (0..width * height)
+            .map(|idx| {
+                let (x, y) = (idx % width, idx / width);
+                (4..20).contains(&x) && (4..20).contains(&y)
+            })
+            .collect();
+        sim.set_roi(&roi).expect("Failed to set ROI");
+        sim.release_area_fraction = Some(0.25);
+        sim.crown_line_method = CrownLineMethod::GradientStep;
+
+        block_on(sim.run()).expect("Failed to run simulation");
+        assert_eq!(sim.state, SimulationState::Finished);
+
+        for (idx, &is_crown) in sim.crown_line.iter().enumerate() {
+            let (x, y) = (idx % width, idx / width);
+            let expected = y == 19 && (4..20).contains(&x);
+            assert_eq!(is_crown, expected, "at ({x},{y})");
+        }
+        // 256 outline cells -> 25% -> 64 release cells on the upstream rows
+        assert_eq!(sim.number_particles(), 64 * 8);
+        let release_areas =
+            block_on(sim.fetch_release_areas()).expect("Failed to fetch release areas");
+        assert_eq!(release_areas.iter().filter(|&&t| t > 0.0).count(), 64);
+    }
+
+    #[test_log::test]
     fn test_release_estimation_particle_crown_line_end_to_end() {
         let width = 24;
         let height = 24;
         let cell_size = 5.0;
         // inclined plane draining towards decreasing y
         let dem_data: Vec<f32> = (0..width * height)
-            .map(|idx| 100.0 + (idx / width) as f32 * 5.0)
+            .map(|idx| 2000.0 + (idx / width) as f32 * 5.0)
             .collect();
         let mut sim: Simulation = block_on(Simulation::new()).expect("Failed to create Simulation");
         block_on(sim.create(Settings::default())).expect("Failed to create simulation");

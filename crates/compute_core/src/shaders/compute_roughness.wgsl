@@ -1,47 +1,50 @@
-@group(0) @binding(1) var terrain_metrics: texture_2d<f32>;
-@group(0) @binding(2) var<storage, read_write> roughness_buffer: array<f32>;;
+@group(0) @binding(1) var dem_texture: texture_2d<f32>;
+@group(0) @binding(2) var<storage, read_write> roughness_buffer: array<f32>;
+
+fn dem_at(x: i32, y: i32) -> f32 {
+    return textureLoad(dem_texture, vec2<i32>(x, y), 0).r;
+}
+
+// Unit surface normal from central differences of the DEM, one-sided at the
+// grid border. Computed from the DEM directly because the terrain geometry
+// texture holds model-dependent quantities (unit normal for the
+// terrain-following models, metric coefficients for the curvilinear model).
+fn surface_normal(cell: vec2<i32>) -> vec3f {
+    let last = vec2<i32>(sim_settings.grid_shape) - 1;
+    let lo = max(cell - 1, vec2<i32>(0));
+    let hi = min(cell + 1, last);
+    let dz_dx = (dem_at(hi.x, cell.y) - dem_at(lo.x, cell.y))
+        / (f32(hi.x - lo.x) * sim_settings.cell_size);
+    let dz_dy = (dem_at(cell.x, hi.y) - dem_at(cell.x, lo.y))
+        / (f32(hi.y - lo.y) * sim_settings.cell_size);
+    return normalize(vec3f(-dz_dx, -dz_dy, 1.0));
+}
 
 @compute @workgroup_size(WG_SIZE_2D, WG_SIZE_2D, 1)
 fn compute_roughness(@builtin(global_invocation_id) id: vec3<u32>) {
-    let threshold = sim_settings.roughness_threshold;
     let cell = id.xy;
     if cell.x >= sim_settings.grid_shape.x || cell.y >= sim_settings.grid_shape.y {
         return;
     }
-    var roughness = 0f;
-    // according to doi:10.5194/nhess-16-2211-2016
-    if cell.x == 0 || cell.y == 0 || cell.x >= sim_settings.grid_shape.x - 1 || cell.y >= sim_settings.grid_shape.y - 1 {
-        roughness = 1.0; // high roughness at borders
-    }
-    else {
+    var roughness = 1.0; // high roughness at borders
+    // vector ruggedness measure according to doi:10.5194/nhess-16-2211-2016:
+    // 1 - |sum of the 9 unit normals| / 9, 0 on a plane
+    if cell.x > 0 && cell.y > 0 && cell.x < sim_settings.grid_shape.x - 1 && cell.y < sim_settings.grid_shape.y - 1 {
         // TODO implement kernel size depending on resolution and average snow height
         // 2 * (HS_mean^2 * C_v) + 1; C_v = 0.35 for regular smoothing, 0.2 for low smoothing (low winds)
-        var idx = 0u;
-        var r: array<vec3f, 9>;
-        var r_sum = vec3f(0.0, 0.0, 0.0);
-
+        var normal_sum = vec3f(0.0);
         for (var y = -1; y <= 1; y = y + 1) {
             for (var x = -1; x <= 1; x = x + 1) {
-                let tex_data = textureLoad(terrain_metrics, vec2<i32>(cell) + vec2(x, y), 0);
-                let l_x = tex_data.x;
-                let l_y = tex_data.y;
-                let J = tex_data.z;
-
-                let normal = vec3<f32>(
-                    -l_x / J,
-                    -l_y / J,
-                    1.0 / J
-                );
-
-                r[idx] = normal;
-                idx = idx + 1u;
+                normal_sum = normal_sum + surface_normal(vec2<i32>(cell) + vec2<i32>(x, y));
             }
         }
-        for (var i = 0u; i < 9u; i = i + 1u) {
-            r_sum = r_sum + r[i];
+        roughness = 1.0 - length(normal_sum) / 9.0;
+        // no-data cells (NaN elevations) cannot carry a slab
+        if !is_finite(roughness) {
+            roughness = 1.0;
         }
-        let r_magnitude = length(r_sum);
-        roughness = 1 - r_magnitude / 9.0;
+        // f32 rounding can push a perfect plane slightly below zero
+        roughness = max(roughness, 0.0);
     }
     roughness_buffer[xy_to_idx(cell)] = roughness;
 }

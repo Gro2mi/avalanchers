@@ -3,12 +3,14 @@
 //! Two stages:
 //! 1. Crown line detection: the crown line is taken as the "inflow boundary"
 //!    of the outline - the outline cells that receive terrain from outside the
-//!    outline. Two detection methods are available: D8 flow routing on a
-//!    sink-filled DEM (CPU), or a GPU particle simulation released everywhere
+//!    outline. Three detection methods are available: D8 flow routing on a
+//!    sink-filled DEM (CPU), a GPU particle simulation released everywhere
 //!    outside the outline (see
-//!    `Simulation::detect_crown_line_by_particle_simulation`). Both depend only
-//!    on how terrain drains into the outline, so they also work when the crown
-//!    line cuts across the contours.
+//!    `Simulation::detect_crown_line_by_particle_simulation`), or a purely
+//!    geometric gradient step: outline cells whose one-cell step uphill leaves
+//!    the outline by more than a threshold. All depend only on how terrain
+//!    drains into the outline, so they also work when the crown line cuts
+//!    across the contours.
 //! 2. Geodesic fill: chamfer-weighted geodesic distance from the crown line
 //!    inside the outline mask; cells are selected by increasing distance until
 //!    the target share of the outline area is reached. The fill front advances
@@ -117,8 +119,16 @@ pub struct ReleaseEstimationConfig {
     /// Snow thickness \[m\] written to the selected release cells.
     pub slab_thickness: f32,
     /// Crown components whose mean elevation is below this share of the outline
-    /// elevation range are discarded as flank gullies (0.5 keeps the top half).
+    /// elevation range are discarded as flank gullies (0.5 keeps the top half,
+    /// 0 disables the filter).
     pub crown_elevation_band: f32,
+    /// Crown components whose mean slope angle \[deg\] is below this are
+    /// discarded: release zones are steep, while inflow from an opposite
+    /// slope onto the valley floor or into the runout lands on gentle
+    /// terrain. There is deliberately no upper bound: crowns often break
+    /// below rock bands steeper than any release terrain. 0 disables the
+    /// filter.
+    pub min_crown_slope_deg: f32,
     /// Minimum number of cells for a crown component to be kept.
     pub min_crown_component_cells: usize,
     /// Gradient \[m\] per cell applied when filling sinks. Must stay well above
@@ -129,6 +139,15 @@ pub struct ReleaseEstimationConfig {
     /// With 4 particles per release cell, planar inflow yields about 4 entries
     /// per crown cell, so 2 filters stray single entries.
     pub min_particles_per_crown_cell: u32,
+    /// Exit distance threshold of the gradient-step detection method, as a
+    /// fraction of the cell size: an outline cell is a crown candidate when
+    /// its one-cell step uphill lands outside the outline and farther than
+    /// this from the nearest outline cell centre. Steps that leave the
+    /// outline land between 0.5 and 1.0 away: a step straight out of the
+    /// upstream edge lands 1.0 away, while flank cells of a spreading
+    /// avalanche step out only slightly and stay below the threshold. Must be
+    /// in [0, 1); values up to 0.5 count every exit.
+    pub crown_exit_distance: f32,
     /// Plausibility window for the crown slope in degrees; violations are only
     /// reported as warnings.
     pub expected_crown_slope_range: (f32, f32),
@@ -139,10 +158,12 @@ impl Default for ReleaseEstimationConfig {
         Self {
             fraction: 0.25,
             slab_thickness: 1.0,
-            crown_elevation_band: 0.5,
+            crown_elevation_band: 0.0,
+            min_crown_slope_deg: 28.0,
             min_crown_component_cells: 3,
             sink_fill_epsilon: 1e-2,
             min_particles_per_crown_cell: 2,
+            crown_exit_distance: 0.75,
             expected_crown_slope_range: (28.0, 60.0),
         }
     }
@@ -155,6 +176,8 @@ pub struct ReleaseEstimate {
     pub release_areas: Vec<f32>,
     /// Mask marking the detected crown line cells.
     pub crown_line: Vec<bool>,
+    /// Mask marking the crown candidates before component filtering.
+    pub crown_candidates: Vec<bool>,
     pub number_roi_cells: usize,
     pub number_release_cells: usize,
     pub number_crown_cells: usize,
@@ -270,24 +293,57 @@ fn d8_flow_directions(z: &[f32], width: usize, height: usize, cell_size: f32) ->
 pub struct CrownDetection {
     /// Crown cells after component filtering.
     pub crown: Vec<bool>,
+    /// Crown candidates before component filtering; shows what the size,
+    /// slope and elevation-band filters removed.
+    pub candidates: Vec<bool>,
     /// Number of crown cells after filtering.
     pub number_crown_cells: usize,
     /// Number of connected components kept.
     pub number_components: usize,
-    /// Crown candidates before elevation-band filtering.
+    /// Crown candidates before component filtering.
     pub number_candidates: usize,
 }
 
+/// Terrain metrics precomputed by the terrain analysis shaders.
+pub(crate) struct TerrainMetrics<'a> {
+    pub slope_angles: &'a [f32],
+    /// Elevation gradient `dz/dx` per meter.
+    pub gradient_x: &'a [f32],
+    /// Elevation gradient `dz/dy` per meter.
+    pub gradient_y: &'a [f32],
+}
+
+fn validate_terrain_metrics(metrics: &TerrainMetrics<'_>, number_cells: usize) -> Result<()> {
+    if metrics.slope_angles.len() != number_cells
+        || metrics.gradient_x.len() != number_cells
+        || metrics.gradient_y.len() != number_cells
+    {
+        bail!(
+            "terrain metric lengths ({}, {}, {}) do not match the DEM ({number_cells})",
+            metrics.slope_angles.len(),
+            metrics.gradient_x.len(),
+            metrics.gradient_y.len()
+        );
+    }
+    Ok(())
+}
+
 /// Groups crown candidate cells into connected components (8-connectivity) and
-/// filters them by mean elevation so flank gullies drop out. Falls back to the
-/// largest component when nothing survives the filter.
+/// filters them by size, by mean slope (see
+/// [`ReleaseEstimationConfig::min_crown_slope_deg`]) and by mean elevation, so
+/// stray cells, inflow onto gentle valley floors or runouts and flank gullies
+/// drop out. Falls back to the largest component when nothing survives the
+/// filters.
+#[allow(clippy::too_many_arguments)]
 fn filter_crown_components(
     candidate: Vec<bool>,
     elevations: &[f32],
     roi: &[bool],
     width: usize,
     height: usize,
+    cell_size: f32,
     config: &ReleaseEstimationConfig,
+    terrain_metrics: Option<&TerrainMetrics<'_>>,
 ) -> CrownDetection {
     let number_candidates = candidate.iter().filter(|&&c| c).count();
 
@@ -328,17 +384,36 @@ fn filter_crown_components(
     }
     let threshold = roi_min + config.crown_elevation_band * (roi_max - roi_min);
 
+    let mut number_slope_rejected = 0;
     let mut kept: Vec<&Vec<usize>> = components
         .iter()
         .filter(|component| component.len() >= config.min_crown_component_cells)
+        .filter(|component| {
+            let mean_slope = component
+                .iter()
+                .map(|&idx| slope_angle(elevations, width, height, cell_size, idx, terrain_metrics))
+                .sum::<f32>()
+                / component.len() as f32;
+            let keep = mean_slope >= config.min_crown_slope_deg;
+            if !keep {
+                number_slope_rejected += 1;
+            }
+            keep
+        })
         .filter(|component| {
             let mean_elevation =
                 component.iter().map(|&idx| elevations[idx]).sum::<f32>() / component.len() as f32;
             mean_elevation >= threshold
         })
         .collect();
+    if number_slope_rejected > 0 {
+        info!(
+            "{number_slope_rejected} crown component(s) discarded: flatter than {:.0}°",
+            config.min_crown_slope_deg
+        );
+    }
     if kept.is_empty() && !components.is_empty() {
-        warn!("no crown component passed the elevation filter, keeping the largest");
+        warn!("no crown component passed the filters, keeping the largest");
         kept = vec![components.iter().max_by_key(|c| c.len()).unwrap()];
     }
 
@@ -352,6 +427,7 @@ fn filter_crown_components(
 
     CrownDetection {
         crown,
+        candidates: candidate,
         number_crown_cells,
         number_components: kept.len(),
         number_candidates,
@@ -360,13 +436,16 @@ fn filter_crown_components(
 
 /// Detects the crown line as the outline's inflow boundary: outline cells that
 /// are the D8 receiver of at least one cell outside the outline.
+#[allow(clippy::too_many_arguments)]
 fn detect_crown_line_from_flow(
     elevations: &[f32],
     flow: &[Option<u8>],
     roi: &[bool],
     width: usize,
     height: usize,
+    cell_size: f32,
     config: &ReleaseEstimationConfig,
+    terrain_metrics: Option<&TerrainMetrics<'_>>,
 ) -> CrownDetection {
     let mut candidate = vec![false; roi.len()];
     for idx in 0..roi.len() {
@@ -389,7 +468,146 @@ fn detect_crown_line_from_flow(
             }
         }
     }
-    filter_crown_components(candidate, elevations, roi, width, height, config)
+    filter_crown_components(
+        candidate,
+        elevations,
+        roi,
+        width,
+        height,
+        cell_size,
+        config,
+        terrain_metrics,
+    )
+}
+
+/// Elevation gradient per cell (not per meter). Uses central differences,
+/// falling back to one-sided differences at the grid border or next to
+/// no-data cells. `None` for no-data cells.
+fn elevation_gradient(z: &[f32], width: usize, height: usize, idx: usize) -> Option<[f32; 2]> {
+    let z0 = z[idx];
+    if !z0.is_finite() {
+        return None;
+    }
+    let (x, y) = ((idx % width) as isize, (idx / width) as isize);
+    let sample = |nx: isize, ny: isize| -> Option<f32> {
+        if nx < 0 || ny < 0 || nx >= width as isize || ny >= height as isize {
+            return None;
+        }
+        let zn = z[ny as usize * width + nx as usize];
+        zn.is_finite().then_some(zn)
+    };
+    let derivative = |minus: Option<f32>, plus: Option<f32>| match (minus, plus) {
+        (Some(m), Some(p)) => (p - m) / 2.0,
+        (None, Some(p)) => p - z0,
+        (Some(m), None) => z0 - m,
+        (None, None) => 0.0,
+    };
+    Some([
+        derivative(sample(x - 1, y), sample(x + 1, y)),
+        derivative(sample(x, y - 1), sample(x, y + 1)),
+    ])
+}
+
+/// Normalized uphill direction in cell units. `None` for no-data cells and
+/// flats.
+fn uphill_direction(
+    z: &[f32],
+    width: usize,
+    height: usize,
+    idx: usize,
+    terrain_metrics: Option<&TerrainMetrics<'_>>,
+) -> Option<[f32; 2]> {
+    let [gx, gy] = match terrain_metrics {
+        Some(metrics) => [metrics.gradient_x[idx], metrics.gradient_y[idx]],
+        None => elevation_gradient(z, width, height, idx)?,
+    };
+    let norm = (gx * gx + gy * gy).sqrt();
+    if norm <= 0.0 || !norm.is_finite() {
+        return None;
+    }
+    Some([gx / norm, gy / norm])
+}
+
+/// Slope angle in degrees from terrain analysis, or the elevation gradient
+/// when no precomputed terrain metrics are available.
+fn slope_angle(
+    z: &[f32],
+    width: usize,
+    height: usize,
+    cell_size: f32,
+    idx: usize,
+    terrain_metrics: Option<&TerrainMetrics<'_>>,
+) -> f32 {
+    if let Some(metrics) = terrain_metrics {
+        return if metrics.slope_angles[idx].is_finite() {
+            metrics.slope_angles[idx]
+        } else {
+            0.0
+        };
+    }
+    elevation_gradient(z, width, height, idx)
+        .map(|[gx, gy]| ((gx * gx + gy * gy).sqrt() / cell_size).atan().to_degrees())
+        .filter(|angle| angle.is_finite())
+        .unwrap_or(0.0)
+}
+
+/// Detects the crown line geometrically: every outline cell steps one cell
+/// length uphill from its centre, and cells whose stepped point lands outside
+/// the outline and farther than `config.crown_exit_distance` (in cells) from
+/// the nearest outline cell centre are crown candidates. The threshold keeps flank cells of a
+/// spreading avalanche, which step out of the outline only slightly, from
+/// becoming crown line.
+fn detect_crown_line_from_gradient(
+    elevations: &[f32],
+    roi: &[bool],
+    width: usize,
+    height: usize,
+    cell_size: f32,
+    config: &ReleaseEstimationConfig,
+    terrain_metrics: Option<&TerrainMetrics<'_>>,
+) -> CrownDetection {
+    let mut candidate = vec![false; roi.len()];
+    for idx in 0..roi.len() {
+        if !roi[idx] {
+            continue;
+        }
+        let Some(direction) = uphill_direction(elevations, width, height, idx, terrain_metrics)
+        else {
+            continue;
+        };
+        let (x, y) = (idx % width, idx / width);
+        let point = [x as f32 + 0.5 + direction[0], y as f32 + 0.5 + direction[1]];
+        let (px, py) = (point[0].floor() as isize, point[1].floor() as isize);
+        let inside_grid = px >= 0 && py >= 0 && px < width as isize && py < height as isize;
+        if inside_grid && roi[py as usize * width + px as usize] {
+            continue; // the step stays inside the outline
+        }
+        // the origin cell is 1.0 away, so the nearest outline centre always
+        // lies in the 3x3 window around the stepped point's cell
+        let mut nearest = f32::INFINITY;
+        for (dx, dy) in NEIGHBOR_OFFSETS.iter().copied().chain([(0, 0)]) {
+            let (nx, ny) = (px + dx, py + dy);
+            if nx < 0 || ny < 0 || nx >= width as isize || ny >= height as isize {
+                continue;
+            }
+            if !roi[ny as usize * width + nx as usize] {
+                continue;
+            }
+            let (ex, ey) = (nx as f32 + 0.5 - point[0], ny as f32 + 0.5 - point[1]);
+            nearest = nearest.min((ex * ex + ey * ey).sqrt());
+        }
+        candidate[idx] = nearest > config.crown_exit_distance;
+    }
+    filter_crown_components(
+        candidate,
+        elevations,
+        roi,
+        width,
+        height,
+        cell_size,
+        config,
+        terrain_metrics,
+    )
 }
 
 /// Chamfer-weighted geodesic distance (Dijkstra) from the seed cells, only
@@ -441,14 +659,24 @@ fn geodesic_distance_from(
     distance
 }
 
-/// Steepest-descent slope angle in degrees on the raw elevations.
+/// Crown slope angle from terrain analysis, or steepest descent on the raw
+/// elevations when no precomputed terrain metrics are available.
 fn steepest_descent_angle(
     z: &[f32],
     width: usize,
     height: usize,
     cell_size: f32,
     idx: usize,
+    terrain_metrics: Option<&TerrainMetrics<'_>>,
 ) -> f32 {
+    if let Some(metrics) = terrain_metrics {
+        return if metrics.slope_angles[idx].is_finite() {
+            metrics.slope_angles[idx]
+        } else {
+            0.0
+        };
+    }
+
     let z0 = z[idx];
     if !z0.is_finite() {
         return 0.0;
@@ -506,6 +734,25 @@ pub fn detect_crown_line(
     roi: &[bool],
     config: &ReleaseEstimationConfig,
 ) -> Result<CrownDetection> {
+    detect_crown_line_impl(dem, roi, config, None)
+}
+
+pub(crate) fn detect_crown_line_with_terrain_metrics(
+    dem: &Dem,
+    roi: &[bool],
+    config: &ReleaseEstimationConfig,
+    terrain_metrics: &TerrainMetrics<'_>,
+) -> Result<CrownDetection> {
+    validate_terrain_metrics(terrain_metrics, dem.width.saturating_mul(dem.height))?;
+    detect_crown_line_impl(dem, roi, config, Some(terrain_metrics))
+}
+
+fn detect_crown_line_impl(
+    dem: &Dem,
+    roi: &[bool],
+    config: &ReleaseEstimationConfig,
+    terrain_metrics: Option<&TerrainMetrics<'_>>,
+) -> Result<CrownDetection> {
     validate_roi(dem, roi)?;
     info!(
         "Crown line estimation: filling sinks on {}x{} grid",
@@ -513,8 +760,64 @@ pub fn detect_crown_line(
     );
     let filled = fill_sinks(&dem.data1d, dem.width, dem.height, config.sink_fill_epsilon);
     let flow = d8_flow_directions(&filled, dem.width, dem.height, dem.cell_size);
-    let detection =
-        detect_crown_line_from_flow(&dem.data1d, &flow, roi, dem.width, dem.height, config);
+    let detection = detect_crown_line_from_flow(
+        &dem.data1d,
+        &flow,
+        roi,
+        dem.width,
+        dem.height,
+        dem.cell_size,
+        config,
+        terrain_metrics,
+    );
+    check_detection(&detection)?;
+    Ok(detection)
+}
+
+/// Detects the crown line of the avalanche outline with the gradient-step
+/// method (see `ReleaseEstimationConfig::crown_exit_distance`). Fails if no
+/// outline cell steps out of the outline by more than the threshold.
+pub fn detect_crown_line_by_gradient_step(
+    dem: &Dem,
+    roi: &[bool],
+    config: &ReleaseEstimationConfig,
+) -> Result<CrownDetection> {
+    detect_crown_line_by_gradient_step_impl(dem, roi, config, None)
+}
+
+pub(crate) fn detect_crown_line_by_gradient_step_with_terrain_metrics(
+    dem: &Dem,
+    roi: &[bool],
+    config: &ReleaseEstimationConfig,
+    terrain_metrics: &TerrainMetrics<'_>,
+) -> Result<CrownDetection> {
+    validate_terrain_metrics(terrain_metrics, dem.width.saturating_mul(dem.height))?;
+    detect_crown_line_by_gradient_step_impl(dem, roi, config, Some(terrain_metrics))
+}
+
+fn detect_crown_line_by_gradient_step_impl(
+    dem: &Dem,
+    roi: &[bool],
+    config: &ReleaseEstimationConfig,
+    terrain_metrics: Option<&TerrainMetrics<'_>>,
+) -> Result<CrownDetection> {
+    validate_roi(dem, roi)?;
+    if !(0.0..1.0).contains(&config.crown_exit_distance) {
+        bail!("crown exit distance must be in [0, 1) cells");
+    }
+    info!(
+        "Crown line estimation: gradient step on {}x{} grid (exit distance {:.2} cells)",
+        dem.width, dem.height, config.crown_exit_distance
+    );
+    let detection = detect_crown_line_from_gradient(
+        &dem.data1d,
+        roi,
+        dem.width,
+        dem.height,
+        dem.cell_size,
+        config,
+        terrain_metrics,
+    );
     check_detection(&detection)?;
     Ok(detection)
 }
@@ -530,6 +833,27 @@ pub fn crown_line_from_particle_counts(
     roi: &[bool],
     config: &ReleaseEstimationConfig,
 ) -> Result<CrownDetection> {
+    crown_line_from_particle_counts_impl(counts, dem, roi, config, None)
+}
+
+pub(crate) fn crown_line_from_particle_counts_with_terrain_metrics(
+    counts: &[u32],
+    dem: &Dem,
+    roi: &[bool],
+    config: &ReleaseEstimationConfig,
+    terrain_metrics: &TerrainMetrics<'_>,
+) -> Result<CrownDetection> {
+    validate_terrain_metrics(terrain_metrics, dem.width.saturating_mul(dem.height))?;
+    crown_line_from_particle_counts_impl(counts, dem, roi, config, Some(terrain_metrics))
+}
+
+fn crown_line_from_particle_counts_impl(
+    counts: &[u32],
+    dem: &Dem,
+    roi: &[bool],
+    config: &ReleaseEstimationConfig,
+    terrain_metrics: Option<&TerrainMetrics<'_>>,
+) -> Result<CrownDetection> {
     validate_roi(dem, roi)?;
     let number_cells = dem.width.saturating_mul(dem.height);
     if counts.len() != number_cells {
@@ -543,10 +867,31 @@ pub fn crown_line_from_particle_counts(
     let candidate: Vec<bool> = (0..number_cells)
         .map(|idx| roi[idx] && counts[idx] >= config.min_particles_per_crown_cell)
         .collect();
-    let detection =
-        filter_crown_components(candidate, &dem.data1d, roi, dem.width, dem.height, config);
+    let detection = filter_crown_components(
+        candidate,
+        &dem.data1d,
+        roi,
+        dem.width,
+        dem.height,
+        dem.cell_size,
+        config,
+        terrain_metrics,
+    );
     check_detection(&detection)?;
     Ok(detection)
+}
+
+fn validate_potential(potential: Option<&[bool]>, roi: &[bool]) -> Result<()> {
+    if let Some(potential) = potential
+        && potential.len() != roi.len()
+    {
+        bail!(
+            "potential release area length ({}) does not match the outline ({})",
+            potential.len(),
+            roi.len()
+        );
+    }
+    Ok(())
 }
 
 fn check_detection(detection: &CrownDetection) -> Result<()> {
@@ -557,14 +902,50 @@ fn check_detection(detection: &CrownDetection) -> Result<()> {
 }
 
 /// Fills the target share of the outline area below the given crown line.
+/// Distances are measured through the whole outline; with potential release
+/// areas only those cells are selected, nearest to the crown first, so terrain
+/// that cannot release (too flat, too steep, too rough) is skipped without
+/// cutting off the release terrain behind it.
 ///
 /// Fails if the outline is empty, covers the whole DEM (crown line detection
-/// needs cells outside the outline) or if no inflow boundary exists.
+/// needs cells outside the outline), if no inflow boundary exists or if no
+/// potential release cell is reachable from the crown line.
 pub fn estimate_release_areas_with_crown(
     dem: &Dem,
     roi: &[bool],
+    potential: Option<&[bool]>,
     crown: &CrownDetection,
     config: &ReleaseEstimationConfig,
+) -> Result<ReleaseEstimate> {
+    estimate_release_areas_with_crown_impl(dem, roi, potential, crown, config, None)
+}
+
+pub(crate) fn estimate_release_areas_with_crown_and_terrain_metrics(
+    dem: &Dem,
+    roi: &[bool],
+    potential: Option<&[bool]>,
+    crown: &CrownDetection,
+    config: &ReleaseEstimationConfig,
+    terrain_metrics: &TerrainMetrics<'_>,
+) -> Result<ReleaseEstimate> {
+    validate_terrain_metrics(terrain_metrics, dem.width.saturating_mul(dem.height))?;
+    estimate_release_areas_with_crown_impl(
+        dem,
+        roi,
+        potential,
+        crown,
+        config,
+        Some(terrain_metrics),
+    )
+}
+
+fn estimate_release_areas_with_crown_impl(
+    dem: &Dem,
+    roi: &[bool],
+    potential: Option<&[bool]>,
+    crown: &CrownDetection,
+    config: &ReleaseEstimationConfig,
+    terrain_metrics: Option<&TerrainMetrics<'_>>,
 ) -> Result<ReleaseEstimate> {
     let width = dem.width;
     let height = dem.height;
@@ -581,23 +962,43 @@ pub fn estimate_release_areas_with_crown(
 
     let distance = geodesic_distance_from(&crown.crown, roi, width, height, dem.cell_size);
 
-    let mut ordered: Vec<(f32, usize)> = roi
-        .iter()
-        .enumerate()
-        .filter(|&(idx, inside)| *inside && distance[idx].is_finite())
-        .map(|(idx, _)| (distance[idx], idx))
+    validate_potential(potential, roi)?;
+    let selectable = |idx: usize| roi[idx] && potential.is_none_or(|p| p[idx]);
+    let number_selectable = (0..roi.len()).filter(|&idx| selectable(idx)).count();
+
+    let mut ordered: Vec<(f32, usize)> = (0..roi.len())
+        .filter(|&idx| selectable(idx) && distance[idx].is_finite())
+        .map(|idx| (distance[idx], idx))
         .collect();
     ordered.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-
-    let target =
-        ((config.fraction * number_roi_cells as f32).round() as usize).clamp(1, ordered.len());
-    if ordered.len() < number_roi_cells {
-        warn!(
-            "{} of {} outline cells are unreachable from the crown line and can never be selected",
-            number_roi_cells - ordered.len(),
-            number_roi_cells
+    if ordered.is_empty() {
+        bail!(
+            "no potential release cell of the outline is reachable from the crown line; \
+             check min_slope_angle, max_slope_angle, release_min_elevation and roughness_threshold"
         );
     }
+
+    if ordered.len() < number_selectable {
+        warn!(
+            "{} of {} {} cells are unreachable from the crown line and can never be selected",
+            number_selectable - ordered.len(),
+            number_selectable,
+            if potential.is_some() {
+                "potential release"
+            } else {
+                "outline"
+            }
+        );
+    }
+    let requested = ((config.fraction * number_roi_cells as f32).round() as usize).max(1);
+    if requested > ordered.len() {
+        warn!(
+            "release target of {requested} cells exceeds the {} reachable potential release \
+             cells; selecting all of them",
+            ordered.len()
+        );
+    }
+    let target = requested.min(ordered.len());
 
     let mut release_areas = vec![0.0f32; roi.len()];
     for &(_, idx) in &ordered[..target] {
@@ -616,7 +1017,16 @@ pub fn estimate_release_areas_with_crown(
     } else {
         crown_indices
             .iter()
-            .map(|&idx| steepest_descent_angle(&dem.data1d, width, height, dem.cell_size, idx))
+            .map(|&idx| {
+                steepest_descent_angle(
+                    &dem.data1d,
+                    width,
+                    height,
+                    dem.cell_size,
+                    idx,
+                    terrain_metrics,
+                )
+            })
             .sum::<f32>()
             / crown_indices.len() as f32
     };
@@ -643,6 +1053,7 @@ pub fn estimate_release_areas_with_crown(
     Ok(ReleaseEstimate {
         release_areas,
         crown_line: crown.crown.clone(),
+        crown_candidates: crown.candidates.clone(),
         number_roi_cells,
         number_release_cells: target,
         number_crown_cells: crown.number_crown_cells,
@@ -658,10 +1069,11 @@ pub fn estimate_release_areas_with_crown(
 pub fn estimate_release_areas(
     dem: &Dem,
     roi: &[bool],
+    potential: Option<&[bool]>,
     config: &ReleaseEstimationConfig,
 ) -> Result<ReleaseEstimate> {
     let crown = detect_crown_line(dem, roi, config)?;
-    estimate_release_areas_with_crown(dem, roi, &crown, config)
+    estimate_release_areas_with_crown(dem, roi, potential, &crown, config)
 }
 
 #[cfg(test)]
@@ -681,8 +1093,9 @@ mod tests {
             ymin: 0.0,
             ymax: height as f32 * cell_size,
         };
+        // 45° plane rising with y, steep enough for the crown slope filter
         dem.data1d = (0..width * height)
-            .map(|idx| (idx / width) as f32)
+            .map(|idx| (idx / width) as f32 * cell_size)
             .collect();
         dem.data = to_2d(&dem.data1d, width, height);
         dem
@@ -743,8 +1156,16 @@ mod tests {
         let config = ReleaseEstimationConfig::default();
         let filled = fill_sinks(&dem.data1d, width, height, config.sink_fill_epsilon);
         let flow = d8_flow_directions(&filled, width, height, dem.cell_size);
-        let detection =
-            detect_crown_line_from_flow(&dem.data1d, &flow, &roi, width, height, &config);
+        let detection = detect_crown_line_from_flow(
+            &dem.data1d,
+            &flow,
+            &roi,
+            width,
+            height,
+            dem.cell_size,
+            &config,
+            None,
+        );
 
         for (idx, &is_crown) in detection.crown.iter().enumerate() {
             let (x, y) = (idx % width, idx / width);
@@ -757,12 +1178,89 @@ mod tests {
     }
 
     #[test]
+    fn gradient_step_uses_precomputed_terrain_metrics() {
+        let width = 20;
+        let height = 20;
+        let dem = Dem {
+            width,
+            height,
+            cell_size: 10.0,
+            data1d: vec![100.0; width * height],
+            ..Default::default()
+        };
+        let roi = rectangle_roi(width, height, 5, 15, 5, 15);
+        let slope_angles = vec![45.0; width * height];
+        let gradient_x = vec![0.0; width * height];
+        let gradient_y = vec![1.0; width * height];
+        let metrics = TerrainMetrics {
+            slope_angles: &slope_angles,
+            gradient_x: &gradient_x,
+            gradient_y: &gradient_y,
+        };
+        let config = ReleaseEstimationConfig::default();
+
+        let detection =
+            detect_crown_line_by_gradient_step_with_terrain_metrics(&dem, &roi, &config, &metrics)
+                .unwrap();
+
+        for (idx, &is_crown) in detection.crown.iter().enumerate() {
+            let (x, y) = (idx % width, idx / width);
+            assert_eq!(is_crown, y == 14 && (5..15).contains(&x), "at ({x},{y})");
+        }
+    }
+
+    #[test]
+    fn slope_filter_drops_inflow_onto_flat_valley_floor() {
+        // 45° slope above y = 8, a ~6° valley floor below; inflow onto the
+        // floor is not a crown even with the elevation band disabled
+        let width = 20;
+        let height = 20;
+        let mut dem = plane_dem(width, height, 10.0);
+        dem.data1d = (0..width * height)
+            .map(|idx| {
+                let y = (idx / width) as f32;
+                if y >= 8.0 { y * 10.0 } else { 80.0 + (y - 8.0) }
+            })
+            .collect();
+        dem.data = to_2d(&dem.data1d, width, height);
+        let roi = rectangle_roi(width, height, 5, 15, 5, 15);
+        let mut counts = vec![0u32; width * height];
+        for x in 5..15 {
+            counts[14 * width + x] = 4;
+        }
+        for x in 8..12 {
+            counts[5 * width + x] = 4;
+        }
+
+        let config = ReleaseEstimationConfig::default();
+        let detection = crown_line_from_particle_counts(&counts, &dem, &roi, &config).unwrap();
+        for (idx, &is_crown) in detection.crown.iter().enumerate() {
+            let (x, y) = (idx % width, idx / width);
+            let expected = y == 14 && (5..15).contains(&x);
+            assert_eq!(is_crown, expected, "at ({x},{y})");
+        }
+        assert_eq!(detection.number_candidates, 14);
+
+        // with the filter disabled the valley-floor component survives
+        let config = ReleaseEstimationConfig {
+            min_crown_slope_deg: 0.0,
+            ..Default::default()
+        };
+        let detection = crown_line_from_particle_counts(&counts, &dem, &roi, &config).unwrap();
+        assert_eq!(detection.number_components, 2);
+        assert_eq!(detection.number_crown_cells, 14);
+    }
+
+    #[test]
     fn crown_line_from_particle_counts_filters_strays_and_flank_gullies() {
         let width = 20;
         let height = 20;
         let dem = plane_dem(width, height, 10.0);
         let roi = rectangle_roi(width, height, 5, 15, 5, 15);
-        let config = ReleaseEstimationConfig::default();
+        let config = ReleaseEstimationConfig {
+            crown_elevation_band: 0.5,
+            ..Default::default()
+        };
         let mut counts = vec![0u32; width * height];
         // upstream row y = 14 fed by ~4 entering particles per cell
         for x in 5..15 {
@@ -784,6 +1282,12 @@ mod tests {
         assert_eq!(detection.number_crown_cells, 10);
         assert_eq!(detection.number_components, 1);
         assert_eq!(detection.number_candidates, 13); // 10 crown + 3 gully cells
+        // the dropped gully cells stay visible in the candidate mask
+        for y in 6..9 {
+            assert!(detection.candidates[y * width + 14]);
+            assert!(!detection.crown[y * width + 14]);
+        }
+        assert_eq!(detection.candidates.iter().filter(|&&c| c).count(), 13);
     }
 
     #[test]
@@ -797,7 +1301,7 @@ mod tests {
             slab_thickness: 1.5,
             ..Default::default()
         };
-        let estimate = estimate_release_areas(&dem, &roi, &config).unwrap();
+        let estimate = estimate_release_areas(&dem, &roi, None, &config).unwrap();
 
         assert_eq!(estimate.number_release_cells, 25); // 25% of 100 cells
         assert_eq!(estimate.number_crown_cells, 10);
@@ -837,7 +1341,7 @@ mod tests {
             crown_elevation_band: 0.25,
             ..Default::default()
         };
-        let estimate = estimate_release_areas(&dem, &roi, &config).unwrap();
+        let estimate = estimate_release_areas(&dem, &roi, None, &config).unwrap();
 
         for (idx, &is_crown) in estimate.crown_line.iter().enumerate() {
             if is_crown {
@@ -857,10 +1361,166 @@ mod tests {
     }
 
     #[test]
+    fn gradient_step_crown_is_upstream_edge_of_rectangle() {
+        let width = 20;
+        let height = 20;
+        let dem = plane_dem(width, height, 10.0);
+        let roi = rectangle_roi(width, height, 5, 15, 5, 15);
+        let config = ReleaseEstimationConfig::default();
+        let detection = detect_crown_line_by_gradient_step(&dem, &roi, &config).unwrap();
+        for (idx, &is_crown) in detection.crown.iter().enumerate() {
+            let (x, y) = (idx % width, idx / width);
+            let expected = y == 14 && (5..15).contains(&x);
+            assert_eq!(is_crown, expected, "at ({x},{y})");
+        }
+        assert_eq!(detection.number_components, 1);
+    }
+
+    #[test]
+    fn gradient_step_threshold_separates_flank_from_crown() {
+        // plane z = 2x + 3y: the uphill direction (2, 3)/sqrt(13) leaves the
+        // right flank of the rectangle ~0.58-0.65 cells from the outline, the
+        // upstream edge ~0.94-1.0 cells
+        let width = 20;
+        let height = 20;
+        let mut dem = plane_dem(width, height, 10.0);
+        dem.data1d = (0..width * height)
+            .map(|idx| (2.0 * (idx % width) as f32 + 3.0 * (idx / width) as f32) * 10.0)
+            .collect();
+        dem.data = to_2d(&dem.data1d, width, height);
+        let roi = rectangle_roi(width, height, 5, 15, 5, 15);
+
+        let config = ReleaseEstimationConfig::default();
+        let detection = detect_crown_line_by_gradient_step(&dem, &roi, &config).unwrap();
+        for (idx, &is_crown) in detection.crown.iter().enumerate() {
+            let (x, y) = (idx % width, idx / width);
+            let expected = y == 14 && (5..15).contains(&x);
+            assert_eq!(is_crown, expected, "at ({x},{y})");
+        }
+
+        // a lower threshold also picks up the right flank
+        let config = ReleaseEstimationConfig {
+            crown_exit_distance: 0.5,
+            ..Default::default()
+        };
+        let detection = detect_crown_line_by_gradient_step(&dem, &roi, &config).unwrap();
+        for (idx, &is_crown) in detection.crown.iter().enumerate() {
+            let (x, y) = (idx % width, idx / width);
+            let expected = roi[idx] && (y == 14 || x == 14);
+            assert_eq!(is_crown, expected, "at ({x},{y})");
+        }
+    }
+
+    #[test]
+    fn gradient_step_drops_isolated_stair_cells_of_spreading_outline() {
+        // outline widening downslope by one cell per side every three rows;
+        // the stair cells step out of the outline but stay isolated
+        let width = 30;
+        let height = 30;
+        let dem = plane_dem(width, height, 10.0);
+        let roi: Vec<bool> = (0..width * height)
+            .map(|idx| {
+                let (x, y) = (idx % width, idx / width);
+                if !(5..20).contains(&y) {
+                    return false;
+                }
+                let widening = (19 - y) / 3;
+                (10 - widening..20 + widening).contains(&x)
+            })
+            .collect();
+        let config = ReleaseEstimationConfig::default();
+        let detection = detect_crown_line_by_gradient_step(&dem, &roi, &config).unwrap();
+        for (idx, &is_crown) in detection.crown.iter().enumerate() {
+            let (x, y) = (idx % width, idx / width);
+            let expected = y == 19 && (10..20).contains(&x);
+            assert_eq!(is_crown, expected, "at ({x},{y})");
+        }
+        assert!(detection.number_candidates > detection.number_crown_cells);
+    }
+
+    #[test]
+    fn gradient_step_crown_follows_oblique_band() {
+        let width = 40;
+        let height = 40;
+        let dem = plane_dem(width, height, 1.0);
+        let roi: Vec<bool> = (0..width * height)
+            .map(|idx| {
+                let (x, y) = (idx % width, idx / width);
+                (10..=30).contains(&(x + y))
+            })
+            .collect();
+        let config = ReleaseEstimationConfig {
+            crown_elevation_band: 0.25,
+            ..Default::default()
+        };
+        let detection = detect_crown_line_by_gradient_step(&dem, &roi, &config).unwrap();
+        for (idx, &is_crown) in detection.crown.iter().enumerate() {
+            if is_crown {
+                let (x, y) = (idx % width, idx / width);
+                assert_eq!(x + y, 30, "crown cell off the upstream diagonal");
+            }
+        }
+        assert_eq!(detection.number_crown_cells, 31);
+    }
+
+    #[test]
+    fn gradient_step_rejects_exit_distance_outside_range() {
+        let dem = plane_dem(20, 20, 1.0);
+        let roi = rectangle_roi(20, 20, 5, 15, 5, 15);
+        let config = ReleaseEstimationConfig {
+            crown_exit_distance: 1.5,
+            ..Default::default()
+        };
+        assert!(detect_crown_line_by_gradient_step(&dem, &roi, &config).is_err());
+    }
+
+    #[test]
+    fn release_fill_skips_cells_outside_potential_release_areas() {
+        // a non-release band at row 13 directly below the crown row 14: the
+        // fill measures distance through it but selects only potential cells
+        let width = 20;
+        let height = 20;
+        let dem = plane_dem(width, height, 10.0);
+        let roi = rectangle_roi(width, height, 5, 15, 5, 15);
+        let potential: Vec<bool> = (0..width * height)
+            .map(|idx| roi[idx] && idx / width != 13)
+            .collect();
+        let config = ReleaseEstimationConfig::default();
+        let estimate = estimate_release_areas(&dem, &roi, Some(&potential), &config).unwrap();
+
+        assert_eq!(estimate.number_release_cells, 25); // 25% of the 100 outline cells
+        for (idx, &thickness) in estimate.release_areas.iter().enumerate() {
+            let (x, y) = (idx % width, idx / width);
+            // rows 14 and 12 complete, then the first 5 cells of row 11
+            let expected = roi[idx] && (y == 14 || y == 12 || (y == 11 && x < 10));
+            assert_eq!(thickness > 0.0, expected, "at ({x},{y})");
+        }
+    }
+
+    #[test]
+    fn release_fill_is_capped_by_potential_release_areas() {
+        let width = 20;
+        let height = 20;
+        let dem = plane_dem(width, height, 10.0);
+        let roi = rectangle_roi(width, height, 5, 15, 5, 15);
+        let potential = rectangle_roi(width, height, 5, 15, 14, 15);
+        let config = ReleaseEstimationConfig::default();
+        let estimate = estimate_release_areas(&dem, &roi, Some(&potential), &config).unwrap();
+        assert_eq!(estimate.number_release_cells, 10);
+        assert_eq!(
+            estimate.release_areas.iter().filter(|&&t| t > 0.0).count(),
+            10
+        );
+
+        // a mask of the wrong size is rejected
+        assert!(estimate_release_areas(&dem, &roi, Some(&potential[1..]), &config).is_err());
+    }
+
+    #[test]
     fn rejects_full_coverage_outline() {
         let dem = plane_dem(5, 5, 1.0);
         let roi = vec![true; 25];
         let config = ReleaseEstimationConfig::default();
-        assert!(estimate_release_areas(&dem, &roi, &config).is_err());
+        assert!(estimate_release_areas(&dem, &roi, None, &config).is_err());
     }
 }

@@ -598,6 +598,7 @@ impl<'de> Deserialize<'de> for SimModel {
 pub enum CrownLineMethod {
     FlowRouting,
     ParticleSimulation,
+    GradientStep,
 }
 
 impl FromStr for CrownLineMethod {
@@ -607,6 +608,7 @@ impl FromStr for CrownLineMethod {
         match value.to_lowercase().replace('_', "-").as_str() {
             "flow-routing" | "flow" | "d8" => Ok(Self::FlowRouting),
             "particle-simulation" | "particle" => Ok(Self::ParticleSimulation),
+            "gradient-step" | "gradient" => Ok(Self::GradientStep),
             _ => Err(format!("unknown crown line method: {value}")),
         }
     }
@@ -617,6 +619,7 @@ impl fmt::Display for CrownLineMethod {
         f.write_str(match self {
             Self::FlowRouting => "flow-routing",
             Self::ParticleSimulation => "particle-simulation",
+            Self::GradientStep => "gradient-step",
         })
     }
 }
@@ -667,19 +670,38 @@ pub struct Settings {
     pub basal_friction_angle: Option<f32>,
 
     pub cfl: Option<f32>,
+    /// Minimum slope angle (deg) of release terrain. Together with
+    /// `max_slope_angle`, `release_min_elevation` and `roughness_threshold`
+    /// it defines the potential release areas, from which the
+    /// `release_area_fraction` estimation selects its release cells.
     pub min_slope_angle: Option<f32>,
     pub max_slope_angle: Option<f32>,
     pub release_min_elevation: Option<f32>,
     pub release_max_elevation: Option<f32>,
     /// Target release area as a fraction of the outline area (0.2 - 0.3 is a
     /// common range). When set, release areas are estimated by detecting the
-    /// outline's crown line and filling this share below it, instead of the
-    /// terrain-threshold classification.
+    /// outline's crown line and selecting this share of the outline area from
+    /// the potential release areas (the terrain-threshold classification),
+    /// nearest to the crown line first.
     pub release_area_fraction: Option<f32>,
     /// How the crown line is detected for `release_area_fraction`: D8 flow
-    /// routing on the CPU (default) or a GPU particle simulation released
-    /// everywhere outside the outline.
+    /// routing on the CPU (default), a GPU particle simulation released
+    /// everywhere outside the outline, or a gradient step (outline cells whose
+    /// one-cell step uphill leaves the outline).
     pub crown_line_method: Option<CrownLineMethod>,
+    /// Exit distance threshold of the `gradient-step` crown line method as a
+    /// fraction of the cell size, in [0, 1) (defaults to 0.75). Outline cells
+    /// whose one-cell step uphill lands outside the outline and farther than
+    /// this from the nearest outline cell centre become crown line; lower
+    /// values also pick up spreading flanks (0.5 or less counts every exit).
+    pub crown_line_exit_distance: Option<f32>,
+    /// Crown candidate components whose mean elevation lies below this share
+    /// of the outline's elevation range are discarded as flank gullies, for
+    /// all crown line methods (defaults to 0, which keeps every component).
+    pub crown_elevation_band: Option<f32>,
+    /// Minimum number of entering particles for an outline cell to become a
+    /// crown candidate in the `particle-simulation` method (defaults to 2).
+    pub min_particles_per_crown_cell: Option<u32>,
     pub velocity_threshold: Option<f32>,
     pub roughness_threshold: Option<f32>,
     pub peak_flow_thickness_threshold: Option<f32>,
@@ -839,7 +861,10 @@ mod tests {
             release_min_elevation: Some(100.0),
             release_max_elevation: Some(200.0),
             release_area_fraction: Some(0.25),
-            crown_line_method: Some(CrownLineMethod::ParticleSimulation),
+            crown_line_method: Some(CrownLineMethod::GradientStep),
+            crown_line_exit_distance: Some(0.7),
+            crown_elevation_band: Some(0.3),
+            min_particles_per_crown_cell: Some(3),
             velocity_threshold: Some(0.001),
             roughness_threshold: Some(0.002),
             peak_flow_thickness_threshold: Some(1.5),
@@ -1186,6 +1211,7 @@ mod tests {
         let methods = [
             (CrownLineMethod::FlowRouting, "flow-routing"),
             (CrownLineMethod::ParticleSimulation, "particle-simulation"),
+            (CrownLineMethod::GradientStep, "gradient-step"),
         ];
 
         for (method, string) in methods {
@@ -1207,6 +1233,14 @@ mod tests {
         assert_eq!(
             CrownLineMethod::from_str("particle"),
             Ok(CrownLineMethod::ParticleSimulation)
+        );
+        assert_eq!(
+            CrownLineMethod::from_str("Gradient_Step"),
+            Ok(CrownLineMethod::GradientStep)
+        );
+        assert_eq!(
+            CrownLineMethod::from_str("gradient"),
+            Ok(CrownLineMethod::GradientStep)
         );
     }
 

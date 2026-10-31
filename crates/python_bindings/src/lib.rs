@@ -768,6 +768,62 @@ impl PySimulation {
             })
     }
 
+    /// ``(height, width)`` bool array marking the crown candidates before the
+    /// component filtering (minimum size and ``crown_elevation_band``). Cells
+    /// set here but not in :attr:`crown_line` were removed by those filters.
+    /// Only available after :meth:`prepare` when the settings contained
+    /// ``release_area_fraction``.
+    #[getter]
+    pub fn crown_candidates<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<bool>>> {
+        if self.inner.crown_candidates.is_empty() {
+            return Err(PyErr::new::<PyValueError, _>(
+                "crown candidates not available: set 'release_area_fraction' in the settings and call prepare()",
+            ));
+        }
+        let dims = [self.inner.dem.height, self.inner.dem.width];
+        self.inner
+            .crown_candidates
+            .to_pyarray(py)
+            .reshape(dims)
+            .map_err(|_| {
+                PyErr::new::<PyValueError, _>(format!(
+                    "Dimension mismatch during texture conversion. Expected: {}x{}, got: {}",
+                    dims[0],
+                    dims[1],
+                    self.inner.crown_candidates.len()
+                ))
+            })
+    }
+
+    /// ``(height, width)`` bool array of the potential release areas inside
+    /// the outline (slope, elevation and roughness thresholds) from which the
+    /// release areas were selected. Only available after :meth:`prepare` when
+    /// the settings contained ``release_area_fraction``.
+    #[getter]
+    pub fn potential_release_areas<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyArray2<bool>>> {
+        if self.inner.potential_release_areas.is_empty() {
+            return Err(PyErr::new::<PyValueError, _>(
+                "potential release areas not available: set 'release_area_fraction' in the settings and call prepare()",
+            ));
+        }
+        let dims = [self.inner.dem.height, self.inner.dem.width];
+        self.inner
+            .potential_release_areas
+            .to_pyarray(py)
+            .reshape(dims)
+            .map_err(|_| {
+                PyErr::new::<PyValueError, _>(format!(
+                    "Dimension mismatch during texture conversion. Expected: {}x{}, got: {}",
+                    dims[0],
+                    dims[1],
+                    self.inner.potential_release_areas.len()
+                ))
+            })
+    }
+
     /// ``[xmin, xmax, ymin, ymax]`` real-world bounds of the DEM in meters.
     #[getter]
     pub fn dem_bounds<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<f32>>> {
@@ -892,6 +948,42 @@ impl PySimulation {
             .block_on()
             .map_runtime_err()?;
         self.get_layer_f32(py, gravity_y.to_vec())
+    }
+
+    /// ``(height, width)`` float32 array of the slope angle in degrees.
+    #[getter]
+    pub fn slope_angle<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        let data = self
+            .inner
+            .fetch_slope_angle()
+            .block_on()
+            .map_runtime_err()?
+            .to_vec();
+        self.get_layer_f32(py, data)
+    }
+
+    /// ``(height, width)`` float32 array of the slope aspect in degrees.
+    #[getter]
+    pub fn slope_aspect<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        let data = self
+            .inner
+            .fetch_slope_aspect()
+            .block_on()
+            .map_runtime_err()?
+            .to_vec();
+        self.get_layer_f32(py, data)
+    }
+
+    /// ``(height, width)`` float32 array of the terrain roughness.
+    #[getter]
+    pub fn roughness<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        let data = self
+            .inner
+            .fetch_roughness()
+            .block_on()
+            .map_runtime_err()?
+            .to_vec();
+        self.get_layer_f32(py, data)
     }
 
     /// ``(height, width)`` float32 array of the configured release areas.

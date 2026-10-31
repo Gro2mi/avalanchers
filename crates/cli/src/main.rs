@@ -125,6 +125,12 @@ struct Args {
     #[arg(long, value_parser = parse_crown_line_method)]
     crown_line_method: Option<CrownLineMethod>,
     #[arg(long)]
+    crown_line_exit_distance: Option<f32>,
+    #[arg(long)]
+    crown_elevation_band: Option<f32>,
+    #[arg(long)]
+    min_particles_per_crown_cell: Option<u32>,
+    #[arg(long)]
     velocity_threshold: Option<f32>,
     #[arg(long)]
     roughness_threshold: Option<f32>,
@@ -163,6 +169,15 @@ impl Args {
         }
         if let Some(value) = self.crown_line_method {
             settings.crown_line_method = Some(value);
+        }
+        if let Some(value) = self.crown_line_exit_distance {
+            settings.crown_line_exit_distance = Some(value);
+        }
+        if let Some(value) = self.crown_elevation_band {
+            settings.crown_elevation_band = Some(value);
+        }
+        if let Some(value) = self.min_particles_per_crown_cell {
+            settings.min_particles_per_crown_cell = Some(value);
         }
         if let Some(value) = self.enable_center_of_mass {
             settings.enable_center_of_mass = Some(value);
@@ -461,6 +476,9 @@ mod tests {
             center_of_mass_biggest_blob: None,
             release_area_fraction: None,
             crown_line_method: None,
+            crown_line_exit_distance: None,
+            crown_elevation_band: None,
+            min_particles_per_crown_cell: None,
             enable_center_of_mass: None,
         };
 
