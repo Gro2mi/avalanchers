@@ -291,3 +291,15 @@ units. The existing PIC entry point and MPMDAC transfer convention are unchanged
 
 This is the major spreading improvement. Resting, stopping, and verification
 time accounting still require separate corrections.
+
+### Step 4: resting and stopping deferred
+
+At the user's request, the current resting and stopping behavior is retained.
+No changes are made to permanent low-speed particle freezing, the 40-step
+new-cell stopping criterion, or the shared non-atomic new-cell counter.
+
+These remain known limitations to revisit. The proposed alternative is to allow
+resting particles to reactivate, apply friction consistently at low speeds, and
+stop only at motionless equilibrium or the configured step limit. That proposal
+has not been implemented or accepted. In particular, very slow spreading runs
+can still freeze or terminate early under the retained policy.
