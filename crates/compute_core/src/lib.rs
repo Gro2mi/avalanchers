@@ -1322,6 +1322,11 @@ impl ComputeOrchestrator {
             }
             1 => {
                 self.add_buffer(
+                    BufferName::ParticlesVelocityZ,
+                    particle_buffer_size_single_value,
+                    BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+                );
+                self.add_buffer(
                     BufferName::ParticlesAffineMatrix,
                     particle_buffer_size_single_value * 4,
                     BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,

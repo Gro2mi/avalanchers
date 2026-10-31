@@ -126,7 +126,7 @@ def fields_from_grid(sim, shape, cell_size, density, jac, frame=None):
     if frame is not None:
         # rotate the grid velocity into the flow frame (flow / cross-flow)
         ex, ey = frame["e_down"]
-        u_flow = vel_u * ex + vel_v * ey
+        u_flow = (vel_u * ex + vel_v * ey) / frame["cos_phi"]
         v_cross = -vel_u * ey + vel_v * ex
         return thickness, u_flow, v_cross, mass
     return thickness, vel_u, vel_v, mass

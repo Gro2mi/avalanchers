@@ -128,6 +128,7 @@ define_shaders! {
     GridPhysicsMPMDAC => "grid_physics_mpmdac",
     GridPhysics => "grid_physics",
     Friction => "friction",
+    CurvilinearGeometry => "curvilinear_geometry",
     Constitutive => "constitutive",
     Utils => "utils",
     Random => "random",
@@ -1334,6 +1335,14 @@ pub fn create_shader_configs(
                 // Binding 13:
                 (
                     BufferName::ParticlesElevation.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                (
+                    BufferName::ParticlesVelocityZ.to_string(),
                     BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: false },
                         has_dynamic_offset: false,

@@ -87,6 +87,8 @@ def fields_from_grid(sim, shape, cell_size, density, jac):
     mass = mass.reshape(shape)
     vel_u = vel_u.reshape(shape)
     vel_v = vel_v.reshape(shape)
+    # The reference uses surface distance along its x-aligned plane.
+    vel_u = vel_u * jac
     thickness = mass / (density * cell_size * cell_size * jac)
     return thickness, vel_u, vel_v, mass
 

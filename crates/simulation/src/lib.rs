@@ -1692,7 +1692,7 @@ impl Simulation {
         Ok(self.gpu_cache.particles_position.as_ref().unwrap())
     }
 
-    /// Particle xy velocities, flattened as `[vx0, vy0, vx1, vy1, ...]`.
+    /// Particle horizontal velocities, stored as `[vx, vy]` pairs.
     pub async fn fetch_particles_velocity(&mut self) -> Result<&Vec<[f32; 2]>> {
         if self.state < SimulationState::ParticlesInitialized {
             bail!("Simulation must be initialized before reading particles");
@@ -1708,15 +1708,15 @@ impl Simulation {
         Ok(self.gpu_cache.particles_velocity.as_ref().unwrap())
     }
 
-    /// Particle vertical velocities; identically zero for the MPM model,
-    /// which does not track a separate vertical component.
+    /// Particle vertical velocities. Curvilinear velocities are reconstructed
+    /// tangent to the bed; MPMDAC still returns a synthetic zero component.
     pub async fn fetch_particles_velocity_z(&mut self) -> Result<&Vec<f32>> {
         if self.state < SimulationState::ParticlesInitialized {
             bail!("Simulation must be initialized before reading particles");
         }
         if self.gpu_cache.particles_velocity_z.is_none() {
             self.gpu_cache.read_count += 1;
-            if self.settings.sim_model != SimModel::TerrainFollowing.as_int() {
+            if self.settings.sim_model == SimModel::MpmDaC.as_int() {
                 self.gpu_cache.particles_velocity_z =
                     Some(vec![0.0; self.number_particles as usize]);
             } else {
@@ -3436,9 +3436,19 @@ mod tests {
     }
 
     #[test_log::test]
-    fn test_mpm_velocity_z_is_synthetic_zero() {
+    fn test_curvilinear_velocity_z_is_tangent_to_bed() {
         let mut sim = setup_simple_sim(40.0, 3.0);
         sim.settings.sim_model = SimModel::Curvilinear.as_int();
+        sim.set_dem(&create_slope(16, 16, 3.0, 40.0), 16, 16, 3.0)
+            .expect("Failed to set interior test DEM");
+        let mut release = vec![0.0; 16 * 16];
+        for y in 6..10 {
+            for x in 6..10 {
+                release[y * 16 + x] = 1.0;
+            }
+        }
+        sim.set_release_areas(&release)
+            .expect("Failed to set interior release");
         block_on(sim.prepare()).expect("Failed to prepare MPM simulation");
         let number_particles = sim.number_particles as usize;
 
@@ -3447,6 +3457,18 @@ mod tests {
 
         assert_eq!(velocity_z.len(), number_particles);
         assert!(velocity_z.iter().all(|velocity| *velocity == 0.0));
+
+        block_on(sim.run_n_steps(1)).expect("Failed to advance curvilinear simulation");
+        let velocity_z = block_on(sim.fetch_particles_velocity_z())
+            .expect("Failed to fetch vertical velocity")
+            .clone();
+        let velocity_xy =
+            block_on(sim.fetch_particles_velocity()).expect("Failed to fetch horizontal velocity");
+        assert!(velocity_z.iter().any(|velocity| velocity.abs() > 1e-3));
+        for (horizontal, vertical) in velocity_xy.iter().zip(velocity_z) {
+            assert!(vertical.is_finite());
+            assert!(vertical.abs() <= horizontal[0].hypot(horizontal[1]) * 2.0);
+        }
     }
 
     #[test_log::test]

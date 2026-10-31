@@ -94,6 +94,17 @@ wasm-pack build crates/wasm_bindings --target web --out-dir ../../frontend/js/pk
 
 ## Run
 
+### Curvilinear velocity convention
+
+The curvilinear solver stores horizontal velocities `(dx/dt, dy/dt)`. Gravity,
+pressure and friction use the full surface metric, including its cross term.
+Particle xyz velocities reconstruct the vertical component from the terrain
+slope; xy velocities and grid momentum are horizontal components. Analytical
+comparisons convert these to surface-distance velocities where needed.
+
+See [the curvilinear model review](docs/curvilinear_model_review.md) for the
+diagnosis and staged correction results.
+
 ### Python
 
 `python avalanchers_example.py`

@@ -44,6 +44,7 @@ fn grid_physics_curvilinear(@builtin(global_invocation_id) id: vec3u) {
     let K_yy = curvature_texture_data.y;
     let K_xy = curvature_texture_data.z;
     let g_x = curvature_texture_data.w;
+    let slope = -vec2f(g_x * l_x, g_y * l_y) / g;
 
     // 1. Decode height and velocity
     let mass = f32(grid_mass_atomic[idx]) * INV_MASS_FACTOR; // no_atomic_float
@@ -58,16 +59,14 @@ fn grid_physics_curvilinear(@builtin(global_invocation_id) id: vec3u) {
     // atomic_float var u = grid_momentum_atomic[idx * 2] / mass;
     // atomic_float var v = grid_momentum_atomic[idx * 2 + 1] / mass;
 
-    // Bed-normal acceleration (negative = into the bed). With curvature, the
-    // centripetal term u^T K u is added, where the contravariant velocity is
-    // (u / l_x, v / l_y) and K_ij = B_ij / J. Concave beds (K > 0) increase
-    // the normal load, convex beds reduce it down to lift-off (zero load).
+    // K_ij = B_ij / J. Curvature changes both the normal load and the
+    // horizontal acceleration needed to keep velocity tangent to the bed.
     var g_normal_magnitude = g / J;
+    var curvature_acceleration = vec2f(0.0);
     if use_curvature {
-        let xi_dot = u / l_x;
-        let eta_dot = v / l_y;
-        let centripetal_acceleration = K_xx * xi_dot * xi_dot + 2.0 * K_xy * xi_dot * eta_dot + K_yy * eta_dot * eta_dot;
+        let centripetal_acceleration = K_xx * u * u + 2.0 * K_xy * u * v + K_yy * v * v;
         g_normal_magnitude = max(g_normal_magnitude + centripetal_acceleration, 0.0);
+        curvature_acceleration = -slope * centripetal_acceleration / J;
     }
     let g_normal = -g_normal_magnitude;
 
@@ -93,17 +92,18 @@ fn grid_physics_curvilinear(@builtin(global_invocation_id) id: vec3u) {
     // let k = 1.0;
     // let grad_h = grad_h2 * 0.5 / (h + 1e-5);
     let grad_h = vec2f(
-        (get_h(id.x + 1, id.y) - get_h(id.x - 1, id.y)) / (2.0 * sim_settings.cell_size / l_x),
-        (get_h(id.x, id.y + 1) - get_h(id.x, id.y - 1)) / (2.0 * sim_settings.cell_size / l_y)
+        (get_h(id.x + 1, id.y) - get_h(id.x - 1, id.y)) / (2.0 * sim_settings.cell_size),
+        (get_h(id.x, id.y + 1) - get_h(id.x, id.y - 1)) / (2.0 * sim_settings.cell_size)
     );
     let k = 1.0;
-    let hydrostatic_pressure_acceleration = -g_normal * k * grad_h;
+    let hydrostatic_pressure_acceleration = -g_normal * k * surface_inverse_metric(slope, grad_h);
+    let gravity_acceleration = -g * slope / (J * J);
 
     // 1. Calculate velocity update from gravity alone first
     // var proposed_u = u + sim_info.dt * g  * sin(degrees(34f));//g_x;
-    var proposed_u = u + sim_info.dt * (g_x - hydrostatic_pressure_acceleration.x);
-    var proposed_v = v + sim_info.dt * (g_y - hydrostatic_pressure_acceleration.y);
-    var proposed_V_mag = length(vec2f(proposed_u, proposed_v));
+    var proposed_u = u + sim_info.dt * (gravity_acceleration.x + curvature_acceleration.x - hydrostatic_pressure_acceleration.x);
+    var proposed_v = v + sim_info.dt * (gravity_acceleration.y + curvature_acceleration.y - hydrostatic_pressure_acceleration.y);
+    var proposed_V_mag = surface_speed(slope, vec2f(proposed_u, proposed_v));
 
     let g_eff = g_normal;
 
@@ -129,7 +129,7 @@ fn grid_physics_curvilinear(@builtin(global_invocation_id) id: vec3u) {
 
     grid_velocity[idx] = vec2f(u, v);
 
-    let v_mag = length(vec2f(u, v));
+    let v_mag = surface_speed(slope, vec2f(u, v));
     if !is_nan(v_mag) && h > 1e-3 && bitcast<u32>(v_mag) > atomicLoad(&atomic_values.peak_velocity) {
         atomicMax(&atomic_values.peak_velocity, bitcast<u32>(v_mag));
     }
@@ -224,6 +224,33 @@ fn earth_pressure_coefficient(
     return select(Kp, Ka, div_u > 0.0);
 }
 
+// import curvilinear_geometry.wgsl;
+// BEGIN curvilinear_geometry.wgsl
+// Velocities are horizontal contravariant components q = (dx/dt, dy/dt).
+// For z = B(x,y), G = I + grad(B) grad(B)^T.
+fn surface_inverse_metric(slope: vec2f, covector: vec2f) -> vec2f {
+    return covector - slope * dot(slope, covector) / (1.0 + dot(slope, slope));
+}
+
+fn surface_velocity(slope: vec2f, velocity: vec2f) -> vec3f {
+    return vec3f(velocity, dot(slope, velocity));
+}
+
+fn surface_speed(slope: vec2f, velocity: vec2f) -> f32 {
+    return length(surface_velocity(slope, velocity));
+}
+
+fn terrain_slope_at_uv(uv: vec2f) -> vec2f {
+    let offset = 1.0 / vec2f(sim_settings.grid_shape);
+    return vec2f(
+        textureSampleLevel(dem_texture, tex_sampler, uv + vec2f(offset.x, 0.0), 0).x
+            - textureSampleLevel(dem_texture, tex_sampler, uv - vec2f(offset.x, 0.0), 0).x,
+        textureSampleLevel(dem_texture, tex_sampler, uv + vec2f(0.0, offset.y), 0).x
+            - textureSampleLevel(dem_texture, tex_sampler, uv - vec2f(0.0, offset.y), 0).x
+    ) / (2.0 * sim_settings.cell_size);
+}
+
+// END curvilinear_geometry.wgsl
 // import friction.wgsl;
 // BEGIN friction.wgsl
 // Shared basal friction models.

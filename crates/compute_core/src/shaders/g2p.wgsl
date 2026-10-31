@@ -35,6 +35,7 @@ struct TimestepData {
 
 @group(0) @binding(12) var dem_texture: texture_2d<f32>;
 @group(0) @binding(13) var<storage, read_write> particles_elevation: array<f32>;
+@group(0) @binding(14) var<storage, read_write> particles_velocity_z: array<f32>;
 
 const density: f32 = 200.0;
 override WG_SIZE_1D: u32 = 1u;
@@ -66,6 +67,7 @@ fn g2p(
     let terrain_data = textureSampleLevel(terrain_metrics, tex_sampler, uv, 0);
     let l_x = terrain_data.x;
     let l_y = terrain_data.y;
+    let slope = terrain_slope_at_uv(uv);
 
     if is_nan(l_x) {
         var state = sim_info.timestep;
@@ -92,14 +94,15 @@ fn g2p(
 
     // TODO PIC is very diffusive, try APIC or FLIP
     let new_velocity = interpolated_velocity;
-    var velocity_contravariant = vec2f(new_velocity.x / l_x, new_velocity.y / l_y);
-    position = position + velocity_contravariant * dt;
+    position = position + new_velocity * dt;
 
     particles_position[particleId] = position;
     particles_velocity[particleId] = new_velocity;
     let uv_new = position_to_uv(position);
     let elevation = get_elevation(uv_new);
     particles_elevation[particleId] = elevation;
+    let slope_new = terrain_slope_at_uv(uv_new);
+    particles_velocity_z[particleId] = dot(slope_new, new_velocity);
 
     // affine transfer
     // particles_affine_matrix[particleId] = new_affine_matrix;
@@ -107,7 +110,7 @@ fn g2p(
     if particleId == sim_info.number_particles / 2u {
         var current: TimestepData;
         current.position = vec3f(position, elevation);
-        current.velocity = vec3f(new_velocity, 0.0);
+        current.velocity = surface_velocity(slope_new, new_velocity);
         current.uv = uv;
         current.dt = dt;
         current.acceleration_tangential = vec3f(0.0);
@@ -138,7 +141,7 @@ fn g2p(
         out_debug[12] = f32(sim_settings.friction_coefficient);
     }
 
-    if dot(interpolated_velocity, interpolated_velocity) < sim_settings.velocity_threshold * sim_settings.velocity_threshold {
+    if surface_speed(slope, interpolated_velocity) < sim_settings.velocity_threshold {
         var state = sim_info.timestep;
         state |= PARTICLE_STOPPED;
         particles_state[particleId] = state;
@@ -270,6 +273,33 @@ fn update_output_data(trajectory: u32, timestep: u32, timestep_data: TimestepDat
 //     return acceleration_magnitude;
 // }
 
+// import curvilinear_geometry.wgsl;
+// BEGIN curvilinear_geometry.wgsl
+// Velocities are horizontal contravariant components q = (dx/dt, dy/dt).
+// For z = B(x,y), G = I + grad(B) grad(B)^T.
+fn surface_inverse_metric(slope: vec2f, covector: vec2f) -> vec2f {
+    return covector - slope * dot(slope, covector) / (1.0 + dot(slope, slope));
+}
+
+fn surface_velocity(slope: vec2f, velocity: vec2f) -> vec3f {
+    return vec3f(velocity, dot(slope, velocity));
+}
+
+fn surface_speed(slope: vec2f, velocity: vec2f) -> f32 {
+    return length(surface_velocity(slope, velocity));
+}
+
+fn terrain_slope_at_uv(uv: vec2f) -> vec2f {
+    let offset = 1.0 / vec2f(sim_settings.grid_shape);
+    return vec2f(
+        textureSampleLevel(dem_texture, tex_sampler, uv + vec2f(offset.x, 0.0), 0).x
+            - textureSampleLevel(dem_texture, tex_sampler, uv - vec2f(offset.x, 0.0), 0).x,
+        textureSampleLevel(dem_texture, tex_sampler, uv + vec2f(0.0, offset.y), 0).x
+            - textureSampleLevel(dem_texture, tex_sampler, uv - vec2f(0.0, offset.y), 0).x
+    ) / (2.0 * sim_settings.cell_size);
+}
+
+// END curvilinear_geometry.wgsl
 // import transfer_g2p.wgsl;
 // BEGIN transfer_g2p.wgsl
 fn transfer_g2p(p_idx: u32) -> vec2f {
