@@ -53,3 +53,34 @@ def test_curvilinear_plane_acceleration_is_rotation_invariant(angle, friction):
     np.testing.assert_allclose(velocity[central, :2].mean(axis=0), expected, atol=0.003)
     physical_speed = np.linalg.norm(velocity[central], axis=1).mean()
     assert physical_speed == pytest.approx(dt * acceleration, abs=0.004)
+
+
+@pytest.mark.parametrize("angle", [0.0, 45.0, 135.0])
+def test_curvilinear_pressure_uses_normal_thickness_and_full_metric(angle):
+    sim, slope, _ = plane_simulation(angle)
+    before = np.asarray(sim.particles_position_xy, dtype=np.float64)
+    sim.run_n_steps(1)
+    mass = np.asarray(sim.grid_mass, dtype=np.float64).reshape((64, 64)) / 10.0
+    jac = np.asarray(sim.terrain_geometry_z, dtype=np.float64)
+    # The terrain kernel leaves the excluded outermost cells uninitialized.
+    jac = np.pad(jac[1:-1, 1:-1], 1, mode="edge")
+    h = mass / (200.0 * 5.0**2 * jac)
+    grad = np.zeros((64, 64, 2))
+    grad[:, 1:-1, 0] = (h[:, 2:] - h[:, :-2]) / 10.0
+    grad[1:-1, :, 1] = (h[2:, :] - h[:-2, :]) / 10.0
+    inverse_grad = grad - slope * np.sum(grad * slope, axis=2, keepdims=True) / (1.0 + slope @ slope)
+    acceleration = -9.81 * slope / (1.0 + slope @ slope) - 9.81 / jac[:, :, None] * inverse_grad
+    q = before / 5.0 - 0.5
+    base = np.floor(q - 0.5).astype(int)
+    expected = np.zeros_like(before)
+    for i in range(3):
+        for j in range(3):
+            node = base + [i, j]
+            distance = np.abs(q - node)
+            weights = np.where(distance < 0.5, 0.75 - distance**2, 0.5 * (1.5 - distance)**2)
+            weight = np.prod(weights, axis=1)
+            expected += weight[:, None] * acceleration[node[:, 1], node[:, 0]]
+    expected *= math.sqrt(2.0 * 0.05 * 5.0 / (9.81 * 0.866))
+    central = ((before > 100.0) & (before < 220.0)).all(axis=1)
+    actual = np.asarray(sim.particles_velocity_xy, dtype=np.float64)
+    np.testing.assert_allclose(actual[central], expected[central], atol=3e-5)

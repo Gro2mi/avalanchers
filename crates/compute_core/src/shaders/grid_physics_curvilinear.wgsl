@@ -96,7 +96,7 @@ fn grid_physics_curvilinear(@builtin(global_invocation_id) id: vec3u) {
         (get_h(id.x, id.y + 1) - get_h(id.x, id.y - 1)) / (2.0 * sim_settings.cell_size)
     );
     let k = 1.0;
-    let hydrostatic_pressure_acceleration = -g_normal * k * surface_inverse_metric(slope, grad_h);
+    let hydrostatic_pressure_acceleration = select(vec2f(0.0), -g_normal * k * surface_inverse_metric(slope, grad_h), use_particle_interaction);
     let gravity_acceleration = -g * slope / (J * J);
 
     // 1. Calculate velocity update from gravity alone first
@@ -158,9 +158,10 @@ fn get_h2(x: u32, y: u32) -> f32 {
 }
 fn get_h(x: u32, y: u32) -> f32 {
     let idx = x_y_to_idx(x, y);
-    // return pow(f32(grid_mass_atomic[idx]) * INV_MASS_FACTOR / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size), 2.0);
-    // atomic_float return grid_mass_atomic[idx] / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size);
-    return f32(grid_mass_atomic[idx]) * INV_MASS_FACTOR / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size); // no_atomic_float 
+    let J = textureLoad(terrain_geometry_texture, vec2i(i32(x), i32(y)), 0).z;
+    let mass = f32(grid_mass_atomic[idx]) * INV_MASS_FACTOR; // no_atomic_float
+    // atomic_float let mass = grid_mass_atomic[idx];
+    return mass / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size * J);
 }
 
 fn get_h2_atomic_u32(x: u32, y: u32) -> f32 {

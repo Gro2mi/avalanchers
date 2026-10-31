@@ -259,3 +259,18 @@ Validation:
   Resting and global stopping are still pending.
 
 These are intermediate results, not acceptance of the complete solver.
+
+### Step 2: normal-thickness pressure
+
+Each pressure-stencil neighbor now divides deposited mass by its own surface
+Jacobian. The inverse-metric gradient acts on normal thickness, and disabling
+particle interaction disables the pressure contribution.
+
+- All 17 GPU regressions passed, including three comparisons against the
+  complete discrete pressure operator on rotated planes.
+- Similarity relative thickness L2: 0.0815 near 5 s and 0.8070 near 20 s.
+- Dam break relative thickness L2: 0.1406 near 5 s and 0.3528 near 20 s.
+  This stage reached 20 s.
+
+The pressure geometry is now consistent, but reduced pressure exposes the
+remaining PIC damping. Late-time accuracy is not yet acceptable.
