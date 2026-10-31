@@ -45,8 +45,6 @@ fn grid_physics_curvilinear(@builtin(global_invocation_id) id: vec3u) {
     let K_xy = curvature_texture_data.z;
     let g_x = curvature_texture_data.w;
 
-    let g_normal = -g / J;
-
     // 1. Decode height and velocity
     let mass = f32(grid_mass_atomic[idx]) * INV_MASS_FACTOR; // no_atomic_float
     // atomic_float let mass = grid_mass_atomic[idx];
@@ -59,7 +57,21 @@ fn grid_physics_curvilinear(@builtin(global_invocation_id) id: vec3u) {
     var v = select(f32(grid_momentum_atomic[idx * 2 + 1]) * INV_MOMENTUM_FACTOR / (mass + 1e-6), 0.0, node_is_empty); // no_atomic_float
     // atomic_float var u = grid_momentum_atomic[idx * 2] / mass;
     // atomic_float var v = grid_momentum_atomic[idx * 2 + 1] / mass;
-    let h = mass / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size * J);
+
+    // Bed-normal acceleration (negative = into the bed). With curvature, the
+    // centripetal term u^T K u is added, where the contravariant velocity is
+    // (u / l_x, v / l_y) and K_ij = B_ij / J. Concave beds (K > 0) increase
+    // the normal load, convex beds reduce it down to lift-off (zero load).
+    var g_normal_magnitude = g / J;
+    if use_curvature {
+        let xi_dot = u / l_x;
+        let eta_dot = v / l_y;
+        let centripetal_acceleration = K_xx * xi_dot * xi_dot + 2.0 * K_xy * xi_dot * eta_dot + K_yy * eta_dot * eta_dot;
+        g_normal_magnitude = max(g_normal_magnitude + centripetal_acceleration, 0.0);
+    }
+    let g_normal = -g_normal_magnitude;
+
+    let h =  mass / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size * J);
     let current_peak_flow_thickness = peak_flow_thickness[idx];
     if current_peak_flow_thickness < h {
         // only if previously cell was empty, we count it as a new cell for diagnostics
