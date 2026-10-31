@@ -412,3 +412,157 @@ contour GIFs (20 frames each). Every animation frame was decoded successfully.
 The existing aggregate runner generates these sequences by default; omit
 `--no-sequences` when running it. Standalone runners generate them with
 `--plot-sequence`.
+
+## Curvature verification: analytical reference
+
+The new curvature benchmark uses the DEM, release, Coulomb coefficient
+`mu = 0.4`, and sampling setup of the energy-line test. It runs both values of
+`enable_curvature`. Internal interaction and all other settings are kept the
+same in those two runs.
+
+### Derivation
+
+Consider a point mass sliding downhill in increasing horizontal `x`, on
+`z = B(x)`, from rest at `x0`. Define:
+
+```text
+p = B'(x)
+J = sqrt(1 + p^2)
+ds = J dx                         (surface arc length)
+kappa = B'' / J^3                 (positive for the concave bed)
+v = ds/dt                         (physical surface speed)
+N/m = g/J + kappa*v^2             (basal normal load)
+w = v^2/(2g)                     (kinetic height)
+H = B + w                         (mechanical energy height)
+```
+
+Tangential gravity and Coulomb friction give:
+
+```text
+dv/dt = -g*p/J - mu*(g/J + kappa*v^2)
+dH/ds = -mu*(1/J + 2*kappa*w)
+dH/dx = -mu - 2*mu*B''/(1+p^2)*w
+dw/dx + 2*mu*B''/(1+p^2)*w = -p-mu.
+```
+
+This is a linear equation for `w`, despite the velocity-squared normal load.
+Its integrating factor, normalized to one at release, is:
+
+```text
+I(x) = exp(2*mu*(atan(p(x)) - atan(p(x0))))
+
+w(x) = [w(x0) + integral(x0..x, I(q)*(-B'(q)-mu) dq)] / I(x)
+H(x) = B(x) + w(x).
+```
+
+This is an analytical definite-integral solution, not an elementary straight
+energy line and not a time-stepped reference simulation. The implementation
+evaluates its smooth integral with 64-point Gauss-Legendre quadrature. An
+independent high-accuracy ODE integration checks that evaluation.
+
+For the upstream parabola:
+
+```text
+B(x) = z_vertex + (b/2)*(x-x_vertex)^2
+p(x) = b*(x-x_vertex)
+b = B'' > 0
+```
+
+The bed parameters are recovered from the actual DEM and verified against
+every DEM cell, including its horizontal continuation. The maximum permitted
+fit residual is 0.001 m.
+
+For release from rest, motion starts only if `p(x0) < -mu`. The first
+nontrivial stopping point `x_stop` solves:
+
+```text
+integral(x0..x_stop, I(q)*(-B'(q)-mu) dq) = 0.
+```
+
+The integrand changes sign at `p = -mu`; the zero after this point is bracketed
+and solved. If the particle reaches the vertex with positive kinetic height,
+the flat continuation has `w' = -mu`, so:
+
+```text
+x_stop = x_vertex + w(x_vertex)/mu.
+horizontal runout = x_stop-x0
+surface runout = integral(x0..x_stop, sqrt(1+p^2) dx).
+```
+
+The parabolic arc-length primitive is
+`[p*sqrt(1+p^2) + asinh(p)]/(2*b)`; the flat contribution is added separately.
+The reference therefore reports both lengths and does not confuse horizontal
+distance with surface distance.
+
+With the normal-load correction disabled, `I = 1` and:
+
+```text
+w(x) = B(x0)-B(x)-mu*(x-x0)
+H(x) = B(x0)-mu*(x-x0).
+```
+
+This recovers the ordinary alpha line exactly. With curvature enabled and
+`w > 0`, the additional dissipation makes the energy line bend below the
+alpha line and shortens runout.
+
+### Assumptions and acceptance
+
+The derivation is exact for a point slider in contact with this concave bed,
+with pure Coulomb friction, no entrainment, and no internal pressure.
+The existing energy-line setup has a finite particle release and particle
+interaction. Its mass-averaged path is consequently only approximated by a
+slider released at the initial center of mass; finite-width, pressure, transfer,
+and stopping effects are not hidden by fitting an energy offset.
+
+A pressure-disabled finite-release probe exhibited unreliable stopping and
+residual particle velocities under the retained policy. The benchmark therefore
+keeps the original energy-line interaction setting rather than changing the
+user-deferred stopping policy.
+
+The new checks require both runout errors <= 2%, both energy-height RMSEs <= 3 m,
+and final mass-weighted RMS speeds <= 0.1 m/s. Curvature must shorten simulated
+runout, and the curvature-aware energy reference must at least halve the error
+against the incorrect alpha line. Formula tests cover the alpha-line limit,
+stopping on both curved and flat sections, invalid non-sliding releases, and
+agreement with the independent ODE.
+
+Run the standalone benchmark with:
+
+```text
+.venv\Scripts\python.exe verification\run_curvature_test.py
+```
+
+It also runs by default in the aggregate suite, or can be selected using
+`verification\run_all_tests.py --tests curvature`. The report includes a plot
+of both energy lines and residuals, and the console lists analytical horizontal
+and surface runout alongside simulated runout.
+
+### Measured verification results
+
+At `mu = 0.4`, the fitted bed has `B'' = 0.00041360158 m^-1` and a maximum
+DEM residual of `0.000163 m`. The initial center of mass is at approximately
+`x0 = 2688.074 m`.
+
+| Normal-load curvature | Analytical horizontal runout | Simulated horizontal runout | Runout error | Energy-height RMSE |
+|---|---:|---:|---:|---:|
+| Off | 1212.892 m | 1214.173 m | +1.281 m | 1.294 m |
+| On | 1150.657 m | 1151.300 m | +0.643 m | 1.110 m |
+
+Analytical surface runouts are 1316.477 m and 1253.430 m, respectively.
+Curvature shortens horizontal runout by 62.234 m analytically and 62.872 m
+in the simulation. The curvature-on energy error against the incorrect alpha
+line is 9.858 m: using the derived reference reduces that error by about 89%.
+Final mass-weighted RMS speeds are approximately 0.063 m/s in both cases.
+Small run-to-run variations are expected from GPU transfers.
+
+All five aggregate benchmarks and all 48 Python tests pass with the new test
+included. The tests also
+explicitly reject an energy reference that cannot distinguish the curvature
+correction from the alpha line. Other simulation models or friction laws retain
+comparison-mode behavior, with this curvature-specific benchmark explicitly
+skipped rather than treated as a numerical failure.
+
+The generated report and plot are in
+`verification/outputs/all_tests/curvature_20261031/report.md`; the complete
+five-benchmark report is in
+`verification/outputs/all_tests/curvilinear_20261031_with_curvature_test/report.md`.

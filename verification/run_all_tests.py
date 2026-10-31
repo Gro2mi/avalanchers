@@ -1,6 +1,6 @@
-"""Run all four avalanchers verification tests and write a markdown report.
+"""Run avalanchers verification tests and write a markdown report.
 
-Runs the energy line, dam break, rotation and similarity solution tests
+Runs the energy line, curvature, dam break, rotation and similarity solution tests
 (see the sibling ``run_<test>.py`` scripts) IN-PROCESS with a switchable
 simulation model, collects each test's console tables, summary plots and
 animated GIFs, and writes everything into one markdown document:
@@ -12,8 +12,9 @@ Model switching: ``--sim-model`` accepts any avalanchers model string
 every test's settings before it runs. The analytic reference solutions
 (alpha line, Faccanoni-Mangeney, Hutter 1993) are exact only for
 ``curvilinear`` + Coulomb friction - for other models the tests still run
-and produce all plots/tables, but treat them as model-comparison runs, not
-analytic validation. ``--friction-model`` / ``--mu`` optionally override
+and produce plots/tables, but treat them as model-comparison runs, not
+analytic validation. The curvature-specific benchmark is explicitly skipped
+for other models or friction laws. ``--friction-model`` / ``--mu`` optionally override
 the friction (defaults: Coulomb with each test's documented angle).
 
 Each test runs in its own subfolder and a failure of one test does not stop
@@ -22,7 +23,7 @@ also apply numerical regression guardrails; other models are labeled comparison
 runs rather than numerical passes.
 
 Usage:
-    python run_all_tests.py                          # all 4 tests, curvilinear
+    python run_all_tests.py                          # all 5 tests, curvilinear
     python run_all_tests.py --sim-model mpmdac       # switch the model
     python run_all_tests.py --tests energy_line dam_break --quick
 """
@@ -46,10 +47,11 @@ import numpy as np
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 ALL_TESTS_DIR = REPO_ROOT / "verification" / "outputs" / "all_tests"
 
-TEST_NAMES = ["energy_line", "similarity_solution", "dam_break", "rotation"]
+TEST_NAMES = ["energy_line", "curvature", "similarity_solution", "dam_break", "rotation"]
 
 TEST_TITLES = {
     "energy_line": "Energy Line",
+    "curvature": "Curvature",
     "similarity_solution": "Similarity Solution",
     "dam_break": "Dam Break",
     "rotation": "Rotation",
@@ -59,6 +61,7 @@ TEST_TITLES = {
 # <test>/pics)
 REPORT_PLOTS = {
     "energy_line": ["*EnergyTest*.png"],
+    "curvature": ["*CurvatureTest*.png"],
     "similarity_solution": ["*SimiSolTest.png", "*_profiles.gif", "*_contours.gif"],
     "dam_break": ["*DamBreakTest.png", "*_compare.gif"],
     "rotation": ["*_runout_comparison.png", "*_sl_comparison.png",
@@ -117,6 +120,15 @@ def run_energy_line_test(test_dir, args):
     return _capture(mod, ["--out-dir", str(test_dir)] + extra)
 
 
+def run_curvature_test(test_dir, args):
+    if args.sim_model not in ("curvilinear", "curvi", "c") or args.friction_model not in (None, "coulomb"):
+        return None, "Curvature benchmark skipped: requires curvilinear/Coulomb.", None
+    import run_curvature_test as mod
+
+    _patch_common(mod.SETTINGS, args)
+    return _capture(mod, ["--out-dir", str(test_dir)])
+
+
 def run_dam_break_test(test_dir, args):
     import run_dam_break_test as mod
 
@@ -157,6 +169,7 @@ def run_similarity_solution_test(test_dir, args):
 
 RUNNERS = {
     "energy_line": run_energy_line_test,
+    "curvature": run_curvature_test,
     "dam_break": run_dam_break_test,
     "rotation": run_rotation_test,
     "similarity_solution": run_similarity_solution_test,
@@ -168,7 +181,23 @@ def _assessment(name, ret, args):
     if args.sim_model not in ("curvilinear", "curvi", "c") or args.friction_model not in (None, "coulomb"):
         return "comparison", ["Numerical acceptance is only evaluated for curvilinear/Coulomb."]
     failures = []
-    if name in ("dam_break", "similarity_solution"):
+    if name == "curvature":
+        for enabled, case in ret["cases"].items():
+            result = case["result"]
+            for key, limit in (
+                ("runout_error", 0.02 * result["horizontal_runout"]),
+                ("energy_rmse", 3.0),
+                ("final_rms_speed", 0.1),
+            ):
+                if not np.isfinite(result[key]) or abs(result[key]) > limit:
+                    failures.append(f"Curvature={enabled}: {key} must be finite and within {limit:.3g}.")
+        if not np.isfinite(ret["runout_reduction"]) or ret["runout_reduction"] <= 0:
+            failures.append("Curvature must reduce runout on this concave bed.")
+        corrected = ret["cases"][True]["result"]["energy_rmse"]
+        incorrect = ret["uncorrected_energy_rmse"]
+        if not np.isfinite(incorrect) or corrected >= 0.5 * incorrect:
+            failures.append("Curvature reference must halve the energy error against the uncorrected alpha line.")
+    elif name in ("dam_break", "similarity_solution"):
         samples, errors = ret
         times = np.asarray(samples["t"])
         required_time = 10.0 if args.quick else 20.0
@@ -243,6 +272,13 @@ def _headline(test, ret):
             return (f"runout s {result['sEnd']:.1f} m, angle {result['runoutAngle']:.2f} deg, "
                     f"ds diff {result['runOutSError']:+.2f} m, "
                     f"velocity-height rmse {result['rmseVelocityElevation']:.2f} m")
+        if test == "curvature":
+            if ret is None:
+                return "skipped: curvature reference requires curvilinear/Coulomb"
+            result = ret["cases"][True]["result"]
+            return (f"runout sim/analytic {result['simulated_runout']:.1f}/{result['horizontal_runout']:.1f} m, "
+                    f"energy RMSE {result['energy_rmse']:.3f} m, "
+                    f"runout reduction {ret['runout_reduction']:.1f} m")
         if test in ("dam_break", "similarity_solution"):
             samples, errors = ret
             times = samples["t"]
@@ -317,6 +353,9 @@ def write_report(run_dir, test_dirs, entries, args, elapsed, timestamp):
         "  required field time 20 s (10 s in quick mode); energy runout error <= 2%,",
         "  velocity-height RMSE <= 3 m; rotation runout difference <= 2% and Dice >= 0.85.",
         "- These are regression guardrails, not physical model certification.",
+        "- curvature: each slider runout error <= 2%, energy-height RMSE <= 3 m,",
+        "  final RMS speed <= 0.1 m/s; curvature must shorten runout and halve",
+        "  energy error relative to the uncorrected alpha line.",
         "",
         "## Summary",
         "",

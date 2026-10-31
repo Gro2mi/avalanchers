@@ -116,6 +116,15 @@ grid mass/momentum snapshot before that step's advection. Verification uses
 the snapshot time and applies numerical regression guardrails instead of
 treating successful execution as numerical acceptance.
 
+The curvature benchmark reuses the energy-line parabola and release, compares
+curvature-on/off runout against an analytical integrating-factor solution, and
+plots the curved energy line. Run it with
+`.venv\Scripts\python.exe verification\run_curvature_test.py`, or use
+`verification\run_all_tests.py --tests curvature`. It is included in the full
+curvilinear/Coulomb verification suite; other comparison configurations explicitly
+skip this benchmark. The derivation and finite-release assumptions are documented
+in [the model review](docs/curvilinear_model_review.md#curvature-verification-analytical-reference).
+
 ### Python
 
 `python avalanchers_example.py`

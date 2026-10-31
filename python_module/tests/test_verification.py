@@ -195,3 +195,84 @@ def test_verification_guardrails_check_errors_and_end_time(error, final_time, ex
     ret = ({"t": np.array([5.0, final_time])},
            {"h_l2rel": np.array([0.08, error]), "vh_l2rel": np.array([0.1, 0.2])})
     assert run_all_tests._assessment("similarity_solution", ret, args)[0] == expected
+
+
+def test_curvature_reference_reduces_to_alpha_line_without_normal_load():
+    from curvature_test import ParabolicBed, analytical_runout, kinetic_height
+
+    bed = ParabolicBed(1000.0, 0.0, 0.001, 2000.0)
+    x = np.array([0.0, 100.0, 300.0, 600.0])
+    mu = 0.6
+    w = kinetic_height(bed, 0.0, x, mu, False)
+    np.testing.assert_allclose(bed.elevation(x)+w, bed.elevation(0.0)-mu*x, atol=1e-12)
+    assert analytical_runout(bed, 0.0, mu, False)["horizontal_runout"] == pytest.approx(800.0)
+    # On the flat continuation, no-curvature runout follows the same alpha line.
+    assert analytical_runout(bed, 0.0, 0.4, False)["horizontal_runout"] == pytest.approx(1250.0)
+
+
+@pytest.mark.parametrize("mu", [0.2, 0.4, 0.6])
+def test_curvature_integrating_factor_matches_independent_ode(mu):
+    from curvature_test import ParabolicBed, analytical_runout, kinetic_height
+    from scipy.integrate import solve_ivp
+
+    bed = ParabolicBed(1000.0, 0.0, 0.001, 3000.0)
+    solution = analytical_runout(bed, 0.0, mu, True)
+    end = solution["stop_x"]
+    x = np.linspace(0.0, end, 101)
+
+    def derivative(position, height):
+        slope = float(bed.slope(position))
+        return [-slope-mu-2.0*mu*bed.second_derivative/(1.0+slope*slope)*height[0]]
+
+    curved_end = min(end, bed.vertex_x)
+    numerical = solve_ivp(derivative, (0.0, curved_end), [0.0], dense_output=True,
+                          rtol=1e-10, atol=1e-10, max_step=5.0)
+    assert numerical.success
+    independent = numerical.sol(np.minimum(x, curved_end))[0]
+    if end > curved_end:
+        flat = solve_ivp(lambda position, height: [-mu], (curved_end, end), numerical.y[:, -1],
+                         dense_output=True, rtol=1e-10, atol=1e-10)
+        assert flat.success
+        independent[x > curved_end] = flat.sol(x[x > curved_end])[0]
+    reference = kinetic_height(bed, 0.0, x, mu, True)
+    np.testing.assert_allclose(reference, independent, atol=2e-7)
+    assert reference[-1] == pytest.approx(0.0, abs=1e-8)
+    assert np.all(reference[1:-1] > 0.0)
+    assert solution["surface_runout"] > solution["horizontal_runout"]
+    uncorrected = analytical_runout(bed, 0.0, mu, False)
+    assert solution["horizontal_runout"] < uncorrected["horizontal_runout"]
+
+
+def test_curvature_reference_rejects_non_sliding_release():
+    from curvature_test import ParabolicBed, analytical_runout
+
+    with pytest.raises(ValueError, match="initial slope"):
+        analytical_runout(ParabolicBed(1000.0, 0.0, 0.001, 2000.0), 800.0, 0.4)
+
+
+def test_curvature_gpu_runout_and_energy_match_analytical_solution():
+    import run_all_tests
+    import run_curvature_test
+
+    result = run_curvature_test.run_simulation(dict(run_curvature_test.SETTINGS))
+    args = SimpleNamespace(sim_model="curvilinear", friction_model="coulomb", quick=False)
+    status, failures = run_all_tests._assessment("curvature", result, args)
+    assert status == "passed", failures
+    # An omitted load correction cannot pass by matching the ordinary alpha line.
+    result["uncorrected_energy_rmse"] = result["cases"][True]["result"]["energy_rmse"]
+    status, failures = run_all_tests._assessment("curvature", result, args)
+    assert status == "failed"
+    assert any("halve the energy error" in failure for failure in failures)
+
+
+@pytest.mark.parametrize("model, friction", [("mpmdac", None), ("curvilinear", "voellmy")])
+def test_curvature_benchmark_explicitly_skips_other_comparison_models(tmp_path, model, friction):
+    import run_all_tests
+
+    args = SimpleNamespace(sim_model=model, friction_model=friction, quick=False)
+    result, output, error = run_all_tests.run_curvature_test(tmp_path, args)
+    assert result is None
+    assert error is None
+    assert "skipped" in output
+    assert run_all_tests._assessment("curvature", result, args)[0] == "comparison"
+    assert "skipped" in run_all_tests._headline("curvature", result)
