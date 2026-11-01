@@ -8,7 +8,7 @@ animated GIFs, and writes everything into one markdown document:
     verification/outputs/all_tests/<model>_<timestamp>/report.md
 
 Model switching: ``--sim-model`` accepts any avalanchers model string
-(``terrain-following`` | ``curvilinear`` | ``mpmdac``) and is injected into
+(``terrain-following`` | ``curvilinear`` | ``mpmdac`` | ``sliding-block``) and is injected into
 every test's settings before it runs. The analytic reference solutions
 (alpha line, Faccanoni-Mangeney, Hutter 1993) are exact only for
 ``curvilinear`` + Coulomb friction - for other models the tests still run
@@ -48,6 +48,8 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 ALL_TESTS_DIR = REPO_ROOT / "verification" / "outputs" / "all_tests"
 
 TEST_NAMES = ["energy_line", "curvature", "similarity_solution", "dam_break", "rotation"]
+# models checked against the analytical references (with Coulomb friction)
+ANALYTIC_MODELS = ("curvilinear", "curvi", "c", "terrain-following", "terrain", "t")
 
 TEST_TITLES = {
     "energy_line": "Energy Line",
@@ -121,8 +123,8 @@ def run_energy_line_test(test_dir, args):
 
 
 def run_curvature_test(test_dir, args):
-    if args.sim_model not in ("curvilinear", "curvi", "c") or args.friction_model not in (None, "coulomb"):
-        return None, "Curvature benchmark skipped: requires curvilinear/Coulomb.", None
+    if args.sim_model not in ANALYTIC_MODELS or args.friction_model not in (None, "coulomb"):
+        return None, "Curvature benchmark skipped: requires curvilinear or terrain-following with Coulomb.", None
     import run_curvature_test as mod
 
     _patch_common(mod.SETTINGS, args)
@@ -178,8 +180,8 @@ RUNNERS = {
 
 def _assessment(name, ret, args):
     """Regression guardrails, not a claim of physical model certification."""
-    if args.sim_model not in ("curvilinear", "curvi", "c") or args.friction_model not in (None, "coulomb"):
-        return "comparison", ["Numerical acceptance is only evaluated for curvilinear/Coulomb."]
+    if args.sim_model not in ANALYTIC_MODELS or args.friction_model not in (None, "coulomb"):
+        return "comparison", ["Numerical acceptance is only evaluated for curvilinear/terrain-following with Coulomb."]
     failures = []
     if name == "curvature":
         for enabled, case in ret["cases"].items():
@@ -274,7 +276,7 @@ def _headline(test, ret):
                     f"velocity-height rmse {result['rmseVelocityElevation']:.2f} m")
         if test == "curvature":
             if ret is None:
-                return "skipped: curvature reference requires curvilinear/Coulomb"
+                return "skipped: curvature reference requires curvilinear or terrain-following with Coulomb"
             result = ret["cases"][True]["result"]
             return (f"runout sim/analytic {result['simulated_runout']:.1f}/{result['horizontal_runout']:.1f} m, "
                     f"energy RMSE {result['energy_rmse']:.3f} m, "
@@ -346,7 +348,7 @@ def write_report(run_dir, test_dirs, entries, args, elapsed, timestamp):
         f"- sim model: **{args.sim_model}**"
         + (f", friction model: {args.friction_model}" if args.friction_model else "")
         + (f", mu: {args.mu}" if args.mu else "")
-        + " (analytic references are exact for curvilinear + Coulomb only)",
+        + " (analytic references apply to curvilinear and terrain-following with Coulomb only)",
         f"- timestamp: {timestamp}",
         f"- runtime: {elapsed / 60:.1f} min",
         "- numerical guardrails: final thickness relative L2 <= 0.15, momentum relative L2 <= 0.25;",
@@ -375,7 +377,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="run all avalanchers verification tests and write a markdown report")
     parser.add_argument("--sim-model", default="curvilinear",
-                        help="terrain-following | curvilinear | mpmdac")
+                        help="terrain-following | curvilinear | mpmdac | sliding-block")
     parser.add_argument("--friction-model", default=None,
                         help="override the friction model (default: coulomb)")
     parser.add_argument("--mu", type=float, default=None,

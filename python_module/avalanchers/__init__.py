@@ -84,6 +84,9 @@ _ENUM_ALIASES = {
         "mpmdac": "mpmdac",
         "mpm-dac": "mpmdac",
         "mpm_depth_averaged_curvilinear": "mpmdac",
+        "sliding-block": "sliding-block",
+        "block": "sliding-block",
+        "b": "sliding-block",
     },
     "friction_model": {
         "coulomb": "coulomb",

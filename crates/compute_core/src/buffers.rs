@@ -116,7 +116,12 @@ pub enum BufferName {
     /// model to derive a smooth clump-aware particle depth
     GridMassPrevious,
     GridMomentum,
+    /// z component of the grid momentum (terrain-following model), kept
+    /// separate so GridMomentum stays interleaved (u, v)
+    GridMomentumZ,
     GridVelocity,
+    /// z component of the grid velocity (terrain-following model)
+    GridVelocityZ,
     GridForces,
     // settings/initialization dependent buffers
     SimSettings,
@@ -131,6 +136,8 @@ pub enum BufferName {
     ParticlesMass,
     ParticlesState,
     ParticlesAffineMatrix,
+    /// z row of the affine velocity gradient (terrain-following model)
+    ParticlesAffineZ,
     /// per-particle stress state of the MPMDAC model: deviatoric stress
     /// (symmetric mat2x2: tau_xx, tau_xy, tau_yy) in [0][0], [0][1], [1][0]
     /// and the cumulative plastic strain in [1][1]
@@ -195,6 +202,7 @@ impl BufferName {
             BufferName::ParticlesState => "particles_state",
             BufferName::ParticlesElevation => "particles_elevation",
             BufferName::ParticlesAffineMatrix => "particles_affine_matrix",
+            BufferName::ParticlesAffineZ => "particles_affine_z",
             BufferName::ParticlesStress => "particles_stress",
             BufferName::ParticlesVolumetricStrain => "particles_volumetric_strain",
             BufferName::ParticlesVelocityZ => "particles_velocity_z",
@@ -202,7 +210,9 @@ impl BufferName {
             BufferName::GridMass => "grid_mass",
             BufferName::GridMassPrevious => "grid_mass_previous",
             BufferName::GridMomentum => "grid_momentum",
+            BufferName::GridMomentumZ => "grid_momentum_z",
             BufferName::GridVelocity => "grid_velocity",
+            BufferName::GridVelocityZ => "grid_velocity_z",
             BufferName::GridPeakFlowThickness => "grid_peak_flow_thickness",
             BufferName::AtomicValues => "atomic_values",
             BufferName::NewCellsRollingWindow => "new_cells_rolling_window",
@@ -254,13 +264,16 @@ impl std::str::FromStr for BufferName {
             "particles_elevation" => Ok(BufferName::ParticlesElevation),
             "particles_velocity_z" => Ok(BufferName::ParticlesVelocityZ),
             "particles_affine_matrix" => Ok(BufferName::ParticlesAffineMatrix),
+            "particles_affine_z" => Ok(BufferName::ParticlesAffineZ),
             "particles_stress" => Ok(BufferName::ParticlesStress),
             "particles_volumetric_strain" => Ok(BufferName::ParticlesVolumetricStrain),
             "timestep_data" => Ok(BufferName::TimestepData),
             "grid_mass" => Ok(BufferName::GridMass),
             "grid_mass_previous" => Ok(BufferName::GridMassPrevious),
             "grid_momentum" => Ok(BufferName::GridMomentum),
+            "grid_momentum_z" => Ok(BufferName::GridMomentumZ),
             "grid_velocity" => Ok(BufferName::GridVelocity),
+            "grid_velocity_z" => Ok(BufferName::GridVelocityZ),
             "grid_peak_flow_thickness" => Ok(BufferName::GridPeakFlowThickness),
             "atomic_values" => Ok(BufferName::AtomicValues),
             "new_cells_rolling_window" => Ok(BufferName::NewCellsRollingWindow),
@@ -949,6 +962,20 @@ pub fn create_buffers_and_texture_descriptions(
         grid_bytes_size * 2,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
     );
+    // z components of the terrain-following model's 3D grid momentum and
+    // velocity; GridMomentumZ is zeroed by reset_grid for every model
+    gpu_resources.add_buffer(
+        device,
+        BufferName::GridMomentumZ,
+        grid_bytes_size,
+        BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+    );
+    gpu_resources.add_buffer(
+        device,
+        BufferName::GridVelocityZ,
+        grid_bytes_size,
+        BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+    );
     // per-cell force vector: written by grid_physics for the terrain-following
     // model, atomically accumulated by p2g_mpmdac for the MPMDAC model,
     // zeroed by reset_grid for every model
@@ -1019,7 +1046,9 @@ mod tests {
             (BufferName::GridPeakVelocity, "grid_peak_velocity"),
             (BufferName::GridMass, "grid_mass"),
             (BufferName::GridMomentum, "grid_momentum"),
+            (BufferName::GridMomentumZ, "grid_momentum_z"),
             (BufferName::GridVelocity, "grid_velocity"),
+            (BufferName::GridVelocityZ, "grid_velocity_z"),
             (
                 BufferName::GridPeakFlowThickness,
                 "grid_peak_flow_thickness",
@@ -1032,6 +1061,7 @@ mod tests {
             (BufferName::ParticlesState, "particles_state"),
             (BufferName::ParticlesElevation, "particles_elevation"),
             (BufferName::ParticlesAffineMatrix, "particles_affine_matrix"),
+            (BufferName::ParticlesAffineZ, "particles_affine_z"),
             (BufferName::TimestepData, "timestep_data"),
             (
                 BufferName::NewCellsRollingWindow,

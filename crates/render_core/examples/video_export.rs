@@ -339,6 +339,7 @@ fn main() -> anyhow::Result<()> {
             velocity_z,
             stopped,
             elevation,
+            grid_mass: None,
         }),
     );
     renderer

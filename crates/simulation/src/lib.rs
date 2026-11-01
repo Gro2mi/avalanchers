@@ -694,7 +694,10 @@ impl Simulation {
 
         if self.state != SimulationState::Running {
             match self.settings.sim_model {
-                model if model == SimModel::TerrainFollowing.as_int() => {
+                model
+                    if model == SimModel::TerrainFollowing.as_int()
+                        || model == SimModel::SlidingBlock.as_int() =>
+                {
                     self.orchestrator
                         .prepare_compute_particles(
                             &self.settings,
@@ -750,6 +753,9 @@ impl Simulation {
             }
             model if model == SimModel::MpmDaC.as_int() => {
                 self.orchestrator.step_mpmdac(steps).await?
+            }
+            model if model == SimModel::SlidingBlock.as_int() => {
+                self.orchestrator.step_sliding_block(steps).await?
             }
             _ => bail!("Unsupported simulation model: {}", self.settings.sim_model),
         };
@@ -1143,7 +1149,8 @@ impl Simulation {
         }
 
         let mut settings = Settings::default();
-        settings.sim_model = Some(SimModel::TerrainFollowing);
+        // independent sliding blocks without grid coupling trace the flow paths
+        settings.sim_model = Some(SimModel::SlidingBlock);
         settings.max_steps = Some(self.settings.max_steps);
         settings.released_particles_per_cell = Some(DETECTION_PARTICLES_PER_CELL);
         settings.enable_curvature = Some(false);
@@ -2514,6 +2521,7 @@ mod tests {
             SimModel::TerrainFollowing,
             SimModel::Curvilinear,
             SimModel::MpmDaC,
+            SimModel::SlidingBlock,
         ] {
             for (name, dem) in [("plane", &plane), ("bumpy", &bumpy)] {
                 let mut sim: Simulation =
@@ -2712,7 +2720,12 @@ mod tests {
 
     fn setup_simple_sim(slope_angle: f32, cell_size: f32) -> Simulation {
         let mut sim: Simulation = block_on(Simulation::new()).expect("Failed to create Simulation");
-        let settings = Settings::default();
+        // a 6x6 DEM is smaller than the grid models' 3-cell p2g boundary, so
+        // the fixture runs independent sliding blocks; tests override the model
+        let settings = Settings {
+            sim_model: Some(SimModel::SlidingBlock),
+            ..Default::default()
+        };
         block_on(sim.create(settings)).expect("Failed to create simulation");
         sim.set_dem(
             &create_slope(6, 6, cell_size, slope_angle), // dem_data
@@ -2882,6 +2895,7 @@ mod tests {
             ),
             cfl: Some(0.5),
             max_steps: Some(6000),
+            sim_model: Some(SimModel::SlidingBlock),
             ..Default::default()
         };
         block_on(sim.create(settings)).expect("Failed to create simulation");
@@ -3416,8 +3430,12 @@ mod tests {
         assert_eq!(advanced.timestep, 1);
         assert_eq!(sim.state, SimulationState::Running);
 
+        // the particles leave the 6x6 DEM during the second step
+        let resumed = block_on(sim.run_n_steps(1)).expect("Failed to resume simulation");
+        assert_eq!(resumed.timestep, 2);
+
         let finished = block_on(sim.run_n_steps(1)).expect("Failed to resume simulation");
-        assert_eq!(finished.timestep, advanced.timestep);
+        assert_eq!(finished.timestep, resumed.timestep);
         assert_eq!(sim.state, SimulationState::Finished);
 
         let atomics = block_on(sim.fetch_atomic_values()).expect("Failed to fetch atomic values");
@@ -3427,7 +3445,8 @@ mod tests {
     #[test_log::test]
     fn test_run_n_steps_clamps_to_max_steps() {
         let mut sim = setup_simple_sim(40.0, 3.0);
-        sim.settings.max_steps = 2;
+        // the particles would need two steps to leave the DEM
+        sim.settings.max_steps = 1;
 
         let result = block_on(sim.run_n_steps(u32::MAX)).expect("Failed to advance simulation");
 
@@ -3469,6 +3488,65 @@ mod tests {
             assert!(vertical.is_finite());
             assert!(vertical.abs() <= horizontal[0].hypot(horizontal[1]) * 2.0);
         }
+    }
+
+    #[test_log::test]
+    fn test_terrain_following_velocity_is_tangent_to_bed() {
+        let slope_angle: f32 = 40.0;
+        let mut sim = setup_simple_sim(slope_angle, 3.0);
+        sim.settings.sim_model = SimModel::TerrainFollowing.as_int();
+        sim.set_dem(&create_slope(16, 16, 3.0, slope_angle), 16, 16, 3.0)
+            .expect("Failed to set interior test DEM");
+        let mut release = vec![0.0; 16 * 16];
+        for y in 6..10 {
+            for x in 6..10 {
+                release[y * 16 + x] = 1.0;
+            }
+        }
+        sim.set_release_areas(&release)
+            .expect("Failed to set interior release");
+        block_on(sim.prepare()).expect("Failed to prepare terrain-following simulation");
+        let start_x: Vec<f32> = block_on(sim.fetch_particles_position())
+            .expect("Failed to read positions")
+            .iter()
+            .map(|p| p[0])
+            .collect();
+
+        block_on(sim.run_n_steps(5)).expect("Failed to advance terrain-following simulation");
+        let velocity_z = block_on(sim.fetch_particles_velocity_z())
+            .expect("Failed to fetch vertical velocity")
+            .clone();
+        let velocity_xy = block_on(sim.fetch_particles_velocity())
+            .expect("Failed to fetch horizontal velocity")
+            .clone();
+        let positions = block_on(sim.fetch_particles_position())
+            .expect("Failed to read positions")
+            .clone();
+
+        // the bed rises along +x, so a tangent velocity has v_z = tan(slope) v_x
+        let tan_slope = slope_angle.to_radians().tan();
+        for (horizontal, vertical) in velocity_xy.iter().zip(&velocity_z) {
+            assert!(vertical.is_finite() && horizontal[0].is_finite());
+            let speed = horizontal[0].hypot(horizontal[1]).hypot(*vertical);
+            assert!(
+                (vertical - tan_slope * horizontal[0]).abs() <= 1e-3 * speed + 1e-4,
+                "velocity ({}, {}, {vertical}) leaves the bed",
+                horizontal[0],
+                horizontal[1]
+            );
+        }
+        let mean_vx = velocity_xy.iter().map(|v| v[0]).sum::<f32>() / velocity_xy.len() as f32;
+        assert!(
+            mean_vx < 0.0,
+            "mass must accelerate downslope, mean v_x {mean_vx}"
+        );
+        let mean_dx = positions
+            .iter()
+            .zip(&start_x)
+            .map(|(p, x0)| p[0] - x0)
+            .sum::<f32>()
+            / positions.len() as f32;
+        assert!(mean_dx < 0.0, "mass must move downslope, mean dx {mean_dx}");
     }
 
     #[test_log::test]

@@ -520,6 +520,8 @@ pub enum SimModel {
     TerrainFollowing,
     Curvilinear,
     MpmDaC,
+    /// Legacy per-particle sliding-block model (former model 0).
+    SlidingBlock,
 }
 
 impl SimModel {
@@ -528,6 +530,7 @@ impl SimModel {
             0 => Some(Self::TerrainFollowing),
             1 => Some(Self::Curvilinear),
             2 => Some(Self::MpmDaC),
+            3 => Some(Self::SlidingBlock),
             _ => None,
         }
     }
@@ -537,6 +540,7 @@ impl SimModel {
             Self::TerrainFollowing => 0,
             Self::Curvilinear => 1,
             Self::MpmDaC => 2,
+            Self::SlidingBlock => 3,
         }
     }
 }
@@ -549,6 +553,7 @@ impl FromStr for SimModel {
             "terrain-following" | "terrain" | "t" => Ok(Self::TerrainFollowing),
             "curvilinear" | "curvi" | "c" => Ok(Self::Curvilinear),
             "mpmdac" | "mpm-dac" | "mpm_depth_averaged_curvilinear" => Ok(Self::MpmDaC),
+            "sliding-block" | "block" | "b" => Ok(Self::SlidingBlock),
             _ => Err(format!("unknown simulation model: {value}")),
         }
     }
@@ -560,6 +565,7 @@ impl fmt::Display for SimModel {
             Self::TerrainFollowing => "terrain-following",
             Self::Curvilinear => "curvilinear",
             Self::MpmDaC => "mpmdac",
+            Self::SlidingBlock => "sliding-block",
         })
     }
 }
@@ -1050,6 +1056,7 @@ mod tests {
             SimModel::TerrainFollowing,
             SimModel::Curvilinear,
             SimModel::MpmDaC,
+            SimModel::SlidingBlock,
         ];
 
         for model in models {
@@ -1066,7 +1073,9 @@ mod tests {
         assert_eq!(SimModel::from_int(1), Some(SimModel::Curvilinear));
         assert_eq!(SimModel::from_int(2), Some(SimModel::MpmDaC));
 
-        assert_eq!(SimModel::from_int(3), None);
+        assert_eq!(SimModel::from_int(3), Some(SimModel::SlidingBlock));
+
+        assert_eq!(SimModel::from_int(4), None);
         assert_eq!(SimModel::from_int(u32::MAX), None);
     }
 
@@ -1076,6 +1085,7 @@ mod tests {
             (SimModel::TerrainFollowing, "terrain-following"),
             (SimModel::Curvilinear, "curvilinear"),
             (SimModel::MpmDaC, "mpmdac"),
+            (SimModel::SlidingBlock, "sliding-block"),
         ];
 
         for (model, string) in models {
@@ -1094,6 +1104,9 @@ mod tests {
         }
         for value in ["mpmdac", "MPM-DAC", "mpm_depth_averaged_curvilinear"] {
             assert_eq!(SimModel::from_str(value), Ok(SimModel::MpmDaC));
+        }
+        for value in ["sliding-block", "block", "b", "BLOCK"] {
+            assert_eq!(SimModel::from_str(value), Ok(SimModel::SlidingBlock));
         }
     }
 

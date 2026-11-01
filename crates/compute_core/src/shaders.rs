@@ -128,8 +128,12 @@ define_shaders! {
     GridPhysicsCurvilinear => "grid_physics_curvilinear",
     GridPhysicsMPMDAC => "grid_physics_mpmdac",
     GridPhysics => "grid_physics",
+    P2GTerrainFollowing => "p2g" entry_point "p2g_terrain_following",
+    GridPhysicsTerrainFollowing => "grid_physics_terrain_following",
+    G2PTerrainFollowing => "g2p_terrain_following",
     Friction => "friction",
     CurvilinearGeometry => "curvilinear_geometry",
+    CartesianGeometry => "cartesian_geometry",
     Constitutive => "constitutive",
     Utils => "utils",
     Random => "random",
@@ -1735,6 +1739,14 @@ pub fn create_shader_configs(
                         min_binding_size: None,
                     },
                 ),
+                (
+                    BufferName::GridMomentumZ.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
             ],
         )?,
     );
@@ -2109,6 +2121,97 @@ pub fn create_shader_configs(
                     },
                 ),
             ],
+        )?,
+    );
+    // the terrain-following (Cartesian) model reuses the curvilinear binding
+    // layouts and appends its z-component buffers
+    let existing_bindings = |shader: ShaderName| -> Vec<(String, BindingType)> {
+        let config = shader_configs
+            .get(&shader)
+            .expect("base shader config is inserted before the terrain-following configs");
+        config
+            .binding_names
+            .iter()
+            .cloned()
+            .zip(config.binding_types.iter().copied())
+            .collect()
+    };
+    let storage_buffer = |read_only: bool| BindingType::Buffer {
+        ty: BufferBindingType::Storage { read_only },
+        has_dynamic_offset: false,
+        min_binding_size: None,
+    };
+    let mut terrain_following_p2g_bindings = existing_bindings(ShaderName::P2GCurvilinear);
+    terrain_following_p2g_bindings.extend([
+        // Binding 8:
+        (
+            BufferName::ParticlesVelocityZ.to_string(),
+            storage_buffer(true),
+        ),
+        // Binding 9:
+        (BufferName::GridMomentumZ.to_string(), storage_buffer(false)),
+        // Binding 10:
+        (
+            BufferName::ParticlesAffineZ.to_string(),
+            storage_buffer(true),
+        ),
+    ]);
+    let mut terrain_following_grid_physics_bindings =
+        existing_bindings(ShaderName::GridPhysicsCurvilinear);
+    terrain_following_grid_physics_bindings.extend([
+        // Binding 11:
+        (BufferName::GridMomentumZ.to_string(), storage_buffer(true)),
+        // Binding 12:
+        (BufferName::GridVelocityZ.to_string(), storage_buffer(false)),
+    ]);
+    let mut terrain_following_g2p_bindings = existing_bindings(ShaderName::G2P);
+    terrain_following_g2p_bindings.extend([
+        // Binding 15:
+        (BufferName::GridVelocityZ.to_string(), storage_buffer(true)),
+        // Binding 16:
+        (
+            BufferName::ParticlesAffineZ.to_string(),
+            storage_buffer(false),
+        ),
+        // Binding 17:
+        (
+            TextureName::Curvature.to_string(),
+            BindingType::Texture {
+                multisampled: false,
+                view_dimension: wgpu::TextureViewDimension::D2,
+                sample_type: wgpu::TextureSampleType::Float {
+                    filterable: has_float32_filterable,
+                },
+            },
+        ),
+    ]);
+    shader_configs.insert(
+        ShaderName::P2GTerrainFollowing,
+        ComputeShaderConfig::new_with_constants(
+            device,
+            ShaderName::P2GTerrainFollowing,
+            load_shader_source(ShaderName::P2GTerrainFollowing, has_float32_atomic),
+            &terrain_following_p2g_bindings,
+            &[("WG_SIZE_1D", max_compute_invocations_per_workgroup as f64)],
+        )?,
+    );
+    shader_configs.insert(
+        ShaderName::GridPhysicsTerrainFollowing,
+        ComputeShaderConfig::new(
+            device,
+            ShaderName::GridPhysicsTerrainFollowing,
+            load_shader_source(ShaderName::GridPhysicsTerrainFollowing, has_float32_atomic),
+            &terrain_following_grid_physics_bindings,
+        )?,
+    );
+    shader_configs.insert(
+        ShaderName::G2PTerrainFollowing,
+        ComputeShaderConfig::new_with_constants(
+            device,
+            ShaderName::G2PTerrainFollowing,
+            load_shader_source(ShaderName::G2PTerrainFollowing, has_float32_atomic),
+            &terrain_following_g2p_bindings,
+            &[("WG_SIZE_1D", max_compute_invocations_per_workgroup as f64)],
         )?,
     );
     shader_configs.insert(

@@ -52,12 +52,20 @@ pub fn any_neighbor_is(idx: usize, width: usize, height: usize, mask: &[bool]) -
     })
 }
 
+/// How far (in cells) a stopped particle is traced along its velocity to the
+/// outline. The terrain normals use central differences, so they turn NaN
+/// one cell before the masked DEM does, and the bilinear sampling blends in
+/// another half cell: a particle crossing the boundary stops up to two cells
+/// short.
+const ENTRY_TRACE_CELLS: f32 = 2.0;
+
 /// Index of the outline cell a stopped particle entered, if any. A particle
 /// that stopped inside the outline counts directly. Because the bilinear
 /// terrain sampling blends in the masked cells, a particle crossing the
-/// boundary usually stops up to one cell short, in a finite cell just outside
-/// the outline; such a particle is attributed to the neighbouring outline
-/// cell its velocity points into. Particles whose velocity does not point
+/// boundary usually stops short, in a finite cell just outside the outline;
+/// such a particle is attributed to the neighbouring outline cell its
+/// velocity points into, or, two cells short, to the first outline cell
+/// along its velocity. Particles whose velocity does not point
 /// into any outline cell (for example particles passing along a flank, or
 /// particles stopped by NaN normals at DEM edges) are not entries.
 pub fn entry_cell(
@@ -110,6 +118,32 @@ pub fn entry_cell(
         }
     }
     best.map(|(_, _, nidx)| nidx)
+        .or_else(|| trace_to_outline(position, velocity, speed, roi, width, height, cell_size))
+}
+
+/// First outline cell on the ray from `position` along `velocity`, up to
+/// `ENTRY_TRACE_CELLS` cells away, sampled in quarter-cell steps.
+fn trace_to_outline(
+    position: [f32; 2],
+    velocity: [f32; 2],
+    speed: f32,
+    roi: &[bool],
+    width: usize,
+    height: usize,
+    cell_size: f32,
+) -> Option<usize> {
+    let direction = [velocity[0] / speed, velocity[1] / speed];
+    let steps = (ENTRY_TRACE_CELLS * 4.0) as usize;
+    (1..=steps).find_map(|step| {
+        let distance = step as f32 * 0.25 * cell_size;
+        let cell_x = ((position[0] + direction[0] * distance) / cell_size).floor();
+        let cell_y = ((position[1] + direction[1] * distance) / cell_size).floor();
+        if cell_x < 0.0 || cell_y < 0.0 || cell_x >= width as f32 || cell_y >= height as f32 {
+            return None;
+        }
+        let idx = cell_y as usize * width + cell_x as usize;
+        roi[idx].then_some(idx)
+    })
 }
 
 #[derive(Debug, Clone)]

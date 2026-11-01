@@ -7,6 +7,10 @@
 @group(0) @binding(5) var<storage, read_write> grid_mass_atomic: array<atomic<u32>>;  // no_atomic_float 
 @group(0) @binding(6) var<storage, read_write> grid_momentum_atomic: array<atomic<i32>>;  // no_atomic_float 
 @group(0) @binding(7) var<storage> particles_affine_matrix: array<mat2x2f>;
+@group(0) @binding(8) var<storage> particles_velocity_z: array<f32>;
+// atomic_float @group(0) @binding(9) var<storage, read_write> grid_momentum_z_atomic: array<atomic<f32>>;
+@group(0) @binding(9) var<storage, read_write> grid_momentum_z_atomic: array<atomic<i32>>;  // no_atomic_float 
+@group(0) @binding(10) var<storage> particles_affine_z: array<vec2f>;
 
 override WG_SIZE_1D: u32 = 1u;
 @compute @workgroup_size(WG_SIZE_1D, 1, 1)
@@ -39,6 +43,37 @@ fn p2g_curvilinear(@builtin(global_invocation_id) id: vec3u) {
         return;
     }
     transfer_p2g_with_affine(id.x, particles_affine_matrix[id.x]);
+}
+
+// 3D Cartesian APIC transfer: xy through the shared transfer, the z
+// component with the z row of the affine matrix on the same stencil
+@compute @workgroup_size(WG_SIZE_1D, 1, 1)
+fn p2g_terrain_following(@builtin(global_invocation_id) id: vec3u) {
+    if id.x >= sim_info.number_particles || (sim_info.flags & SIM_INFO_STOPPED) != 0u {
+        return;
+    }
+    let cell = position_to_cell(particles_position[id.x]);
+    if cell.x < 3 || cell.x >= sim_settings.grid_shape.x - 3 || cell.y < 3 || cell.y >= sim_settings.grid_shape.y - 3 {
+        return;
+    }
+    transfer_p2g_with_affine(id.x, particles_affine_matrix[id.x]);
+
+    let grid_pos = particles_position[id.x] / sim_settings.cell_size - vec2f(0.5);
+    let base_node = vec2u(floor(grid_pos - vec2f(0.5)));
+    let p_mass = particles_mass[id.x];
+    let p_velocity_z = particles_velocity_z[id.x];
+    let affine_z = particles_affine_z[id.x];
+    for (var i: u32 = 0; i < 3; i++) {
+        for (var j: u32 = 0; j < 3; j++) {
+            let node_coords = base_node + vec2u(i, j);
+            let distance = calculate_distance_to_node(grid_pos, node_coords);
+            let weight = calculate_weight(distance);
+            let idx = xy_to_idx(node_coords);
+            let affine_velocity_z = p_velocity_z - dot(affine_z, distance);
+            // atomic_float atomicAdd(&grid_momentum_z_atomic[idx], p_mass * affine_velocity_z * weight);
+            atomicAdd(&grid_momentum_z_atomic[idx], quantize_momentum_component(p_mass * affine_velocity_z * weight * MOMENTUM_FACTOR)); // no_atomic_float 
+        }
+    }
 }
 
 // import transfer_p2g.wgsl;

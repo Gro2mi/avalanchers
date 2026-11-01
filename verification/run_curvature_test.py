@@ -15,12 +15,16 @@ import curvature_test
 import run_energy_line_test as energy_line
 
 SETTINGS = dict(energy_line.SETTINGS, enable_curvature=True)
+# models whose curvature load is compared against the analytical solution
+ANALYTIC_MODELS = ("curvilinear", "curvi", "c", "terrain-following", "terrain", "t")
 OUTPUT_DIR = energy_line.REPO_ROOT / "verification" / "outputs" / "curvature_test"
 
 
 def run_simulation(settings, save_steps=25):
-    if settings["sim_model"] not in ("curvilinear", "curvi", "c") or settings["friction_model"] != "coulomb":
-        raise ValueError("Curvature verification requires the curvilinear model and Coulomb friction.")
+    if settings["sim_model"] not in ANALYTIC_MODELS or settings["friction_model"] != "coulomb":
+        raise ValueError(
+            "Curvature verification requires the curvilinear or terrain-following model and Coulomb friction."
+        )
     mu = settings["friction_coefficient"]
     cases = {}
     for enabled in (False, True):

@@ -878,7 +878,7 @@ impl ComputeOrchestrator {
                 self.max_texture_size
             ));
         }
-        if sim_settings.sim_model > 2 {
+        if sim_settings.sim_model > 3 {
             return Err(anyhow!(
                 "Unsupported simulation model: {}",
                 sim_settings.sim_model
@@ -922,7 +922,7 @@ impl ComputeOrchestrator {
             texture_usage_input,
         )?;
         match sim_settings.sim_model {
-            0 | 2 => self.run_shader(
+            0 | 2 | 3 => self.run_shader(
                 &ShaderName::AnalyzeTerrain,
                 self.dispatch_number_workgroups_x_2d,
                 self.dispatch_number_workgroups_y_2d,
@@ -934,7 +934,7 @@ impl ComputeOrchestrator {
                 self.dispatch_number_workgroups_y_2d,
                 1,
             ),
-            3_u32..=u32::MAX => {
+            4_u32..=u32::MAX => {
                 return Err(anyhow!(
                     "Unsupported simulation model: {}",
                     sim_settings.sim_model
@@ -1228,7 +1228,7 @@ impl ComputeOrchestrator {
         number_release_particles: u32,
         relax_particles: bool,
     ) -> Result<u32> {
-        if sim_settings.sim_model > 2 {
+        if sim_settings.sim_model > 3 {
             return Err(anyhow!(
                 "Unsupported simulation model: {}",
                 sim_settings.sim_model
@@ -1317,6 +1317,24 @@ impl ComputeOrchestrator {
                     BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
                 );
                 self.add_buffer(
+                    BufferName::ParticlesAffineMatrix,
+                    particle_buffer_size_single_value * 4,
+                    BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+                );
+                // z row of the affine velocity gradient (d v_z / d x, d v_z / d y)
+                self.add_buffer(
+                    BufferName::ParticlesAffineZ,
+                    particle_buffer_size_single_value * 2,
+                    BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+                );
+            }
+            3 => {
+                self.add_buffer(
+                    BufferName::ParticlesVelocityZ,
+                    particle_buffer_size_single_value,
+                    BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+                );
+                self.add_buffer(
                     BufferName::GridVelocity,
                     grid_buffer_size_vec2,
                     BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
@@ -1358,7 +1376,7 @@ impl ComputeOrchestrator {
                     BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
                 );
             }
-            3_u32..=u32::MAX => {
+            4_u32..=u32::MAX => {
                 return Err(anyhow!(
                     "Unsupported simulation model: {}",
                     sim_settings.sim_model
@@ -1536,9 +1554,9 @@ impl ComputeOrchestrator {
         let (p2g_shader, grid_physics_shader, particle_update_shader) = match sim_settings.sim_model
         {
             0 => (
-                ShaderName::P2G,
-                ShaderName::GridPhysics,
-                ShaderName::ComputeParticles,
+                ShaderName::P2GTerrainFollowing,
+                ShaderName::GridPhysicsTerrainFollowing,
+                ShaderName::G2PTerrainFollowing,
             ),
             1 => (
                 ShaderName::P2GCurvilinear,
@@ -1550,7 +1568,12 @@ impl ComputeOrchestrator {
                 ShaderName::GridPhysicsMPMDAC,
                 ShaderName::G2PMPMDAC,
             ),
-            3_u32..=u32::MAX => {
+            3 => (
+                ShaderName::P2G,
+                ShaderName::GridPhysics,
+                ShaderName::ComputeParticles,
+            ),
+            4_u32..=u32::MAX => {
                 return Err(anyhow!(
                     "Unsupported simulation model: {}",
                     sim_settings.sim_model
@@ -1786,6 +1809,10 @@ impl ComputeOrchestrator {
             .await
     }
 
+    pub async fn step_sliding_block(&mut self, steps: u32) -> Result<SimInfo> {
+        self.step_simulation(steps, SimModel::SlidingBlock).await
+    }
+
     pub async fn run_compute_particles(
         &mut self,
         sim_settings: &settings::SimSettings,
@@ -1807,7 +1834,11 @@ impl ComputeOrchestrator {
             let steps = self
                 .batch_compute_steps
                 .min(sim_settings.max_steps - steps_run);
-            let sim_info = self.step_terrain_following(steps).await?;
+            let sim_info = if sim_settings.sim_model == SimModel::SlidingBlock.as_int() {
+                self.step_sliding_block(steps).await?
+            } else {
+                self.step_terrain_following(steps).await?
+            };
             steps_run += steps;
             let flags = sim_info.parsed_flags();
             if !flags.is_empty() {
@@ -1827,7 +1858,7 @@ impl ComputeOrchestrator {
         minimum_dem_elevation: f32,
     ) -> Result<()> {
         match sim_settings.sim_model {
-            0 => {
+            0 | 3 => {
                 self.run_compute_particles(
                     sim_settings,
                     number_release_particles,
@@ -1851,7 +1882,7 @@ impl ComputeOrchestrator {
                 )
                 .await?
             }
-            3_u32..=u32::MAX => {
+            4_u32..=u32::MAX => {
                 return Err(anyhow!(
                     "Unsupported simulation model: {}",
                     sim_settings.sim_model
@@ -2104,6 +2135,26 @@ mod tests {
             block_on(ComputeOrchestrator::new()).expect("Failed to create ComputeOrchestrator");
         orchestrator.generate_shader_report(
             Some("shader_report_sim_model_0.html"),
+            &[
+                ShaderName::AnalyzeTerrain,
+                ShaderName::ComputeRoughness,
+                ShaderName::ComputeReleaseAreas,
+                ShaderName::InitializeParticles,
+                ShaderName::ResetGrid,
+                ShaderName::P2GTerrainFollowing,
+                ShaderName::GridPhysicsTerrainFollowing,
+                ShaderName::G2PTerrainFollowing,
+                ShaderName::UpdateSimInfo,
+            ],
+        );
+    }
+
+    #[test_log::test]
+    fn test_shader_report_generation_sim_model_3() {
+        let orchestrator =
+            block_on(ComputeOrchestrator::new()).expect("Failed to create ComputeOrchestrator");
+        orchestrator.generate_shader_report(
+            Some("shader_report_sim_model_3.html"),
             &[
                 ShaderName::AnalyzeTerrain,
                 ShaderName::ComputeRoughness,

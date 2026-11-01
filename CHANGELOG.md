@@ -2,6 +2,19 @@
 
 All notable changes to this project might be documented in this file.
 
+## [Unreleased]
+
+### Changed
+- `terrain-following` (model 0) is now a depth-averaged grid MPM like the curvilinear
+  model, formulated in 3D Cartesian coordinates: 3D APIC transfer, gravity, hydrostatic
+  pressure and basal friction on the grid with bed-normal projection; particles keep the
+  curvature-corrected arc step and snap onto the DEM.
+- The particle arc step no longer adds the displacement twice per step.
+
+### Added
+- `sliding-block` (model 3): the previous per-particle terrain-following model.
+- Optional particle elevation jitter in the renderer (live viewer key `J`).
+
 ## [0.2.0] - 2026-05-20
 
 ### Added

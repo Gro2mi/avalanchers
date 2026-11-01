@@ -66,6 +66,8 @@ def test_calibration_parameters_enum_normalization():
     assert params["sim_model"] == "mpmdac"
     assert params["friction_model"] == "voellmy-min-shear"
     assert params["constitutive_model"] == "mu-i"
+    assert avalanchers.calibration_parameters({"sim_model": 3})["sim_model"] == "sliding-block"
+    assert avalanchers.calibration_parameters({"sim_model": "block"})["sim_model"] == "sliding-block"
 
 
 def test_export_calibration_parameters_with_evaluation(tmp_path):

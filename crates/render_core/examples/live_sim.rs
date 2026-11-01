@@ -8,7 +8,7 @@
 //! Controls: left drag orbits, right drag pans, scroll zooms, `R` restarts the
 //! simulation, `V` resets the view, `0` hides the overlay, `1` peak flow velocity, `2`
 //! peak flow thickness, `3` grid mass, `4` release areas, `5` slope angle, `6` slope
-//! aspect, `7` roughness, `8` grid momentum, `P` toggles particles. The egui panel
+//! aspect, `7` roughness, `8` grid momentum, `P` toggles particles, `J` the particle elevation jitter. The egui panel
 //! switches the testcase (the DEM pngs next to the configured one), the simulation
 //! model and the other simulation settings; sliders fine-tune with the arrow keys once
 //! focused (click the slider or its label, or `Tab` to it), and double-clicking a
@@ -344,6 +344,19 @@ struct SimulationView {
 }
 
 impl SimulationView {
+    /// Factor from a raw `GridMass` value to metres of flow, and whether the
+    /// mass is stored as f32 bits (float-atomic adapters) instead of a
+    /// quantized u32 (see `MASS_FACTOR` in utils.wgsl).
+    fn grid_mass_encoding(&self) -> (f32, bool) {
+        const MASS_FACTOR: f32 = 10.0;
+        let settings = &self.simulation.settings;
+        let is_f32 = self.simulation.orchestrator().has_float32_atomic();
+        let mass_factor = if is_f32 { 1.0 } else { MASS_FACTOR };
+        let thickness =
+            1.0 / (mass_factor * settings.density * settings.cell_size * settings.cell_size);
+        (thickness, is_f32)
+    }
+
     fn grid(&self, name: &BufferName) -> &wgpu::Buffer {
         &self
             .grids
@@ -625,6 +638,7 @@ fn write_snapshot(sim: &SimulationView, overlay: Overlay, path: &str) -> anyhow:
             velocity_z: &sim.particles[2],
             stopped: &sim.particles[3],
             elevation: &sim.particles[4],
+            grid_mass: None,
         }),
     );
     renderer.particles_mut().set_count(sim.particle_count);
@@ -738,6 +752,8 @@ struct Viewer {
     panning: bool,
     overlay: Overlay,
     show_particles: bool,
+    /// Lift particles by a random share of the local flow thickness (visual only).
+    particle_jitter: bool,
     /// Input or rebuild changed the view; the next redraw must render. Keeps an
     /// idle viewer at zero GPU work instead of redrawing identical frames.
     dirty: bool,
@@ -760,6 +776,7 @@ impl Viewer {
             panning: false,
             overlay: Overlay::PeakFlowVelocity,
             show_particles: true,
+            particle_jitter: true,
             dirty: true,
             pending_render: false,
             last_render_at: Instant::now(),
@@ -794,8 +811,16 @@ impl Viewer {
             velocity_z: &self.sim.particles[2],
             stopped: &self.sim.particles[3],
             elevation: &self.sim.particles[4],
+            grid_mass: Some(self.sim.grid(&BufferName::GridMass)),
         });
         view.renderer.set_particles(&self.sim.device, buffers);
+        let (mass_to_thickness, mass_is_f32) = self.sim.grid_mass_encoding();
+        let amplitude = if self.particle_jitter { 1.0 } else { 0.0 };
+        view.renderer.particles_mut().set_elevation_jitter(
+            amplitude,
+            mass_to_thickness,
+            mass_is_f32,
+        );
         self.dirty = true;
     }
 
@@ -1065,6 +1090,11 @@ impl ApplicationHandler for Viewer {
                         self.show_particles = !self.show_particles;
                         self.apply_particles();
                     }
+                    Key::Character("j" | "J") => {
+                        self.particle_jitter = !self.particle_jitter;
+                        self.apply_particles();
+                        tracing::info!("particle elevation jitter: {}", self.particle_jitter);
+                    }
                     Key::Character("+") => self.sim.adjust_speed(2.0),
                     Key::Character("-") => self.sim.adjust_speed(0.5),
                     Key::Character("r" | "R") => {
@@ -1208,6 +1238,11 @@ impl ApplicationHandler for Viewer {
                                             "Curvilinear",
                                         );
                                         ui.selectable_value(&mut model, SimModel::MpmDaC, "MPMDAC");
+                                        ui.selectable_value(
+                                            &mut model,
+                                            SimModel::SlidingBlock,
+                                            "Sliding block",
+                                        );
                                     });
                                 draft.sim_model = Some(model);
                             });

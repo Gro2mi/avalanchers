@@ -309,6 +309,7 @@ fn particles_are_drawn_on_top_of_the_terrain() {
                     velocity_z: &velocity_z,
                     stopped: &stopped,
                     elevation: &elevation,
+                    grid_mass: None,
                 }),
             );
             renderer.particles_mut().set_count(count);

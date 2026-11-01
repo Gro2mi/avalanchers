@@ -265,6 +265,7 @@ impl RenderView {
                 velocity_z: &particles[2],
                 stopped: &particles[3],
                 elevation: &particles[4],
+                grid_mass: None,
             });
         self.renderer.set_particles(&self.device, buffers);
     }
