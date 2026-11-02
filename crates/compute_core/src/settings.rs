@@ -187,7 +187,7 @@ impl SimSettings {
             internal_friction_angle: 40.0,
             basal_friction_angle: 25.0,
 
-            cfl: 0.5,
+            cfl: 0.9,
             cell_size: 1.0,
             velocity_threshold: 0.1,
             roughness_threshold: 0.01,
@@ -809,7 +809,7 @@ mod tests {
         assert_eq!(settings.slab_thickness_factor, 1.0);
         assert_eq!(settings.friction_coefficient, 0.2);
         assert_eq!(settings.drag_coefficient, 2000.0);
-        assert_eq!(settings.cfl, 0.5);
+        assert_eq!(settings.cfl, 0.9);
         assert_eq!(settings.cell_size, 1.0);
         assert_eq!(settings.min_slope_angle, 28.0);
         assert_eq!(settings.max_slope_angle, 60.0);

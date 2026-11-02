@@ -34,7 +34,7 @@ CALIBRATION_PARAMETER_DEFAULTS = {
     "bulk_modulus": 2.0e4,
     "compaction_pressure": 2.0e3,
     "released_particles_per_cell": 8,
-    "cfl": 0.5,
+    "cfl": 0.9,
     "cell_size": 1.0,
     "min_slope_angle": 28.0,
     "max_slope_angle": 60.0,
