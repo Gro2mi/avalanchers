@@ -788,7 +788,7 @@ impl ComputeOrchestrator {
             // Vulkan drivers in proportion to their length; short batches keep
             // that one-time cost low
             batch_compute_steps: 50,
-            particle_sort_interval: 0,
+            particle_sort_interval: 25,
             particle_sort: None,
             steps_since_particle_sort: 0,
             has_float32_atomic,
@@ -1868,13 +1868,6 @@ impl ComputeOrchestrator {
         if self.particle_sort_interval == 0
             || sim_settings.sim_model != SimModel::Curvilinear.as_int()
         {
-            return Ok(());
-        }
-        if !self
-            .shader_configs
-            .contains_key(&ShaderName::P2GCurvilinearSorted)
-        {
-            warn!("Particle sorting needs integer grid atomics; using the direct P2G");
             return Ok(());
         }
         // 8x8-cell tiles, see sort_particles.wgsl

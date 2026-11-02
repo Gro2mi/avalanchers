@@ -2,14 +2,18 @@
 // A workgroup whose particles touch at most SHARED_TILE x SHARED_TILE nodes
 // accumulates the quantized contributions in workgroup memory and flushes
 // each non-zero node sum with one global atomic; otherwise it falls back to
-// direct global atomics. Integer sums make both paths give identical grids.
-// Requires the integer-atomic grid (no float atomics).
+// direct global atomics. On the integer-atomic grid both paths give identical
+// grids. On the float-atomic grid the shared path keeps the integer
+// quantization and converts each node sum once, so it deviates from the
+// unquantized direct float deposit by at most the quantization step per node.
 @group(0) @binding(1) var<storage, read_write> sim_info: SimInfo;
 @group(0) @binding(2) var<storage> particles_position: array<vec2<f32>>;
 @group(0) @binding(3) var<storage> particles_velocity: array<vec2<f32>>;
 @group(0) @binding(4) var<storage> particles_mass: array<f32>;
-@group(0) @binding(5) var<storage, read_write> grid_mass_atomic: array<atomic<u32>>;
-@group(0) @binding(6) var<storage, read_write> grid_momentum_atomic: array<atomic<i32>>;
+@group(0) @binding(5) var<storage, read_write> grid_mass_atomic: array<atomic<u32>>; // no_atomic_float
+@group(0) @binding(6) var<storage, read_write> grid_momentum_atomic: array<atomic<i32>>; // no_atomic_float
+// atomic_float @group(0) @binding(5) var<storage, read_write> grid_mass_atomic: array<atomic<f32>>;
+// atomic_float @group(0) @binding(6) var<storage, read_write> grid_momentum_atomic: array<atomic<f32>>;
 @group(0) @binding(7) var<storage> particles_affine_matrix: array<mat2x2f>;
 @group(0) @binding(8) var<storage> sorted_particle_index: array<u32>;
 
@@ -105,9 +109,12 @@ fn p2g_curvilinear_sorted(
         let mass = atomicLoad(&tile_mass[tile_idx]);
         let momentum_x = atomicLoad(&tile_momentum_x[tile_idx]);
         let momentum_y = atomicLoad(&tile_momentum_y[tile_idx]);
-        if mass != 0u { atomicAdd(&grid_mass_atomic[idx], mass); }
-        if momentum_x != 0 { atomicAdd(&grid_momentum_atomic[idx * 2u], momentum_x); }
-        if momentum_y != 0 { atomicAdd(&grid_momentum_atomic[idx * 2u + 1u], momentum_y); }
+        if mass != 0u { atomicAdd(&grid_mass_atomic[idx], mass); } // no_atomic_float
+        if momentum_x != 0 { atomicAdd(&grid_momentum_atomic[idx * 2u], momentum_x); } // no_atomic_float
+        if momentum_y != 0 { atomicAdd(&grid_momentum_atomic[idx * 2u + 1u], momentum_y); } // no_atomic_float
+        // atomic_float if mass != 0u { atomicAdd(&grid_mass_atomic[idx], f32(mass) * INV_MASS_FACTOR); }
+        // atomic_float if momentum_x != 0 { atomicAdd(&grid_momentum_atomic[idx * 2u], f32(momentum_x) * INV_MOMENTUM_FACTOR); }
+        // atomic_float if momentum_y != 0 { atomicAdd(&grid_momentum_atomic[idx * 2u + 1u], f32(momentum_y) * INV_MOMENTUM_FACTOR); }
     }
 }
 

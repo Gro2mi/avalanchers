@@ -1903,85 +1903,83 @@ pub fn create_shader_configs(
             &[("WG_SIZE_1D", max_compute_invocations_per_workgroup as f64)],
         )?,
     );
-    // the tile-sorted P2G accumulates integer contributions in workgroup
-    // memory, so it is only available on the integer-atomic grid
-    if !has_float32_atomic {
-        let storage_buffer = |read_only: bool| BindingType::Buffer {
-            ty: BufferBindingType::Storage { read_only },
-            has_dynamic_offset: false,
-            min_binding_size: None,
-        };
-        let mut sorted_p2g_bindings = curvilinear_p2g_bindings.clone();
-        // Binding 8:
-        sorted_p2g_bindings.push((
-            BufferName::SortedParticleIndex.to_string(),
-            storage_buffer(true),
-        ));
-        shader_configs.insert(
+    // the tile-sorted P2G sums quantized integer contributions in workgroup
+    // memory and flushes them to the integer or float grid
+    let storage_buffer = |read_only: bool| BindingType::Buffer {
+        ty: BufferBindingType::Storage { read_only },
+        has_dynamic_offset: false,
+        min_binding_size: None,
+    };
+    let mut sorted_p2g_bindings = curvilinear_p2g_bindings.clone();
+    // Binding 8:
+    sorted_p2g_bindings.push((
+        BufferName::SortedParticleIndex.to_string(),
+        storage_buffer(true),
+    ));
+    shader_configs.insert(
+        ShaderName::P2GCurvilinearSorted,
+        ComputeShaderConfig::new(
+            device,
             ShaderName::P2GCurvilinearSorted,
-            ComputeShaderConfig::new(
-                device,
-                ShaderName::P2GCurvilinearSorted,
-                load_shader_source(ShaderName::P2GCurvilinearSorted, has_float32_atomic),
-                &sorted_p2g_bindings,
-            )?,
-        );
-        let sort_bindings = [
-            // Binding 0:
-            (
-                BufferName::SimSettings.to_string(),
-                BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-            ),
-            // Binding 1:
-            (BufferName::SimInfo.to_string(), storage_buffer(false)),
-            // Binding 2:
-            (
-                BufferName::ParticlesPosition.to_string(),
-                storage_buffer(true),
-            ),
-            // Binding 3:
-            (BufferName::SortBins.to_string(), storage_buffer(false)),
-            // Binding 4:
-            (
-                BufferName::ParticleBinRank.to_string(),
-                storage_buffer(false),
-            ),
-            // Binding 5:
-            (
-                BufferName::SortedParticleIndex.to_string(),
-                storage_buffer(false),
-            ),
-        ];
-        for shader in [
-            ShaderName::SortClearBins,
-            ShaderName::SortCountParticles,
-            ShaderName::SortScatterParticles,
-        ] {
-            shader_configs.insert(
-                shader,
-                ComputeShaderConfig::new_with_constants(
-                    device,
-                    shader,
-                    load_shader_source(shader, has_float32_atomic),
-                    &sort_bindings,
-                    &[("WG_SIZE_1D", max_compute_invocations_per_workgroup as f64)],
-                )?,
-            );
-        }
+            load_shader_source(ShaderName::P2GCurvilinearSorted, has_float32_atomic),
+            &sorted_p2g_bindings,
+        )?,
+    );
+    let sort_bindings = [
+        // Binding 0:
+        (
+            BufferName::SimSettings.to_string(),
+            BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+        ),
+        // Binding 1:
+        (BufferName::SimInfo.to_string(), storage_buffer(false)),
+        // Binding 2:
+        (
+            BufferName::ParticlesPosition.to_string(),
+            storage_buffer(true),
+        ),
+        // Binding 3:
+        (BufferName::SortBins.to_string(), storage_buffer(false)),
+        // Binding 4:
+        (
+            BufferName::ParticleBinRank.to_string(),
+            storage_buffer(false),
+        ),
+        // Binding 5:
+        (
+            BufferName::SortedParticleIndex.to_string(),
+            storage_buffer(false),
+        ),
+    ];
+    for shader in [
+        ShaderName::SortClearBins,
+        ShaderName::SortCountParticles,
+        ShaderName::SortScatterParticles,
+    ] {
         shader_configs.insert(
-            ShaderName::SortScanBins,
-            ComputeShaderConfig::new(
+            shader,
+            ComputeShaderConfig::new_with_constants(
                 device,
-                ShaderName::SortScanBins,
-                load_shader_source(ShaderName::SortScanBins, has_float32_atomic),
+                shader,
+                load_shader_source(shader, has_float32_atomic),
                 &sort_bindings,
+                &[("WG_SIZE_1D", max_compute_invocations_per_workgroup as f64)],
             )?,
         );
     }
+    shader_configs.insert(
+        ShaderName::SortScanBins,
+        ComputeShaderConfig::new(
+            device,
+            ShaderName::SortScanBins,
+            load_shader_source(ShaderName::SortScanBins, has_float32_atomic),
+            &sort_bindings,
+        )?,
+    );
     shader_configs.insert(
         ShaderName::GridPhysics,
         ComputeShaderConfig::new(
@@ -2972,4 +2970,38 @@ pub fn generate_shader_report(
     std::fs::write(filename.unwrap_or("shader_report.html"), &html)
         .expect("Unable to write shader report to file.");
     html
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The float-atomic variants cannot run on GPUs without float atomics, so
+    // at least validate the WGSL that would be compiled there.
+    #[test]
+    fn p2g_shaders_validate_with_integer_and_float_atomics() {
+        for shader in [ShaderName::P2GCurvilinear, ShaderName::P2GCurvilinearSorted] {
+            for has_float32_atomic in [false, true] {
+                let source = load_shader_source(shader, has_float32_atomic);
+                let float_binding = source.lines().any(|line| {
+                    line.trim_start().starts_with("@group") && line.contains("atomic<f32>")
+                });
+                assert_eq!(float_binding, has_float32_atomic);
+                let module = naga::front::wgsl::parse_str(source).unwrap_or_else(|error| {
+                    std::panic!(
+                        "{shader} (float atomics {has_float32_atomic}): {}",
+                        error.emit_to_string(source)
+                    )
+                });
+                naga::valid::Validator::new(
+                    naga::valid::ValidationFlags::all(),
+                    naga::valid::Capabilities::all(),
+                )
+                .validate(&module)
+                .unwrap_or_else(|error| {
+                    std::panic!("{shader} (float atomics {has_float32_atomic}): {error:?}")
+                });
+            }
+        }
+    }
 }
