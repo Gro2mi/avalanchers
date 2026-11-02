@@ -52,6 +52,11 @@ fn update_sim_info(@builtin(global_invocation_id) global_id: vec3<u32>) {
     } else {
         sim_info.dt = expected_dt;
     }
+    // Curvilinear: the CFL speed follows the current flow instead of the
+    // run's all-time maximum, so dt grows again once the flow slows down.
+    if sim_settings.model_type == 1u {
+        atomicStore(&atomic_values.expected_max_velocity, 0u);
+    }
     sim_info.max_flow_thickness = max_flow_thickness;
 }
 

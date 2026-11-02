@@ -17,6 +17,8 @@ All notable changes to this project might be documented in this file.
   threshold. Resting particles keep depositing mass but do not move.
 - Curvilinear: the simulation also stops (`AT_REST` flag) once 99% of the particles rest or
   are stopped. The 40-step no-new-cells criterion is unchanged.
+- Curvilinear: the CFL timestep follows the current maximum of `v + sqrt(g h)` instead of the
+  run's all-time maximum, so dt grows again once the flow slows down.
 
 ### Added
 - `sliding-block` (model 3): the previous per-particle terrain-following model.
