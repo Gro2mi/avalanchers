@@ -768,7 +768,10 @@ impl ComputeOrchestrator {
             simulation_pipelines: None,
             simulation_bind_groups: None,
             has_float32_filterable,
-            batch_compute_steps: 200,
+            // the first command buffers of a run are slow to finish on some
+            // Vulkan drivers in proportion to their length; short batches keep
+            // that one-time cost low
+            batch_compute_steps: 50,
             has_float32_atomic,
             completed_steps: 0,
             enable_center_of_mass: true,

@@ -22,6 +22,7 @@ All notable changes to this project might be documented in this file.
 - Curvilinear: the CFL wave speed uses the bed-normal gravity `g cos(theta)` instead of `g`.
 - Curvilinear: grid nodes whose 3x3 neighbourhood holds no mass skip the grid update.
 - P2G skips atomic adds of zero momentum, which removes most atomics of resting particles.
+- Default `batch_compute_steps` is 50 (was 200).
 - Default `cfl` is 0.9 (was 0.5).
 
 ### Added
