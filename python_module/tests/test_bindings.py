@@ -22,6 +22,32 @@ def test_pysettings_round_trip(tmp_path):
     assert loaded.dem_path == "example/dem.tif"
 
 
+def test_restore_initial_state_repeats_run():
+    sim = avalanchers.PySimulation.new()
+    sim.create_example("data/avaframe/avaParabola.png")
+    sim.set_max_timesteps(5)
+    sim.store_initial_state()
+    assert sim.has_initial_state
+
+    sim.run()
+    first = sim.peak_flow_thickness.copy()
+
+    sim.update_settings({"cfl": 0.5})
+    sim.restore_initial_state()
+    sim.run()
+    changed = sim.peak_flow_thickness.copy()
+
+    sim.update_settings({"cfl": 0.9})
+    sim.restore_initial_state()
+    sim.run()
+    again = sim.peak_flow_thickness.copy()
+
+    assert not np.array_equal(first, changed)
+    np.testing.assert_allclose(first, again, atol=1e-3)
+    with pytest.raises(RuntimeError, match="dem_path"):
+        sim.update_settings({"dem_path": "other.tif"})
+
+
 def test_simulation_binding_smoke():
     sim = avalanchers.PySimulation.new()
     sim.create_example("data/avaframe/avaParabola.png")

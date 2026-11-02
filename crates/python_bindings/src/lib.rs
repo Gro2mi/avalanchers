@@ -686,6 +686,77 @@ impl PySimulation {
         self.inner.prepare().block_on().map_runtime_err()
     }
 
+    /// Prepare the simulation (if needed) and keep its initial particles.
+    ///
+    /// Terrain analysis, release areas (including crown line estimation)
+    /// and particle seeding with relaxation then run only once; every
+    /// :meth:`restore_initial_state` starts the next run from the same
+    /// particles. Intended for back calibration::
+    ///
+    ///     sim.create(settings)
+    ///     sim.store_initial_state()
+    ///     for params in parameter_sets:
+    ///         sim.update_settings(params)
+    ///         sim.restore_initial_state()
+    ///         sim.run()
+    ///         sim.post_process()
+    ///         result = sim.evaluate()
+    ///
+    /// Must be called before the simulation runs.
+    pub fn store_initial_state(&mut self) -> PyResult<()> {
+        self.inner
+            .store_initial_state()
+            .block_on()
+            .map_runtime_err()
+    }
+
+    /// Reset the simulation to the state kept by :meth:`store_initial_state`.
+    ///
+    /// Settings changed with :meth:`update_settings` take effect, and only
+    /// the preparation stages they affect run again:
+    ///
+    /// - ``sim_model`` or ``reference_surface_length``: full preparation,
+    /// - release thresholds (slope, elevation, roughness),
+    ///   ``released_particles_per_cell``, ``release_area_fraction``, the
+    ///   crown line settings or ``enable_particle_relaxation``: release areas
+    ///   and particle seeding,
+    /// - ``density`` or ``slab_thickness_factor``: particle masses are
+    ///   rescaled,
+    /// - anything else (friction, drag, cfl, max_steps, flags, ...): the
+    ///   stored particles are restored as they are.
+    pub fn restore_initial_state(&mut self) -> PyResult<()> {
+        self.inner
+            .restore_initial_state()
+            .block_on()
+            .map_runtime_err()
+    }
+
+    /// Change settings without reloading the input data.
+    ///
+    /// Takes the same keys as :meth:`create`; keys that are not given keep
+    /// their value. The change applies to the next
+    /// :meth:`restore_initial_state` (or preparation). Input data keys
+    /// (``dem_path``, ``release_areas_path``, ``outlines_path``,
+    /// ``outlines_padding``, ``output_path``) raise an error; load new data
+    /// with :meth:`create`.
+    ///
+    /// Args:
+    ///     settings: Dictionary of settings, e.g.
+    ///         ``{"friction_coefficient": 0.3, "drag_coefficient": 3000.0}``.
+    pub fn update_settings(&mut self, settings: &Bound<'_, PyAny>) -> PyResult<()> {
+        let json_value: serde_json::Value =
+            depythonize(settings).map_err(|e| PyErr::new::<PyTypeError, _>(e.to_string()))?;
+        let json_str = serde_json::to_string(&json_value).map_runtime_err()?;
+        let patch = Settings::loads(&json_str).map_runtime_err()?;
+        self.inner.update_settings(&patch).map_runtime_err()
+    }
+
+    /// Whether :meth:`store_initial_state` holds particles to restore.
+    #[getter]
+    pub fn has_initial_state(&self) -> bool {
+        self.inner.has_initial_state()
+    }
+
     /// Save the current results to disk.
     ///
     /// Args:
