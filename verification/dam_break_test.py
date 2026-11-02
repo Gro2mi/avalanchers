@@ -211,6 +211,36 @@ def dam_break_solution(phi_deg, delta_deg, h_l, times, s_rel, g=9.81, x_back_rel
     return h, u, x_mid
 
 
+FRONT_THRESHOLDS = (1e-3, 1e-2, 5e-2)
+
+
+def front_position(s_rel, h, threshold):
+    """Most downstream along-slope position where h reaches `threshold`,
+    interpolated linearly toward the next thinner sample; nan if none."""
+    order = np.argsort(s_rel)
+    s_rel = np.asarray(s_rel, dtype=float)[order]
+    h = np.asarray(h, dtype=float)[order]
+    above = np.nonzero(h >= threshold)[0]
+    if len(above) == 0:
+        return math.nan
+    i = above[-1]
+    if i + 1 >= len(h):
+        return float(s_rel[i])
+    return float(s_rel[i] + (s_rel[i + 1] - s_rel[i]) * (h[i] - threshold) / (h[i] - h[i + 1]))
+
+
+def front_lags(frame, dam, cfg, h, t, thresholds=FRONT_THRESHOLDS):
+    """Numerical minus analytic front position (along-slope m) on the profile
+    row for each thickness contour; negative = the numerical front lags."""
+    s_row = frame["s_rel_profile"]
+    s_fine = np.arange(np.min(s_row), np.max(s_row), 0.05)
+    h_ana = dam_break_solution(frame["phi_deg"], cfg["delta"], dam["h_l"], [t], s_fine,
+                               cfg["grav_acc"], x_back_rel=dam["x_back_rel"])[0][0]
+    h_row = h[frame["row_index"]]
+    return {thr: front_position(s_row, h_row, thr) - front_position(s_fine, h_ana, thr)
+            for thr in thresholds}
+
+
 def dam_break_rear_edge(phi_deg, delta_deg, h_l, t, g, x_back_rel):
     """Along-slope position of the physical rear edge of the material.
 

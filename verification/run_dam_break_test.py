@@ -37,6 +37,7 @@ Usage:
     python run_dam_break_test.py                    # run with the SETTINGS below
     python run_dam_break_test.py --show             # also open the plot windows
     python run_dam_break_test.py --t-end 30 --save-interval 0.5 --delta 12
+    python run_dam_break_test.py --weak-pressure    # weak-form pressure gradient
 """
 
 import argparse
@@ -64,10 +65,12 @@ SETTINGS = {
     "density": 200.0,
     "released_particles_per_cell": 4,
     "cfl": 0.05,
-    "velocity_threshold": 0.01,
+    "velocity_threshold": 1e-8,
     "enable_particle_interaction": True,
     # the Faccanoni & Mangeney solution is hydrostatic (K = 1)
     "enable_earth_pressure_coefficient": False,
+    # weak-form pressure gradient (--weak-pressure); off like the engine default
+    "enable_weak_pressure": False,
     "enable_particle_relaxation": True,
     "max_steps": 20000,
 }
@@ -212,6 +215,8 @@ def run_simulation(settings, cfg):
                                      settings["sim_model"],
                                      settings["friction_model"],
                                      math.degrees(math.atan(mu)))
+    if settings.get("enable_weak_pressure"):
+        sim_name += "_weak"
     print(f"=== Dam break test (Faccanoni & Mangeney 2012, dry bed) - {sim_name} ===")
     print(f"DEM: {settings['dem_path']}")
     print(f"plane {frame['phi_deg']:.2f} deg, bed friction "
@@ -326,6 +331,10 @@ def main():
     parser.add_argument("--phi", type=float, default=None,
                         help="slope angle in degrees (default: measure from DEM)")
     parser.add_argument("--max-steps", type=int, default=None)
+    parser.add_argument("--weak-pressure", action=argparse.BooleanOptionalAction,
+                        default=None,
+                        help="weak-form pressure gradient of the curvilinear model "
+                             "(default: SETTINGS)")
     parser.add_argument("--out-dir", default=str(OUTPUT_DIR))
     parser.add_argument("--gpu", default=None, help="GPU name substring to select")
     parser.add_argument("--plot-sequence", action="store_true",
@@ -352,6 +361,8 @@ def main():
         cfg["phi"] = args.phi
     if args.max_steps is not None:
         settings["max_steps"] = args.max_steps
+    if args.weak_pressure is not None:
+        settings["enable_weak_pressure"] = args.weak_pressure
     settings["friction_coefficient"] = math.tan(math.radians(cfg["delta"]))
     cfg["plot_sequence"] = cfg["plot_sequence"] or args.plot_sequence
 
@@ -415,6 +426,10 @@ def main():
           f"({'relative' if relative else 'absolute'}):")
     print(f"h  L2 : {err_h[i_save]:.4f}   h  LMax : {err_h_max[i_save]:.4f}")
     print(f"hv L2 : {err_vh[i_save]:.4f}   hv LMax : {err_vh_max[i_save]:.4f}")
+    lags = dam_break_test.front_lags(frame, dam, cfg, samples["h"][i_save],
+                                     samples["t"][i_save])
+    print("front lag along the slope (numerical - analytic, < 0 = behind):")
+    print("   ".join(f"h = {thr:g} m: {lag:6.1f} m" for thr, lag in lags.items()))
     return samples, errors
 
 

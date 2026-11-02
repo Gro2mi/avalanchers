@@ -110,6 +110,8 @@ def _patch_common(settings, args):
         settings["friction_model"] = args.friction_model
     if args.mu:
         settings["friction_coefficient"] = args.mu
+    if args.weak_pressure is not None:
+        settings["enable_weak_pressure"] = args.weak_pressure
 
 
 def run_energy_line_test(test_dir, args):
@@ -382,6 +384,10 @@ def main():
                         help="override the friction model (default: coulomb)")
     parser.add_argument("--mu", type=float, default=None,
                         help="Coulomb friction coefficient override")
+    parser.add_argument("--weak-pressure", action=argparse.BooleanOptionalAction,
+                        default=None,
+                        help="weak-form pressure gradient of the curvilinear model "
+                             "(default: each test's SETTINGS)")
     parser.add_argument("--tests", nargs="+", default=TEST_NAMES, choices=TEST_NAMES)
     parser.add_argument("--out-dir", default=None,
                         help="run directory (default: all_tests/<model>_<timestamp>)")
