@@ -1107,6 +1107,7 @@ mod tests {
             internal_friction_angle: Some(30.0),
             basal_friction_angle: Some(45.0),
             batch_compute_steps: Some(100),
+            particle_sort_interval: None,
             cfl: Some(8.0),
             min_slope_angle: Some(9.0),
             max_slope_angle: Some(10.0),

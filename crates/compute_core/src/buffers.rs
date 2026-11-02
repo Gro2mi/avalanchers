@@ -187,6 +187,12 @@ pub enum BufferName {
     RelaxGridHead,
     /// linked list tails of RelaxGridHead (one u32 per particle)
     ParticleNext,
+    /// per 8x8-cell tile particle counts, then exclusive offsets (particle sort)
+    SortBins,
+    /// rank of each particle within its sort bin
+    ParticleBinRank,
+    /// particle indices ordered by sort bin
+    SortedParticleIndex,
 
     TestOutput,
 }
@@ -239,6 +245,9 @@ impl BufferName {
             BufferName::RelaxParams => "relax_params",
             BufferName::RelaxGridHead => "relax_grid_head",
             BufferName::ParticleNext => "particle_next",
+            BufferName::SortBins => "sort_bins",
+            BufferName::ParticleBinRank => "particle_bin_rank",
+            BufferName::SortedParticleIndex => "sorted_particle_index",
             BufferName::ParticlesPositionRelax => "particles_position_relax",
         }
     }
@@ -300,6 +309,9 @@ impl std::str::FromStr for BufferName {
             "relax_params" => Ok(BufferName::RelaxParams),
             "relax_grid_head" => Ok(BufferName::RelaxGridHead),
             "particle_next" => Ok(BufferName::ParticleNext),
+            "sort_bins" => Ok(BufferName::SortBins),
+            "particle_bin_rank" => Ok(BufferName::ParticleBinRank),
+            "sorted_particle_index" => Ok(BufferName::SortedParticleIndex),
             "particles_position_relax" => Ok(BufferName::ParticlesPositionRelax),
             _ => Err(format!("Unknown buffer name: {}", name)),
         }

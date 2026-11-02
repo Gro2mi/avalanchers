@@ -469,6 +469,17 @@ struct SimulationPipelines {
     center_of_mass: ComputePipeline,
 }
 
+/// Pipelines and bind groups of the optional tile-sorted curvilinear P2G.
+struct ParticleSort {
+    clear_bins: (ComputePipeline, BindGroup),
+    count_particles: (ComputePipeline, BindGroup),
+    scan_bins: (ComputePipeline, BindGroup),
+    scatter_particles: (ComputePipeline, BindGroup),
+    p2g: (ComputePipeline, BindGroup),
+    dispatch_bins: u32,
+    dispatch_p2g: u32,
+}
+
 struct SimulationBindGroups {
     reset_grid: BindGroup,
     p2g: BindGroup,
@@ -491,6 +502,11 @@ pub struct ComputeOrchestrator {
     pub max_particles: u64,
     pub max_compute_invocations_per_workgroup: u32,
     pub batch_compute_steps: u32,
+    /// Steps between particle sorts for the tile-sorted curvilinear P2G;
+    /// 0 disables sorting and uses the direct P2G.
+    pub particle_sort_interval: u32,
+    particle_sort: Option<ParticleSort>,
+    steps_since_particle_sort: u32,
     texture_size: Extent3d,
     shader_configs: HashMap<ShaderName, ComputeShaderConfig>,
     dispatch_number_workgroups_x_2d: u32,
@@ -772,6 +788,9 @@ impl ComputeOrchestrator {
             // Vulkan drivers in proportion to their length; short batches keep
             // that one-time cost low
             batch_compute_steps: 50,
+            particle_sort_interval: 0,
+            particle_sort: None,
+            steps_since_particle_sort: 0,
             has_float32_atomic,
             completed_steps: 0,
             enable_center_of_mass: true,
@@ -1654,6 +1673,7 @@ impl ComputeOrchestrator {
                 .create_bind_group(&self.device, &self.resources)?,
         });
 
+        self.prepare_particle_sort(sim_settings, number_release_particles)?;
         self.prepared_max_steps = Some(sim_settings.max_steps);
         self.prepared_model = Some(sim_settings.sim_model);
         self.center_of_mass_biggest_blob =
@@ -1735,6 +1755,8 @@ impl ComputeOrchestrator {
         } else {
             (None, None, 0)
         };
+        let particle_sort = self.particle_sort.as_ref();
+        let mut steps_since_particle_sort = self.steps_since_particle_sort;
         for _ in 0..steps {
             if let (Some(source), Some(destination)) =
                 (mass_buffer.as_ref(), mass_previous_buffer.as_ref())
@@ -1755,9 +1777,30 @@ impl ComputeOrchestrator {
                 1,
             );
 
-            compute_pass.set_pipeline(&simulation_pipelines.p2g);
-            compute_pass.set_bind_group(0, &simulation_bind_groups.p2g, &[]);
-            compute_pass.dispatch_workgroups(self.dispatch_number_workgroups_1d, 1, 1);
+            if let Some(sort) = particle_sort {
+                if steps_since_particle_sort >= self.particle_sort_interval {
+                    let passes = [
+                        (&sort.clear_bins, sort.dispatch_bins),
+                        (&sort.count_particles, self.dispatch_number_workgroups_1d),
+                        (&sort.scan_bins, 1),
+                        (&sort.scatter_particles, self.dispatch_number_workgroups_1d),
+                    ];
+                    for ((pipeline, bind_group), workgroups) in passes {
+                        compute_pass.set_pipeline(pipeline);
+                        compute_pass.set_bind_group(0, bind_group, &[]);
+                        compute_pass.dispatch_workgroups(workgroups, 1, 1);
+                    }
+                    steps_since_particle_sort = 0;
+                }
+                steps_since_particle_sort += 1;
+                compute_pass.set_pipeline(&sort.p2g.0);
+                compute_pass.set_bind_group(0, &sort.p2g.1, &[]);
+                compute_pass.dispatch_workgroups(sort.dispatch_p2g, 1, 1);
+            } else {
+                compute_pass.set_pipeline(&simulation_pipelines.p2g);
+                compute_pass.set_bind_group(0, &simulation_bind_groups.p2g, &[]);
+                compute_pass.dispatch_workgroups(self.dispatch_number_workgroups_1d, 1, 1);
+            }
 
             compute_pass.set_pipeline(&simulation_pipelines.grid_physics);
             compute_pass.set_bind_group(0, &simulation_bind_groups.grid_physics, &[]);
@@ -1806,8 +1849,76 @@ impl ComputeOrchestrator {
             }
         }
         self.queue.submit(Some(command_encoder.finish()));
+        self.steps_since_particle_sort = steps_since_particle_sort;
 
         self.get_sim_info().await
+    }
+
+    /// Whether the prepared simulation uses the tile-sorted curvilinear P2G.
+    pub fn particle_sort_enabled(&self) -> bool {
+        self.particle_sort.is_some()
+    }
+
+    fn prepare_particle_sort(
+        &mut self,
+        sim_settings: &settings::SimSettings,
+        number_release_particles: u32,
+    ) -> Result<()> {
+        self.particle_sort = None;
+        if self.particle_sort_interval == 0
+            || sim_settings.sim_model != SimModel::Curvilinear.as_int()
+        {
+            return Ok(());
+        }
+        if !self
+            .shader_configs
+            .contains_key(&ShaderName::P2GCurvilinearSorted)
+        {
+            warn!("Particle sorting needs integer grid atomics; using the direct P2G");
+            return Ok(());
+        }
+        // 8x8-cell tiles, see sort_particles.wgsl
+        let number_bins =
+            sim_settings.grid_shape_x.div_ceil(8) * sim_settings.grid_shape_y.div_ceil(8);
+        let usage = BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC;
+        self.add_buffer_with_data(
+            BufferName::SortBins,
+            &vec![0u32; number_bins as usize],
+            usage,
+        );
+        self.add_buffer_with_data(
+            BufferName::ParticleBinRank,
+            &vec![0u32; number_release_particles as usize],
+            usage,
+        );
+        self.add_buffer_with_data(
+            BufferName::SortedParticleIndex,
+            &(0..number_release_particles).collect::<Vec<u32>>(),
+            usage,
+        );
+        let stage = |shader: ShaderName| -> Result<(ComputePipeline, BindGroup)> {
+            let config = self
+                .shader_configs
+                .get(&shader)
+                .ok_or_else(|| anyhow!("{} shader config not found", shader))?;
+            Ok((
+                config.pipeline.clone(),
+                config.create_bind_group(&self.device, &self.resources)?,
+            ))
+        };
+        self.particle_sort = Some(ParticleSort {
+            clear_bins: stage(ShaderName::SortClearBins)?,
+            count_particles: stage(ShaderName::SortCountParticles)?,
+            scan_bins: stage(ShaderName::SortScanBins)?,
+            scatter_particles: stage(ShaderName::SortScatterParticles)?,
+            p2g: stage(ShaderName::P2GCurvilinearSorted)?,
+            dispatch_bins: number_bins.div_ceil(self.max_compute_invocations_per_workgroup),
+            // p2g_sorted.wgsl uses a fixed workgroup size of 256
+            dispatch_p2g: number_release_particles.div_ceil(256),
+        });
+        // sort before the first step
+        self.steps_since_particle_sort = self.particle_sort_interval;
+        Ok(())
     }
 
     pub async fn get_sim_info(&mut self) -> Result<SimInfo> {

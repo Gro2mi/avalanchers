@@ -124,6 +124,12 @@ define_shaders! {
     G2PMPMDAC => "g2p_mpmdac",
     P2G => "p2g",
     P2GCurvilinear => "p2g" entry_point "p2g_curvilinear",
+    P2GCurvilinearSorted => "p2g_sorted" entry_point "p2g_curvilinear_sorted",
+    // the four particle sort kernels share one source file
+    SortClearBins => "sort_particles" entry_point "sort_clear_bins",
+    SortCountParticles => "sort_particles" entry_point "sort_count_particles",
+    SortScanBins => "sort_particles" entry_point "sort_scan_bins",
+    SortScatterParticles => "sort_particles" entry_point "sort_scatter_particles",
     P2GMPMDAC => "p2g_mpmdac",
     GridPhysicsCurvilinear => "grid_physics_curvilinear",
     GridPhysicsMPMDAC => "grid_physics_mpmdac",
@@ -1897,6 +1903,85 @@ pub fn create_shader_configs(
             &[("WG_SIZE_1D", max_compute_invocations_per_workgroup as f64)],
         )?,
     );
+    // the tile-sorted P2G accumulates integer contributions in workgroup
+    // memory, so it is only available on the integer-atomic grid
+    if !has_float32_atomic {
+        let storage_buffer = |read_only: bool| BindingType::Buffer {
+            ty: BufferBindingType::Storage { read_only },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        };
+        let mut sorted_p2g_bindings = curvilinear_p2g_bindings.clone();
+        // Binding 8:
+        sorted_p2g_bindings.push((
+            BufferName::SortedParticleIndex.to_string(),
+            storage_buffer(true),
+        ));
+        shader_configs.insert(
+            ShaderName::P2GCurvilinearSorted,
+            ComputeShaderConfig::new(
+                device,
+                ShaderName::P2GCurvilinearSorted,
+                load_shader_source(ShaderName::P2GCurvilinearSorted, has_float32_atomic),
+                &sorted_p2g_bindings,
+            )?,
+        );
+        let sort_bindings = [
+            // Binding 0:
+            (
+                BufferName::SimSettings.to_string(),
+                BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+            ),
+            // Binding 1:
+            (BufferName::SimInfo.to_string(), storage_buffer(false)),
+            // Binding 2:
+            (
+                BufferName::ParticlesPosition.to_string(),
+                storage_buffer(true),
+            ),
+            // Binding 3:
+            (BufferName::SortBins.to_string(), storage_buffer(false)),
+            // Binding 4:
+            (
+                BufferName::ParticleBinRank.to_string(),
+                storage_buffer(false),
+            ),
+            // Binding 5:
+            (
+                BufferName::SortedParticleIndex.to_string(),
+                storage_buffer(false),
+            ),
+        ];
+        for shader in [
+            ShaderName::SortClearBins,
+            ShaderName::SortCountParticles,
+            ShaderName::SortScatterParticles,
+        ] {
+            shader_configs.insert(
+                shader,
+                ComputeShaderConfig::new_with_constants(
+                    device,
+                    shader,
+                    load_shader_source(shader, has_float32_atomic),
+                    &sort_bindings,
+                    &[("WG_SIZE_1D", max_compute_invocations_per_workgroup as f64)],
+                )?,
+            );
+        }
+        shader_configs.insert(
+            ShaderName::SortScanBins,
+            ComputeShaderConfig::new(
+                device,
+                ShaderName::SortScanBins,
+                load_shader_source(ShaderName::SortScanBins, has_float32_atomic),
+                &sort_bindings,
+            )?,
+        );
+    }
     shader_configs.insert(
         ShaderName::GridPhysics,
         ComputeShaderConfig::new(

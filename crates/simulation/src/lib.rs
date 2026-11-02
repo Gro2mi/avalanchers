@@ -149,6 +149,7 @@ pub struct SimulationLoadResult {
     pub min_particles_per_crown_cell: Option<u32>,
     /// Number of compute steps dispatched per GPU submission. The OS might reset the GPU or interrupt the submission, if computing a batch takes too long.
     pub batch_compute_steps: Option<u32>,
+    pub particle_sort_interval: Option<u32>,
     /// Destination for results written by [`Simulation::save`].
     pub output_path: Option<String>,
 }
@@ -338,6 +339,7 @@ impl Simulation {
             dem: dem_result,
             roi: outline,
             batch_compute_steps: settings.batch_compute_steps,
+            particle_sort_interval: settings.particle_sort_interval,
             dem_path: settings.dem_path.clone().unwrap_or_default(),
             release_areas_path: settings.release_areas_path.clone(),
             release_area_fraction: settings.release_area_fraction,
@@ -360,6 +362,9 @@ impl Simulation {
             .set_enable_center_of_mass(self.enable_center_of_mass);
         if let Some(batch_steps) = data.batch_compute_steps {
             self.orchestrator.batch_compute_steps = batch_steps;
+        }
+        if let Some(interval) = data.particle_sort_interval {
+            self.orchestrator.particle_sort_interval = interval;
         }
 
         self.dem = data.dem;
@@ -3490,6 +3495,42 @@ mod tests {
             assert!(vertical.is_finite());
             assert!(vertical.abs() <= horizontal[0].hypot(horizontal[1]) * 2.0);
         }
+    }
+
+    #[test_log::test]
+    fn test_sorted_p2g_matches_direct_p2g() {
+        // integer grid sums do not depend on the deposit order, so the
+        // tile-sorted P2G must reproduce the direct P2G exactly
+        let run = |sort_interval: u32| {
+            let mut sim = setup_simple_sim(30.0, 5.0);
+            sim.settings.sim_model = SimModel::Curvilinear.as_int();
+            sim.enable_particle_relaxation = false;
+            sim.orchestrator.particle_sort_interval = sort_interval;
+            sim.set_dem(&create_slope(40, 40, 5.0, 30.0), 40, 40, 5.0)
+                .expect("Failed to set DEM");
+            let mut release = vec![0.0; 40 * 40];
+            for y in 12..28 {
+                for x in 22..34 {
+                    release[y * 40 + x] = 1.0;
+                }
+            }
+            sim.set_release_areas(&release)
+                .expect("Failed to set release");
+            block_on(sim.run_n_steps(40)).expect("Failed to run");
+            assert_eq!(sim.orchestrator.particle_sort_enabled(), sort_interval > 0);
+            let mut positions = block_on(sim.fetch_particles_position())
+                .expect("Failed to fetch positions")
+                .clone();
+            positions.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let grid_mass: Vec<u32> = block_on(sim.orchestrator.read_buffer(BufferName::GridMass))
+                .expect("Failed to read grid mass");
+            (positions, grid_mass)
+        };
+        let (direct_positions, direct_mass) = run(0);
+        let (sorted_positions, sorted_mass) = run(3);
+        assert!(direct_mass.iter().any(|mass| *mass > 0));
+        assert_eq!(direct_mass, sorted_mass);
+        assert_eq!(direct_positions, sorted_positions);
     }
 
     #[test_log::test]

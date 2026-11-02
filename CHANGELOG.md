@@ -28,6 +28,9 @@ All notable changes to this project might be documented in this file.
 ### Added
 - `sliding-block` (model 3): the previous per-particle terrain-following model.
 - Optional particle elevation jitter in the renderer (live viewer key `J`).
+- `particle_sort_interval` (CLI `--particle-sort-interval`): curvilinear P2G over particles sorted
+  by 8x8-cell tiles, accumulating each workgroup in shared memory before the global atomics.
+  Results are identical to the direct P2G; 0 (default) disables it.
 
 ## [0.2.0] - 2026-05-20
 

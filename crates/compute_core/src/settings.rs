@@ -661,6 +661,8 @@ pub struct Settings {
     pub max_steps: Option<u32>,
     pub sim_model: Option<SimModel>,
     pub batch_compute_steps: Option<u32>,
+    /// Steps between particle sorts for the tile-sorted curvilinear P2G; 0 disables it.
+    pub particle_sort_interval: Option<u32>,
     pub friction_model: Option<FrictionModel>,
     pub released_particles_per_cell: Option<u32>,
     pub density: Option<f32>,
@@ -861,6 +863,7 @@ mod tests {
             internal_friction_angle: Some(30.0),
             basal_friction_angle: Some(45.0),
             batch_compute_steps: Some(100),
+            particle_sort_interval: None,
             cfl: Some(0.9),
             min_slope_angle: Some(10.0),
             max_slope_angle: Some(20.0),

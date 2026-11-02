@@ -76,6 +76,8 @@ struct Args {
     sim_model: Option<SimModel>,
     #[arg(long)]
     batch_compute_steps: Option<u32>,
+    #[arg(long)]
+    particle_sort_interval: Option<u32>,
     #[arg(long, value_parser = parse_friction_model)]
     friction_model: Option<FrictionModel>,
     #[arg(long)]
@@ -193,6 +195,9 @@ impl Args {
         }
         if let Some(value) = self.batch_compute_steps {
             settings.batch_compute_steps = Some(value);
+        }
+        if let Some(value) = self.particle_sort_interval {
+            settings.particle_sort_interval = Some(value);
         }
         if let Some(value) = self.friction_model {
             settings.friction_model = Some(value);
@@ -447,6 +452,7 @@ mod tests {
             release_areas_path: None,
             output_path: None,
             batch_compute_steps: None,
+            particle_sort_interval: None,
             released_particles_per_cell: None,
             slab_thickness_factor: None,
             friction_coefficient: None,
