@@ -63,11 +63,10 @@ const ENTRY_TRACE_CELLS: f32 = 2.0;
 /// that stopped inside the outline counts directly. Because the bilinear
 /// terrain sampling blends in the masked cells, a particle crossing the
 /// boundary usually stops short, in a finite cell just outside the outline;
-/// such a particle is attributed to the neighbouring outline cell its
-/// velocity points into, or, two cells short, to the first outline cell
-/// along its velocity. Particles whose velocity does not point
-/// into any outline cell (for example particles passing along a flank, or
-/// particles stopped by NaN normals at DEM edges) are not entries.
+/// such a particle is attributed to the first outline cell along its
+/// velocity. Particles whose path does not reach the outline (for example
+/// particles passing along a flank, or particles stopped by NaN normals at
+/// DEM edges) are not entries.
 pub fn entry_cell(
     position: [f32; 2],
     velocity: [f32; 2],
@@ -90,35 +89,9 @@ pub fn entry_cell(
     if speed <= 0.0 {
         return None;
     }
-    // (alignment with velocity, negated distance, cell index)
-    let mut best: Option<(f32, f32, usize)> = None;
-    for (dx, dy) in NEIGHBOR_OFFSETS {
-        let (nx, ny) = (x as isize + dx, y as isize + dy);
-        if nx < 0 || ny < 0 || nx >= width as isize || ny >= height as isize {
-            continue;
-        }
-        let nidx = ny as usize * width + nx as usize;
-        if !roi[nidx] {
-            continue;
-        }
-        let center = [(nx as f32 + 0.5) * cell_size, (ny as f32 + 0.5) * cell_size];
-        let direction = [center[0] - position[0], center[1] - position[1]];
-        let distance = (direction[0] * direction[0] + direction[1] * direction[1]).sqrt();
-        if distance <= f32::EPSILON {
-            return Some(nidx);
-        }
-        let dot = velocity[0] * direction[0] + velocity[1] * direction[1];
-        if dot <= 0.0 {
-            continue; // not moving into this outline cell
-        }
-        let alignment = dot / (distance * speed);
-        let candidate = (alignment, -distance, nidx);
-        if best.is_none_or(|b| candidate > b) {
-            best = Some(candidate);
-        }
-    }
-    best.map(|(_, _, nidx)| nidx)
-        .or_else(|| trace_to_outline(position, velocity, speed, roi, width, height, cell_size))
+    // a nearest-neighbour pick would count flank particles that slide past an
+    // outline corner; the ray only hits cells the particle actually heads into
+    trace_to_outline(position, velocity, speed, roi, width, height, cell_size)
 }
 
 /// First outline cell on the ray from `position` along `velocity`, up to

@@ -1200,9 +1200,28 @@ impl Simulation {
             if !state.out_of_dem_data {
                 continue;
             }
+            // the NaN normals reach past the unreleased ring, so particles
+            // spawned next to it stop before they move; they would have
+            // started downslope
+            let mut direction = *velocity;
+            if direction == [0.0, 0.0] {
+                let cell_x = (position[0] / self.dem.cell_size).floor();
+                let cell_y = (position[1] / self.dem.cell_size).floor();
+                if cell_x >= 0.0
+                    && cell_y >= 0.0
+                    && (cell_x as usize) < self.dem.width
+                    && (cell_y as usize) < self.dem.height
+                {
+                    let idx = cell_y as usize * self.dem.width + cell_x as usize;
+                    direction = [
+                        -terrain_metrics.gradient_x[idx],
+                        -terrain_metrics.gradient_y[idx],
+                    ];
+                }
+            }
             if let Some(idx) = release_estimation::entry_cell(
                 *position,
-                *velocity,
+                direction,
                 &self.roi,
                 self.dem.width,
                 self.dem.height,
