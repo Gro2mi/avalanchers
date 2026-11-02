@@ -38,6 +38,7 @@ bitflags! {
         const CFL_EXCEEDED             = 1 << 1;
         const IS_NAN                   = 1 << 2;
         const PARTICLE_OUT_OF_DEM_DATA = 1 << 3;
+        const LOW_MOMENTUM             = 1 << 27;
         const AT_REST                  = 1 << 28;
         const NO_NEW_CELLS             = 1 << 29;
         const ALL_PARTICLES_STOPPED    = 1 << 30;
@@ -2022,10 +2023,11 @@ impl ComputeOrchestrator {
             .ok_or_else(|| anyhow!("SimInfo buffer was empty"))?;
         info!("{:#?}", sim_info);
         info!("{:#?}", atomic_values);
-        if !sim_info
-            .parsed_flags()
-            .intersects(SimInfoFlags::ALL_PARTICLES_STOPPED | SimInfoFlags::AT_REST)
-        {
+        if !sim_info.parsed_flags().intersects(
+            SimInfoFlags::ALL_PARTICLES_STOPPED
+                | SimInfoFlags::AT_REST
+                | SimInfoFlags::LOW_MOMENTUM,
+        ) {
             warn!(
                 "Simulation reached max steps without all particles stopping. Consider increasing max_steps or checking for issues in the simulation."
             );

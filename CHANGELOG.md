@@ -32,6 +32,8 @@ All notable changes to this project might be documented in this file.
   particles sorted by 8x8-cell tiles, accumulating each workgroup in shared memory before the
   global atomics; 0 disables it. Results are identical to the direct P2G on the integer-atomic
   grid; on the float-atomic grid the shared sums keep the integer quantization.
+- `momentum_stop_fraction` (CLI `--momentum-stop-fraction`, default 0 = off): stops a curvilinear
+  run once the total grid momentum falls below this fraction of its peak (flag `LOW_MOMENTUM`).
 
 ## [0.2.0] - 2026-05-20
 

@@ -218,6 +218,8 @@ const SIM_INFO_ALL_PARTICLES_STOPPED: u32 = 1u << 30u;
 const SIM_INFO_NO_NEW_CELLS: u32 = 1u << 29u;
 // almost all particles are resting or terminally stopped
 const SIM_INFO_AT_REST: u32 = 1u << 28u;
+// total momentum fell below momentum_stop_fraction of its peak
+const SIM_INFO_LOW_MOMENTUM: u32 = 1u << 27u;
 
 // reversible low-speed state; the low bits hold the rest start step while resting
 // and the consecutive slow-step count while moving
@@ -263,6 +265,11 @@ struct SimSettings {
     // MPMDAC compressibility; bulk_modulus 0 = incompressible
     bulk_modulus: f32,
     compaction_pressure: f32,
+    // stop once total momentum < fraction * its peak; 0 disables (curvilinear)
+    momentum_stop_fraction: f32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 };
 
 struct AtomicValues {
@@ -276,6 +283,11 @@ struct AtomicValues {
     stopped_particles: atomic<u32>,
     // resting particles counted during the current step, reset by update_sim_info
     resting_particles: atomic<u32>,
+    // total grid momentum (kg m/s) of the current step as a 64-bit sum, reset by update_sim_info
+    momentum_lo: atomic<u32>,
+    momentum_hi: atomic<u32>,
+    // f32 bits of the largest total momentum so far
+    peak_momentum: atomic<u32>,
 };
 
 struct G2PUpdate {

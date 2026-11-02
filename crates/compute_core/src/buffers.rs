@@ -29,8 +29,11 @@ pub struct AtomicValues {
     pub stopped_particles: u32,
     /// Particles resting during the last step; reset by update_sim_info.
     pub resting_particles: u32,
-    /// Keeps the size a multiple of 16 bytes, matching the allocated buffer.
-    pub _pad: [u32; 3],
+    /// Total grid momentum of the last step in kg m/s, as low and high 32 bits.
+    pub momentum_lo: u32,
+    pub momentum_hi: u32,
+    /// Largest total momentum so far in kg m/s.
+    pub peak_momentum: f32,
 }
 
 /// GPU layout mirror of the CenterOfMassResult struct in center_of_mass.wgsl

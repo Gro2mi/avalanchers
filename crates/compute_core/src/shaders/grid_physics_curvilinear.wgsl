@@ -143,6 +143,16 @@ fn grid_physics_curvilinear(@builtin(global_invocation_id) id: vec3u) {
     if !is_nan(v_mag) && h > 1e-3 {
         grid_peak_velocity[idx] = max(grid_peak_velocity[idx], v_mag);
     }
+    if sim_settings.momentum_stop_fraction > 0.0 && !is_nan(v_mag) {
+        // total momentum in kg m/s as a 64-bit sum of two u32 atomics
+        let node_momentum = u32(round(mass * v_mag));
+        if node_momentum > 0u {
+            let previous = atomicAdd(&atomic_values.momentum_lo, node_momentum);
+            if previous > 0xFFFFFFFFu - node_momentum {
+                atomicAdd(&atomic_values.momentum_hi, 1u);
+            }
+        }
+    }
 
     // gravity waves travel at sqrt(g cos(theta) h) on the inclined bed;
     // cos(theta) = 1 / J
@@ -389,6 +399,8 @@ const SIM_INFO_ALL_PARTICLES_STOPPED: u32 = 1u << 30u;
 const SIM_INFO_NO_NEW_CELLS: u32 = 1u << 29u;
 // almost all particles are resting or terminally stopped
 const SIM_INFO_AT_REST: u32 = 1u << 28u;
+// total momentum fell below momentum_stop_fraction of its peak
+const SIM_INFO_LOW_MOMENTUM: u32 = 1u << 27u;
 
 // reversible low-speed state; the low bits hold the rest start step while resting
 // and the consecutive slow-step count while moving
@@ -434,6 +446,11 @@ struct SimSettings {
     // MPMDAC compressibility; bulk_modulus 0 = incompressible
     bulk_modulus: f32,
     compaction_pressure: f32,
+    // stop once total momentum < fraction * its peak; 0 disables (curvilinear)
+    momentum_stop_fraction: f32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 };
 
 struct AtomicValues {
@@ -447,6 +464,11 @@ struct AtomicValues {
     stopped_particles: atomic<u32>,
     // resting particles counted during the current step, reset by update_sim_info
     resting_particles: atomic<u32>,
+    // total grid momentum (kg m/s) of the current step as a 64-bit sum, reset by update_sim_info
+    momentum_lo: atomic<u32>,
+    momentum_hi: atomic<u32>,
+    // f32 bits of the largest total momentum so far
+    peak_momentum: atomic<u32>,
 };
 
 struct G2PUpdate {

@@ -106,6 +106,11 @@ pub struct SimSettings {
     // MPMDAC compressibility; bulk_modulus 0 = incompressible
     pub bulk_modulus: f32,
     pub compaction_pressure: f32,
+    /// Curvilinear: stop once the total momentum falls below this fraction of
+    /// its peak; 0 disables the criterion.
+    pub momentum_stop_fraction: f32,
+    /// Keeps the uniform size a multiple of 16 bytes.
+    pub _pad: [u32; 3],
 }
 
 impl Hash for SimSettings {
@@ -146,6 +151,7 @@ impl Hash for SimSettings {
         // MPMDAC compressibility
         self.bulk_modulus.to_bits().hash(state);
         self.compaction_pressure.to_bits().hash(state);
+        self.momentum_stop_fraction.to_bits().hash(state);
         // Flags
         self.flags.hash(state);
     }
@@ -206,6 +212,9 @@ impl SimSettings {
 
             bulk_modulus: 2.0e4,
             compaction_pressure: 2.0e3,
+
+            momentum_stop_fraction: 0.0,
+            _pad: [0; 3],
         }
     }
 
@@ -306,6 +315,9 @@ impl SimSettings {
         }
         if let Some(val) = patch.compaction_pressure {
             settings.compaction_pressure = val;
+        }
+        if let Some(val) = patch.momentum_stop_fraction {
+            settings.momentum_stop_fraction = val;
         }
         if let Some(val) = patch.enable_curvature {
             if val {
@@ -731,6 +743,9 @@ pub struct Settings {
     /// Compaction pressure (Pa) above which the MPMDAC material densifies
     /// plastically (irreversibly); the volumetric pressure is capped there.
     pub compaction_pressure: Option<f32>,
+    /// Curvilinear: stop once the total grid momentum falls below this
+    /// fraction of its peak, e.g. 0.01; 0 or unset disables the criterion.
+    pub momentum_stop_fraction: Option<f32>,
 
     pub enable_curvature: Option<bool>,
     pub enable_particle_interaction: Option<bool>,
@@ -865,6 +880,7 @@ mod tests {
             basal_friction_angle: Some(45.0),
             batch_compute_steps: Some(100),
             particle_sort_interval: None,
+            momentum_stop_fraction: None,
             cfl: Some(0.9),
             min_slope_angle: Some(10.0),
             max_slope_angle: Some(20.0),

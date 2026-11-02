@@ -1179,10 +1179,11 @@ impl Simulation {
         detection_sim.run().await?;
 
         let sim_info = detection_sim.fetch_sim_info().await?;
-        if !sim_info
-            .parsed_flags()
-            .intersects(SimInfoFlags::ALL_PARTICLES_STOPPED | SimInfoFlags::AT_REST)
-        {
+        if !sim_info.parsed_flags().intersects(
+            SimInfoFlags::ALL_PARTICLES_STOPPED
+                | SimInfoFlags::AT_REST
+                | SimInfoFlags::LOW_MOMENTUM,
+        ) {
             warn!(
                 "crown detection simulation stopped at max_steps; entry counts may be incomplete"
             );
@@ -3531,6 +3532,39 @@ mod tests {
         assert!(direct_mass.iter().any(|mass| *mass > 0));
         assert_eq!(direct_mass, sorted_mass);
         assert_eq!(direct_positions, sorted_positions);
+    }
+
+    #[test_log::test]
+    fn test_momentum_stop_fraction_stops_decaying_flow() {
+        // a block spreading on flat ground gains and then loses momentum
+        let run = |fraction: f32| {
+            let mut sim = setup_simple_sim(0.0, 5.0);
+            sim.settings.sim_model = SimModel::Curvilinear.as_int();
+            sim.settings.friction_coefficient = 0.05;
+            sim.settings.momentum_stop_fraction = fraction;
+            sim.settings.max_steps = 2000;
+            sim.enable_particle_relaxation = false;
+            sim.set_dem(&create_slope(40, 40, 5.0, 0.0), 40, 40, 5.0)
+                .expect("Failed to set DEM");
+            let mut release = vec![0.0; 40 * 40];
+            for y in 16..24 {
+                for x in 16..24 {
+                    release[y * 40 + x] = 1.0;
+                }
+            }
+            sim.set_release_areas(&release)
+                .expect("Failed to set release");
+            let mut info = block_on(sim.run_n_steps(50)).expect("Failed to run");
+            while !info.parsed_flags().contains(SimInfoFlags::SIM_STOPPED) && info.timestep < 2000 {
+                info = block_on(sim.run_n_steps(50)).expect("Failed to run");
+            }
+            info
+        };
+        let off = run(0.0);
+        let on = run(0.5);
+        assert!(!off.parsed_flags().contains(SimInfoFlags::LOW_MOMENTUM));
+        assert!(on.parsed_flags().contains(SimInfoFlags::LOW_MOMENTUM));
+        assert!(on.timestep < off.timestep);
     }
 
     #[test_log::test]
