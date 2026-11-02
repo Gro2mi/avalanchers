@@ -55,7 +55,9 @@ All notable changes to this project might be documented in this file.
   creep on gorge floors below steep walls and dropped the centrifugal load of narrow bends.)
   The live viewer exposes the setting under "terrain & release" (0 = off).
   `verification/run_gully_test.py` checks the V-channel friction factor against the wedge limit.
-- Curvilinear: `enable_earth_pressure_coefficient` (on by default) now applies the Savage-Hutter
+- `enable_earth_pressure_coefficient` is off by default in all models (engine, live viewer, web
+  frontend, Python defaults): Voellmy-type parameters are calibrated with hydrostatic pressure.
+- Curvilinear: `enable_earth_pressure_coefficient` now applies the Savage-Hutter
   earth pressure coefficients of Hutter et al. (1993) to the hydrostatic pressure gradient:
   `k_x` along the fall line of the (reference) surface and `k_y` across it, each active or
   passive by the sign of the strain rate in its direction, from `internal_friction_angle` and

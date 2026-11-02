@@ -136,7 +136,7 @@ fn apply_panel_defaults(settings: &mut Settings) {
     settings.enable_particle_relaxation.get_or_insert(true);
     settings
         .enable_earth_pressure_coefficient
-        .get_or_insert(true);
+        .get_or_insert(false);
 }
 
 /// Directory the testcase dropdown scans: the folder holding the configured DEM

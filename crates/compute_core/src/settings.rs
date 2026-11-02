@@ -217,7 +217,9 @@ impl SimSettings {
             cell_size: 1.0,
             velocity_threshold: 0.1,
             roughness_threshold: 0.01,
-            flags: SimFlags::new(true, true, true, true, false, false).mask,
+            // earth pressure coefficient off: Voellmy-type parameters are
+            // calibrated with hydrostatic lateral pressure (K = 1)
+            flags: SimFlags::new(true, true, false, true, false, false).mask,
 
             min_slope_angle: 28.0,
             max_slope_angle: 60.0,

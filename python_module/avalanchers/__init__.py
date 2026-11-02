@@ -47,7 +47,7 @@ CALIBRATION_PARAMETER_DEFAULTS = {
     "peak_flow_thickness_threshold": 0.1,
     "enable_curvature": True,
     "enable_particle_interaction": True,
-    "enable_earth_pressure_coefficient": True,
+    "enable_earth_pressure_coefficient": False,
     "enable_entrainment": True,
     "enable_weak_pressure": False,
 }
