@@ -19,6 +19,7 @@ All notable changes to this project might be documented in this file.
   are stopped. The 40-step no-new-cells criterion is unchanged.
 - Curvilinear: the CFL timestep follows the current maximum of `v + sqrt(g h)` instead of the
   run's all-time maximum, so dt grows again once the flow slows down.
+- Curvilinear: the CFL wave speed uses the bed-normal gravity `g cos(theta)` instead of `g`.
 - Default `cfl` is 0.9 (was 0.5).
 
 ### Added

@@ -137,7 +137,9 @@ fn grid_physics_curvilinear(@builtin(global_invocation_id) id: vec3u) {
         grid_peak_velocity[idx] = max(grid_peak_velocity[idx], v_mag);
     }
 
-    let expected_cell_velocity = v_mag + sqrt(g * h);
+    // gravity waves travel at sqrt(g cos(theta) h) on the inclined bed;
+    // cos(theta) = 1 / J
+    let expected_cell_velocity = v_mag + sqrt(g * h / J);
     if !is_nan(expected_cell_velocity) && h > 1e-3 && bitcast<u32>(expected_cell_velocity) > atomicLoad(&atomic_values.expected_max_velocity) {
         atomicMax(&atomic_values.expected_max_velocity, bitcast<u32>(expected_cell_velocity));
     }
