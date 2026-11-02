@@ -271,7 +271,8 @@ struct SimSettings {
     compaction_pressure: f32,
     // stop once total momentum < fraction * its peak; 0 disables (curvilinear)
     momentum_stop_fraction: f32,
-    _pad0: u32,
+    // front travel in cells covered by the no-new-cells stop window
+    no_new_cells_travel: f32,
     _pad1: u32,
     _pad2: u32,
 };
@@ -300,6 +301,13 @@ struct G2PUpdate {
 };
 
 @group(0) @binding(0) var<uniform> sim_settings: SimSettings;
+
+// length in steps of the no-new-cells rolling window: the fastest material
+// moves at most cfl cells per step, so round(travel / cfl) steps cover the same
+// front travel at any cfl; at least 10 steps
+fn no_new_cells_window() -> u32 {
+    return max(10u, u32(round(sim_settings.no_new_cells_travel / sim_settings.cfl)));
+}
 
 fn is_nan(x: f32) -> bool {
     let bits: u32 = bitcast<u32>(x);

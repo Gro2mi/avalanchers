@@ -1584,6 +1584,13 @@ impl ComputeOrchestrator {
             BufferName::SimSettings,
             sim_settings.as_bytes(),
         )?;
+        // every slot starts full so the run cannot stop before one window passed
+        let window = sim_settings.no_new_cells_window();
+        self.add_buffer_with_data(
+            BufferName::NewCellsRollingWindow,
+            &vec![window; window as usize],
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+        );
 
         let (p2g_shader, grid_physics_shader, particle_update_shader) = match sim_settings.sim_model
         {

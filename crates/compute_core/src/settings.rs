@@ -109,8 +109,11 @@ pub struct SimSettings {
     /// Curvilinear: stop once the total momentum falls below this fraction of
     /// its peak; 0 disables the criterion.
     pub momentum_stop_fraction: f32,
+    /// The no-new-cells stop window spans round(travel / cfl) steps, at least
+    /// 10: the steps the fastest material needs to travel this many cells.
+    pub no_new_cells_travel: f32,
     /// Keeps the uniform size a multiple of 16 bytes.
-    pub _pad: [u32; 3],
+    pub _pad: [u32; 2],
 }
 
 impl Hash for SimSettings {
@@ -152,6 +155,7 @@ impl Hash for SimSettings {
         self.bulk_modulus.to_bits().hash(state);
         self.compaction_pressure.to_bits().hash(state);
         self.momentum_stop_fraction.to_bits().hash(state);
+        self.no_new_cells_travel.to_bits().hash(state);
         // Flags
         self.flags.hash(state);
     }
@@ -164,6 +168,11 @@ impl Default for SimSettings {
 }
 
 impl SimSettings {
+    /// Length in steps of the no-new-cells rolling window, see utils.wgsl.
+    pub fn no_new_cells_window(&self) -> u32 {
+        ((self.no_new_cells_travel / self.cfl).round() as u32).max(10)
+    }
+
     pub fn calculate_hash(&self) -> u64 {
         let mut s = DefaultHasher::new();
         self.hash(&mut s);
@@ -214,7 +223,8 @@ impl SimSettings {
             compaction_pressure: 2.0e3,
 
             momentum_stop_fraction: 0.0,
-            _pad: [0; 3],
+            no_new_cells_travel: 65.0,
+            _pad: [0; 2],
         }
     }
 
@@ -318,6 +328,9 @@ impl SimSettings {
         }
         if let Some(val) = patch.momentum_stop_fraction {
             settings.momentum_stop_fraction = val;
+        }
+        if let Some(val) = patch.no_new_cells_travel {
+            settings.no_new_cells_travel = val;
         }
         if let Some(val) = patch.enable_curvature {
             if val {
@@ -746,6 +759,10 @@ pub struct Settings {
     /// Curvilinear: stop once the total grid momentum falls below this
     /// fraction of its peak, e.g. 0.01; 0 or unset disables the criterion.
     pub momentum_stop_fraction: Option<f32>,
+    /// The simulation stops when fewer than 4 cells were newly reached within
+    /// the steps the fastest material needs to travel this many cells,
+    /// round(travel / cfl) and at least 10 (default 65 cells, 72 steps at CFL 0.9).
+    pub no_new_cells_travel: Option<f32>,
 
     pub enable_curvature: Option<bool>,
     pub enable_particle_interaction: Option<bool>,
@@ -803,6 +820,17 @@ mod tests {
     use super::*;
     use std::io::Read;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn no_new_cells_window_covers_constant_front_travel() {
+        let mut settings = SimSettings::new();
+        assert_eq!(settings.no_new_cells_window(), 72);
+        settings.cfl = 0.05;
+        assert_eq!(settings.no_new_cells_window(), 1300);
+        settings.no_new_cells_travel = 1.0;
+        settings.cfl = 0.9;
+        assert_eq!(settings.no_new_cells_window(), 10);
+    }
 
     fn create_test_dem() -> Dem {
         let mut dem = Dem::default();
@@ -881,6 +909,7 @@ mod tests {
             batch_compute_steps: Some(100),
             particle_sort_interval: None,
             momentum_stop_fraction: None,
+            no_new_cells_travel: None,
             cfl: Some(0.9),
             min_slope_angle: Some(10.0),
             max_slope_angle: Some(20.0),

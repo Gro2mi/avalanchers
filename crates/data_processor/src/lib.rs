@@ -1109,6 +1109,7 @@ mod tests {
             batch_compute_steps: Some(100),
             particle_sort_interval: None,
             momentum_stop_fraction: None,
+            no_new_cells_travel: None,
             cfl: Some(8.0),
             min_slope_angle: Some(9.0),
             max_slope_angle: Some(10.0),

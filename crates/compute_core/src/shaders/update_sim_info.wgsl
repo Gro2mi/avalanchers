@@ -41,7 +41,7 @@ fn update_sim_info(@builtin(global_invocation_id) global_id: vec3<u32>) {
         }
     }
     var sum_new_cells: u32 = 0u;
-    for (var i: u32 = 0u; i < 40u; i = i + 1u) {
+    for (var i: u32 = 0u; i < no_new_cells_window(); i = i + 1u) {
         sum_new_cells = sum_new_cells + new_cells_rolling_window[i];
     }
     if sum_new_cells < 4u {
@@ -52,7 +52,7 @@ fn update_sim_info(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let max_flow_thickness = bitcast<f32>(atomicLoad(&atomic_values.peak_flow_thickness));
     sim_info.timestep = sim_info.timestep + 1u;
-    new_cells_rolling_window[sim_info.timestep % 40u] = 0u; // reset the count for the new cells in the current timestep
+    new_cells_rolling_window[sim_info.timestep % no_new_cells_window()] = 0u; // reset the count for the new cells in the current timestep
     sim_info.max_velocity = bitcast<f32>(atomicLoad(&atomic_values.peak_velocity));
     // MPM case
     var expected_max_velocity = bitcast<f32>(atomicLoad(&atomic_values.expected_max_velocity));
@@ -173,7 +173,8 @@ struct SimSettings {
     compaction_pressure: f32,
     // stop once total momentum < fraction * its peak; 0 disables (curvilinear)
     momentum_stop_fraction: f32,
-    _pad0: u32,
+    // front travel in cells covered by the no-new-cells stop window
+    no_new_cells_travel: f32,
     _pad1: u32,
     _pad2: u32,
 };
@@ -202,6 +203,13 @@ struct G2PUpdate {
 };
 
 @group(0) @binding(0) var<uniform> sim_settings: SimSettings;
+
+// length in steps of the no-new-cells rolling window: the fastest material
+// moves at most cfl cells per step, so round(travel / cfl) steps cover the same
+// front travel at any cfl; at least 10 steps
+fn no_new_cells_window() -> u32 {
+    return max(10u, u32(round(sim_settings.no_new_cells_travel / sim_settings.cfl)));
+}
 
 fn is_nan(x: f32) -> bool {
     let bits: u32 = bitcast<u32>(x);

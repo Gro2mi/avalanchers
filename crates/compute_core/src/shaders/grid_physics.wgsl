@@ -22,7 +22,7 @@ fn grid_physics(@builtin(global_invocation_id) id: vec3u) {
 
     let use_particle_interaction: bool = (sim_settings.flags & (1u << 1u)) != 0u;
     if !use_particle_interaction {
-        new_cells_rolling_window[sim_info.timestep % 40u] = new_cells_rolling_window[sim_info.timestep % 40u] + 1u; // update new cell count for diagnostics
+        new_cells_rolling_window[sim_info.timestep % no_new_cells_window()] = new_cells_rolling_window[sim_info.timestep % no_new_cells_window()] + 1u; // update new cell count for diagnostics
         return;
     }
     let idx = xy_to_idx(id.xy);
@@ -44,7 +44,7 @@ fn grid_physics(@builtin(global_invocation_id) id: vec3u) {
     // new max value
     if h > sim_settings.peak_flow_thickness_threshold && h > peak_flow_thickness[idx] {
         // new cell reached
-        new_cells_rolling_window[sim_info.timestep % 40u] = new_cells_rolling_window[sim_info.timestep % 40u] + 1u; // update new cell count for diagnostics
+        new_cells_rolling_window[sim_info.timestep % no_new_cells_window()] = new_cells_rolling_window[sim_info.timestep % no_new_cells_window()] + 1u; // update new cell count for diagnostics
         
         peak_flow_thickness[idx] = h;
         if is_finite(h) {
@@ -299,7 +299,8 @@ struct SimSettings {
     compaction_pressure: f32,
     // stop once total momentum < fraction * its peak; 0 disables (curvilinear)
     momentum_stop_fraction: f32,
-    _pad0: u32,
+    // front travel in cells covered by the no-new-cells stop window
+    no_new_cells_travel: f32,
     _pad1: u32,
     _pad2: u32,
 };
@@ -328,6 +329,13 @@ struct G2PUpdate {
 };
 
 @group(0) @binding(0) var<uniform> sim_settings: SimSettings;
+
+// length in steps of the no-new-cells rolling window: the fastest material
+// moves at most cfl cells per step, so round(travel / cfl) steps cover the same
+// front travel at any cfl; at least 10 steps
+fn no_new_cells_window() -> u32 {
+    return max(10u, u32(round(sim_settings.no_new_cells_travel / sim_settings.cfl)));
+}
 
 fn is_nan(x: f32) -> bool {
     let bits: u32 = bitcast<u32>(x);

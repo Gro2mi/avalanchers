@@ -24,6 +24,9 @@ All notable changes to this project might be documented in this file.
 - P2G skips atomic adds of zero momentum, which removes most atomics of resting particles.
 - Default `batch_compute_steps` is 50 (was 200).
 - Default `cfl` is 0.9 (was 0.5).
+- The no-new-cells stop window spans the steps the fastest material needs to travel
+  `no_new_cells_travel` cells (CLI `--no-new-cells-travel`, default 65), i.e. round(65 / cfl)
+  and at least 10 steps: 72 at CFL 0.9 instead of a fixed 40.
 
 ### Added
 - `sliding-block` (model 3): the previous per-particle terrain-following model.

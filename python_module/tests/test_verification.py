@@ -150,7 +150,8 @@ def test_curvilinear_elapsed_time_uses_executed_timestep():
 
 @pytest.mark.slow
 def test_stopped_batch_preserves_last_grid_snapshot():
-    sim, _, _ = plane_simulation(0.0, friction=10.0)
+    # a 2-cell no-new-cells travel gives a 40-step window at CFL 0.05
+    sim, _, _ = plane_simulation(0.0, friction=10.0, no_new_cells_travel=2.0)
     info = sim.run_n_steps(100)
     assert info.flags & (1 << 31)
     mass = np.asarray(sim.grid_mass, dtype=np.float64).sum() / 10.0
