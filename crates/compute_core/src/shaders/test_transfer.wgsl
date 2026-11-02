@@ -142,8 +142,11 @@ fn transfer_p2g_with_affine(p_idx: u32, affine_matrix: mat2x2f) {
             atomicAdd(&grid_mass_atomic[idx], u32(round(p_mass * weight * MASS_FACTOR))); // no_atomic_float 
             let momentum_x = p_mass * affine_velocity.x * weight * MOMENTUM_FACTOR; // no_atomic_float
             let momentum_y = p_mass * affine_velocity.y * weight * MOMENTUM_FACTOR; // no_atomic_float
-            atomicAdd(&grid_momentum_atomic[idx * 2u], quantize_momentum_component(momentum_x)); // no_atomic_float 
-            atomicAdd(&grid_momentum_atomic[idx * 2u + 1u], quantize_momentum_component(momentum_y)); // no_atomic_float 
+            // resting particles carry no momentum; skipping zero adds saves most of their atomics
+            let quantized_x = quantize_momentum_component(momentum_x); // no_atomic_float
+            let quantized_y = quantize_momentum_component(momentum_y); // no_atomic_float
+            if quantized_x != 0 { atomicAdd(&grid_momentum_atomic[idx * 2u], quantized_x); } // no_atomic_float
+            if quantized_y != 0 { atomicAdd(&grid_momentum_atomic[idx * 2u + 1u], quantized_y); } // no_atomic_float
         }
     }
 }
