@@ -2923,6 +2923,12 @@ mod tests {
             cfl: Some(0.5),
             max_steps: Some(6000),
             sim_model: Some(SimModel::SlidingBlock),
+            // the velocity bounds below were tuned for these Voellmy parameters
+            // (the defaults before c121632); the steady speed on the 34 deg plane
+            // is sqrt(xi h (sin - mu cos)), ~38 m/s here and ~26 m/s with the
+            // current defaults
+            friction_coefficient: Some(0.155),
+            drag_coefficient: Some(4000.0),
             ..Default::default()
         };
         block_on(sim.create(settings)).expect("Failed to create simulation");
