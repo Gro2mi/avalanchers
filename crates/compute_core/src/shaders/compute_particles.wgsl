@@ -69,6 +69,7 @@ fn compute_particles(
 
     if is_nan(normal.x) {
         state = sim_info.timestep;
+        state |= PARTICLE_STOPPED;
         state |= PARTICLE_OUT_OF_DEM_DATA;
         particles_state[particleId] = state;
         atomicAdd(&atomic_values.stopped_particles, 1u);
