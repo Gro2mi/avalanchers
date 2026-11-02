@@ -542,6 +542,9 @@ pub struct ComputeOrchestrator {
     pub particle_sort_interval: u32,
     particle_sort: Option<ParticleSort>,
     steps_since_particle_sort: u32,
+    /// Weak-form pressure pass of the curvilinear model, dispatched after P2G
+    /// when enable_weak_pressure is set.
+    weak_pressure: Option<(ComputePipeline, BindGroup)>,
     texture_size: Extent3d,
     shader_configs: HashMap<ShaderName, ComputeShaderConfig>,
     dispatch_number_workgroups_x_2d: u32,
@@ -827,6 +830,7 @@ impl ComputeOrchestrator {
             particle_sort_interval: 25,
             particle_sort: None,
             steps_since_particle_sort: 0,
+            weak_pressure: None,
             has_float32_atomic,
             completed_steps: 0,
             enable_center_of_mass: true,
@@ -1738,6 +1742,20 @@ impl ComputeOrchestrator {
         });
 
         self.prepare_particle_sort(sim_settings, number_release_particles)?;
+        self.weak_pressure = if sim_settings.sim_model == SimModel::Curvilinear.as_int()
+            && SimFlags::from_u32(sim_settings.flags).is_weak_pressure_enabled()
+        {
+            let config = self
+                .shader_configs
+                .get(&ShaderName::P2GWeakPressure)
+                .ok_or_else(|| anyhow!("P2GWeakPressure shader config not found"))?;
+            Some((
+                config.pipeline.clone(),
+                config.create_bind_group(&self.device, &self.resources)?,
+            ))
+        } else {
+            None
+        };
         self.prepared_max_steps = Some(sim_settings.max_steps);
         self.prepared_model = Some(sim_settings.sim_model);
         self.center_of_mass_biggest_blob =
@@ -1820,6 +1838,7 @@ impl ComputeOrchestrator {
             (None, None, 0)
         };
         let particle_sort = self.particle_sort.as_ref();
+        let weak_pressure = self.weak_pressure.as_ref();
         let mut steps_since_particle_sort = self.steps_since_particle_sort;
         for _ in 0..steps {
             if let (Some(source), Some(destination)) =
@@ -1863,6 +1882,12 @@ impl ComputeOrchestrator {
             } else {
                 compute_pass.set_pipeline(&simulation_pipelines.p2g);
                 compute_pass.set_bind_group(0, &simulation_bind_groups.p2g, &[]);
+                compute_pass.dispatch_workgroups(self.dispatch_number_workgroups_1d, 1, 1);
+            }
+            // needs the complete grid mass of this step
+            if let Some((pipeline, bind_group)) = weak_pressure {
+                compute_pass.set_pipeline(pipeline);
+                compute_pass.set_bind_group(0, bind_group, &[]);
                 compute_pass.dispatch_workgroups(self.dispatch_number_workgroups_1d, 1, 1);
             }
 
@@ -2613,7 +2638,7 @@ mod tests {
             grid_shape_x: 3,
             grid_shape_y: 2,
             cell_size: 5.0,
-            flags: SimFlags::new(true, true, true, true, true).mask,
+            flags: SimFlags::new(true, true, true, true, true, false).mask,
             ..Default::default()
         };
         let mut orchestrator =

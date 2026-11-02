@@ -1121,6 +1121,7 @@ mod tests {
             peak_flow_thickness_threshold: Some(14.0),
             enable_curvature: Some(true),
             enable_entrainment: Some(true),
+            enable_weak_pressure: Some(true),
             enable_particle_interaction: Some(true),
             enable_particle_relaxation: Some(true),
             enable_earth_pressure_coefficient: Some(true),
@@ -1165,6 +1166,7 @@ mod tests {
         assert_eq!(loaded.peak_flow_thickness_threshold, Some(14.0));
         assert_eq!(loaded.enable_curvature, Some(true));
         assert_eq!(loaded.enable_entrainment, Some(true));
+        assert_eq!(loaded.enable_weak_pressure, Some(true));
         assert_eq!(loaded.enable_particle_interaction, Some(true));
         assert_eq!(loaded.enable_earth_pressure_coefficient, Some(true));
         assert_eq!(loaded.n0, Some(1.0));

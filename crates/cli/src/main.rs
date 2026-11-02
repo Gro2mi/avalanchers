@@ -153,6 +153,8 @@ struct Args {
     #[arg(long, value_parser = parse_bool)]
     enable_entrainment: Option<bool>,
     #[arg(long, value_parser = parse_bool)]
+    enable_weak_pressure: Option<bool>,
+    #[arg(long, value_parser = parse_bool)]
     enable_center_of_mass: Option<bool>,
     #[arg(long, value_parser = parse_bool)]
     center_of_mass_biggest_blob: Option<bool>,
@@ -300,6 +302,9 @@ impl Args {
         }
         if let Some(value) = self.enable_entrainment {
             settings.enable_entrainment = Some(value);
+        }
+        if let Some(value) = self.enable_weak_pressure {
+            settings.enable_weak_pressure = Some(value);
         }
         if let Some(value) = self.center_of_mass_biggest_blob {
             settings.center_of_mass_biggest_blob = Some(value);
@@ -497,6 +502,7 @@ mod tests {
             enable_particle_interaction: None,
             enable_earth_pressure_coefficient: None,
             enable_entrainment: None,
+            enable_weak_pressure: None,
             center_of_mass_biggest_blob: None,
             release_area_fraction: None,
             crown_line_method: None,

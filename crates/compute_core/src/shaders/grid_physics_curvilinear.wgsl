@@ -13,10 +13,13 @@
 
 // x = cos(beta) between the bed and the smoothed reference surface
 @group(0) @binding(11) var basal_topography_texture: texture_2d<f32>;
+// weak-form pressure sum -sum_p m_p h_p / 2 grad N_i of p2g_weak_pressure
+@group(0) @binding(12) var<storage> grid_forces: array<i32>; // no_atomic_float
+// atomic_float @group(0) @binding(12) var<storage> grid_forces: array<f32>;
 // declared for curvilinear_geometry.wgsl, unused by this entry point
-@group(0) @binding(12) var dem_texture: texture_2d<f32>;
-@group(0) @binding(13) var tex_sampler: sampler;
-@group(0) @binding(14) var<storage, read_write> particles_elevation: array<f32>;
+@group(0) @binding(13) var dem_texture: texture_2d<f32>;
+@group(0) @binding(14) var tex_sampler: sampler;
+@group(0) @binding(15) var<storage, read_write> particles_elevation: array<f32>;
 
 
 @compute @workgroup_size(WG_SIZE_2D, WG_SIZE_2D, 1)
@@ -32,6 +35,7 @@ fn grid_physics_curvilinear(@builtin(global_invocation_id) id: vec3u) {
     let use_particle_interaction: bool = (sim_settings.flags & (1u << 1u)) != 0u;
     let use_earth_pressure_coefficient: bool = (sim_settings.flags & (1u << 2u)) != 0u;
     let use_entrainment: bool = (sim_settings.flags & (1u << 3u)) != 0u;
+    let use_weak_pressure: bool = (sim_settings.flags & (1u << 5u)) != 0u;
 
     let idx = xy_to_idx(id.xy);
     // No particle gathers from a node whose 3x3 neighbourhood holds no mass:
@@ -102,10 +106,17 @@ fn grid_physics_curvilinear(@builtin(global_invocation_id) id: vec3u) {
     // );
     // let k = 1.0;
     // let grad_h = grad_h2 * 0.5 / (h + 1e-5);
-    let grad_h = vec2f(
+    var grad_h = vec2f(
         (get_h(id.x + 1, id.y) - get_h(id.x - 1, id.y)) / (2.0 * sim_settings.cell_size),
         (get_h(id.x, id.y + 1) - get_h(id.x, id.y - 1)) / (2.0 * sim_settings.cell_size)
     );
+    if use_weak_pressure {
+        // weak form: m_i grad h = -sum_p m_p h_p / 2 grad N_i(x_p); the small
+        // mass of a thin front node lets the pressure behind it accelerate it
+        let weak_sum = vec2f(f32(grid_forces[idx * 2u]), f32(grid_forces[idx * 2u + 1u])) * INV_PRESSURE_FACTOR; // no_atomic_float
+        // atomic_float let weak_sum = vec2f(grid_forces[idx * 2u], grid_forces[idx * 2u + 1u]);
+        grad_h = select(weak_sum / mass, vec2f(0.0), node_is_empty);
+    }
     // Savage-Hutter earth pressure (Hutter et al. 1993): k_x along the fall
     // line, k_y across it, each active where the flow stretches in that
     // direction and passive where it is compressed; hydrostatic when disabled
@@ -434,6 +445,11 @@ const INV_MOMENTUM_FACTOR: f32 = 1 / MOMENTUM_FACTOR;
 // depth-integrated internal force (h * sigma * grad_w * area, ~1e4..1e5 N per node contribution)
 const FORCE_FACTOR: f32 = 1e-3; // i32 limit is 2.1e6 N per node
 const INV_FORCE_FACTOR: f32 = 1 / FORCE_FACTOR;
+// weak-form pressure sum m_p h_p / 2 grad_w (kg) of the curvilinear model,
+// node sum = node_mass * |grad h|: 0.001 kg resolves thin front nodes
+//   (rho*cell^2*h*J ~ 6e4 kg * 1 * 1e3 = 6e7 < 2.1e9)
+const PRESSURE_FACTOR: f32 = 1e3;
+const INV_PRESSURE_FACTOR: f32 = 1 / PRESSURE_FACTOR;
 
 // TODO precompute often used values on the cpu and pass them as uniforms to avoid redundant calculations on the gpu
 

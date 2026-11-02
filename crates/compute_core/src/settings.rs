@@ -24,6 +24,7 @@ impl SimFlags {
         earth_pressure_coefficient: bool,
         entrainment: bool,
         center_of_mass_biggest_blob: bool,
+        weak_pressure: bool,
     ) -> Self {
         let mut mask = 0u32;
         if curvature {
@@ -40,6 +41,9 @@ impl SimFlags {
         }
         if center_of_mass_biggest_blob {
             mask |= 1 << 4;
+        }
+        if weak_pressure {
+            mask |= 1 << 5;
         }
 
         SimFlags { mask }
@@ -63,6 +67,9 @@ impl SimFlags {
     }
     pub fn is_center_of_mass_biggest_blob_enabled(&self) -> bool {
         (self.mask & (1 << 4)) != 0
+    }
+    pub fn is_weak_pressure_enabled(&self) -> bool {
+        (self.mask & (1 << 5)) != 0
     }
 }
 #[repr(C)]
@@ -210,7 +217,7 @@ impl SimSettings {
             cell_size: 1.0,
             velocity_threshold: 0.1,
             roughness_threshold: 0.01,
-            flags: SimFlags::new(true, true, true, true, false).mask,
+            flags: SimFlags::new(true, true, true, true, false, false).mask,
 
             min_slope_angle: 28.0,
             max_slope_angle: 60.0,
@@ -381,6 +388,13 @@ impl SimSettings {
                 settings.flags |= 1 << 4;
             } else {
                 settings.flags &= !(1 << 4);
+            }
+        }
+        if let Some(val) = patch.enable_weak_pressure {
+            if val {
+                settings.flags |= 1 << 5;
+            } else {
+                settings.flags &= !(1 << 5);
             }
         }
     }
@@ -786,6 +800,11 @@ pub struct Settings {
     pub enable_curvature: Option<bool>,
     pub enable_particle_interaction: Option<bool>,
     pub enable_earth_pressure_coefficient: Option<bool>,
+    /// Curvilinear: hydrostatic pressure gradient from the MPM weak form,
+    /// -sum_p m_p h_p / 2 grad N_i(x_p) per node, instead of the centred
+    /// difference of the nodal thickness. Thin front nodes are then pushed by
+    /// the full pressure of the particles behind them (defaults to false).
+    pub enable_weak_pressure: Option<bool>,
     pub enable_entrainment: Option<bool>,
     pub enable_center_of_mass: Option<bool>,
     /// Relax freshly initialized particles to the hexagonal packing spacing
@@ -956,6 +975,7 @@ mod tests {
             enable_particle_relaxation: Some(false),
             enable_earth_pressure_coefficient: Some(false),
             enable_entrainment: Some(false),
+            enable_weak_pressure: Some(false),
             enable_center_of_mass: Some(true),
             center_of_mass_biggest_blob: Some(false),
         };
@@ -996,7 +1016,7 @@ mod tests {
         assert_eq!(sim_settings.basal_friction_angle, 45.0);
         assert_eq!(
             sim_settings.flags,
-            SimFlags::new(false, false, false, false, false).mask
+            SimFlags::new(false, false, false, false, false, false).mask
         );
 
         // Test enabling flags one by one
@@ -1004,36 +1024,44 @@ mod tests {
         sim_settings = SimSettings::from_settings(&patch, &dem);
         assert_eq!(
             sim_settings.flags,
-            SimFlags::new(true, false, false, false, false).mask
+            SimFlags::new(true, false, false, false, false, false).mask
         );
 
         patch.enable_particle_interaction = Some(true);
         sim_settings = SimSettings::from_settings(&patch, &dem);
         assert_eq!(
             sim_settings.flags,
-            SimFlags::new(true, true, false, false, false).mask
+            SimFlags::new(true, true, false, false, false, false).mask
         );
 
         patch.enable_earth_pressure_coefficient = Some(true);
         sim_settings = SimSettings::from_settings(&patch, &dem);
         assert_eq!(
             sim_settings.flags,
-            SimFlags::new(true, true, true, false, false).mask
+            SimFlags::new(true, true, true, false, false, false).mask
         );
 
         patch.enable_entrainment = Some(true);
         sim_settings = SimSettings::from_settings(&patch, &dem);
         assert_eq!(
             sim_settings.flags,
-            SimFlags::new(true, true, true, true, false).mask
+            SimFlags::new(true, true, true, true, false, false).mask
         );
 
         patch.center_of_mass_biggest_blob = Some(true);
         sim_settings = SimSettings::from_settings(&patch, &dem);
         assert_eq!(
             sim_settings.flags,
-            SimFlags::new(true, true, true, true, true).mask
+            SimFlags::new(true, true, true, true, true, false).mask
         );
+
+        patch.enable_weak_pressure = Some(true);
+        sim_settings = SimSettings::from_settings(&patch, &dem);
+        assert_eq!(
+            sim_settings.flags,
+            SimFlags::new(true, true, true, true, true, true).mask
+        );
+        assert!(SimFlags::from_u32(sim_settings.flags).is_weak_pressure_enabled());
     }
 
     #[test_log::test]

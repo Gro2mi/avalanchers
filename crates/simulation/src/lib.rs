@@ -3815,6 +3815,85 @@ mod tests {
     }
 
     #[test_log::test]
+    fn test_curvilinear_weak_pressure_gradient() {
+        // one step of a flat square release: the weak-form grad h of
+        // p2g_weak_pressure follows the centred difference at the release edge
+        // and nearly vanishes inside the uniform release
+        const N: usize = 40;
+        const CELL: f32 = 5.0;
+        let run = |weak_pressure: bool| {
+            let mut sim = setup_simple_sim(0.0, CELL);
+            sim.settings.sim_model = SimModel::Curvilinear.as_int();
+            if weak_pressure {
+                sim.settings.flags |=
+                    compute_core::settings::SimFlags::new(false, false, false, false, false, true)
+                        .mask;
+            }
+            sim.set_dem(&create_slope(N, N, CELL, 0.0), N, N, CELL)
+                .expect("Failed to set DEM");
+            let mut release = vec![0.0; N * N];
+            for y in 12..28 {
+                for x in 12..28 {
+                    release[y * N + x] = 1.0;
+                }
+            }
+            sim.set_release_areas(&release)
+                .expect("Failed to set release");
+            block_on(sim.run_n_steps(1)).expect("Failed to run");
+            let mass: Vec<u32> = block_on(sim.orchestrator.read_buffer(BufferName::GridMass))
+                .expect("Failed to read grid mass");
+            let sums: Vec<i32> = block_on(sim.orchestrator.read_buffer(BufferName::GridForces))
+                .expect("Failed to read weak pressure sums");
+            (mass, sums, sim.settings.density)
+        };
+
+        let (_, centred_sums, _) = run(false);
+        assert!(centred_sums.iter().all(|sum| *sum == 0));
+
+        let (mass, sums, density) = run(true);
+        // dequantize with MASS_FACTOR = 1e1 and PRESSURE_FACTOR = 1e3 (utils.wgsl)
+        let node_mass = |x: usize, y: usize| mass[y * N + x] as f32 * 0.1;
+        let thickness = |x: usize, y: usize| node_mass(x, y) / (density * CELL * CELL);
+        let mut interior = Vec::new();
+        let mut edge = Vec::new();
+        let mut edge_agrees = 0;
+        for y in 4..N - 4 {
+            for x in 4..N - 4 {
+                if node_mass(x, y) < 1.0 {
+                    continue;
+                }
+                let weak = [
+                    sums[(y * N + x) * 2] as f32 * 1e-3 / node_mass(x, y),
+                    sums[(y * N + x) * 2 + 1] as f32 * 1e-3 / node_mass(x, y),
+                ];
+                let centred = [
+                    (thickness(x + 1, y) - thickness(x - 1, y)) / (2.0 * CELL),
+                    (thickness(x, y + 1) - thickness(x, y - 1)) / (2.0 * CELL),
+                ];
+                if (16..24).contains(&x) && (16..24).contains(&y) {
+                    interior.push(weak[0].hypot(weak[1]));
+                } else if centred[0].hypot(centred[1]) > 0.05 {
+                    edge.push(weak[0].hypot(weak[1]));
+                    if weak[0] * centred[0] + weak[1] * centred[1] > 0.0 {
+                        edge_agrees += 1;
+                    }
+                }
+            }
+        }
+        let mean = |values: &[f32]| values.iter().sum::<f32>() / values.len() as f32;
+        info!(
+            "weak grad h: interior mean {:.4}, edge mean {:.4}, {}/{} edge nodes agree",
+            mean(&interior),
+            mean(&edge),
+            edge_agrees,
+            edge.len()
+        );
+        assert!(!interior.is_empty() && !edge.is_empty());
+        assert!(edge_agrees as f32 >= 0.9 * edge.len() as f32);
+        assert!(mean(&interior) < 0.25 * mean(&edge));
+    }
+
+    #[test_log::test]
     fn test_momentum_stop_fraction_stops_decaying_flow() {
         // a block spreading on flat ground gains and then loses momentum
         let run = |fraction: f32| {

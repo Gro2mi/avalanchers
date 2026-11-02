@@ -103,6 +103,12 @@ Geometric transport along curved terrain is always included.
 `enable_curvature` controls the additional centripetal basal normal load;
 the alpha-line energy benchmark disables that load correction to match its
 reference assumption.
+`enable_weak_pressure` (default off) takes the hydrostatic pressure gradient
+from the MPM weak form, `m_i grad h = -sum_p m_p h_p / 2 grad N_i(x_p)`, in an
+extra particle pass after P2G instead of the centred difference of the nodal
+thickness. The small mass of a thin front node then receives the full push of
+the particles behind it; on the dam break benchmark the front moves about 5 m
+closer to the analytic solution at 5 m cells.
 Particle xyz velocities reconstruct the vertical component from the terrain
 slope; xy velocities and grid momentum are horizontal components. Analytical
 comparisons convert these to surface-distance velocities where needed.

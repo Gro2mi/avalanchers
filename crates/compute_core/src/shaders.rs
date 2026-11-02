@@ -125,6 +125,7 @@ define_shaders! {
     P2G => "p2g",
     P2GCurvilinear => "p2g" entry_point "p2g_curvilinear",
     P2GCurvilinearSorted => "p2g_sorted" entry_point "p2g_curvilinear_sorted",
+    P2GWeakPressure => "p2g_weak_pressure",
     // the four particle sort kernels share one source file
     SortClearBins => "sort_particles" entry_point "sort_clear_bins",
     SortCountParticles => "sort_particles" entry_point "sort_count_particles",
@@ -1945,6 +1946,51 @@ pub fn create_shader_configs(
             &sorted_p2g_bindings,
         )?,
     );
+    // curvilinear weak-form pressure, a particle pass after either P2G
+    shader_configs.insert(
+        ShaderName::P2GWeakPressure,
+        ComputeShaderConfig::new_with_constants(
+            device,
+            ShaderName::P2GWeakPressure,
+            load_shader_source(ShaderName::P2GWeakPressure, has_float32_atomic),
+            &[
+                // Binding 0:
+                (
+                    BufferName::SimSettings.to_string(),
+                    BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                // Binding 1:
+                (BufferName::SimInfo.to_string(), storage_buffer(false)),
+                // Binding 2:
+                (
+                    BufferName::ParticlesPosition.to_string(),
+                    storage_buffer(true),
+                ),
+                // Binding 3:
+                (BufferName::ParticlesMass.to_string(), storage_buffer(true)),
+                // Binding 4:
+                (BufferName::GridMass.to_string(), storage_buffer(true)),
+                // Binding 5:
+                (
+                    TextureName::TerrainGeometry.to_string(),
+                    BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float {
+                            filterable: has_float32_filterable,
+                        },
+                    },
+                ),
+                // Binding 6:
+                (BufferName::GridForces.to_string(), storage_buffer(false)),
+            ],
+            &[("WG_SIZE_1D", max_compute_invocations_per_workgroup as f64)],
+        )?,
+    );
     let sort_bindings = [
         // Binding 0:
         (
@@ -2234,6 +2280,15 @@ pub fn create_shader_configs(
                         },
                     },
                 ),
+                // Binding 12: weak-form pressure sums of p2g_weak_pressure
+                (
+                    BufferName::GridForces.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
             ],
         )?,
     );
@@ -2272,6 +2327,9 @@ pub fn create_shader_configs(
     ]);
     let mut terrain_following_grid_physics_bindings =
         existing_bindings(ShaderName::GridPhysicsCurvilinear);
+    // binding 12 (weak-form pressure) is curvilinear only
+    terrain_following_grid_physics_bindings
+        .retain(|(name, _)| *name != BufferName::GridForces.to_string());
     terrain_following_grid_physics_bindings.extend([
         // Binding 12:
         (BufferName::GridMomentumZ.to_string(), storage_buffer(true)),
@@ -3030,7 +3088,11 @@ mod tests {
 
     #[test]
     fn p2g_shaders_validate_with_integer_and_float_atomics() {
-        for shader in [ShaderName::P2GCurvilinear, ShaderName::P2GCurvilinearSorted] {
+        for shader in [
+            ShaderName::P2GCurvilinear,
+            ShaderName::P2GCurvilinearSorted,
+            ShaderName::P2GWeakPressure,
+        ] {
             for has_float32_atomic in [false, true] {
                 let source = validate_wgsl(shader, has_float32_atomic);
                 let float_binding = source.lines().any(|line| {

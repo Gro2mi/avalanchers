@@ -49,6 +49,7 @@ CALIBRATION_PARAMETER_DEFAULTS = {
     "enable_particle_interaction": True,
     "enable_earth_pressure_coefficient": True,
     "enable_entrainment": True,
+    "enable_weak_pressure": False,
 }
 
 # Metric names of PyEvaluation (see crates/python_bindings/src/lib.rs),
