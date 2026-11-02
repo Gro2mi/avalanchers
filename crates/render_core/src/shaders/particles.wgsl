@@ -63,7 +63,8 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     // Vertical velocity is zero for models without a z component, so the ramp still
     // shows horizontal speed there.
     out.speed = length(vec3<f32>(velocities[index], velocities_z[index]));
-    out.moving = select(1.0, 0.0, stopped[index] != 0u);
+    // stopped (bit 31) or resting (bit 26); the low bits only count slow steps
+    out.moving = select(1.0, 0.0, (stopped[index] & ((1u << 31u) | (1u << 26u))) != 0u);
     return out;
 }
 
