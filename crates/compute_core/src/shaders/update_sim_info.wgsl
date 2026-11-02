@@ -15,6 +15,16 @@ fn update_sim_info(@builtin(global_invocation_id) global_id: vec3<u32>) {
         sim_info.flags = sim_info.flags | SIM_INFO_STOPPED;
         return;
     }
+    // Curvilinear model: stop once 99% of the particles rest or are stopped;
+    // the remaining few moving particles do not change the outline materially.
+    let resting = atomicLoad(&atomic_values.resting_particles);
+    atomicStore(&atomic_values.resting_particles, 0u);
+    let settled = atomicLoad(&atomic_values.stopped_particles) + resting;
+    if sim_settings.model_type == 1u && f32(settled) >= 0.99 * f32(sim_info.number_particles) {
+        sim_info.flags = sim_info.flags | SIM_INFO_AT_REST;
+        sim_info.flags = sim_info.flags | SIM_INFO_STOPPED;
+        return;
+    }
     var sum_new_cells: u32 = 0u;
     for (var i: u32 = 0u; i < 40u; i = i + 1u) {
         sum_new_cells = sum_new_cells + new_cells_rolling_window[i];
@@ -92,7 +102,12 @@ const SIM_INFO_PARTICLE_OUT_OF_DEM_DATA: u32 = 1u << 3u;
 const SIM_INFO_STOPPED: u32 = 1u << 31u;
 const SIM_INFO_ALL_PARTICLES_STOPPED: u32 = 1u << 30u;
 const SIM_INFO_NO_NEW_CELLS: u32 = 1u << 29u;
+// almost all particles are resting or terminally stopped
+const SIM_INFO_AT_REST: u32 = 1u << 28u;
 
+// reversible low-speed state; the low bits hold the rest start step while resting
+// and the consecutive slow-step count while moving
+const PARTICLE_RESTING: u32 = 1u << 26u;
 const PARTICLE_FLYING: u32 = 1u << 27u;
 const PARTICLE_OUT_OF_BOUNDS: u32 = 1u << 28u;
 const PARTICLE_IS_NAN: u32 = 1u << 29u;
@@ -145,6 +160,8 @@ struct AtomicValues {
     number_release_cells: atomic<u32>,
     number_release_particles: atomic<u32>,
     stopped_particles: atomic<u32>,
+    // resting particles counted during the current step, reset by update_sim_info
+    resting_particles: atomic<u32>,
 };
 
 struct G2PUpdate {

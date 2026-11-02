@@ -38,6 +38,8 @@ struct TimestepData {
 @group(0) @binding(14) var<storage, read_write> particles_velocity_z: array<f32>;
 
 const density: f32 = 200.0;
+// consecutive slow steps before a particle rests
+const REST_STEPS: u32 = 20u;
 override WG_SIZE_1D: u32 = 1u;
 @compute @workgroup_size(WG_SIZE_1D, 1, 1)
 fn g2p(
@@ -53,7 +55,8 @@ fn g2p(
     if (sim_info.flags & SIM_INFO_STOPPED) != 0u {
         return;
     }
-    if (particles_state[particleId] & PARTICLE_STOPPED) != 0u {
+    let previous_state = particles_state[particleId];
+    if (previous_state & PARTICLE_STOPPED) != 0u {
         return;
     }
     var position = particles_position[particleId];
@@ -80,6 +83,40 @@ fn g2p(
     let update = transfer_g2p(particleId);
     let interpolated_velocity = update.velocity;
     var dt = sim_info.dt;
+
+    // Reversible resting: a particle rests after REST_STEPS consecutive slow
+    // steps and wakes once the gathered grid speed exceeds twice the
+    // threshold. Resting particles keep depositing mass but no momentum, and
+    // do not move, which removes sub-threshold creep inside deposits.
+    let speed = surface_speed(slope, interpolated_velocity);
+    // Low state bits: the slow-step counter while moving, the rest start step while resting.
+    let low_mask = PARTICLE_RESTING - 1u;
+    var resting = (previous_state & PARTICLE_RESTING) != 0u;
+    var low_bits = previous_state & low_mask;
+    if resting {
+        if speed > 2.0 * sim_settings.velocity_threshold {
+            resting = false;
+            low_bits = 0u;
+        }
+    } else if speed < sim_settings.velocity_threshold {
+        low_bits = min(low_bits + 1u, REST_STEPS);
+        if low_bits >= REST_STEPS {
+            resting = true;
+            low_bits = sim_info.timestep & low_mask;
+        }
+    } else {
+        low_bits = 0u;
+    }
+    particles_state[particleId] = (previous_state & ~(PARTICLE_RESTING | low_mask))
+        | select(0u, PARTICLE_RESTING, resting)
+        | low_bits;
+    if resting {
+        particles_velocity[particleId] = vec2f(0.0);
+        particles_velocity_z[particleId] = 0.0;
+        particles_affine_matrix[particleId] = mat2x2<f32>(vec2f(0.0), vec2f(0.0));
+        atomicAdd(&atomic_values.resting_particles, 1u);
+        return;
+    }
 
     let new_velocity = interpolated_velocity;
     position = position + new_velocity * dt;
@@ -127,14 +164,6 @@ fn g2p(
         out_debug[10] = f32(sim_settings.world_size.x);
         out_debug[11] = f32(sim_settings.world_size.y);
         out_debug[12] = f32(sim_settings.friction_coefficient);
-    }
-
-    if surface_speed(slope, interpolated_velocity) < sim_settings.velocity_threshold {
-        var state = sim_info.timestep;
-        state |= PARTICLE_STOPPED;
-        particles_state[particleId] = state;
-        atomicAdd(&atomic_values.stopped_particles, 1u);
-        return;
     }
 
     if is_nan(position.x) {
@@ -363,7 +392,12 @@ const SIM_INFO_PARTICLE_OUT_OF_DEM_DATA: u32 = 1u << 3u;
 const SIM_INFO_STOPPED: u32 = 1u << 31u;
 const SIM_INFO_ALL_PARTICLES_STOPPED: u32 = 1u << 30u;
 const SIM_INFO_NO_NEW_CELLS: u32 = 1u << 29u;
+// almost all particles are resting or terminally stopped
+const SIM_INFO_AT_REST: u32 = 1u << 28u;
 
+// reversible low-speed state; the low bits hold the rest start step while resting
+// and the consecutive slow-step count while moving
+const PARTICLE_RESTING: u32 = 1u << 26u;
 const PARTICLE_FLYING: u32 = 1u << 27u;
 const PARTICLE_OUT_OF_BOUNDS: u32 = 1u << 28u;
 const PARTICLE_IS_NAN: u32 = 1u << 29u;
@@ -416,6 +450,8 @@ struct AtomicValues {
     number_release_cells: atomic<u32>,
     number_release_particles: atomic<u32>,
     stopped_particles: atomic<u32>,
+    // resting particles counted during the current step, reset by update_sim_info
+    resting_particles: atomic<u32>,
 };
 
 struct G2PUpdate {

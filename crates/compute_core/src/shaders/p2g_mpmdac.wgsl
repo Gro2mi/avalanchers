@@ -303,7 +303,12 @@ const SIM_INFO_PARTICLE_OUT_OF_DEM_DATA: u32 = 1u << 3u;
 const SIM_INFO_STOPPED: u32 = 1u << 31u;
 const SIM_INFO_ALL_PARTICLES_STOPPED: u32 = 1u << 30u;
 const SIM_INFO_NO_NEW_CELLS: u32 = 1u << 29u;
+// almost all particles are resting or terminally stopped
+const SIM_INFO_AT_REST: u32 = 1u << 28u;
 
+// reversible low-speed state; the low bits hold the rest start step while resting
+// and the consecutive slow-step count while moving
+const PARTICLE_RESTING: u32 = 1u << 26u;
 const PARTICLE_FLYING: u32 = 1u << 27u;
 const PARTICLE_OUT_OF_BOUNDS: u32 = 1u << 28u;
 const PARTICLE_IS_NAN: u32 = 1u << 29u;
@@ -356,6 +361,8 @@ struct AtomicValues {
     number_release_cells: atomic<u32>,
     number_release_particles: atomic<u32>,
     stopped_particles: atomic<u32>,
+    // resting particles counted during the current step, reset by update_sim_info
+    resting_particles: atomic<u32>,
 };
 
 struct G2PUpdate {

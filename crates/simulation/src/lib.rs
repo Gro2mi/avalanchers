@@ -1176,7 +1176,7 @@ impl Simulation {
         let sim_info = detection_sim.fetch_sim_info().await?;
         if !sim_info
             .parsed_flags()
-            .contains(SimInfoFlags::ALL_PARTICLES_STOPPED)
+            .intersects(SimInfoFlags::ALL_PARTICLES_STOPPED | SimInfoFlags::AT_REST)
         {
             warn!(
                 "crown detection simulation stopped at max_steps; entry counts may be incomplete"
@@ -4116,7 +4116,10 @@ mod avawog_diagnostics {
                 "non-finite particle velocity at step {}",
                 info.timestep
             );
-            final_stopped = states.iter().filter(|state| state.stopped).count();
+            final_stopped = states
+                .iter()
+                .filter(|state| state.stopped || state.resting)
+                .count();
             final_max_speed = velocities
                 .iter()
                 .map(|v| (v[0] * v[0] + v[1] * v[1]).sqrt())

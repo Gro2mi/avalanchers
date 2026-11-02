@@ -27,6 +27,10 @@ pub struct AtomicValues {
     pub number_release_cells: u32,
     pub number_release_particles: u32,
     pub stopped_particles: u32,
+    /// Particles resting during the last step; reset by update_sim_info.
+    pub resting_particles: u32,
+    /// Keeps the size a multiple of 16 bytes, matching the allocated buffer.
+    pub _pad: [u32; 3],
 }
 
 /// GPU layout mirror of the CenterOfMassResult struct in center_of_mass.wgsl

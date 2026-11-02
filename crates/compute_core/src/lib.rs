@@ -38,6 +38,7 @@ bitflags! {
         const CFL_EXCEEDED             = 1 << 1;
         const IS_NAN                   = 1 << 2;
         const PARTICLE_OUT_OF_DEM_DATA = 1 << 3;
+        const AT_REST                  = 1 << 28;
         const NO_NEW_CELLS             = 1 << 29;
         const ALL_PARTICLES_STOPPED    = 1 << 30;
         const SIM_STOPPED              = 1 << 31;
@@ -76,6 +77,7 @@ impl std::fmt::Debug for SimInfoFlags {
     }
 }
 
+const PARTICLE_RESTING: u32 = 1u32 << 26;
 const PARTICLE_FLYING: u32 = 1u32 << 27;
 const PARTICLE_OUT_OF_BOUNDS: u32 = 1u32 << 28;
 const PARTICLE_IS_NAN: u32 = 1u32 << 29;
@@ -89,6 +91,8 @@ pub struct ParticleState {
     pub is_nan: bool,
     pub out_of_dem_data: bool,
     pub stopped: bool,
+    /// Reversibly resting at low speed; may still be reactivated.
+    pub resting: bool,
     pub naturally_stopped: bool,
     pub timestep: u32,
 }
@@ -96,6 +100,7 @@ pub struct ParticleState {
 impl From<u32> for ParticleState {
     fn from(state: u32) -> Self {
         let stopped = state & PARTICLE_STOPPED != 0;
+        let resting = !stopped && state & PARTICLE_RESTING != 0;
         let is_nan = state & PARTICLE_IS_NAN != 0;
         let out_of_dem_data = state & PARTICLE_OUT_OF_DEM_DATA != 0;
         let out_of_bounds = state & PARTICLE_OUT_OF_BOUNDS == PARTICLE_OUT_OF_BOUNDS;
@@ -103,7 +108,8 @@ impl From<u32> for ParticleState {
             | PARTICLE_OUT_OF_BOUNDS
             | PARTICLE_IS_NAN
             | PARTICLE_OUT_OF_DEM_DATA
-            | PARTICLE_STOPPED;
+            | PARTICLE_STOPPED
+            | PARTICLE_RESTING;
 
         Self {
             flying: state & PARTICLE_FLYING == PARTICLE_FLYING,
@@ -111,8 +117,13 @@ impl From<u32> for ParticleState {
             is_nan,
             out_of_dem_data,
             stopped,
+            resting,
             naturally_stopped: !out_of_bounds && !is_nan && !out_of_dem_data,
-            timestep: if stopped { state & !status_flags } else { 0 },
+            timestep: if stopped || resting {
+                state & !status_flags
+            } else {
+                0
+            },
         }
     }
 }
@@ -1906,7 +1917,7 @@ impl ComputeOrchestrator {
         info!("{:#?}", atomic_values);
         if !sim_info
             .parsed_flags()
-            .contains(SimInfoFlags::ALL_PARTICLES_STOPPED)
+            .intersects(SimInfoFlags::ALL_PARTICLES_STOPPED | SimInfoFlags::AT_REST)
         {
             warn!(
                 "Simulation reached max steps without all particles stopping. Consider increasing max_steps or checking for issues in the simulation."
@@ -2093,6 +2104,19 @@ mod tests {
         assert!(!parsed.out_of_dem_data);
         assert!(!parsed.naturally_stopped);
         assert_eq!(parsed.timestep, 37);
+    }
+
+    #[test]
+    fn particle_state_decodes_resting_start_and_ignores_slow_counter() {
+        let resting = ParticleState::from(412u32 | PARTICLE_RESTING);
+        assert!(resting.resting);
+        assert!(!resting.stopped);
+        assert_eq!(resting.timestep, 412);
+
+        let slow = ParticleState::from(7u32);
+        assert!(!slow.resting);
+        assert!(!slow.stopped);
+        assert_eq!(slow.timestep, 0);
     }
 
     #[test]

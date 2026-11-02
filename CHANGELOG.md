@@ -12,6 +12,11 @@ All notable changes to this project might be documented in this file.
 - The particle arc step no longer adds the displacement twice per step.
 - Curvilinear: basal friction now also acts below `velocity_threshold`, so Coulomb friction
   holds material at rest while the driving force is below yield, independent of the timestep.
+- Curvilinear: slow particles no longer freeze permanently. They rest after 20 consecutive
+  steps below `velocity_threshold` and are reactivated once the grid speed exceeds twice the
+  threshold. Resting particles keep depositing mass but do not move.
+- Curvilinear: the simulation also stops (`AT_REST` flag) once 99% of the particles rest or
+  are stopped. The 40-step no-new-cells criterion is unchanged.
 
 ### Added
 - `sliding-block` (model 3): the previous per-particle terrain-following model.

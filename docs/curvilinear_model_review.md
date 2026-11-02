@@ -304,6 +304,9 @@ stop only at motionless equilibrium or the configured step limit. That proposal
 has not been implemented or accepted. In particular, very slow spreading runs
 can still freeze or terminate early under the retained policy.
 
+Superseded on 2026-11-01: see
+[Resting and stopping policy](#resting-and-stopping-policy) below.
+
 ### Step 5: verification time accounting and guardrails
 
 Elapsed time now advances by the timestep actually executed, before the next
@@ -566,3 +569,84 @@ The generated report and plot are in
 `verification/outputs/all_tests/curvature_20261031/report.md`; the complete
 five-benchmark report is in
 `verification/outputs/all_tests/curvilinear_20261031_with_curvature_test/report.md`.
+
+## Resting and stopping policy
+
+Date: 2026-11-01
+
+The aim is fast results with a stable avalanche outline and no endless
+unphysical creep, not an exact equilibrium. A few cells changing late, or a few
+particles still moving at stop, are acceptable.
+
+### Static friction on the grid
+
+Basal friction was previously skipped when the trial node speed was below
+`velocity_threshold`. Slow material was therefore driven by gravity and pressure
+with no resistance at all, and only the irreversible particle freeze ended its
+creep. Friction is now applied every step as a projection:
+
+```text
+v_trial = v + dt * (gravity + curvature - pressure)
+a_f     = friction(max(|v_trial|, velocity_threshold))
+v       = 0                                if a_f*dt >= |v_trial|
+v       = v_trial * (1 - a_f*dt/|v_trial|) otherwise
+```
+
+For Coulomb-type laws this is a yield criterion. A node at rest stays at rest
+while the driving acceleration is below `mu*g_n`. Both sides scale with `dt`, so
+the outcome is timestep independent. A Coulomb heap stops once its surface
+slope falls to about `mu`, rather than creeping forever. Frictionless runs are
+unaffected.
+
+### Reversible particle resting
+
+Permanent low-speed freezing is replaced by a `PARTICLE_RESTING` state (bit 26).
+`PARTICLE_STOPPED` is now only set for terminal cases: out of bounds, NaN, or
+outside the DEM.
+
+- A moving particle counts consecutive steps whose gathered surface speed is
+  below `velocity_threshold`. After 20 steps it rests. The delay keeps particles
+  from resting at run-up turning points or brief velocity reversals.
+- A resting particle keeps its position and has zero velocity and zero APIC
+  matrix. It still deposits mass, so pressure and stacking are unchanged, but it
+  adds no momentum.
+- A resting particle wakes once the gathered grid speed exceeds twice the
+  threshold. The hysteresis band keeps particles from flickering between states.
+  Incoming flow therefore remobilises a deposit.
+- The low state bits hold the slow-step counter while moving, and the rest start
+  step while resting. `ParticleState` decodes the latter as `timestep` and adds a
+  `resting` field.
+
+### Global stopping
+
+- The 40-step no-new-cells criterion is unchanged, including its non-atomic
+  counter. The approximate count is sufficient for this check.
+- For the curvilinear model, a new `AT_REST` flag (bit 28) stops the simulation
+  once resting plus stopped particles reach 99% of all particles. Other models
+  keep the exact all-particles-stopped criterion.
+
+### Results
+
+- A Coulomb block (`mu = 0.4`) on a 15-degree plane shows exactly zero
+  displacement at CFL 0.05 and 0.2, and stops with `AT_REST` after the 20 rest
+  steps. On a 30-degree plane it slides.
+- A 20 m Coulomb heap on flat ground (CFL 0.3) spreads from an RMS radius of
+  21.4 m to 34.8 m and stops with `AT_REST` at about 7.7 s, with no particle
+  above 0.1 m/s.
+- A deposit resting on flat ground stays exactly still until a slab from the
+  upstream slope reaches it. It is then pushed about 34 m on average.
+- At threshold 0.1, the frictionless flat heap now keeps spreading like the
+  zero-threshold run instead of stalling.
+- All five benchmarks pass with unchanged accuracy
+  ([report](../verification/outputs/all_tests/curvilinear_20261101_resting/report.md)).
+  In the energy-line and curvature runs, the final mass-weighted RMS speed drops
+  from about 0.063 m/s to 0.000 m/s. Those runs stop 14 to 16 steps later
+  because of the rest delay.
+
+### Known limitation
+
+The 40-step no-new-cells criterion counts steps, not time. With small timesteps
+it can still end a slowly spreading flow early, before its front crosses a new
+cell. The 20 m heap at CFL 0.05 stopped this way after 0.94 s, while most
+particles were still moving. This is the retained behavior, and the
+`AT_REST` criterion does not change it.
