@@ -2722,8 +2722,10 @@ mod tests {
         let mut sim: Simulation = block_on(Simulation::new()).expect("Failed to create Simulation");
         // a 6x6 DEM is smaller than the grid models' 3-cell p2g boundary, so
         // the fixture runs independent sliding blocks; tests override the model
+        // the step counts asserted by the fixture's users assume CFL 0.5
         let settings = Settings {
             sim_model: Some(SimModel::SlidingBlock),
+            cfl: Some(0.5),
             ..Default::default()
         };
         block_on(sim.create(settings)).expect("Failed to create simulation");
