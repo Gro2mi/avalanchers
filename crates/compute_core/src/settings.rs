@@ -247,6 +247,14 @@ impl SimSettings {
 
     pub fn from_settings(patch: &Settings, dem: &Dem) -> Self {
         let mut settings = SimSettings::new();
+        settings.apply_patch(patch);
+        settings.set_dem(dem);
+        settings
+    }
+
+    /// Overwrites the fields set in `patch`; unset fields keep their value.
+    pub fn apply_patch(&mut self, patch: &Settings) {
+        let settings = self;
         if let Some(val) = patch.max_steps {
             settings.max_steps = val;
         }
@@ -375,8 +383,6 @@ impl SimSettings {
                 settings.flags &= !(1 << 4);
             }
         }
-        settings.set_dem(dem);
-        settings
     }
 
     pub fn to_json(&self, path: &str) -> std::io::Result<()> {

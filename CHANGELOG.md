@@ -29,6 +29,15 @@ All notable changes to this project might be documented in this file.
   and at least 10 steps: 72 at CFL 0.9 instead of a fixed 40.
 
 ### Added
+- Reusable initial state for back calibration (Rust `Simulation` and Python `PySimulation`):
+  `store_initial_state()` prepares once and keeps the seeded, relaxed particle positions and
+  masses on the GPU; `update_settings(dict)` changes settings without reloading the data;
+  `restore_initial_state()` resets particle state and the peak fields for the next `run()`.
+  Changed settings re-run only the preparation stage they affect: model or reference surface
+  the full preparation, release thresholds, particles per cell or crown settings the release
+  and seeding, density or `slab_thickness_factor` a mass rescale.
+- `run()` no longer repeats terrain analysis, release areas and particle seeding when the
+  particles are already initialized (after `prepare()` or `restore_initial_state()`).
 - `sliding-block` (model 3): the previous per-particle terrain-following model.
 - Optional particle elevation jitter in the renderer (live viewer key `J`).
 - `particle_sort_interval` (CLI `--particle-sort-interval`, default 25): curvilinear P2G over

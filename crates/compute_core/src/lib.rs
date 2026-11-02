@@ -492,6 +492,40 @@ struct SimulationBindGroups {
     center_of_mass: BindGroup,
 }
 
+/// Particle buffers of a prepared simulation, kept so that later runs start
+/// from the same seeded and relaxed particles without repeating preparation.
+struct InitialParticles {
+    /// GPU copies of the buffers the simulation loop reads before it writes
+    /// them, keyed by the live buffer they restore.
+    buffers: Vec<(BufferName, wgpu::Buffer)>,
+    /// CPU copy of the particle masses, rescaled when density or release
+    /// thickness change.
+    mass: Vec<f32>,
+    /// Release counters written by initialize_particles.
+    atomic_values: AtomicValues,
+    number_particles: u32,
+    sim_model: u32,
+}
+
+/// Per-run state reset to zero before a restored run: particle state and the
+/// grid accumulators that reset_grid does not clear every step. Buffers that
+/// do not exist for the current model are skipped.
+const RUN_STATE_BUFFERS: [BufferName; 13] = [
+    BufferName::ParticlesVelocity,
+    BufferName::ParticlesState,
+    BufferName::ParticlesVelocityZ,
+    BufferName::ParticlesAffineMatrix,
+    BufferName::ParticlesAffineZ,
+    BufferName::ParticlesStress,
+    BufferName::ParticlesVolumetricStrain,
+    BufferName::GridCellCount,
+    BufferName::GridPeakVelocity,
+    BufferName::GridPeakFlowThickness,
+    BufferName::GridMassPrevious,
+    BufferName::GridVelocity,
+    BufferName::GridVelocityZ,
+];
+
 pub struct ComputeOrchestrator {
     pub instance: Instance,
     pub adapter: Adapter,
@@ -522,6 +556,7 @@ pub struct ComputeOrchestrator {
     has_float32_atomic: bool,
     pub enable_center_of_mass: bool,
     center_of_mass_biggest_blob: bool,
+    initial_particles: Option<InitialParticles>,
 }
 
 impl ComputeOrchestrator {
@@ -796,6 +831,7 @@ impl ComputeOrchestrator {
             completed_steps: 0,
             enable_center_of_mass: true,
             center_of_mass_biggest_blob: false,
+            initial_particles: None,
         })
     }
 
@@ -926,6 +962,7 @@ impl ComputeOrchestrator {
 
         self.simulation_pipelines = None;
         self.simulation_bind_groups = None;
+        self.initial_particles = None;
 
         self.dispatch_number_workgroups_x_2d =
             sim_settings.grid_shape_x.div_ceil(WORKGROUP_SIZE_2D);
@@ -1293,6 +1330,7 @@ impl ComputeOrchestrator {
                 self.max_particles
             ));
         }
+        self.initial_particles = None;
         let particle_count = usize::try_from(number_release_particles)
             .context("Particle count does not fit in usize")?;
         let particle_buffer_size_single_value = particle_count
@@ -2216,6 +2254,136 @@ impl ComputeOrchestrator {
     ) {
         self.resources
             .add_buffer_with_data(&self.device, name, data, usage);
+    }
+
+    /// Whether [`Self::store_initial_particles`] holds particles for a restore.
+    pub fn has_initial_particles(&self) -> bool {
+        self.initial_particles.is_some()
+    }
+
+    /// Keeps the freshly initialized particles for later runs: GPU copies of
+    /// their positions and masses (and elevations for the models that read
+    /// them before writing), plus the release counters. Must run after
+    /// [`Self::run_initialize_particles`] and before the first step.
+    pub async fn store_initial_particles(
+        &mut self,
+        sim_model: u32,
+        number_particles: u32,
+    ) -> Result<()> {
+        let mut names = vec![BufferName::ParticlesPosition, BufferName::ParticlesMass];
+        // terrain-following and sliding-block particles start their step from
+        // the stored elevation; the other models resample it from the DEM
+        if sim_model == SimModel::TerrainFollowing.as_int()
+            || sim_model == SimModel::SlidingBlock.as_int()
+        {
+            names.push(BufferName::ParticlesElevation);
+        }
+        let mut encoder = self
+            .device
+            .create_command_encoder(&CommandEncoderDescriptor {
+                label: Some("Store initial particles"),
+            });
+        let mut buffers = Vec::with_capacity(names.len());
+        for name in names {
+            let source = self
+                .resources
+                .get_buffer(&name)
+                .ok_or_else(|| anyhow!("{name} buffer not found"))?;
+            let copy = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(&format!("initial {name}")),
+                size: source.size(),
+                usage: BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            encoder.copy_buffer_to_buffer(source, 0, &copy, 0, source.size());
+            buffers.push((name, copy));
+        }
+        self.queue.submit(Some(encoder.finish()));
+
+        let mass = self.read_buffer::<f32>(BufferName::ParticlesMass).await?;
+        let atomic_values = *self
+            .read_buffer::<AtomicValues>(BufferName::AtomicValues)
+            .await?
+            .first()
+            .ok_or_else(|| anyhow!("AtomicValues buffer was empty"))?;
+        self.initial_particles = Some(InitialParticles {
+            buffers,
+            mass,
+            atomic_values,
+            number_particles,
+            sim_model,
+        });
+        Ok(())
+    }
+
+    /// Resets the GPU to the particles kept by [`Self::store_initial_particles`]:
+    /// positions, masses and release counters are restored, particle
+    /// velocities, states and the per-run grid accumulators are zeroed.
+    /// `mass_scale` multiplies the particle masses and `volume_scale` the
+    /// release volume, which is how density and release thickness enter the
+    /// particle initialization.
+    pub async fn restore_initial_particles(
+        &mut self,
+        mass_scale: f32,
+        volume_scale: f32,
+    ) -> Result<()> {
+        let initial = self
+            .initial_particles
+            .as_ref()
+            .ok_or_else(|| anyhow!("No initial particles stored"))?;
+        let mut encoder = self
+            .device
+            .create_command_encoder(&CommandEncoderDescriptor {
+                label: Some("Restore initial particles"),
+            });
+        for (name, copy) in &initial.buffers {
+            if *name == BufferName::ParticlesMass && mass_scale != 1.0 {
+                continue;
+            }
+            let target = self
+                .resources
+                .get_buffer(name)
+                .ok_or_else(|| anyhow!("{name} buffer not found"))?;
+            if target.size() != copy.size() {
+                return Err(anyhow!(
+                    "{name} buffer was resized since the initial particles were stored"
+                ));
+            }
+            encoder.copy_buffer_to_buffer(copy, 0, target, 0, copy.size());
+        }
+        for name in RUN_STATE_BUFFERS {
+            if let Some(buffer) = self.resources.get_buffer(&name)
+                && buffer.usage().contains(BufferUsages::COPY_DST)
+            {
+                encoder.clear_buffer(buffer, 0, None);
+            }
+        }
+        self.queue.submit(Some(encoder.finish()));
+
+        let mut atomic_values = initial.atomic_values;
+        atomic_values.estimated_release_volume =
+            (atomic_values.estimated_release_volume as f32 * volume_scale).round() as u32;
+        let mass = (mass_scale != 1.0).then(|| {
+            initial
+                .mass
+                .iter()
+                .map(|m| m * mass_scale)
+                .collect::<Vec<f32>>()
+        });
+        self.resources
+            .write_buffer(&self.queue, BufferName::AtomicValues, &[atomic_values])?;
+        if let Some(mass) = mass {
+            self.resources
+                .write_buffer(&self.queue, BufferName::ParticlesMass, &mass)?;
+        }
+        Ok(())
+    }
+
+    /// Particle count and model of the stored initial particles.
+    pub fn initial_particles_info(&self) -> Option<(u32, u32)> {
+        self.initial_particles
+            .as_ref()
+            .map(|initial| (initial.number_particles, initial.sim_model))
     }
 }
 

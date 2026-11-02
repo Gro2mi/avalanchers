@@ -113,6 +113,48 @@ pub enum SimulationState {
     Evaluated,
 }
 
+/// Inputs of the release stage besides the [`SimSettings`]; a change between
+/// [`Simulation::store_initial_state`] and
+/// [`Simulation::restore_initial_state`] re-runs the release areas and the
+/// particle initialization.
+#[derive(Debug, Clone, PartialEq)]
+struct ReleaseConfig {
+    release_areas_path: Option<String>,
+    release_hash: u64,
+    roi_hash: u64,
+    release_area_fraction: Option<f32>,
+    crown_line_method: CrownLineMethod,
+    crown_line_exit_distance: Option<f32>,
+    crown_elevation_band: Option<f32>,
+    min_particles_per_crown_cell: Option<u32>,
+    enable_particle_relaxation: bool,
+}
+
+/// Settings the stored initial particles were prepared with.
+struct InitialState {
+    settings: SimSettings,
+    release: ReleaseConfig,
+    /// Release thickness per cell as prepared, rescaled on the GPU together
+    /// with the particle masses when the release thickness changes.
+    release_areas: Vec<f32>,
+    /// Factor the GPU release areas currently carry relative to
+    /// `release_areas`.
+    release_areas_scale: f32,
+}
+
+/// Earliest preparation stage a settings change invalidates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum PreparationStage {
+    /// Only loop parameters changed: restore the stored particles.
+    None,
+    /// Density or release thickness changed: restore with rescaled masses.
+    ParticleMass,
+    /// The release cells may change: release areas and particle seeding.
+    Release,
+    /// The terrain analysis changes: full preparation.
+    Terrain,
+}
+
 /// Data produced by [`Simulation::load_data`] and consumed by
 /// [`Simulation::apply_data`]; splitting the two lets callers load data
 /// concurrently with GPU initialization.
@@ -209,6 +251,8 @@ pub struct Simulation {
     pub gpu_cache: GpuCache,
     /// Avalanche deposit mask extracted by [`Simulation::post_process`].
     pub ava_mask: Vec<bool>,
+    /// Settings of the particles kept by [`Simulation::store_initial_state`].
+    initial_state: Option<InitialState>,
     #[cfg(not(target_arch = "wasm32"))]
     output: Option<data_processor::output::Output>,
 }
@@ -249,6 +293,7 @@ impl Simulation {
             crown_candidates: Vec::new(),
             potential_release_areas: Vec::new(),
             ava_mask: Vec::new(),
+            initial_state: None,
             #[cfg(not(target_arch = "wasm32"))]
             output: None,
         })
@@ -279,6 +324,7 @@ impl Simulation {
         self.crown_line = Vec::new();
         self.crown_candidates = Vec::new();
         self.potential_release_areas = Vec::new();
+        self.initial_state = None;
         self.state = if self.dem.data1d.is_empty() {
             SimulationState::DemMissing
         } else {
@@ -389,6 +435,7 @@ impl Simulation {
         self.crown_line = Vec::new();
         self.crown_candidates = Vec::new();
         self.potential_release_areas = Vec::new();
+        self.initial_state = None;
 
         self.gpu_cache.reset_all();
 
@@ -603,6 +650,7 @@ impl Simulation {
             projection: String::new(),
         };
         self.settings.set_dem(&self.dem);
+        self.initial_state = None;
 
         self.state = SimulationState::DemLoaded;
         info!(
@@ -679,6 +727,210 @@ impl Simulation {
         let _ = self.load_release_areas().await?;
         self.initialize_particles().await?;
         Ok(())
+    }
+
+    /// Changes settings of a loaded simulation without reloading its data;
+    /// unset fields keep their value. The change takes effect with the next
+    /// [`Self::restore_initial_state`] or preparation. Input data (DEM,
+    /// release area and outline files, output path) can only be changed with
+    /// [`Self::create`].
+    pub fn update_settings(&mut self, patch: &Settings) -> Result<()> {
+        let data_keys = [
+            ("dem_path", patch.dem_path.is_some()),
+            ("release_areas_path", patch.release_areas_path.is_some()),
+            ("outlines_path", patch.outlines_path.is_some()),
+            ("outlines_padding", patch.outlines_padding.is_some()),
+            ("output_path", patch.output_path.is_some()),
+        ];
+        if let Some((key, _)) = data_keys.iter().find(|(_, is_set)| *is_set) {
+            bail!("`{key}` changes the input data; load it with create instead");
+        }
+        self.settings.apply_patch(patch);
+        if let Some(steps) = patch.batch_compute_steps {
+            self.orchestrator.batch_compute_steps = steps;
+        }
+        if let Some(interval) = patch.particle_sort_interval {
+            self.orchestrator.particle_sort_interval = interval;
+        }
+        if let Some(enable) = patch.enable_center_of_mass {
+            self.enable_center_of_mass = enable;
+            self.orchestrator.set_enable_center_of_mass(enable);
+        }
+        if let Some(enable) = patch.enable_particle_relaxation {
+            self.enable_particle_relaxation = enable;
+        }
+        if let Some(fraction) = patch.release_area_fraction {
+            self.release_area_fraction = Some(fraction);
+        }
+        if let Some(method) = patch.crown_line_method {
+            self.crown_line_method = method;
+        }
+        if let Some(distance) = patch.crown_line_exit_distance {
+            self.crown_line_exit_distance = Some(distance);
+        }
+        if let Some(band) = patch.crown_elevation_band {
+            self.crown_elevation_band = Some(band);
+        }
+        if let Some(count) = patch.min_particles_per_crown_cell {
+            self.min_particles_per_crown_cell = Some(count);
+        }
+        Ok(())
+    }
+
+    fn release_config(&self) -> ReleaseConfig {
+        let mut roi_hasher = DefaultHasher::new();
+        self.roi.hash(&mut roi_hasher);
+        ReleaseConfig {
+            release_areas_path: self.release_areas_path.clone(),
+            release_hash: self.release_hash(),
+            roi_hash: roi_hasher.finish(),
+            release_area_fraction: self.release_area_fraction,
+            crown_line_method: self.crown_line_method,
+            crown_line_exit_distance: self.crown_line_exit_distance,
+            crown_elevation_band: self.crown_elevation_band,
+            min_particles_per_crown_cell: self.min_particles_per_crown_cell,
+            enable_particle_relaxation: self.enable_particle_relaxation,
+        }
+    }
+
+    /// Whether the release thickness comes from `slab_thickness_factor`
+    /// (computed or estimated release areas) rather than a file or array.
+    fn release_thickness_from_settings(&self) -> bool {
+        self.release_areas_path.is_none() && self.release_areas_array.is_none()
+    }
+
+    fn preparation_stage(&self, initial: &InitialState) -> PreparationStage {
+        let (old, new) = (&initial.settings, &self.settings);
+        if old.sim_model != new.sim_model
+            || old.grid_shape_x != new.grid_shape_x
+            || old.grid_shape_y != new.grid_shape_y
+            || old.cell_size != new.cell_size
+            || old.world_size_x != new.world_size_x
+            || old.world_size_y != new.world_size_y
+            || old.reference_surface_length != new.reference_surface_length
+        {
+            return PreparationStage::Terrain;
+        }
+        if old.min_slope_angle != new.min_slope_angle
+            || old.max_slope_angle != new.max_slope_angle
+            || old.release_min_elevation != new.release_min_elevation
+            || old.release_max_elevation != new.release_max_elevation
+            || old.roughness_threshold != new.roughness_threshold
+            || old.released_particles_per_cell != new.released_particles_per_cell
+            || initial.release != self.release_config()
+        {
+            return PreparationStage::Release;
+        }
+        if old.density != new.density || old.slab_thickness_factor != new.slab_thickness_factor {
+            return PreparationStage::ParticleMass;
+        }
+        PreparationStage::None
+    }
+
+    /// Prepares the simulation if needed and keeps its initial particles on
+    /// the GPU, so that [`Self::restore_initial_state`] can start further
+    /// runs (e.g. a back calibration with changed friction parameters)
+    /// without repeating terrain analysis, release areas and particle
+    /// seeding. Only the particle positions and masses are kept; everything
+    /// else a run changes is reset on restore.
+    pub async fn store_initial_state(&mut self) -> Result<()> {
+        if self.state < SimulationState::ParticlesInitialized {
+            self.prepare().await?;
+        }
+        if self.state != SimulationState::ParticlesInitialized {
+            bail!(
+                "The initial state must be stored before the simulation runs; call prepare or restore_initial_state first"
+            );
+        }
+        self.orchestrator
+            .store_initial_particles(self.settings.sim_model, self.number_particles)
+            .await?;
+        let release_areas = self
+            .orchestrator
+            .read_buffer::<f32>(BufferName::ReleaseAreas)
+            .await?;
+        self.initial_state = Some(InitialState {
+            settings: self.settings,
+            release: self.release_config(),
+            release_areas,
+            release_areas_scale: 1.0,
+        });
+        Ok(())
+    }
+
+    /// Resets the simulation to the state kept by
+    /// [`Self::store_initial_state`], ready for the next [`Self::run`].
+    /// Settings changed since then (see [`Self::update_settings`]) take
+    /// effect; only the preparation stages they affect run again:
+    ///
+    /// - model, grid or reference surface: full preparation,
+    /// - release thresholds, particles per cell or release configuration:
+    ///   release areas and particle seeding,
+    /// - density or release thickness: the particle masses are rescaled,
+    /// - anything else: the stored particles are restored as they are.
+    pub async fn restore_initial_state(&mut self) -> Result<()> {
+        let Some(initial) = &self.initial_state else {
+            bail!("No initial state stored; call store_initial_state first");
+        };
+        let stage = self.preparation_stage(initial);
+        match stage {
+            PreparationStage::Terrain => {
+                info!("Settings change the terrain analysis; preparing again");
+                self.state = SimulationState::DemLoaded;
+                self.store_initial_state().await?;
+            }
+            PreparationStage::Release => {
+                info!("Settings change the release; seeding the particles again");
+                self.state = SimulationState::TerrainAnalyzed;
+                // the release shaders count with atomicAdd
+                self.orchestrator
+                    .write_buffer(BufferName::AtomicValues, &[AtomicValues::default()])
+                    .await?;
+                self.load_release_areas().await?;
+                self.initialize_particles().await?;
+                self.store_initial_state().await?;
+            }
+            PreparationStage::ParticleMass | PreparationStage::None => {}
+        }
+
+        let thickness_from_settings = self.release_thickness_from_settings();
+        let Some(initial) = &mut self.initial_state else {
+            bail!("No initial state stored; call store_initial_state first");
+        };
+        // the ratios are taken against the stored settings, so repeated
+        // restores do not drift
+        let thickness_scale = if thickness_from_settings {
+            self.settings.slab_thickness_factor / initial.settings.slab_thickness_factor
+        } else {
+            1.0
+        };
+        let mass_scale = self.settings.density / initial.settings.density * thickness_scale;
+        if thickness_scale != initial.release_areas_scale {
+            let release_areas: Vec<f32> = initial
+                .release_areas
+                .iter()
+                .map(|thickness| thickness * thickness_scale)
+                .collect();
+            self.orchestrator
+                .write_buffer(BufferName::ReleaseAreas, &release_areas)
+                .await?;
+            initial.release_areas_scale = thickness_scale;
+        }
+        self.orchestrator
+            .restore_initial_particles(mass_scale, thickness_scale)
+            .await?;
+
+        self.gpu_cache.reset_simulation_result();
+        self.gpu_cache.release_areas = None;
+        self.sim_info = SimInfo::default();
+        self.ava_mask = Vec::new();
+        self.state = SimulationState::ParticlesInitialized;
+        Ok(())
+    }
+
+    /// Whether [`Self::store_initial_state`] holds particles to restore.
+    pub fn has_initial_state(&self) -> bool {
+        self.initial_state.is_some()
     }
 
     /// Advances the simulation by up to `steps` steps, automatically running
@@ -782,23 +1034,26 @@ impl Simulation {
     /// in [`SimulationState::Finished`].
     ///
     /// Fails when the release areas contain no cells (nothing to simulate).
+    ///
+    /// Preparation is skipped when the particles are already initialized, by
+    /// [`Self::prepare`] or [`Self::restore_initial_state`].
     pub async fn run(&mut self) -> Result<()> {
-        self.analyze_terrain().await?;
-        timer_checkpoint("Terrain analyzed");
-        if !self.roi.is_empty() {
-            self.upload_roi().await?;
-        }
-        let _ = self.load_release_areas().await?;
-        timer_checkpoint("Release areas loaded");
-        if self.number_particles == 0 {
-            bail!("No particles to simulate! Check if release areas are correctly defined.");
-        } else {
+        if self.state != SimulationState::ParticlesInitialized {
+            self.analyze_terrain().await?;
+            timer_checkpoint("Terrain analyzed");
+            if !self.roi.is_empty() {
+                self.upload_roi().await?;
+            }
+            let _ = self.load_release_areas().await?;
+            timer_checkpoint("Release areas loaded");
+            if self.number_particles == 0 {
+                bail!("No particles to simulate! Check if release areas are correctly defined.");
+            }
             self.initialize_particles().await?;
             timer_checkpoint("Particles initialized");
-            self.compute_particles().await?;
-
-            self.sim_info = self.fetch_sim_info().await?;
         }
+        self.compute_particles().await?;
+        self.sim_info = self.fetch_sim_info().await?;
         self.state = SimulationState::Finished;
 
         timer_checkpoint("Simulation finished");
@@ -3590,6 +3845,154 @@ mod tests {
         assert!(!off.parsed_flags().contains(SimInfoFlags::LOW_MOMENTUM));
         assert!(on.parsed_flags().contains(SimInfoFlags::LOW_MOMENTUM));
         assert!(on.timestep < off.timestep);
+    }
+
+    /// Slab released on a 30 degree slope, with relaxed particles, for the
+    /// initial-state tests.
+    fn setup_restore_sim(sim_model: SimModel) -> Simulation {
+        let mut sim = setup_simple_sim(30.0, 5.0);
+        sim.settings.sim_model = sim_model.as_int();
+        sim.settings.max_steps = 150;
+        sim.set_dem(&create_slope(40, 40, 5.0, 30.0), 40, 40, 5.0)
+            .expect("Failed to set DEM");
+        let mut release = vec![0.0; 40 * 40];
+        for y in 16..24 {
+            for x in 16..24 {
+                release[y * 40 + x] = 1.0;
+            }
+        }
+        sim.set_release_areas(&release)
+            .expect("Failed to set release");
+        sim
+    }
+
+    /// Step count, peak flow thickness and peak velocity of a full run.
+    fn run_and_collect(sim: &mut Simulation) -> (u32, Vec<f32>, Vec<f32>) {
+        block_on(sim.run()).expect("Failed to run");
+        let timestep = sim.sim_info.timestep;
+        let thickness = block_on(sim.fetch_peak_flow_thickness())
+            .expect("Failed to fetch peak flow thickness")
+            .to_vec();
+        let velocity = block_on(sim.fetch_peak_velocity())
+            .expect("Failed to fetch peak velocity")
+            .clone();
+        (timestep, thickness, velocity)
+    }
+
+    /// Integer grid sums are order-independent, so repeated runs from the
+    /// same particles match exactly; float atomics may round differently.
+    fn assert_same_run(sim: &Simulation, left: &[f32], right: &[f32]) {
+        assert_eq!(left.len(), right.len());
+        if sim.orchestrator.has_float32_atomic() {
+            let max = left.iter().fold(0.0f32, |acc, v| acc.max(v.abs()));
+            for (l, r) in left.iter().zip(right) {
+                assert!((l - r).abs() <= 1e-3 * max.max(1.0), "{l} != {r}");
+            }
+        } else {
+            assert_eq!(left, right);
+        }
+    }
+
+    #[test_log::test]
+    fn test_restore_initial_state_repeats_the_run() {
+        for model in [SimModel::Curvilinear, SimModel::SlidingBlock] {
+            let mut sim = setup_restore_sim(model);
+            block_on(sim.store_initial_state()).expect("Failed to store initial state");
+            assert!(sim.has_initial_state());
+            let (steps, thickness, velocity) = run_and_collect(&mut sim);
+            assert!(thickness.iter().any(|h| *h > 0.0));
+
+            block_on(sim.restore_initial_state()).expect("Failed to restore");
+            assert_eq!(sim.get_state(), SimulationState::ParticlesInitialized);
+            let (steps_again, thickness_again, velocity_again) = run_and_collect(&mut sim);
+            assert_eq!(steps, steps_again, "{model}");
+            assert_same_run(&sim, &thickness, &thickness_again);
+            assert_same_run(&sim, &velocity, &velocity_again);
+        }
+    }
+
+    #[test_log::test]
+    fn test_restore_initial_state_applies_loop_settings() {
+        let mut sim = setup_restore_sim(SimModel::Curvilinear);
+        block_on(sim.store_initial_state()).expect("Failed to store initial state");
+        let (_, thickness, _) = run_and_collect(&mut sim);
+
+        let patch = Settings {
+            friction_coefficient: Some(0.5),
+            ..Default::default()
+        };
+        sim.update_settings(&patch)
+            .expect("Failed to update settings");
+        block_on(sim.restore_initial_state()).expect("Failed to restore");
+        let (_, thickness_rough, _) = run_and_collect(&mut sim);
+        assert_ne!(thickness, thickness_rough);
+
+        // back to the stored friction: the first run again
+        let patch = Settings {
+            friction_coefficient: Some(0.2),
+            ..Default::default()
+        };
+        sim.update_settings(&patch)
+            .expect("Failed to update settings");
+        block_on(sim.restore_initial_state()).expect("Failed to restore");
+        let (_, thickness_again, _) = run_and_collect(&mut sim);
+        assert_same_run(&sim, &thickness, &thickness_again);
+    }
+
+    #[test_log::test]
+    fn test_restore_initial_state_rescales_mass_and_reseeds_release() {
+        let mut sim = setup_restore_sim(SimModel::Curvilinear);
+        block_on(sim.store_initial_state()).expect("Failed to store initial state");
+        let positions = block_on(sim.fetch_particles_position())
+            .expect("Failed to fetch positions")
+            .clone();
+        let mass = block_on(sim.fetch_particles_mass())
+            .expect("Failed to fetch mass")
+            .clone();
+        run_and_collect(&mut sim);
+
+        // density only rescales the stored particles
+        let patch = Settings {
+            density: Some(400.0),
+            ..Default::default()
+        };
+        sim.update_settings(&patch)
+            .expect("Failed to update settings");
+        block_on(sim.restore_initial_state()).expect("Failed to restore");
+        let restored_positions = block_on(sim.fetch_particles_position())
+            .expect("Failed to fetch positions")
+            .clone();
+        let restored_mass = block_on(sim.fetch_particles_mass())
+            .expect("Failed to fetch mass")
+            .clone();
+        assert_eq!(positions, restored_positions);
+        for (m, restored) in mass.iter().zip(&restored_mass) {
+            assert!((m * 2.0 - restored).abs() <= 1e-6 * restored.abs());
+        }
+
+        // particles per cell change the seeding
+        let number_particles = sim.number_particles();
+        let patch = Settings {
+            released_particles_per_cell: Some(4),
+            ..Default::default()
+        };
+        sim.update_settings(&patch)
+            .expect("Failed to update settings");
+        block_on(sim.restore_initial_state()).expect("Failed to restore");
+        assert_eq!(sim.number_particles(), number_particles / 2);
+        let (_, thickness, _) = run_and_collect(&mut sim);
+        assert!(thickness.iter().any(|h| *h > 0.0));
+    }
+
+    #[test_log::test]
+    fn test_update_settings_rejects_input_data() {
+        let mut sim = setup_restore_sim(SimModel::Curvilinear);
+        let patch = Settings {
+            dem_path: Some("other.tif".to_string()),
+            ..Default::default()
+        };
+        assert!(sim.update_settings(&patch).is_err());
+        assert!(block_on(sim.restore_initial_state()).is_err());
     }
 
     #[test_log::test]
