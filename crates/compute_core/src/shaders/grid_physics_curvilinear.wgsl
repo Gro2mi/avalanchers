@@ -31,6 +31,13 @@ fn grid_physics_curvilinear(@builtin(global_invocation_id) id: vec3u) {
     let use_entrainment: bool = (sim_settings.flags & (1u << 3u)) != 0u;
 
     let idx = xy_to_idx(id.xy);
+    // No particle gathers from a node whose 3x3 neighbourhood holds no mass:
+    // each particle deposits at least a quarter of its mass onto its stencil
+    // centre, which neighbours all nine nodes the particle gathers from.
+    if neighbourhood_is_empty(id.xy) {
+        grid_velocity[idx] = vec2f(0.0);
+        return;
+    }
     let terrain_geometry_texture_data = textureLoad(terrain_geometry_texture, vec2<i32>(id.xy), 0);
 
     // 2. Unpack precalculated elements
@@ -151,6 +158,17 @@ fn grid_physics_curvilinear(@builtin(global_invocation_id) id: vec3u) {
     // if V_mag > 1f {
     //     grid_peak_velocity[idx] = max(grid_peak_velocity[idx], V_mag);
     // }
+}
+
+fn neighbourhood_is_empty(xy: vec2u) -> bool {
+    for (var y = xy.y - 1u; y <= xy.y + 1u; y++) {
+        for (var x = xy.x - 1u; x <= xy.x + 1u; x++) {
+            if f32(grid_mass_atomic[x_y_to_idx(x, y)]) > 0.0 {
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 fn get_h2(x: u32, y: u32) -> f32 {
