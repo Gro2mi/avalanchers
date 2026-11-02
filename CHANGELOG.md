@@ -10,6 +10,8 @@ All notable changes to this project might be documented in this file.
   pressure and basal friction on the grid with bed-normal projection; particles keep the
   curvature-corrected arc step and snap onto the DEM.
 - The particle arc step no longer adds the displacement twice per step.
+- Curvilinear: basal friction now also acts below `velocity_threshold`, so Coulomb friction
+  holds material at rest while the driving force is below yield, independent of the timestep.
 
 ### Added
 - `sliding-block` (model 3): the previous per-particle terrain-following model.

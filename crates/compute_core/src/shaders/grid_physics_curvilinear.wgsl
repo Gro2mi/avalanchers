@@ -106,22 +106,23 @@ fn grid_physics_curvilinear(@builtin(global_invocation_id) id: vec3u) {
 
     let g_eff = g_normal;
 
-    if proposed_V_mag > sim_settings.velocity_threshold {
-        let friction_acceleration = basal_friction_acceleration(g_eff, sim_settings.snow_density, proposed_V_mag, h, sim_settings.friction_model);
+    // Friction is applied at every speed, so Coulomb resistance also acts as
+    // static friction: a node at rest stays at rest while the driving
+    // acceleration is below the yield value, independent of dt. Evaluating at
+    // no less than velocity_threshold keeps the low-speed gate of the shared
+    // friction model from switching it off.
+    let friction_speed = max(proposed_V_mag, sim_settings.velocity_threshold);
+    let friction_acceleration = basal_friction_acceleration(g_eff, sim_settings.snow_density, friction_speed, h, sim_settings.friction_model);
 
-        // If friction would reverse or completely zero out the momentum this step
-        if (friction_acceleration * sim_info.dt) >= proposed_V_mag {
-            u = 0.0;
-            v = 0.0;
-        } else {
-            // Apply friction cleanly as a scaling factor
-            let friction_scale = 1.0 - (friction_acceleration * sim_info.dt / proposed_V_mag);
-            u = proposed_u * friction_scale;
-            v = proposed_v * friction_scale;
-        }
+    // If friction would reverse or completely zero out the momentum this step
+    if (friction_acceleration * sim_info.dt) >= proposed_V_mag {
+        u = 0.0;
+        v = 0.0;
     } else {
-        u = proposed_u;
-        v = proposed_v;
+        // Apply friction cleanly as a scaling factor
+        let friction_scale = 1.0 - (friction_acceleration * sim_info.dt / proposed_V_mag);
+        u = proposed_u * friction_scale;
+        v = proposed_v * friction_scale;
     }
 
     // u = 
