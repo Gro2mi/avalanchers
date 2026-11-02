@@ -158,8 +158,42 @@ def test_stopped_batch_preserves_last_grid_snapshot():
     assert sim.run_n_steps(1).elapsed_time == final_time
 
 
+SIM_STOPPED = 1 << 31
+SIM_AT_REST = 1 << 28
+
+
+def rest_simulation(dem, release, **overrides):
+    sim = avalanchers.PySimulation.new()
+    sim.create({
+        "sim_model": "curvilinear",
+        "friction_model": "coulomb",
+        "friction_coefficient": 0.4,
+        "density": 200.0,
+        "released_particles_per_cell": 16,
+        "max_steps": 3000,
+        "cfl": 0.05,
+        "velocity_threshold": 0.1,
+        "enable_curvature": False,
+        "enable_particle_interaction": True,
+        "enable_particle_relaxation": False,
+        **overrides,
+    })
+    sim.set_dem_with_bounds(np.ascontiguousarray(dem.astype(np.float32)), 5.0, 0.0, 320.0, 0.0, 320.0, 1.0)
+    sim.set_release_areas(np.ascontiguousarray(release.astype(np.float32)))
+    sim.prepare()
+    return sim
+
+
+def run_until_stopped(sim, max_batches=30):
+    for _ in range(max_batches):
+        info = sim.run_n_steps(100)
+        if info.flags & SIM_STOPPED:
+            break
+    return info
+
+
 @pytest.mark.parametrize("threshold", [0.0, 0.1])
-def test_flat_heap_spreading_and_retained_freezing_policy(threshold):
+def test_frictionless_flat_heap_keeps_spreading_with_resting(threshold):
     sim, _, _ = plane_simulation(0.0, velocity_threshold=threshold)
     y, x = np.mgrid[:64, :64]
     x, y = (x + 0.5) * 5.0, (y + 0.5) * 5.0
@@ -174,12 +208,63 @@ def test_flat_heap_spreading_and_retained_freezing_policy(threshold):
     info = sim.run_n_steps(100)
     after = np.asarray(sim.particles_position_xy, dtype=np.float64)
     final_radius = np.sqrt(np.mean(np.sum((after - 160.0)**2, axis=1)))
-    if threshold == 0.0:
-        assert not info.flags & (1 << 31)
-        assert final_radius > initial_radius + 1.0
+    # without friction, slow pressure-driven spreading must not freeze
+    assert not info.flags & SIM_STOPPED
+    assert final_radius > initial_radius + 1.0
+
+
+@pytest.mark.parametrize("cfl", [0.05, 0.2])
+@pytest.mark.parametrize("angle, slides", [(15.0, False), (30.0, True)])
+def test_coulomb_static_friction_holds_block_below_yield(angle, slides, cfl):
+    x = (np.mgrid[:64, :64][1] + 0.5) * 5.0
+    release = np.zeros((64, 64))
+    release[24:40, 24:40] = 1.0
+    sim = rest_simulation(1000.0 - math.tan(math.radians(angle)) * x, release,
+                          cfl=cfl, enable_particle_interaction=False)
+    before = np.asarray(sim.particles_position_xy, dtype=np.float64)
+    info = sim.run_n_steps(50)
+    displacement = np.linalg.norm(np.asarray(sim.particles_position_xy) - before, axis=1)
+    if slides:
+        assert displacement.min() > 1.0
+        assert not info.flags & SIM_STOPPED
     else:
-        assert info.flags & (1 << 31)
-        assert final_radius < initial_radius + 0.2
+        # tan(15 deg) < mu: no creep at any timestep, rest after REST_STEPS
+        assert displacement.max() == 0.0
+        assert info.flags & SIM_AT_REST
+        assert info.timestep >= 19
+
+
+def test_coulomb_heap_comes_to_rest():
+    y, x = np.mgrid[:64, :64]
+    x, y = (x + 0.5) * 5.0, (y + 0.5) * 5.0
+    release = np.maximum(20.0 * (1.0 - ((x - 160.0) / 30.0)**2 - ((y - 160.0) / 30.0)**2), 0.0)
+    sim = rest_simulation(np.zeros((64, 64)), release, cfl=0.3)
+    before = np.asarray(sim.particles_position_xy, dtype=np.float64)
+    initial_radius = np.sqrt(np.mean(np.sum((before - 160.0)**2, axis=1)))
+    info = run_until_stopped(sim)
+    after = np.asarray(sim.particles_position_xy, dtype=np.float64)
+    final_radius = np.sqrt(np.mean(np.sum((after - 160.0)**2, axis=1)))
+    speed = np.linalg.norm(np.asarray(sim.particles_velocity_xy), axis=1)
+    assert info.flags & SIM_AT_REST
+    assert final_radius > initial_radius + 5.0
+    assert np.mean(speed > 0.1) <= 0.01
+
+
+def test_resting_deposit_is_remobilised_by_incoming_flow():
+    x = (np.mgrid[:64, :64][1] + 0.5) * 5.0
+    dem = np.where(x < 150.0, (150.0 - x) * math.tan(math.radians(35.0)), 0.0)
+    release = np.zeros((64, 64))
+    release[24:40, 4:14] = 3.0
+    release[24:40, 36:44] = 0.5
+    sim = rest_simulation(dem, release, cfl=0.2)
+    before = np.asarray(sim.particles_position_xy, dtype=np.float64)
+    deposit = before[:, 0] > 175.0
+    sim.run_n_steps(100)
+    displacement = np.linalg.norm(np.asarray(sim.particles_position_xy) - before, axis=1)
+    assert displacement[deposit].max() == 0.0
+    run_until_stopped(sim)
+    displacement = np.linalg.norm(np.asarray(sim.particles_position_xy) - before, axis=1)
+    assert displacement[deposit].mean() > 5.0
 
 
 @pytest.mark.parametrize("error, final_time, expected", [
