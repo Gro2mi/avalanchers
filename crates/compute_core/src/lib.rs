@@ -955,6 +955,24 @@ impl ComputeOrchestrator {
             TextureFormat::R32Float,
             texture_usage_input,
         )?;
+        if sim_settings.sim_model == SimModel::Curvilinear.as_int() {
+            // the surface the flow follows; finer terrain becomes basal topography
+            let reference = crate::dem::smooth_gaussian(
+                &dem.data1d,
+                dem.width,
+                dem.height,
+                sim_settings.reference_surface_length / sim_settings.cell_size,
+            );
+            self.resources.add_texture_with_data(
+                &self.device,
+                &self.queue,
+                reference.as_slice(),
+                TextureName::DemReference,
+                self.texture_size,
+                TextureFormat::R32Float,
+                texture_usage_input,
+            )?;
+        }
         match sim_settings.sim_model {
             0 | 2 | 3 => self.run_shader(
                 &ShaderName::AnalyzeTerrain,

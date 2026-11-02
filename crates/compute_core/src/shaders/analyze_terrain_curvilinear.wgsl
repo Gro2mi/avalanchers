@@ -6,6 +6,14 @@
 @group(0) @binding(4) var<storage, read_write> slope_angle_buffer: array<f32>;
 @group(0) @binding(5) var<storage, read_write> slope_aspect_buffer: array<f32>;
 @group(0) @binding(6) var<storage, read_write> debug: array<f32>;
+// Gaussian-smoothed DEM (a copy of the DEM when reference_surface_length is 0)
+@group(0) @binding(7) var dem_reference_texture: texture_2d<f32>;
+// x = cos(beta) between the bed and reference surface normals
+@group(0) @binding(8) var basal_topography_texture: texture_storage_2d<rgba32float, write>;
+
+// Gully walls steeper than 70 degrees against the reference surface load
+// the flow like 70 degree walls (keeps 1 / cos(beta) bounded at cliffs)
+const MIN_COS_BETA: f32 = 0.34202014;
 
 @compute @workgroup_size(WG_SIZE_2D, WG_SIZE_2D, 1)
 fn analyze_terrain_curvilinear(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -80,12 +88,26 @@ fn analyze_terrain_curvilinear(@builtin(global_invocation_id) id: vec3<u32>) {
         slope_aspect_deg = -1.0;
     }
 
-    // 9. Write everything to WebGPU Storage Buffers
+    // 9. Inclination beta of the bed against the smoothed reference surface,
+    //    the gully wall angle (cos(beta) = 1 exactly when disabled)
+    var basal_topography = vec4f(1.0, 0.0, 0.0, 0.0);
+    if sim_settings.reference_surface_length > 0.0 {
+        let ref_dx = (textureLoad(dem_reference_texture, coords + vec2<i32>(1, 0), 0).r
+            - textureLoad(dem_reference_texture, coords + vec2<i32>(-1, 0), 0).r) / (2.0 * dx);
+        let ref_dy = (textureLoad(dem_reference_texture, coords + vec2<i32>(0, 1), 0).r
+            - textureLoad(dem_reference_texture, coords + vec2<i32>(0, -1), 0).r) / (2.0 * dy);
+        let ref_J = sqrt(1.0 + ref_dx * ref_dx + ref_dy * ref_dy);
+        let cos_beta = (dB_dx * ref_dx + dB_dy * ref_dy + 1.0) / (J * ref_J);
+        basal_topography.x = clamp(cos_beta, MIN_COS_BETA, 1.0);
+    }
+
+    // 10. Write everything to WebGPU Storage Buffers
     let index = xy_to_idx(id.xy);
 
     // Curvilinear physics buffer
     textureStore(curvature_texture, coords, vec4f(K_xx, K_yy, K_xy, g_x));
     textureStore(terrain_geometry_texture, coords, vec4f(l_x, l_y, J, g_y));
+    textureStore(basal_topography_texture, coords, basal_topography);
 
     // New analysis buffers
     slope_angle_buffer[index] = slope_angle_deg;
@@ -216,8 +238,9 @@ struct SimSettings {
     momentum_stop_fraction: f32,
     // front travel in cells covered by the no-new-cells stop window
     no_new_cells_travel: f32,
+    // Gaussian width (m) of the curvilinear reference surface; 0 disables it
+    reference_surface_length: f32,
     _pad1: u32,
-    _pad2: u32,
 };
 
 struct AtomicValues {

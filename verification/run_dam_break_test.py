@@ -66,6 +66,8 @@ SETTINGS = {
     "cfl": 0.05,
     "velocity_threshold": 0.01,
     "enable_particle_interaction": True,
+    # the Faccanoni & Mangeney solution is hydrostatic (K = 1)
+    "enable_earth_pressure_coefficient": False,
     "enable_particle_relaxation": True,
     "max_steps": 20000,
 }

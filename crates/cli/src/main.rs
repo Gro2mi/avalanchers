@@ -82,6 +82,8 @@ struct Args {
     momentum_stop_fraction: Option<f32>,
     #[arg(long)]
     no_new_cells_travel: Option<f32>,
+    #[arg(long)]
+    reference_surface_length: Option<f32>,
     #[arg(long, value_parser = parse_friction_model)]
     friction_model: Option<FrictionModel>,
     #[arg(long)]
@@ -208,6 +210,9 @@ impl Args {
         }
         if let Some(value) = self.no_new_cells_travel {
             settings.no_new_cells_travel = Some(value);
+        }
+        if let Some(value) = self.reference_surface_length {
+            settings.reference_surface_length = Some(value);
         }
         if let Some(value) = self.friction_model {
             settings.friction_model = Some(value);
@@ -465,6 +470,7 @@ mod tests {
             particle_sort_interval: None,
             momentum_stop_fraction: None,
             no_new_cells_travel: None,
+            reference_surface_length: None,
             released_particles_per_cell: None,
             slab_thickness_factor: None,
             friction_coefficient: None,

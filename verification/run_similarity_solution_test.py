@@ -154,6 +154,8 @@ def run_simulation(settings, cfg):
                                      settings["sim_model"],
                                      settings["friction_model"],
                                      cfg["delta"])
+    if cfg["flag_earth"]:
+        sim_name += "_earth"
     print(f"=== Similarity solution test (Hutter et al. 1993) - {sim_name} ===")
     print(f"DEM: {settings['dem_path']}")
     print(f"plane {cfg['zeta']:.2f} deg, bed friction {cfg['delta']:.2f} deg "
@@ -261,6 +263,9 @@ def main():
     parser.add_argument("--delta", type=float, default=None,
                         help="bed friction angle in degrees")
     parser.add_argument("--max-steps", type=int, default=None)
+    parser.add_argument("--earth-pressure", action="store_true",
+                        help="Savage-Hutter earth pressure coefficients in the "
+                             "analytic solution and the simulation")
     parser.add_argument("--out-dir", default=str(OUTPUT_DIR))
     parser.add_argument("--gpu", default=None, help="GPU name substring to select")
     parser.add_argument("--plot-sequence", action="store_true",
@@ -284,7 +289,12 @@ def main():
         cfg["delta"] = args.delta
     if args.max_steps is not None:
         settings["max_steps"] = args.max_steps
+    cfg["flag_earth"] = cfg["flag_earth"] or args.earth_pressure
     settings["friction_coefficient"] = math.tan(math.radians(cfg["delta"]))
+    # earth pressure as in the analytic solution (Savage-Hutter K from phi, delta)
+    settings["enable_earth_pressure_coefficient"] = cfg["flag_earth"]
+    settings["internal_friction_angle"] = cfg["phi"]
+    settings["basal_friction_angle"] = cfg["delta"]
     cfg["plot_sequence"] = cfg["plot_sequence"] or args.plot_sequence
 
     import similarity_solution_test as sst

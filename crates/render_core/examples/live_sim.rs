@@ -83,6 +83,8 @@ const DEFAULT_ROUGHNESS_THRESHOLD: f32 = 0.01;
 const DEFAULT_INTERNAL_FRICTION_ANGLE: f32 = 40.0;
 const DEFAULT_RELEASED_PARTICLES_PER_CELL: u32 = 8;
 const DEFAULT_MAX_STEPS: u32 = 6000;
+/// 0 disables the curvilinear reference-surface split (gully confinement)
+const DEFAULT_REFERENCE_SURFACE_LENGTH: f32 = 0.0;
 
 /// Fills in every field the settings panel edits with the engine defaults from
 /// `SimSettings::new`. `from_settings` already falls back to those values for unset
@@ -122,6 +124,9 @@ fn apply_panel_defaults(settings: &mut Settings) {
         .released_particles_per_cell
         .get_or_insert(DEFAULT_RELEASED_PARTICLES_PER_CELL);
     settings.max_steps.get_or_insert(DEFAULT_MAX_STEPS);
+    settings
+        .reference_surface_length
+        .get_or_insert(DEFAULT_REFERENCE_SURFACE_LENGTH);
     settings.sim_model.get_or_insert(SimModel::Curvilinear);
     settings
         .friction_model
@@ -1399,6 +1404,26 @@ impl ApplicationHandler for Viewer {
                                     &mut draft.roughness_threshold,
                                     0.001..=1.0,
                                     0.001,
+                                );
+                                // curvilinear only; 0 disables the gully confinement
+                                ui.add_enabled_ui(
+                                    draft.sim_model == Some(SimModel::Curvilinear),
+                                    |ui| {
+                                        f32_slider(
+                                            ui,
+                                            "reference surface length (m)",
+                                            DEFAULT_REFERENCE_SURFACE_LENGTH,
+                                            &mut draft.reference_surface_length,
+                                            0.0..=100.0,
+                                            1.0,
+                                        )
+                                        .0
+                                        .on_hover_text(
+                                            "Gully confinement: terrain narrower than this \
+                                             Gaussian width counts as gully walls with \
+                                             extra friction. 0 = off",
+                                        );
+                                    },
                                 );
                             });
 

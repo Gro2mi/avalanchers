@@ -112,8 +112,11 @@ pub struct SimSettings {
     /// The no-new-cells stop window spans round(travel / cfl) steps, at least
     /// 10: the steps the fastest material needs to travel this many cells.
     pub no_new_cells_travel: f32,
+    /// Curvilinear: Gaussian width (m) of the reference surface that defines
+    /// gully wall inclinations for the confinement friction; 0 disables it.
+    pub reference_surface_length: f32,
     /// Keeps the uniform size a multiple of 16 bytes.
-    pub _pad: [u32; 2],
+    pub _pad: [u32; 1],
 }
 
 impl Hash for SimSettings {
@@ -156,6 +159,7 @@ impl Hash for SimSettings {
         self.compaction_pressure.to_bits().hash(state);
         self.momentum_stop_fraction.to_bits().hash(state);
         self.no_new_cells_travel.to_bits().hash(state);
+        self.reference_surface_length.to_bits().hash(state);
         // Flags
         self.flags.hash(state);
     }
@@ -224,7 +228,8 @@ impl SimSettings {
 
             momentum_stop_fraction: 0.0,
             no_new_cells_travel: 65.0,
-            _pad: [0; 2],
+            reference_surface_length: 0.0,
+            _pad: [0; 1],
         }
     }
 
@@ -331,6 +336,9 @@ impl SimSettings {
         }
         if let Some(val) = patch.no_new_cells_travel {
             settings.no_new_cells_travel = val;
+        }
+        if let Some(val) = patch.reference_surface_length {
+            settings.reference_surface_length = val;
         }
         if let Some(val) = patch.enable_curvature {
             if val {
@@ -763,6 +771,11 @@ pub struct Settings {
     /// the steps the fastest material needs to travel this many cells,
     /// round(travel / cfl) and at least 10 (default 65 cells, 72 steps at CFL 0.9).
     pub no_new_cells_travel: Option<f32>,
+    /// Curvilinear: Gaussian width (m) of the smoothed reference surface.
+    /// Bed inclined by beta against it counts as a gully wall whose normal
+    /// load grows by 1 + K tan^2(beta) from the lateral pressure of the snow
+    /// beside it; 0 or unset disables it.
+    pub reference_surface_length: Option<f32>,
 
     pub enable_curvature: Option<bool>,
     pub enable_particle_interaction: Option<bool>,
@@ -910,6 +923,7 @@ mod tests {
             particle_sort_interval: None,
             momentum_stop_fraction: None,
             no_new_cells_travel: None,
+            reference_surface_length: Some(12.5),
             cfl: Some(0.9),
             min_slope_angle: Some(10.0),
             max_slope_angle: Some(20.0),

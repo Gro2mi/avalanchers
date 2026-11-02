@@ -198,8 +198,9 @@ struct SimSettings {
     momentum_stop_fraction: f32,
     // front travel in cells covered by the no-new-cells stop window
     no_new_cells_travel: f32,
+    // Gaussian width (m) of the curvilinear reference surface; 0 disables it
+    reference_surface_length: f32,
     _pad1: u32,
-    _pad2: u32,
 };
 
 struct AtomicValues {

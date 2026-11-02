@@ -328,6 +328,11 @@ pub enum TextureName {
     TerrainGeometry,
     // x = K_xx, y = K_yy, z = K_xy, w = g_x
     Curvature,
+    /// Gaussian-smoothed DEM the curvilinear flow follows
+    DemReference,
+    /// x = b / J_ref (basal topography normal to the reference surface),
+    /// y = cos(beta) between bed and reference surface normals
+    BasalTopography,
 }
 
 impl TextureName {
@@ -336,6 +341,8 @@ impl TextureName {
             TextureName::Dem => "dem",
             TextureName::TerrainGeometry => "terrain_geometry",
             TextureName::Curvature => "curvature",
+            TextureName::DemReference => "dem_reference",
+            TextureName::BasalTopography => "basal_topography",
         }
     }
 }
@@ -353,6 +360,8 @@ impl std::str::FromStr for TextureName {
             "dem" => Ok(TextureName::Dem),
             "terrain_geometry" => Ok(TextureName::TerrainGeometry),
             "curvature" => Ok(TextureName::Curvature),
+            "dem_reference" => Ok(TextureName::DemReference),
+            "basal_topography" => Ok(TextureName::BasalTopography),
             _ => Err(format!("Unknown texture name: {}", name)),
         }
     }
@@ -901,6 +910,13 @@ pub fn create_buffers_and_texture_descriptions(
         TextureFormat::Rgba32Float,
         texture_usage_default,
     );
+    gpu_resources.add_texture(
+        device,
+        TextureName::BasalTopography,
+        texture_size,
+        TextureFormat::Rgba32Float,
+        texture_usage_default,
+    );
     gpu_resources.add_buffer(
         device,
         BufferName::SimSettings,
@@ -1121,6 +1137,8 @@ mod tests {
             (TextureName::Dem, "dem"),
             (TextureName::TerrainGeometry, "terrain_geometry"),
             (TextureName::Curvature, "curvature"),
+            (TextureName::DemReference, "dem_reference"),
+            (TextureName::BasalTopography, "basal_topography"),
         ];
 
         for (name, expected) in cases {

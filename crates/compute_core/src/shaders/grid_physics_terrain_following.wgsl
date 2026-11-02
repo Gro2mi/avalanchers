@@ -12,9 +12,10 @@
 @group(0) @binding(8) var<storage, read_write> sim_info: SimInfo;
 @group(0) @binding(9) var<storage, read_write> grid_velocity: array<vec2f>;
 @group(0) @binding(10) var<storage, read_write> grid_peak_velocity: array<f32>;
-@group(0) @binding(11) var<storage> grid_momentum_z_atomic: array<i32>; // no_atomic_float
-// atomic_float @group(0) @binding(11) var<storage> grid_momentum_z_atomic: array<f32>;
-@group(0) @binding(12) var<storage, read_write> grid_velocity_z: array<f32>;
+// binding 11 (basal topography) is shared with the curvilinear layout, unused here
+@group(0) @binding(12) var<storage> grid_momentum_z_atomic: array<i32>; // no_atomic_float
+// atomic_float @group(0) @binding(12) var<storage> grid_momentum_z_atomic: array<f32>;
+@group(0) @binding(13) var<storage, read_write> grid_velocity_z: array<f32>;
 
 // Cartesian counterpart of grid_physics_curvilinear: the node velocity is a
 // 3D vector tangent to the bed, forces are projected with the bed normal.
@@ -356,8 +357,9 @@ struct SimSettings {
     momentum_stop_fraction: f32,
     // front travel in cells covered by the no-new-cells stop window
     no_new_cells_travel: f32,
+    // Gaussian width (m) of the curvilinear reference surface; 0 disables it
+    reference_surface_length: f32,
     _pad1: u32,
-    _pad2: u32,
 };
 
 struct AtomicValues {

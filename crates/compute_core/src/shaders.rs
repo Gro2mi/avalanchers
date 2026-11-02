@@ -550,6 +550,26 @@ pub fn create_shader_configs(
                         min_binding_size: None,
                     },
                 ),
+                // Binding 7:
+                (
+                    TextureName::DemReference.to_string(),
+                    BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float {
+                            filterable: has_float32_filterable,
+                        },
+                    },
+                ),
+                // Binding 8:
+                (
+                    TextureName::BasalTopography.to_string(),
+                    BindingType::StorageTexture {
+                        access: StorageTextureAccess::WriteOnly,
+                        format: TextureFormat::Rgba32Float,
+                        view_dimension: TextureViewDimension::D2,
+                    },
+                ),
             ],
         )?,
     );
@@ -2203,6 +2223,17 @@ pub fn create_shader_configs(
                         min_binding_size: None,
                     },
                 ),
+                // Binding 11:
+                (
+                    TextureName::BasalTopography.to_string(),
+                    BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float {
+                            filterable: has_float32_filterable,
+                        },
+                    },
+                ),
             ],
         )?,
     );
@@ -2242,9 +2273,9 @@ pub fn create_shader_configs(
     let mut terrain_following_grid_physics_bindings =
         existing_bindings(ShaderName::GridPhysicsCurvilinear);
     terrain_following_grid_physics_bindings.extend([
-        // Binding 11:
-        (BufferName::GridMomentumZ.to_string(), storage_buffer(true)),
         // Binding 12:
+        (BufferName::GridMomentumZ.to_string(), storage_buffer(true)),
+        // Binding 13:
         (BufferName::GridVelocityZ.to_string(), storage_buffer(false)),
     ]);
     let mut terrain_following_g2p_bindings = existing_bindings(ShaderName::G2P);
@@ -2978,29 +3009,48 @@ mod tests {
 
     // The float-atomic variants cannot run on GPUs without float atomics, so
     // at least validate the WGSL that would be compiled there.
+    fn validate_wgsl(shader: ShaderName, has_float32_atomic: bool) -> &'static str {
+        let source = load_shader_source(shader, has_float32_atomic);
+        let module = naga::front::wgsl::parse_str(source).unwrap_or_else(|error| {
+            std::panic!(
+                "{shader} (float atomics {has_float32_atomic}): {}",
+                error.emit_to_string(source)
+            )
+        });
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|error| {
+            std::panic!("{shader} (float atomics {has_float32_atomic}): {error:?}")
+        });
+        source
+    }
+
     #[test]
     fn p2g_shaders_validate_with_integer_and_float_atomics() {
         for shader in [ShaderName::P2GCurvilinear, ShaderName::P2GCurvilinearSorted] {
             for has_float32_atomic in [false, true] {
-                let source = load_shader_source(shader, has_float32_atomic);
+                let source = validate_wgsl(shader, has_float32_atomic);
                 let float_binding = source.lines().any(|line| {
                     line.trim_start().starts_with("@group") && line.contains("atomic<f32>")
                 });
                 assert_eq!(float_binding, has_float32_atomic);
-                let module = naga::front::wgsl::parse_str(source).unwrap_or_else(|error| {
-                    std::panic!(
-                        "{shader} (float atomics {has_float32_atomic}): {}",
-                        error.emit_to_string(source)
-                    )
-                });
-                naga::valid::Validator::new(
-                    naga::valid::ValidationFlags::all(),
-                    naga::valid::Capabilities::all(),
-                )
-                .validate(&module)
-                .unwrap_or_else(|error| {
-                    std::panic!("{shader} (float atomics {has_float32_atomic}): {error:?}")
-                });
+            }
+        }
+    }
+
+    #[test]
+    fn grid_physics_shaders_validate_with_integer_and_float_atomics() {
+        for shader in [
+            ShaderName::AnalyzeTerrainCurvilinear,
+            ShaderName::GridPhysicsCurvilinear,
+            ShaderName::GridPhysicsTerrainFollowing,
+            ShaderName::GridPhysics,
+        ] {
+            for has_float32_atomic in [false, true] {
+                validate_wgsl(shader, has_float32_atomic);
             }
         }
     }

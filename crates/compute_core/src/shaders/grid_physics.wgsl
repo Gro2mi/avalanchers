@@ -63,7 +63,7 @@ fn grid_physics(@builtin(global_invocation_id) id: vec3u) {
 
     let use_earth_pressure_coefficient: bool = (sim_settings.flags & (1u << 2u)) != 0u;
     if use_earth_pressure_coefficient {
-        let div_u = div_u(id.x, id.y, mass);
+        let div_u = div_u(id.x, id.y);
         k = earth_pressure_coefficient(radians(sim_settings.internal_friction_angle), radians(sim_settings.basal_friction_angle), div_u);
     } else {
         k = 1.0;
@@ -81,7 +81,7 @@ fn grid_physics(@builtin(global_invocation_id) id: vec3u) {
     // ), vec2f(0.0, 0.0), h < 1e-5);
     if h > 1e-3 {
         if use_earth_pressure_coefficient {
-            let div_u = div_u(id.x, id.y, mass);
+            let div_u = div_u(id.x, id.y);
             k = earth_pressure_coefficient(radians(sim_settings.internal_friction_angle), radians(sim_settings.basal_friction_angle), div_u);
         } else {
             k = 1.0;
@@ -148,29 +148,46 @@ fn get_h(x: u32, y: u32) -> f32 {
     return f32(grid_mass_atomic[idx]) * INV_MASS_FACTOR / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size); // no_atomic_float 
 }
 
-fn get_velocity(x: u32, y: u32, mass: f32) -> vec2f {
+// Velocity of node (x, y) from the node's own mass and momentum; z = 1 when
+// the node holds mass, 0 below the p2g mass floor where it is meaningless.
+fn node_velocity(x: u32, y: u32) -> vec3f {
     let idx = x_y_to_idx(x, y);
-    return vec2f(
-        // atomic_float grid_momentum_atomic[idx * 2] / (mass + 1e-6),
-        // atomic_float grid_momentum_atomic[idx * 2 + 1] / (mass + 1e-6) 
-        f32(grid_momentum_atomic[idx * 2]) * INV_MOMENTUM_FACTOR / (mass + 1e-6), // no_atomic_float 
-        f32(grid_momentum_atomic[idx * 2 + 1]) * INV_MOMENTUM_FACTOR / (mass + 1e-6) // no_atomic_float 
-    );
+    let mass = f32(grid_mass_atomic[idx]) * INV_MASS_FACTOR; // no_atomic_float
+    // atomic_float let mass = grid_mass_atomic[idx];
+    if mass < 1e-2 {
+        return vec3f(0.0);
+    }
+    let q = vec2f(
+        f32(grid_momentum_atomic[idx * 2]) * INV_MOMENTUM_FACTOR, // no_atomic_float
+        f32(grid_momentum_atomic[idx * 2 + 1]) * INV_MOMENTUM_FACTOR // no_atomic_float
+        // atomic_float grid_momentum_atomic[idx * 2],
+        // atomic_float grid_momentum_atomic[idx * 2 + 1]
+    ) / mass;
+    return vec3f(q, 1.0);
 }
 
-fn div_u(x: u32, y: u32, mass: f32) -> f32 {
-
+// Derivative of one velocity component: central where both neighbours hold
+// mass, one-sided against the centre at the flow edge, zero for an isolated
+// node. Empty nodes carry no velocity, so a spreading front is not mistaken
+// for a compressed one.
+fn edge_aware_difference(low: vec3f, centre: f32, high: vec3f, component: u32) -> f32 {
     let dx = sim_settings.cell_size;
+    if low.z > 0.0 && high.z > 0.0 {
+        return (high[component] - low[component]) / (2.0 * dx);
+    }
+    if high.z > 0.0 {
+        return (high[component] - centre) / dx;
+    }
+    if low.z > 0.0 {
+        return (centre - low[component]) / dx;
+    }
+    return 0.0;
+}
 
-    let uL = get_velocity(x - 1u, y, mass).x;
-    let uR = get_velocity(x + 1u, y, mass).x;
-
-    let vD = get_velocity(x, y - 1u, mass).y;
-    let vU = get_velocity(x, y + 1u, mass).y;
-
-    let dudx = (uR - uL) / (2.0 * dx);
-    let dvdy = (vU - vD) / (2.0 * dx);
-
+fn div_u(x: u32, y: u32) -> f32 {
+    let centre = node_velocity(x, y);
+    let dudx = edge_aware_difference(node_velocity(x - 1u, y), centre.x, node_velocity(x + 1u, y), 0u);
+    let dvdy = edge_aware_difference(node_velocity(x, y - 1u), centre.y, node_velocity(x, y + 1u), 1u);
     return dudx + dvdy;
 }
 
@@ -301,8 +318,9 @@ struct SimSettings {
     momentum_stop_fraction: f32,
     // front travel in cells covered by the no-new-cells stop window
     no_new_cells_travel: f32,
+    // Gaussian width (m) of the curvilinear reference surface; 0 disables it
+    reference_surface_length: f32,
     _pad1: u32,
-    _pad2: u32,
 };
 
 struct AtomicValues {
