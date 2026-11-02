@@ -148,6 +148,7 @@ def test_curvilinear_elapsed_time_uses_executed_timestep():
         np.testing.assert_allclose(after - before, velocity * used_dt, atol=2e-5)
 
 
+@pytest.mark.slow
 def test_stopped_batch_preserves_last_grid_snapshot():
     sim, _, _ = plane_simulation(0.0, friction=10.0)
     info = sim.run_n_steps(100)
@@ -192,6 +193,7 @@ def run_until_stopped(sim, max_batches=30):
     return info
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("threshold", [0.0, 0.1])
 def test_frictionless_flat_heap_keeps_spreading_with_resting(threshold):
     sim, _, _ = plane_simulation(0.0, velocity_threshold=threshold)
@@ -213,6 +215,7 @@ def test_frictionless_flat_heap_keeps_spreading_with_resting(threshold):
     assert final_radius > initial_radius + 1.0
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("cfl", [0.05, 0.2])
 @pytest.mark.parametrize("angle, slides", [(15.0, False), (30.0, True)])
 def test_coulomb_static_friction_holds_block_below_yield(angle, slides, cfl):
@@ -234,6 +237,7 @@ def test_coulomb_static_friction_holds_block_below_yield(angle, slides, cfl):
         assert info.timestep >= 19
 
 
+@pytest.mark.slow
 def test_coulomb_heap_comes_to_rest():
     y, x = np.mgrid[:64, :64]
     x, y = (x + 0.5) * 5.0, (y + 0.5) * 5.0
@@ -250,6 +254,7 @@ def test_coulomb_heap_comes_to_rest():
     assert np.mean(speed > 0.1) <= 0.01
 
 
+@pytest.mark.slow
 def test_resting_deposit_is_remobilised_by_incoming_flow():
     x = (np.mgrid[:64, :64][1] + 0.5) * 5.0
     dem = np.where(x < 150.0, (150.0 - x) * math.tan(math.radians(35.0)), 0.0)
@@ -335,6 +340,7 @@ def test_curvature_reference_rejects_non_sliding_release():
         analytical_runout(ParabolicBed(1000.0, 0.0, 0.001, 2000.0), 800.0, 0.4)
 
 
+@pytest.mark.slow
 def test_curvature_gpu_runout_and_energy_match_analytical_solution():
     import run_all_tests
     import run_curvature_test

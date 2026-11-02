@@ -4,6 +4,7 @@ import shutil
 import avalanchers
 import numpy as np
 import pandas as pd
+import pytest
 import xarray as xr
 from avalanchers import AvalanchersOutput
 
@@ -90,6 +91,7 @@ def test_export_calibration_parameters_with_evaluation(tmp_path):
     assert pd.notna(frame.loc[0, "horizontal_distance_ref"])
 
 
+@pytest.mark.slow
 def test_simulation_save():
     path = "avalanchers_test.zarr"
     site_name = "avaPfa"
