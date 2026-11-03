@@ -1262,6 +1262,10 @@ impl ComputeOrchestrator {
     /// - beeline_3d between the highest and lowest avalanche point
     /// - chamfer between the simulated cells and the region of interest,
     ///   normalized with the length of the grid diagonal
+    ///
+    /// Release cells (ReleaseAreas > 0) are left out of the overlap counts and
+    /// the chamfer means, so the area metrics do not improve with the release
+    /// area fraction.
     pub async fn evaluate_gpu(
         &mut self,
         sim_settings: &settings::SimSettings,
@@ -1311,6 +1315,8 @@ impl ComputeOrchestrator {
             raw.count_sim,
             raw.sum_roi_to_sim,
             raw.count_roi,
+            raw.roi_seeded != 0,
+            raw.sim_seeded != 0,
             diagonal,
         )))
     }
@@ -2624,6 +2630,30 @@ mod tests {
         println!("Actual distance: {}", actual.beeline_3d);
         // TODO not correctly implemented yet
         // assert!((actual.beeline_3d - expected_distance).abs() < 1e-7);
+
+        // a release cell lies in both masks and must not count as overlap
+        block_on(
+            orchestrator.write_buffer(BufferName::ReleaseAreas, &[0.0f32, 1.0, 0.0, 0.0, 0.0, 0.0]),
+        )
+        .expect("Failed to write release areas");
+        let mut reference_outside_release = reference.clone();
+        let mut simulated_outside_release = simulated.clone();
+        reference_outside_release[1] = false;
+        simulated_outside_release[1] = false;
+        let expected = evaluation::evaluate_mass_movement_area(
+            &reference_outside_release,
+            &simulated_outside_release,
+        )
+        .unwrap();
+        let actual = block_on(orchestrator.evaluate_gpu(&settings))
+            .expect("GPU evaluation with release cells failed");
+        assert_eq!(actual.intersection, expected.intersection);
+        assert_eq!(actual.undershoot, expected.undershoot);
+        assert_eq!(actual.overshoot, expected.overshoot);
+        assert_eq!(actual.iou, expected.iou);
+        assert!(actual.chamfer.is_finite());
+        block_on(orchestrator.write_buffer(BufferName::ReleaseAreas, &[0.0f32; 6]))
+            .expect("Failed to reset release areas");
 
         block_on(orchestrator.write_buffer(BufferName::GridPeakFlowThickness, &[1.0f32; 6]))
             .expect("Failed to reset peak flow thicknesses");

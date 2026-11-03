@@ -1094,13 +1094,23 @@ impl Simulation {
     ///
     /// Returns the CPU-derived overlap, runout, and peak velocity metrics.
     /// GPU-derived chamfer metrics can be added with [`Self::evaluate_gpu`].
+    /// Release cells are left out of the overlap, as in the GPU evaluation.
     pub async fn evaluate(&mut self) -> Result<MassMovementEvaluation> {
         if self.state < SimulationState::PostProcessed {
             bail!("Simulation must be post-processed before evaluation");
         }
-        let overlap =
-            compute_core::evaluation::evaluate_mass_movement_area(&self.ava_mask, &self.roi)
-                .map_err(|e| anyhow::anyhow!("Mass movement area evaluation failed: {e:?}"))?;
+        let release_areas = self.fetch_release_areas().await?.to_vec();
+        let outside_release = |mask: &[bool]| -> Vec<bool> {
+            mask.iter()
+                .zip(&release_areas)
+                .map(|(&set, &thickness)| set && thickness <= 0.0)
+                .collect()
+        };
+        let overlap = compute_core::evaluation::evaluate_mass_movement_area(
+            &outside_release(&self.roi),
+            &outside_release(&self.ava_mask),
+        )
+        .map_err(|e| anyhow::anyhow!("Mass movement area evaluation failed: {e:?}"))?;
         let (horizontal_distance, vertical_drop) = self
             .dem
             .get_elevation_extrema_distance_and_drop(&self.ava_mask)

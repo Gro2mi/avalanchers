@@ -3,6 +3,8 @@
 // of interest only) or overshoot (simulated only) and accumulates the three
 // counts atomically into the unified evaluation result buffer. The CPU
 // combines the counts into the final MassMovementEvaluation.
+// Release cells are skipped: they lie in both masks by construction, so
+// counting them would inflate the overlap with the release area fraction.
 
 struct EvaluationCounts {
     intersection: atomic<u32>,
@@ -14,6 +16,7 @@ struct EvaluationCounts {
 @group(0) @binding(1) var<storage, read> region_of_interest: array<u32>;
 @group(0) @binding(2) var<storage, read> grid_peak_flow_thickness: array<f32>;
 @group(0) @binding(3) var<storage, read_write> counts: EvaluationCounts;
+@group(0) @binding(4) var<storage, read> release_areas: array<f32>;
 
 fn bit_is_set(word: u32, index: u32) -> bool {
     return (word & (1u << (index % 32u))) != 0u;
@@ -26,6 +29,9 @@ fn evaluate_mass_movement(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 
     let index = id.y * sim_settings.grid_shape.x + id.x;
+    if release_areas[index] > 0.0 {
+        return;
+    }
     let word_index = index / 32u;
     let reference_affected = bit_is_set(region_of_interest[word_index], index);
     let simulated_affected = grid_peak_flow_thickness[index] > sim_settings.peak_flow_thickness_threshold;

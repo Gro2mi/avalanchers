@@ -1107,7 +1107,11 @@ FILE: crates/compute_core/src/shaders/chamfer_flood.wgsl (336; 16×16×1)
   step n/2…1 (see dispatch_chamfer_distance).
 FILE: crates/compute_core/src/shaders/chamfer_reduce.wgsl (347; 256×1×1, one workgroup)
   Tree-reduces sum_sim_to_roi/count_sim/sum_roi_to_sim/count_roi into the chamfer section of
-  EvaluationResult; CPU normalizes (chamfer_from_sums in evaluation.rs).
+  EvaluationResult; CPU normalizes (chamfer_from_sums in evaluation.rs). Release cells
+  (ReleaseAreas > 0) are skipped in the sums but stay seeds; roi_seeded/sim_seeded flag
+  non-empty masks so an empty mask (not a release-only one) gives an infinite distance.
+  evaluate_mass_movement.wgsl and CPU evaluate() likewise skip release cells, so
+  IoU/chamfer do not grow with the release area fraction.
 FILE: crates/compute_core/src/shaders/compute_beeline_distance.wgsl (359; 256×1×1)
   Finds highest/lowest DEM elevation among avalanche cells (paired index+elevation through the
   reduction) and writes beeline distance = |Δ(x,y,z)| between cell centers into the last

@@ -100,13 +100,17 @@ pub struct EvaluationResult {
     pub count_sim: f32,
     pub sum_roi_to_sim: f32,
     pub count_roi: f32,
+    /// 1 if the region of interest / simulation has any cell, release cells
+    /// included (those are left out of the counts above)
+    pub roi_seeded: u32,
+    pub sim_seeded: u32,
     // beeline distance between the highest and lowest avalanche point
     pub beeline_distance: f32,
     pub beeline_min_elevation: f32,
     pub beeline_max_elevation: f32,
     pub beeline_min_cell: u32,
     pub beeline_max_cell: u32,
-    pub _padding: [u32; 3],
+    pub _padding: u32,
 }
 
 #[derive(Eq, Hash, PartialEq, Clone)]

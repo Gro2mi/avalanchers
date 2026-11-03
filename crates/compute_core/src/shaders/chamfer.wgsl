@@ -17,6 +17,10 @@
 //   evaluation result buffer. Runs as a single workgroup with a strided loop,
 //   so no atomics are needed. Dispatch exactly one workgroup; the CPU combines
 //   the sums into the diagonal-normalized chamfer distance.
+//   Release cells are left out of the sums, since they lie in both masks by
+//   construction and would dilute the mean with the release area fraction.
+//   They remain seeds, so a flow that never leaves the release area still
+//   gets a finite distance from the region of interest beyond it.
 
 struct ChamferParams {
     step: u32,
@@ -33,6 +37,9 @@ struct ChamferDistanceResult {
     count_sim: f32,
     sum_roi_to_sim: f32,
     count_roi: f32,
+    // 1 if the mask has any seed cell (release cells included), 0 otherwise
+    roi_seeded: u32,
+    sim_seeded: u32,
 }
 
 const NO_SEED: u32 = 0xFFFFFFFFu;
@@ -47,6 +54,7 @@ const WG_SIZE: u32 = 256u;
 @group(0) @binding(6) var<storage, read_write> chamfer_nearest_sim: array<vec2u>;
 @group(0) @binding(7) var<storage, read> chamfer_nearest_sim_snapshot: array<vec2u>;
 @group(0) @binding(8) var<storage, read_write> chamfer_result: ChamferDistanceResult;
+@group(0) @binding(9) var<storage, read> release_areas: array<f32>;
 
 fn bit_is_set(word: u32, index: u32) -> bool {
     return (word & (1u << (index % 32u))) != 0u;
@@ -135,6 +143,9 @@ fn chamfer_reduce(@builtin(local_invocation_index) li: u32) {
     // x: sum_sim_to_roi, y: count_sim, z: sum_roi_to_sim, w: count_roi
     var partial = vec4f(0.0, 0.0, 0.0, 0.0);
     for (var i = li; i < num_cells; i = i + WG_SIZE) {
+        if release_areas[i] > 0.0 {
+            continue;
+        }
         let simulated = grid_peak_flow_thickness[i] > sim_settings.peak_flow_thickness_threshold;
         let reference = bit_is_set(region_of_interest[i / 32u], i);
 
@@ -174,6 +185,9 @@ fn chamfer_reduce(@builtin(local_invocation_index) li: u32) {
         chamfer_result.count_sim = wg_partial[0].y;
         chamfer_result.sum_roi_to_sim = wg_partial[0].z;
         chamfer_result.count_roi = wg_partial[0].w;
+        // after flooding every cell holds a seed iff the mask has one
+        chamfer_result.roi_seeded = select(0u, 1u, chamfer_nearest_roi[0].x != NO_SEED);
+        chamfer_result.sim_seeded = select(0u, 1u, chamfer_nearest_sim[0].x != NO_SEED);
     }
 }
 

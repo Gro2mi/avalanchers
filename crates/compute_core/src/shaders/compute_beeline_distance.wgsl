@@ -15,15 +15,13 @@
 // shaders; the beeline section follows.
 struct BeelineDistanceResult {
     _evaluation_counts: array<u32, 8>,
-    _chamfer: array<f32, 4>,
+    _chamfer: array<f32, 6>,
     distance: f32,
     min_elevation: f32,
     max_elevation: f32,
     min_cell: u32,
     max_cell: u32,
-    _padding_a: u32,
-    _padding_b: u32,
-    _padding_c: u32,
+    _padding: u32,
 }
 
 const NO_CELL: u32 = 0xFFFFFFFFu;

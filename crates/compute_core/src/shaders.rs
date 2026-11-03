@@ -657,6 +657,15 @@ pub fn create_shader_configs(
                 min_binding_size: None,
             },
         ),
+        // Binding 4: release cells are excluded from the counts
+        (
+            BufferName::ReleaseAreas.to_string(),
+            BindingType::Buffer {
+                ty: BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+        ),
     ];
     shader_configs.insert(
         ShaderName::EvaluateMassMovement,
@@ -907,6 +916,15 @@ pub fn create_shader_configs(
             BufferName::EvaluationResult.to_string(),
             BindingType::Buffer {
                 ty: BufferBindingType::Storage { read_only: false },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+        ),
+        // Binding 9: release cells are excluded from the reduced sums
+        (
+            BufferName::ReleaseAreas.to_string(),
+            BindingType::Buffer {
+                ty: BufferBindingType::Storage { read_only: true },
                 has_dynamic_offset: false,
                 min_binding_size: None,
             },
