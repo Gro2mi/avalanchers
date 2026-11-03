@@ -153,15 +153,16 @@ fn transfer_p2g_mpmdac(p_idx: u32, cell: vec2u) {
     );
     let plastic_strain = stress_state[1][1];
     let tau_trial = tau_old + (2.0 * sim_settings.shear_modulus * sim_info.dt) * eps_dot_dev;
-    let tau_trial_magnitude = frobenius_norm(tau_trial);
+    // equivalent shear stress tau_eq = sqrt(1/2 tau:tau); in these measures
+    // the elastic response is tau_eq = G * gamma
+    let tau_trial_magnitude = equivalent_shear_stress(tau_trial);
 
-    // 2. yield stress: Drucker-Prager (pressure-dependent) or mu(I)
+    // 2. yield stress on tau_eq: Drucker-Prager (pressure-dependent) or mu(I)
     // (rate-dependent), both with linear isotropic hardening on the
-    // accumulated plastic strain
-    let strain_rate_magnitude = frobenius_norm(eps_dot_dev);
+    // accumulated plastic shear strain
     var yield_stress = 0.0;
     if sim_settings.constitutive_model == 1u {
-        let mu_i = mu_inertial(strain_rate_magnitude, pressure);
+        let mu_i = mu_inertial(equivalent_shear_rate(eps_dot_dev), pressure);
         yield_stress = sim_settings.n0 + mu_i * pressure + sim_settings.hardening_modulus * plastic_strain;
     } else {
         yield_stress = sim_settings.n0
@@ -175,7 +176,7 @@ fn transfer_p2g_mpmdac(p_idx: u32, cell: vec2u) {
     if tau_trial_magnitude > yield_stress {
         tau_new = tau_trial * (yield_stress / tau_trial_magnitude);
         delta_plastic_strain = (tau_trial_magnitude - yield_stress)
-            / (2.0 * sim_settings.shear_modulus + sim_settings.hardening_modulus);
+            / (sim_settings.shear_modulus + sim_settings.hardening_modulus);
     }
     if is_nan(tau_new[0][0]) || is_nan(tau_new[0][1]) || is_nan(tau_new[1][0]) {
         tau_new = mat2x2<f32>(vec2f(0.0), vec2f(0.0));
@@ -243,12 +244,23 @@ fn frobenius_norm(m: mat2x2<f32>) -> f32 {
     ));
 }
 
+// Equivalent shear measures of 2D deviatoric tensors (Jop et al. 2006),
+// which reduce to tau_xy and the shear rate gamma_dot in simple shear, so
+// literature friction coefficients and mu(I) parameters apply directly:
+//   tau_eq = sqrt(1/2 tau:tau),  gamma_dot = sqrt(2 eps_dot_dev:eps_dot_dev)
+fn equivalent_shear_stress(tau_dev: mat2x2<f32>) -> f32 {
+    return frobenius_norm(tau_dev) / sqrt(2.0);
+}
+
+fn equivalent_shear_rate(eps_dot_dev: mat2x2<f32>) -> f32 {
+    return sqrt(2.0) * frobenius_norm(eps_dot_dev);
+}
+
 // Rate-dependent mu(I) inertial rheology: the friction coefficient grows
 // from mu0 at rest towards mu2 with the inertial number
-//   I = |eps_dot_dev| * d / sqrt(P / rho)
-// (the norm convention absorbs the order-unity shear-rate factor into i0).
-fn mu_inertial(strain_rate_magnitude: f32, pressure: f32) -> f32 {
-    let inertial_number = strain_rate_magnitude * sim_settings.grain_diameter
+//   I = gamma_dot * d / sqrt(P / rho)
+fn mu_inertial(shear_rate: f32, pressure: f32) -> f32 {
+    let inertial_number = shear_rate * sim_settings.grain_diameter
         / sqrt(max(pressure / sim_settings.snow_density, 1e-6));
     return sim_settings.mu0
         + (sim_settings.mu2 - sim_settings.mu0)

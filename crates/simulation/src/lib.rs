@@ -375,6 +375,7 @@ impl Simulation {
         timer_checkpoint("Start create");
         let (settings_result, dem_result, outline) =
             data_processor::create_sim_settings_and_dem(settings).await?;
+        settings_result.validate().map_err(anyhow::Error::msg)?;
 
         timer_checkpoint("Load settings");
 
@@ -745,7 +746,10 @@ impl Simulation {
         if let Some((key, _)) = data_keys.iter().find(|(_, is_set)| *is_set) {
             bail!("`{key}` changes the input data; load it with create instead");
         }
-        self.settings.apply_patch(patch);
+        let mut settings = self.settings;
+        settings.apply_patch(patch);
+        settings.validate().map_err(anyhow::Error::msg)?;
+        self.settings = settings;
         if let Some(steps) = patch.batch_compute_steps {
             self.orchestrator.batch_compute_steps = steps;
         }

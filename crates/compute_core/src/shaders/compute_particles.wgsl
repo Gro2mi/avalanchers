@@ -446,14 +446,17 @@ fn basal_friction_acceleration(g_eff: f32, density: f32, proposed_speed: f32, h:
         // let n0 = sim_settings.n0;
         // shear_stress = friction_coefficient * normal_stress + (1 - friction_coefficient) * n0 - (1 - friction_coefficient) * n0 * exp(-normal_stress / n0);
     }
-    // mu(I) friction model
+    // mu(I) friction model with the depth-averaged inertial number of a
+    // Bagnold profile (shear rate 5u/2h): I = 5/2 d u / (h sqrt(g h))
     else if model == 5u {
         let grain_diameter = sim_settings.grain_diameter;
         let i0 = sim_settings.i0;
         let mu0 = sim_settings.mu0;
         let mu2 = sim_settings.mu2;
-        let inertial_number = 2.5 * sqrt(proposed_speed) / h * grain_diameter / sqrt(max(g_eff_magnitude, 1e-6) * h);
-        let mu_i = mu0 + (mu2 - mu0) / (i0 / inertial_number + 1.0);
+        let h_clamped = max(h, 1e-3);
+        let inertial_number = 2.5 * grain_diameter * proposed_speed
+            / (h_clamped * sqrt(max(g_eff_magnitude, 1e-6) * h_clamped));
+        let mu_i = mu0 + (mu2 - mu0) / (i0 / max(inertial_number, 1e-9) + 1.0);
         shear_stress = mu_i * normal_stress;
     }
 

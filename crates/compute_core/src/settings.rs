@@ -184,6 +184,53 @@ impl SimSettings {
         ((self.no_new_cells_travel / self.cfl).round() as u32).max(10)
     }
 
+    /// Whether the mu(I) rheology is in use, either as the basal friction
+    /// model or as the constitutive law of the MPMDAC model.
+    pub fn uses_mu_i(&self) -> bool {
+        self.friction_model == FrictionModel::MuI.as_int()
+            || (self.sim_model == SimModel::MpmDaC.as_int()
+                && self.constitutive_model == ConstitutiveModel::MuI.as_int())
+    }
+
+    /// Sanity checks of the parameters the shaders cannot guard against
+    /// without producing NaN or meaningless friction. The mu(I) parameters
+    /// are only checked when the mu(I) rheology is in use.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.uses_mu_i() {
+            let finite = [
+                ("i0", self.i0),
+                ("mu0", self.mu0),
+                ("mu2", self.mu2),
+                ("grain_diameter", self.grain_diameter),
+            ];
+            if let Some((name, value)) = finite.iter().find(|(_, value)| !value.is_finite()) {
+                return Err(format!("mu(I): `{name}` must be finite, got {value}"));
+            }
+            if self.grain_diameter <= 0.0 {
+                return Err(format!(
+                    "mu(I): `grain_diameter` must be positive, got {}",
+                    self.grain_diameter
+                ));
+            }
+            if self.i0 <= 0.0 {
+                return Err(format!("mu(I): `i0` must be positive, got {}", self.i0));
+            }
+            if self.mu0 < 0.0 {
+                return Err(format!(
+                    "mu(I): `mu0` must not be negative, got {}",
+                    self.mu0
+                ));
+            }
+            if self.mu2 < self.mu0 {
+                return Err(format!(
+                    "mu(I): `mu2` ({}) must not be smaller than `mu0` ({})",
+                    self.mu2, self.mu0
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub fn calculate_hash(&self) -> u64 {
         let mut s = DefaultHasher::new();
         self.hash(&mut s);
@@ -416,6 +463,8 @@ pub enum FrictionModel {
     Voellmy,
     VoellmyMinShear,
     SamosAT,
+    /// rate-dependent mu(I) basal friction (model 5; model 4 is a stub)
+    MuI,
 }
 
 impl FrictionModel {
@@ -425,6 +474,7 @@ impl FrictionModel {
             1 => Some(FrictionModel::Voellmy),
             2 => Some(FrictionModel::VoellmyMinShear),
             3 => Some(FrictionModel::SamosAT),
+            5 => Some(FrictionModel::MuI),
             _ => None,
         }
     }
@@ -435,6 +485,7 @@ impl FrictionModel {
             FrictionModel::Voellmy => 1,
             FrictionModel::VoellmyMinShear => 2,
             FrictionModel::SamosAT => 3,
+            FrictionModel::MuI => 5,
         }
     }
 }
@@ -448,6 +499,7 @@ impl FromStr for FrictionModel {
             "voellmy" => Ok(Self::Voellmy),
             "voellmyminshear" | "voellmy-min-shear" => Ok(Self::VoellmyMinShear),
             "samosat" | "samos-at" => Ok(Self::SamosAT),
+            "mu-i" | "mui" | "mu(i)" => Ok(Self::MuI),
             _ => Err(format!("unknown friction model: {value}")),
         }
     }
@@ -460,6 +512,7 @@ impl fmt::Display for FrictionModel {
             Self::Voellmy => "voellmy",
             Self::VoellmyMinShear => "voellmy-min-shear",
             Self::SamosAT => "samos-at",
+            Self::MuI => "mu-i",
         })
     }
 }
@@ -1135,6 +1188,8 @@ mod tests {
             assert_eq!(FrictionModel::from_int(i as u32), Some(*variant));
             assert_eq!(variant.as_int(), i as u32);
         }
+        assert_eq!(FrictionModel::from_int(5), Some(FrictionModel::MuI));
+        assert_eq!(FrictionModel::MuI.as_int(), 5);
         assert_eq!(FrictionModel::from_int(99), None);
     }
 
@@ -1222,6 +1277,7 @@ mod tests {
             FrictionModel::Voellmy,
             FrictionModel::VoellmyMinShear,
             FrictionModel::SamosAT,
+            FrictionModel::MuI,
         ];
 
         for model in models {
@@ -1241,6 +1297,7 @@ mod tests {
             Some(FrictionModel::VoellmyMinShear)
         );
         assert_eq!(FrictionModel::from_int(3), Some(FrictionModel::SamosAT));
+        assert_eq!(FrictionModel::from_int(5), Some(FrictionModel::MuI));
 
         assert_eq!(FrictionModel::from_int(4), None);
         assert_eq!(FrictionModel::from_int(u32::MAX), None);
@@ -1253,6 +1310,7 @@ mod tests {
             (FrictionModel::Voellmy, "voellmy"),
             (FrictionModel::VoellmyMinShear, "voellmy-min-shear"),
             (FrictionModel::SamosAT, "samos-at"),
+            (FrictionModel::MuI, "mu-i"),
         ];
 
         for (model, string) in models {
@@ -1310,6 +1368,63 @@ mod tests {
             FrictionModel::from_str("VOELLMY"),
             Ok(FrictionModel::Voellmy)
         );
+
+        assert_eq!(FrictionModel::from_str("mu(I)"), Ok(FrictionModel::MuI));
+    }
+
+    #[test]
+    fn mu_i_parameters_validated_only_when_selected() {
+        let invalid = SimSettings {
+            grain_diameter: 0.0,
+            i0: -1.0,
+            mu0: 0.5,
+            mu2: 0.2,
+            ..SimSettings::new()
+        };
+        // Voellmy basal friction with the Drucker-Prager law ignores them
+        assert!(invalid.validate().is_ok());
+        // the constitutive mu(I) law only runs in the MPMDAC model
+        let curvilinear_mu_i = SimSettings {
+            sim_model: SimModel::Curvilinear.as_int(),
+            constitutive_model: ConstitutiveModel::MuI.as_int(),
+            ..invalid
+        };
+        assert!(curvilinear_mu_i.validate().is_ok());
+        let mpmdac_mu_i = SimSettings {
+            sim_model: SimModel::MpmDaC.as_int(),
+            ..curvilinear_mu_i
+        };
+        assert!(mpmdac_mu_i.validate().is_err());
+
+        let basal_mu_i = SimSettings {
+            friction_model: FrictionModel::MuI.as_int(),
+            ..SimSettings::new()
+        };
+        assert!(basal_mu_i.validate().is_ok(), "defaults must be valid");
+        for broken in [
+            SimSettings {
+                grain_diameter: 0.0,
+                ..basal_mu_i
+            },
+            SimSettings {
+                i0: 0.0,
+                ..basal_mu_i
+            },
+            SimSettings {
+                mu0: -0.1,
+                ..basal_mu_i
+            },
+            SimSettings {
+                mu2: basal_mu_i.mu0 - 0.1,
+                ..basal_mu_i
+            },
+            SimSettings {
+                mu2: f32::NAN,
+                ..basal_mu_i
+            },
+        ] {
+            assert!(broken.validate().is_err(), "{broken:?}");
+        }
     }
 
     #[test]

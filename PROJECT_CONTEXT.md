@@ -350,7 +350,7 @@ Two levels (defined in `crates/compute_core/src/settings.rs`):
   `constitutive_model DruckerPrager(0)`, `shear_modulus 5e4`, `hardening_modulus 0`,
   `bulk_modulus 2e4`, `compaction_pressure 2e3`.
 
-Enums: `FrictionModel { Coulomb=0, Voellmy=1, VoellmyMinShear=2, SamosAT=3 }`;
+Enums: `FrictionModel { Coulomb=0, Voellmy=1, VoellmyMinShear=2, SamosAT=3, MuI=5 }`;
 `ConstitutiveModel { DruckerPrager=0, MuI=1 }` (strings "dp", "mohr-coulomb", "mu(i)", …);
 `SimModel` (see section 1); `CrownLineMethod { FlowRouting("flow-routing"/"d8"),
 ParticleSimulation("particle-simulation"), GradientStep("gradient-step"/"gradient") }`.
@@ -909,10 +909,11 @@ FILE: crates/compute_core/src/shaders/transfer_g2p_affine.wgsl (23) — APIC gat
 FILE: crates/compute_core/src/shaders/friction.wgsl (53) — basal_friction_acceleration(
   g_perp, proposed_speed, h) -> deceleration m/s². friction_model ids: 0 coulomb, 1 voellmy
   (+turbulent ρV²g/ξ), 2 voellmy minshear (+const 70 Pa), 3 samosAT (rs0=0.222),
-  4 voellmy-with-cohesion (commented stub), 5 mu(I) (I = 2.5·√v/h·d/√(g⊥h)). Returns 0 when
+  4 voellmy-with-cohesion (commented stub), 5 mu(I) (I = 2.5·d·v/(h·√(g⊥h)), h clamped ≥ 1e-3, I floored at 1e-9). Returns 0 when
   proposed_speed < velocity_threshold or model ≥ 6. Imported by grid_physics_mpmdac.wgsl.
 FILE: crates/compute_core/src/shaders/constitutive.wgsl (34) — strain_rate_tensor,
-  mat2_deviatoric, frobenius_norm, mu_inertial(I = |ε̇|·d/√(P/ρ)). Imported by p2g_mpmdac.wgsl.
+  mat2_deviatoric, frobenius_norm, equivalent_shear_stress (‖τ‖_F/√2),
+  equivalent_shear_rate (√2‖ε̇_dev‖_F), mu_inertial(I = γ̇·d/√(P/ρ)). Imported by p2g_mpmdac.wgsl.
 ```
 
 #### Terrain preprocessing (run once per DEM)
@@ -1003,9 +1004,9 @@ ALGORITHM (transfer_p2g_mpmdac, lines 48-219):
   - volumetric: eps_v_e += dt·div(APIC) (|Δ|≤0.5); p_vol = -bulk_modulus·eps_v_e; one-sided
     plastic compaction above compaction_pressure (eps_v_p accumulates, density_ratio =
     max(1+eps_v_p, 0.5) shrinks particle volume); tension clamp eps_v_e ≤ 0.5
-  - constitutive (constitutive.wgsl): τ_trial = τ + 2G·dt·ε̇_dev; yield y = n0 +
-    [tan(internal_friction_angle)·P̄ (DP) | mu_inertial·P̄ (µ(I))] + hardening_modulus·ε_p;
-    radial return τ = τ_trial·y/|τ_trial|, Δε_p = (|τ_trial|-y)/(2G+H)
+  - constitutive (constitutive.wgsl): τ_trial = τ + 2G·dt·ε̇_dev; yield on τ_eq = ‖τ‖_F/√2,
+    y = n0 + [tan(internal_friction_angle)·P̄ (DP) | mu_inertial(γ̇ = √2‖ε̇_dev‖_F)·P̄ (µ(I))]
+    + hardening_modulus·γ_p; radial return τ = τ_trial·y/τ_eq_trial, Δγ_p = (τ_eq_trial-y)/(G+H)
   - pressure P̄ = max(0.5·ρ·g_perp·h_p + p_vol, 0); σ = τ − P̄·I
   - scatter: APIC momentum quantized i32; internal force f_i -= V_p·(h_p·σ)·grad_w_ip
     quantized (FORCE_FACTOR) into grid_forces_atomic

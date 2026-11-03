@@ -3554,9 +3554,9 @@ mod tests {
                 // voellmy with cohesion is a stub and must produce zero
                 4 => 0.0,
                 5 => {
-                    let inertial_number = 2.5 * proposed_speed.sqrt() / h
-                        * sim_settings.grain_diameter
-                        / (g_eff.max(1e-6) * h).sqrt();
+                    let h_clamped = h.max(1e-3);
+                    let inertial_number = 2.5 * sim_settings.grain_diameter * proposed_speed
+                        / (h_clamped * (g_eff.max(1e-6) * h_clamped).sqrt());
                     let mu_i = sim_settings.mu0
                         + (sim_settings.mu2 - sim_settings.mu0)
                             / (sim_settings.i0 / inertial_number + 1.0);
@@ -3580,6 +3580,13 @@ mod tests {
             );
         }
         assert_eq!(test_output[4], 0.0, "stub model 4 must produce zero");
+        // independent reference: I = 2.5 * 0.01 * 10 / (1 * sqrt(9.81)) = 0.07982,
+        // mu = 0.1 + 0.3 / (0.05 / I + 1) = 0.28446, deceleration = mu * g
+        assert!(
+            (test_output[5] - 2.7905).abs() < 1e-3,
+            "mu(I) deceleration {} != 2.7905",
+            test_output[5]
+        );
         let preview = &test_output[..test_output.len().min(6)];
         println!("{:#?}", preview)
     }

@@ -96,6 +96,9 @@ _ENUM_ALIASES = {
         "voellmyminshear": "voellmy-min-shear",
         "samosat": "samosat",
         "samos-at": "samosat",
+        "mu-i": "mu-i",
+        "mui": "mu-i",
+        "mu(i)": "mu-i",
     },
     "constitutive_model": {
         "drucker-prager": "drucker-prager",
@@ -109,11 +112,17 @@ _ENUM_ALIASES = {
 }
 
 
+# integer ids that do not follow the alias order (friction model 4 is a stub)
+_ENUM_INDICES = {
+    "friction_model": ["coulomb", "voellmy", "voellmy-min-shear", "samosat", None, "mu-i"],
+}
+
+
 def _normalize_enum(name, value):
     aliases = _ENUM_ALIASES[name]
     if isinstance(value, (int, np.integer)):
-        choices = list(dict.fromkeys(aliases.values()))
-        if 0 <= int(value) < len(choices):
+        choices = _ENUM_INDICES.get(name) or list(dict.fromkeys(aliases.values()))
+        if 0 <= int(value) < len(choices) and choices[int(value)] is not None:
             return choices[int(value)]
         raise ValueError(f"Invalid {name} index: {value}")
     key = str(value).lower()

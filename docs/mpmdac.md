@@ -78,23 +78,26 @@ predictor–plastic corrector (radial return):
 - **predictor**: `τ_trial = τ_old + 2 G · dt · ε̇_dev` with the deviatoric shear
   modulus `G = shear_modulus` (Pa, default 5·10⁴ — large values approach the
   rigid-plastic limit),
+- **yield** is checked on the equivalent shear stress `τ_eq = √(½ τ:τ)` with the
+  shear rate `γ̇ = √(2 ε̇_dev:ε̇_dev)` (Jop et al. 2006); both reduce to `τ_xy` and
+  `γ̇` in simple shear, so literature friction angles and µ(I) parameters apply
+  directly. In these measures the elastic response is `τ_eq = G·γ`,
 - **yield stress** `y`, selected by `constitutive_model`:
   - `0` / `"drucker-prager"` (default): pressure-dependent Mohr–Coulomb /
     Drucker–Prager `y = c + P̄·tan φ`,
   - `1` / `"mu-i"`: rate-dependent inertial rheology `y = c + μ(I)·P̄` with
     `μ(I) = μ0 + (μ2 − μ0) / (i0/I + 1)` and the inertial number
-    `I = |ε̇_dev| · d / √(P̄/ρ)` (`grain_diameter = d`, norms absorb the
-    order-unity shear-rate factor into `i0`),
-  - both optionally hardened: `y += H · ε_p_cum` with the linear isotropic
+    `I = γ̇ · d / √(P̄/ρ)` (`grain_diameter = d`),
+  - both optionally hardened: `y += H · γ_p_cum` with the linear isotropic
     hardening modulus `H = hardening_modulus` (Pa, 0 = off),
-- **corrector** (radial return): if `|τ_trial| > y`, scale
-  `τ = τ_trial · y/|τ_trial|` and accumulate plastic strain
-  `ε_p += (|τ_trial| − y)/(2G + H)`; otherwise the step was elastic and `τ`
+- **corrector** (radial return): if `τ_eq,trial > y`, scale
+  `τ = τ_trial · y/τ_eq,trial` and accumulate the plastic shear strain
+  `γ_p += (τ_eq,trial − y)/(G + H)`; otherwise the step was elastic and `τ`
   keeps its trial value (elastic unloading is possible),
 - total stress `σ = τ − P̄·I` with lithostatic `P̄ = ½ ρ g_perp h_p`.
 
 The stored state per particle is the symmetric deviatoric stress
-`(τ_xx, τ_xy, τ_yy)` plus the cumulative plastic strain `ε_p_cum`, packed into
+`(τ_xx, τ_xy, τ_yy)` plus the cumulative plastic shear strain `γ_p_cum`, packed into
 one `mat2x2` (`ParticlesStress`, zero-initialized). Because the stress is
 carried, near-stopping material relaxes elastically instead of dropping
 stresslessly to zero, and deposited snow retains a yield-limited residual
@@ -118,7 +121,7 @@ explicit earth-pressure coefficient `K(div u)` **emerges naturally** here; the
 `enable_earth_pressure_coefficient` flag has no effect in this model.
 
 Implementation: `constitutive.wgsl` (`strain_rate_tensor`, `mat2_deviatoric`,
-`frobenius_norm`, `mu_inertial`).
+`frobenius_norm`, `equivalent_shear_stress`, `equivalent_shear_rate`, `mu_inertial`).
 
 ### 1.3.1 Volumetric response — compressibility and compaction
 
@@ -184,7 +187,7 @@ mass-per-area `ρ·h`:
 | 1 | Voellmy | `μ · g_perp + g·|u|² / (ξ·h)` |
 | 2 | Voellmy min shear | Voellmy `+ 70 Pa / (ρ h)` |
 | 3 | SamosAT | velocity- and pressure-dependent saltation term |
-| 5 | µ(I) | rate-dependent inertial rheology (parameters `i0, mu0, mu2, grain_diameter`) |
+| 5 | µ(I) | `µ(I) · g_perp` with `I = 5/2 · d·|u| / (h √(g_perp h))` (Bagnold profile; parameters `i0, mu0, mu2, grain_diameter`, checked on load when selected) |
 
 `μ = friction_coefficient`, `ξ = drag_coefficient`.
 
