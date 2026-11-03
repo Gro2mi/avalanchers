@@ -1103,7 +1103,9 @@ impl Simulation {
         let outside_release = |mask: &[bool]| -> Vec<bool> {
             mask.iter()
                 .zip(&release_areas)
-                .map(|(&set, &thickness)| set && thickness <= 0.0)
+                .map(|(&set, &thickness)| {
+                    set && thickness <= compute_core::RELEASE_THICKNESS_THRESHOLD
+                })
                 .collect()
         };
         let overlap = compute_core::evaluation::evaluate_mass_movement_area(
@@ -1542,7 +1544,9 @@ impl Simulation {
                 self.orchestrator
                     .write_buffer(BufferName::ReleaseAreas, &data)
                     .await?;
-                data.iter().filter(|&&x| x > 1e-3).count() as u32
+                data.iter()
+                    .filter(|&&x| x > compute_core::RELEASE_THICKNESS_THRESHOLD)
+                    .count() as u32
             }
             None => match &self.release_areas_array {
                 Some(data) => {
@@ -1551,7 +1555,9 @@ impl Simulation {
                     self.orchestrator
                         .write_buffer(BufferName::ReleaseAreas, data)
                         .await?;
-                    data.iter().filter(|&&x| x > 1e-3).count() as u32
+                    data.iter()
+                        .filter(|&&x| x > compute_core::RELEASE_THICKNESS_THRESHOLD)
+                        .count() as u32
                 }
                 None => match self.release_area_fraction {
                     Some(fraction) => {
@@ -1594,7 +1600,7 @@ impl Simulation {
                             .read_buffer::<f32>(BufferName::ReleaseAreas)
                             .await?
                             .iter()
-                            .map(|&thickness| thickness > 1e-3)
+                            .map(|&thickness| thickness > compute_core::RELEASE_THICKNESS_THRESHOLD)
                             .collect();
                         let slope_angles = self.fetch_slope_angle().await?.to_vec();
                         let (gradient_x, gradient_y) = self.terrain_gradient().await?;
@@ -3148,7 +3154,7 @@ mod tests {
             "Particles stopped at step 0: {}",
             state.iter().filter(|state| state.timestep == 0).count()
         );
-        assert_eq!(state.iter().filter(|state| state.timestep > 2).count(), 0);
+        assert_eq!(state.iter().filter(|state| state.timestep > 3).count(), 0);
         assert_eq!(state.iter().filter(|state| state.stopped).count(), 16);
         assert_eq!(state.iter().filter(|state| state.out_of_bounds).count(), 16);
         for p in state.iter() {
@@ -3627,6 +3633,76 @@ mod tests {
         info!("Read number_release_cells: {:?}", number_release_cells);
     }
 
+    /// Seeded and relaxed particles must lie in release cells under the
+    /// floor(position / cell_size) convention of the simulation kernels.
+    /// The L-shaped release has concave and convex edges on all four
+    /// sides, and one cell below RELEASE_THICKNESS_THRESHOLD that must
+    /// neither be seeded nor counted when sizing the particle buffer.
+    #[test_log::test]
+    fn test_particles_stay_in_release_cells() {
+        const WIDTH: usize = 12;
+        const HEIGHT: usize = 10;
+        const CELL_SIZE: f32 = 5.0;
+        const PARTICLES_PER_CELL: u32 = 8;
+        let is_release_cell = |x: usize, y: usize| {
+            (2..=8).contains(&x) && (2..=6).contains(&y) && !(x >= 5 && y >= 5)
+        };
+        let dem: Vec<f32> = (0..WIDTH * HEIGHT)
+            .map(|idx| 1000.0 - 3.0 * (idx / WIDTH) as f32 * CELL_SIZE)
+            .collect();
+        let mut release: Vec<f32> = (0..WIDTH * HEIGHT)
+            .map(|idx| f32::from(is_release_cell(idx % WIDTH, idx / WIDTH)))
+            .collect();
+        release[8 * WIDTH + 10] = 0.5 * compute_core::RELEASE_THICKNESS_THRESHOLD;
+        let release_cells = release
+            .iter()
+            .filter(|&&thickness| thickness == 1.0)
+            .count();
+        assert_eq!(release_cells, 27);
+
+        for relax in [false, true] {
+            let mut sim = block_on(Simulation::new()).expect("Failed to create Simulation");
+            sim.set_dem(&dem, WIDTH, HEIGHT, CELL_SIZE)
+                .expect("Failed to set DEM");
+            sim.set_release_areas(&release)
+                .expect("Failed to set release areas");
+            sim.settings.released_particles_per_cell = PARTICLES_PER_CELL;
+            sim.enable_particle_relaxation = relax;
+            block_on(sim.prepare()).expect("Failed to prepare simulation");
+            assert_eq!(
+                sim.number_particles as usize,
+                release_cells * PARTICLES_PER_CELL as usize
+            );
+
+            let positions = block_on(sim.fetch_particles_position())
+                .expect("Failed to fetch particle positions")
+                .clone();
+            assert_eq!(positions.len(), sim.number_particles as usize);
+            let mut particles_per_cell = vec![0u32; WIDTH * HEIGHT];
+            for &[x, y] in &positions {
+                let cell_x = (x / CELL_SIZE).floor();
+                let cell_y = (y / CELL_SIZE).floor();
+                assert!(
+                    cell_x >= 0.0
+                        && cell_y >= 0.0
+                        && is_release_cell(cell_x as usize, cell_y as usize),
+                    "particle ({x}, {y}) outside the release cells (relax: {relax})"
+                );
+                particles_per_cell[cell_y as usize * WIDTH + cell_x as usize] += 1;
+            }
+            if !relax {
+                for (idx, &count) in particles_per_cell.iter().enumerate() {
+                    let expected = if is_release_cell(idx % WIDTH, idx / WIDTH) {
+                        PARTICLES_PER_CELL
+                    } else {
+                        0
+                    };
+                    assert_eq!(count, expected, "seeded particles in cell {idx}");
+                }
+            }
+        }
+    }
+
     #[test_log::test]
     fn test_initialize_particles() {
         let mut sim = block_on(Simulation::new()).expect("Failed to create Simulation");
@@ -3728,9 +3804,9 @@ mod tests {
         assert_eq!(advanced.timestep, 1);
         assert_eq!(sim.state, SimulationState::Running);
 
-        // the particles leave the 6x6 DEM during the second step
-        let resumed = block_on(sim.run_n_steps(1)).expect("Failed to resume simulation");
-        assert_eq!(resumed.timestep, 2);
+        // the particles leave the 6x6 DEM during the third step
+        let resumed = block_on(sim.run_n_steps(2)).expect("Failed to resume simulation");
+        assert_eq!(resumed.timestep, 3);
 
         let finished = block_on(sim.run_n_steps(1)).expect("Failed to resume simulation");
         assert_eq!(finished.timestep, resumed.timestep);
@@ -3743,7 +3819,7 @@ mod tests {
     #[test_log::test]
     fn test_run_n_steps_clamps_to_max_steps() {
         let mut sim = setup_simple_sim(40.0, 3.0);
-        // the particles would need two steps to leave the DEM
+        // the particles would need three steps to leave the DEM
         sim.settings.max_steps = 1;
 
         let result = block_on(sim.run_n_steps(u32::MAX)).expect("Failed to advance simulation");

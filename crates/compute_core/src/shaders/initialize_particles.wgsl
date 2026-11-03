@@ -9,6 +9,12 @@
 @group(0) @binding(8) var<storage, read_write> start_elevation: array<f32>;
 @group(0) @binding(9) var<storage, read_write> atomic_values: AtomicValues;
 @group(0) @binding(10) var<storage, read_write> debug: array<f32>;
+
+// thinner cells are not seeded; must match RELEASE_THICKNESS_THRESHOLD in lib.rs
+const RELEASE_THICKNESS_THRESHOLD: f32 = 0.01;
+// keeps the random offsets this fraction of a cell away from the cell edges,
+// so f32 rounding cannot place a particle in a neighboring cell
+const CELL_EDGE_MARGIN: f32 = 1e-3;
 // @group(0) @binding(13) var<uniform> tracked_particle_relative_positions: array<Particle>;
 // @group(0) @binding(14) var<storage, read_write> tracked_particle_ids: array<u32>;
 
@@ -19,7 +25,7 @@ fn initialize_particles(@builtin(global_invocation_id) cell: vec3<u32>) {
     }
     let idx = xy_to_idx(cell.xy);
     let snow_thickness = release_areas[idx];
-    if snow_thickness <= 0.01 {
+    if snow_thickness <= RELEASE_THICKNESS_THRESHOLD {
         return;
     }
 
@@ -35,12 +41,13 @@ fn initialize_particles(@builtin(global_invocation_id) cell: vec3<u32>) {
     let atomicParticleIndex = atomicAdd(&atomic_values.number_release_particles, sim_settings.released_particles_per_cell);
     for (var n: u32 = 0; n < sim_settings.released_particles_per_cell; n++) {
         let particleIndex = atomicParticleIndex + n;
-        let r = rand2(&rng_seed);
-        let cell_xy = (vec2f(cell.xy) + r - 0.5);
+        let r = mix(vec2f(CELL_EDGE_MARGIN), vec2f(1.0 - CELL_EDGE_MARGIN), rand2(&rng_seed));
+        // cell i covers [i, i + 1) * cell_size, as in position_to_cell
+        let particle_position = (vec2f(cell.xy) + r) * sim_settings.cell_size;
 
-        position[particleIndex] = vec2f(cell_xy * sim_settings.cell_size);
+        position[particleIndex] = particle_position;
         mass[particleIndex] = cell_mass / f32(sim_settings.released_particles_per_cell);
-        start_elevation[particleIndex] = textureSampleLevel(dem_texture, tex_sampler, cellf_to_uv(cell_xy), 0).x;
+        start_elevation[particleIndex] = textureSampleLevel(dem_texture, tex_sampler, position_to_uv(particle_position), 0).x;
     }
 }
 

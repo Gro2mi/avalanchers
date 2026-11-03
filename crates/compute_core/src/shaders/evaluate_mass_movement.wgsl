@@ -18,6 +18,9 @@ struct EvaluationCounts {
 @group(0) @binding(3) var<storage, read_write> counts: EvaluationCounts;
 @group(0) @binding(4) var<storage, read> release_areas: array<f32>;
 
+// must match RELEASE_THICKNESS_THRESHOLD in lib.rs and initialize_particles.wgsl
+const RELEASE_THICKNESS_THRESHOLD: f32 = 0.01;
+
 fn bit_is_set(word: u32, index: u32) -> bool {
     return (word & (1u << (index % 32u))) != 0u;
 }
@@ -29,7 +32,7 @@ fn evaluate_mass_movement(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 
     let index = id.y * sim_settings.grid_shape.x + id.x;
-    if release_areas[index] > 0.0 {
+    if release_areas[index] > RELEASE_THICKNESS_THRESHOLD {
         return;
     }
     let word_index = index / 32u;

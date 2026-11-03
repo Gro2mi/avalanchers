@@ -43,6 +43,8 @@ struct ChamferDistanceResult {
 }
 
 const NO_SEED: u32 = 0xFFFFFFFFu;
+// must match RELEASE_THICKNESS_THRESHOLD in lib.rs and initialize_particles.wgsl
+const RELEASE_THICKNESS_THRESHOLD: f32 = 0.01;
 const MAX_DISTANCE_SQUARED: i32 = 2147483647;
 const WG_SIZE: u32 = 256u;
 
@@ -143,7 +145,7 @@ fn chamfer_reduce(@builtin(local_invocation_index) li: u32) {
     // x: sum_sim_to_roi, y: count_sim, z: sum_roi_to_sim, w: count_roi
     var partial = vec4f(0.0, 0.0, 0.0, 0.0);
     for (var i = li; i < num_cells; i = i + WG_SIZE) {
-        if release_areas[i] > 0.0 {
+        if release_areas[i] > RELEASE_THICKNESS_THRESHOLD {
             continue;
         }
         let simulated = grid_peak_flow_thickness[i] > sim_settings.peak_flow_thickness_threshold;

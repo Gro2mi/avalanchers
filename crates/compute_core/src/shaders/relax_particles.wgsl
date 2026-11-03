@@ -20,8 +20,14 @@ struct RelaxParams {
 // instead of scanning all particles
 @group(0) @binding(6) var<storage, read_write> grid_head: array<atomic<u32>>;
 @group(0) @binding(7) var<storage, read_write> particle_next: array<u32>;
+@group(0) @binding(8) var dem_texture: texture_2d<f32>;
+@group(0) @binding(9) var tex_sampler: sampler;
+// start elevation of each particle, set by initialize_particles at the seed position
+@group(0) @binding(10) var<storage, read_write> start_elevation: array<f32>;
 
 const LINKED_LIST_END: u32 = 0xFFFFFFFFu;
+// must match RELEASE_THICKNESS_THRESHOLD in lib.rs and initialize_particles.wgsl
+const RELEASE_THICKNESS_THRESHOLD: f32 = 0.01;
 
 override WG_SIZE_1D: u32 = 1u;
 
@@ -38,7 +44,7 @@ fn is_release_position(p: vec2f) -> bool {
         || cellf.y >= f32(sim_settings.grid_shape.y)) {
         return false;
     }
-    return release_areas[xy_to_idx(vec2u(cellf))] > 0.01;
+    return release_areas[xy_to_idx(vec2u(cellf))] > RELEASE_THICKNESS_THRESHOLD;
 }
 
 @compute @workgroup_size(WG_SIZE_2D, WG_SIZE_2D, 1)
@@ -115,14 +121,34 @@ fn relax_particles(@builtin(global_invocation_id) global_id: vec3<u32>) {
         displacement = displacement / displacement_len * max_step;
     }
 
-    let relaxed = position + displacement;
-    if (is_release_position(relaxed)) {
-        particles_position[index] = relaxed;
+    // a step leaving the release area is reduced to one axis, larger component
+    // first, so particles pushed against the edge still slide along it
+    let step_x = vec2f(displacement.x, 0.0);
+    let step_y = vec2f(0.0, displacement.y);
+    let primary = select(step_y, step_x, abs(displacement.x) >= abs(displacement.y));
+    let secondary = select(step_x, step_y, abs(displacement.x) >= abs(displacement.y));
+    if (is_release_position(position + displacement)) {
+        particles_position[index] = position + displacement;
+    } else if (is_release_position(position + primary)) {
+        particles_position[index] = position + primary;
+    } else if (is_release_position(position + secondary)) {
+        particles_position[index] = position + secondary;
     } else {
-        // hard clamp back to the last valid position
+        // no admissible step: stay at the previous position
         particles_position[index] = position;
         particles_velocity[index] = vec2f(0.0);
     }
+}
+
+// run once after the last iteration: the particles moved away from their seed
+// position, so the start elevation is re-sampled at the relaxed position
+@compute @workgroup_size(WG_SIZE_1D, 1, 1)
+fn relax_sample_elevation(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let index = global_id.x;
+    if (index >= relax_params.num_particles) {
+        return;
+    }
+    start_elevation[index] = textureSampleLevel(dem_texture, tex_sampler, position_to_uv(particles_position[index]), 0).x;
 }
 
 // import utils.wgsl;

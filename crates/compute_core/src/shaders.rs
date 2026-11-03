@@ -114,11 +114,12 @@ define_shaders! {
     ComputeBeelineDistance => "compute_beeline_distance",
     EvaluateMassMovement => "evaluate_mass_movement",
     InitializeParticles => "initialize_particles",
-    // the three relaxation kernels share one source file; each entry point
+    // the four relaxation kernels share one source file; each entry point
     // dispatches one kernel from relax_particles.wgsl
     RelaxParticles => "relax_particles",
     RelaxClearGrid => "relax_particles" entry_point "relax_clear_grid",
     RelaxBuildGrid => "relax_particles" entry_point "relax_build_grid",
+    RelaxSampleElevation => "relax_particles" entry_point "relax_sample_elevation",
     ComputeParticles => "compute_particles",
     G2P => "g2p",
     G2PMPMDAC => "g2p_mpmdac",
@@ -1153,8 +1154,8 @@ pub fn create_shader_configs(
             ],
         )?,
     );
-    // all three relaxation kernels share one bind group layout; the clear and
-    // build kernels only use a subset of the bindings
+    // all four relaxation kernels share one bind group layout; each kernel
+    // only uses a subset of the bindings
     let relax_bindings = vec![
         // Binding 0:
         (
@@ -1228,6 +1229,31 @@ pub fn create_shader_configs(
                 min_binding_size: None,
             },
         ),
+        // Binding 8:
+        (
+            TextureName::Dem.to_string(),
+            BindingType::Texture {
+                multisampled: false,
+                view_dimension: wgpu::TextureViewDimension::D2,
+                sample_type: wgpu::TextureSampleType::Float {
+                    filterable: has_float32_filterable,
+                },
+            },
+        ),
+        // Binding 9:
+        (
+            "Sampler".to_string(),
+            wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+        ),
+        // Binding 10:
+        (
+            BufferName::ParticlesElevation.to_string(),
+            BindingType::Buffer {
+                ty: BufferBindingType::Storage { read_only: false },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+        ),
     ];
     shader_configs.insert(
         ShaderName::RelaxParticles,
@@ -1254,6 +1280,16 @@ pub fn create_shader_configs(
             device,
             ShaderName::RelaxBuildGrid,
             load_shader_source(ShaderName::RelaxBuildGrid, has_float32_atomic),
+            &relax_bindings,
+            &[("WG_SIZE_1D", max_compute_invocations_per_workgroup as f64)],
+        )?,
+    );
+    shader_configs.insert(
+        ShaderName::RelaxSampleElevation,
+        ComputeShaderConfig::new_with_constants(
+            device,
+            ShaderName::RelaxSampleElevation,
+            load_shader_source(ShaderName::RelaxSampleElevation, has_float32_atomic),
             &relax_bindings,
             &[("WG_SIZE_1D", max_compute_invocations_per_workgroup as f64)],
         )?,

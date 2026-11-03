@@ -451,6 +451,12 @@ pub async fn list_devices() -> Result<Vec<String>> {
 
 const WORKGROUP_SIZE_2D: u32 = 16;
 
+/// Release thickness (m) above which a cell counts as a release cell: it is
+/// seeded with particles, bounds the relaxation and is left out of the
+/// evaluation. Mirrored as a constant in initialize_particles,
+/// relax_particles, evaluate_mass_movement and chamfer (.wgsl).
+pub const RELEASE_THICKNESS_THRESHOLD: f32 = 0.01;
+
 // soft sphere relaxation of the freshly initialized particles: overlapping
 // particles repel each other until they reach the hexagonal packing spacing
 const RELAXATION_ITERATIONS: u32 = 30;
@@ -1263,7 +1269,7 @@ impl ComputeOrchestrator {
     /// - chamfer between the simulated cells and the region of interest,
     ///   normalized with the length of the grid diagonal
     ///
-    /// Release cells (ReleaseAreas > 0) are left out of the overlap counts and
+    /// Release cells (ReleaseAreas > RELEASE_THICKNESS_THRESHOLD) are left out of the overlap counts and
     /// the chamfer means, so the area metrics do not improve with the release
     /// area fraction.
     pub async fn evaluate_gpu(
@@ -1512,8 +1518,11 @@ impl ComputeOrchestrator {
     /// spacing before the simulation starts: each particle owns the cell
     /// area divided by released_particles_per_cell, which corresponds to an
     /// equilibrium center spacing of h = cell_size * sqrt(2/(sqrt(3) * N)).
-    /// Positions may only move into release cells; rejected moves are
-    /// clamped back to the last valid position.
+    /// Positions may only move into release cells; a step that would leave
+    /// them is reduced to one axis (larger component first), so particles
+    /// pushed against the release edge slide along it, and dropped if
+    /// neither axis stays inside. Afterwards the start elevation is
+    /// re-sampled from the DEM at the relaxed positions.
     ///
     /// Each iteration works on a snapshot of the positions so all threads
     /// see a consistent state. Neighbors are found through a fixed hash
@@ -1590,6 +1599,14 @@ impl ComputeOrchestrator {
             self.run_shader(&ShaderName::RelaxParticles, dispatch_particles_1d, 1, 1)
                 .await?;
         }
+        // the start elevation was sampled at the seed position
+        self.run_shader(
+            &ShaderName::RelaxSampleElevation,
+            dispatch_particles_1d,
+            1,
+            1,
+        )
+        .await?;
         Ok(())
     }
 
@@ -2660,6 +2677,117 @@ mod tests {
         let empty_simulation = block_on(orchestrator.evaluate_gpu(&settings))
             .expect("GPU evaluation without affected cells failed");
         assert_eq!(empty_simulation.beeline_3d, 0.0);
+    }
+
+    /// Two overlapping particles at the upper edge of a release block: the
+    /// upper one is pushed diagonally out of the block. Its full step is
+    /// rejected, but the tangential x component must still be applied, so
+    /// it slides along the edge instead of staying pinned.
+    #[test_log::test]
+    fn test_relax_particles_slide_along_release_edge() {
+        let settings = settings::SimSettings {
+            grid_shape_x: 6,
+            grid_shape_y: 6,
+            world_size_x: 60.0,
+            world_size_y: 60.0,
+            cell_size: 10.0,
+            released_particles_per_cell: 4,
+            ..Default::default()
+        };
+        let mut orchestrator =
+            block_on(ComputeOrchestrator::new()).expect("Failed to create ComputeOrchestrator");
+        orchestrator
+            .create_buffers_and_texture_descriptions(&settings)
+            .expect("Failed to create GPU resources");
+        block_on(orchestrator.write_buffer(BufferName::SimSettings, settings.as_bytes()))
+            .expect("Failed to write sim settings");
+
+        // release block: cells x = 1..=4, y = 1..=3, i.e. [10, 50) x [10, 40) m
+        let is_release_cell = |x: i64, y: i64| (1..=4).contains(&x) && (1..=3).contains(&y);
+        let release_areas: Vec<f32> = (0..36)
+            .map(|idx| f32::from(is_release_cell(idx % 6, idx / 6)))
+            .collect();
+        block_on(orchestrator.write_buffer(BufferName::ReleaseAreas, &release_areas))
+            .expect("Failed to write release areas");
+
+        let edge_particle = [25.0f32, 39.8];
+        let inner_particle = [27.0f32, 37.0];
+        let usage = BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC;
+        orchestrator.add_buffer_with_data(
+            BufferName::ParticlesPosition,
+            &[edge_particle, inner_particle],
+            usage,
+        );
+        orchestrator.add_buffer_with_data(BufferName::ParticlesVelocity, &[[0.0f32; 2]; 2], usage);
+        // stale on purpose: relaxation must overwrite the start elevation
+        orchestrator.add_buffer_with_data(BufferName::ParticlesElevation, &[0.0f32; 2], usage);
+        // planar DEM z = 2 x + 3 y sampled at the cell centers, so linear
+        // filtering reproduces the plane exactly between the centers
+        let dem: Vec<f32> = (0..36)
+            .map(|idx| {
+                let center = |i: i32| (i as f32 + 0.5) * settings.cell_size;
+                2.0 * center(idx % 6) + 3.0 * center(idx / 6)
+            })
+            .collect();
+        orchestrator
+            .resources
+            .add_texture_with_data(
+                &orchestrator.device,
+                &orchestrator.queue,
+                &dem,
+                TextureName::Dem,
+                Extent3d {
+                    width: settings.grid_shape_x,
+                    height: settings.grid_shape_y,
+                    depth_or_array_layers: 1,
+                },
+                TextureFormat::R32Float,
+                TextureUsages::TEXTURE_BINDING
+                    | TextureUsages::STORAGE_BINDING
+                    | TextureUsages::COPY_DST
+                    | TextureUsages::COPY_SRC,
+            )
+            .expect("Failed to add texture with data");
+
+        block_on(orchestrator.relax_particles(&settings, 2)).expect("Relaxation failed");
+
+        let positions =
+            block_on(orchestrator.read_buffer::<[f32; 2]>(BufferName::ParticlesPosition))
+                .expect("Failed to read particle positions");
+        for [x, y] in &positions {
+            let cell_x = (x / settings.cell_size).floor() as i64;
+            let cell_y = (y / settings.cell_size).floor() as i64;
+            assert!(
+                is_release_cell(cell_x, cell_y),
+                "particle ({x}, {y}) left the release block"
+            );
+        }
+        // pinned at the edge the particle only moves on the few iterations
+        // whose outward push is small enough (~0.14 m); sliding moves ~0.8 m
+        let [edge_x, edge_y] = positions[0];
+        assert!(
+            edge_x < edge_particle[0] - 0.5,
+            "edge particle did not slide along the edge: x = {edge_x}"
+        );
+        assert!(edge_y < 40.0);
+
+        let elevations = block_on(orchestrator.read_buffer::<f32>(BufferName::ParticlesElevation))
+            .expect("Failed to read particle elevations");
+        // hardware filtering quantizes the sub-texel weights to 1/256, i.e.
+        // up to (2 + 3) * 10 m / 256 ~ 0.2 m here; the seed position of the
+        // edge particle would give ~1 m more
+        for ([x, y], elevation) in positions.iter().zip(&elevations) {
+            let expected = if orchestrator.has_float32_filterable {
+                2.0 * x + 3.0 * y
+            } else {
+                let center = |p: f32| ((p / settings.cell_size).floor() + 0.5) * settings.cell_size;
+                2.0 * center(*x) + 3.0 * center(*y)
+            };
+            assert!(
+                (elevation - expected).abs() < 0.25,
+                "start elevation {elevation} at ({x}, {y}), expected {expected}"
+            );
+        }
     }
 
     #[test_log::test]

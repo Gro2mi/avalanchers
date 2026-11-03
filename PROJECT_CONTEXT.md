@@ -268,7 +268,8 @@ Simulation::prepare  (lib.rs:634)
     [simulation/src/release_estimation.rs] | GPU thresholds via
     ComputeRoughness → ComputeReleaseAreas)
   + initialize_particles → run_initialize_particles (GPU; model-specific buffers)
-    [+ relax_particles: 30 iterations of RelaxClearGrid → RelaxBuildGrid → RelaxParticles]
+    [+ relax_particles: 30 iterations of RelaxClearGrid → RelaxBuildGrid → RelaxParticles,
+     then RelaxSampleElevation once]
   ↓
 prepare_<model>  → per-step compute pass loop (section 4.2), batched by batch_compute_steps
   ↓ stop when SIM_STOPPED / max_steps
@@ -789,7 +790,8 @@ CONTENTS:
     AnalyzeTerrainCurvilinear, AnalyzeTerrain, ResetGrid, ComputeRoughness, ComputeReleaseAreas,
     ComputeCenterOfMass, CenterOfMassSeed, CenterOfMassPropagate, ChamferPrepare, ChamferFlood,
     ChamferReduce, ComputeBeelineDistance, EvaluateMassMovement, EvaluateMassMovementPoints,
-    InitializeParticles, RelaxParticles, RelaxClearGrid, RelaxBuildGrid, ComputeParticles, G2P,
+    InitializeParticles, RelaxParticles, RelaxClearGrid, RelaxBuildGrid, RelaxSampleElevation,
+    ComputeParticles, G2P,
     G2PMPMDAC("g2p_mpmdac"), P2G, P2GMPMDAC("p2g_mpmdac"), GridPhysicsCurvilinear,
     GridPhysicsMPMDAC("grid_physics_mpmdac"), GridPhysics, Friction, Constitutive, Utils, Random,
     UpdateSimInfo, TestTransfer, TransferG2P, TransferG2PAffine, TransferP2G, TestTransforms,
@@ -949,20 +951,27 @@ FILE: crates/compute_core/src/shaders/initialize_particles.wgsl (337; 16×16×1)
 PURPOSE: Per release cell: cell_volume = thickness·cell²/cos(slope), cell_mass =
   volume·snow_density; atomically appends released_particles_per_cell particles (PCG jitter,
   seed 42), equal mass split, records start elevation; accumulates release_volume and
-  number_release_particles in AtomicValues.
+  number_release_particles in AtomicValues. Cell i is seeded over [i, i+1)·cell_size (the
+  floor(pos/cell_size) convention of all kernels), 1e-3 cell margin against f32 rounding.
+  Release cell = thickness > RELEASE_THICKNESS_THRESHOLD (0.01, compute_core lib.rs); the
+  same constant is used by relax, evaluation and the CPU release-cell counts.
 BINDINGS: 1 sim_info, 2 dem_texture, 3 slope_angle_buffer, 4 release_areas, 5 tex_sampler,
   6 position, 7 mass, 8 start_elevation, 9 atomic_values, 10 debug.
 
-FILE: crates/compute_core/src/shaders/relax_particles.wgsl (126; untracked/new; 3 entries)
+FILE: crates/compute_core/src/shaders/relax_particles.wgsl (126; untracked/new; 4 entries)
 PURPOSE: Soft-sphere relaxation of freshly initialized particles to hexagonal packing spacing
   h = cell_size·sqrt(2/(√3·N)) for N particles/cell. Entries: relax_clear_grid (16×16×1, sets
   grid_head = LINKED_LIST_END 0xFFFFFFFF), relax_build_grid (WG_SIZE_1D override, lock-free
   linked-list insert particle_next[i] = atomicExchange(&grid_head[cell], i)), relax_particles
   (WG_SIZE_1D, 3×3-cell neighbor walk; displacement move_factor·overlap clamped to
-  max_step_fraction·h; moves rejected unless landing inside a release cell).
+  max_step_fraction·h; a step leaving the release cells falls back to its larger, then smaller
+  axis component, so edge particles slide along the edge; dropped if neither stays inside),
+  relax_sample_elevation (run once after the loop; re-samples start_elevation from the DEM
+  at the relaxed position, compute_particles reads it as z at step 0).
 BINDINGS (relax_particles): 1 relax_params (RelaxParams {num_particles, move_factor,
   max_step_fraction, pad}), 2 particles_position, 3 position snapshot, 4 particles_velocity,
-  5 release_areas, 6 grid_head, 7 particle_next.
+  5 release_areas, 6 grid_head, 7 particle_next, 8 dem_texture, 9 tex_sampler,
+  10 start_elevation (ParticlesElevation).
 FILES: relax_clear_grid.wgsl (652) and relax_build_grid.wgsl (392) are alias modules —
   one comment line + `// import relax_particles.wgsl;` at top, rest is stale inlined content.
 RUST SIDE: constants RELAXATION_ITERATIONS=30, RELAX_MOVE_FACTOR=0.3, RELAX_MAX_STEP_FRACTION=0.5
@@ -1108,7 +1117,7 @@ FILE: crates/compute_core/src/shaders/chamfer_flood.wgsl (336; 16×16×1)
 FILE: crates/compute_core/src/shaders/chamfer_reduce.wgsl (347; 256×1×1, one workgroup)
   Tree-reduces sum_sim_to_roi/count_sim/sum_roi_to_sim/count_roi into the chamfer section of
   EvaluationResult; CPU normalizes (chamfer_from_sums in evaluation.rs). Release cells
-  (ReleaseAreas > 0) are skipped in the sums but stay seeds; roi_seeded/sim_seeded flag
+  (ReleaseAreas > RELEASE_THICKNESS_THRESHOLD) are skipped in the sums but stay seeds; roi_seeded/sim_seeded flag
   non-empty masks so an empty mask (not a release-only one) gives an infinite distance.
   evaluate_mass_movement.wgsl and CPU evaluate() likewise skip release cells, so
   IoU/chamfer do not grow with the release area fraction.
