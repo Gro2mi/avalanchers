@@ -246,3 +246,8 @@ settings_stubai.json
 stubai_release_areas.png
 stubai.qgz
 frontend/data/
+
+# local project notes
+/PROJECT_CONTEXT.md
+/TODO.md
+/docs/release_area_estimation_section.tex
