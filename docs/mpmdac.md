@@ -258,7 +258,7 @@ model in `p2g_da` (section 1.3).
 ### 2.3 Adaptive timestep
 
 `update_sim_info.wgsl` (shared with model 1) sets
-`dt = max(0.01, cfl · Δ / (|v| + √(g·h)))` using the
+`dt = cfl · Δ / (|v| + √(g·h))` using the
 `expected_max_velocity` accumulated in `grid_physics_da`. The
 shallow-water wave speed `√(g·h)` is also the dominant plastic pressure-wave
 speed of this model, so no additional CFL term is required.
@@ -419,9 +419,6 @@ previously validated ~20–28 m/s plateau.
   (`constitutive_model`, `shear_modulus`, `hardening_modulus`), following the
   precedent of `internal_friction_angle` and friends which are also not
   exported.
-- **The 0.01 s dt floor** (`update_sim_info`) bounds the simulated avalanche
-  duration at `max_steps`; very long runouts on flat runout zones may hit the
-  cap before all particles stop.
 - **Basal friction is grid-side only**: a particle in a cell whose velocity was
   zeroed by friction stops on the grid but keeps its last particle velocity
   below the threshold (as in model 1).

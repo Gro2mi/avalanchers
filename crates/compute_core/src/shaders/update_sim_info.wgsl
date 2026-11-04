@@ -61,7 +61,7 @@ fn update_sim_info(@builtin(global_invocation_id) global_id: vec3<u32>) {
         expected_max_velocity = sim_info.max_velocity + sqrt(g * max_flow_thickness);
         atomicStore(&atomic_values.expected_max_velocity, bitcast<u32>(expected_max_velocity));
     }
-    let expected_dt = max(0.01, sim_settings.cfl * sim_settings.cell_size / expected_max_velocity);
+    let expected_dt = sim_settings.cfl * sim_settings.cell_size / expected_max_velocity;
     if !is_finite(expected_dt) {
         sim_info.dt = 0.05;
     } else {
