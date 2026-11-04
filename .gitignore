@@ -37,6 +37,7 @@ data/avalanche_outlines_switzerland_2018/
 data/single_avalanche_outlines_switzerland_2018/
 test.zarr/
 avalanchers.zarr/
+*.zarr.lock
 prompts.md
 questions.md
 dev.ipynb

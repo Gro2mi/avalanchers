@@ -773,6 +773,18 @@ impl PySimulation {
         }
     }
 
+    /// Write a grid to an ESRI ASCII file georeferenced by the DEM.
+    ///
+    /// Args:
+    ///     layer: ``peak_velocity``, ``peak_flow_thickness`` or ``release_areas``.
+    ///     path: Output file path.
+    pub fn write_asc(&mut self, layer: &str, path: &str) -> PyResult<()> {
+        self.inner
+            .write_asc(layer, path)
+            .block_on()
+            .map_runtime_err()
+    }
+
     /// Current lifecycle state of the simulation (read-only).
     #[getter]
     pub fn state(&self) -> String {

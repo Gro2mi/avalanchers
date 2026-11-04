@@ -1,10 +1,19 @@
 import xarray as xr
 import zarr
 
+# Keep in sync with FORMAT_VERSION in crates/data_processor/src/store_schema.rs.
+STORE_FORMAT = "0.2.0"
+
 
 class AvalanchersOutput:
     def __init__(self, path):
         self.path = path
+        found = self.attrs.get("avalanchers_format")
+        if found != STORE_FORMAT:
+            raise ValueError(
+                f"Store {path} has format {found}, expected {STORE_FORMAT}. "
+                "Older stores are not supported."
+            )
 
     @property
     def attrs(self):
@@ -17,7 +26,7 @@ class AvalanchersOutput:
 
     @property
     def conventions(self):
-        return self.attrs["conventions"]
+        return self.attrs["Conventions"]
 
     @property
     def source(self):
@@ -51,7 +60,7 @@ class AvalanchersOutput:
         return AvalancherSite(self.path, name)
 
     def scenario(self, site, name):
-        return AvalanchersScenario(self.path, name)
+        return AvalanchersScenario(self.path, site, name)
 
     def get_site(self, name_or_hash):
         matches = []
@@ -111,6 +120,7 @@ class AvalancherSite:
             engine="zarr",
             group=self.name,
             consolidated=False,
+            decode_coords="all",
         )["dem"]
 
     def get_scenario(self, name):
@@ -154,12 +164,13 @@ class AvalanchersScenario:
         return self.attrs["aspect_release_degrees"]
 
     @property
-    def release_volume_m3(self):
-        return self.attrs["release_volume_m3"]
-
-    @property
     def number_of_runs(self):
         return self.attrs["number_of_runs"]
+
+    @property
+    def software_versions(self):
+        """Builds that wrote to this scenario, indexed by ``software_version``."""
+        return self.attrs["software_versions"]
 
     @property
     def dataset(self):
@@ -168,13 +179,13 @@ class AvalanchersScenario:
             engine="zarr",
             group=self.site + "/" + self.name,
             consolidated=False,
+            decode_coords="all",
         ).isel(run=slice(0, self.number_of_runs))
 
     def __str__(self):
         return (
             f"Scenario: {self.name}\n"
             f"  Aspect: {self.aspect_release_degrees}°\n"
-            f"  Release volume: {self.release_volume_m3} m³\n"
             f"  Runs: {self.number_of_runs}"
         )
 
@@ -183,6 +194,5 @@ class AvalanchersScenario:
             f"AvalanchersScenario("
             f"name={self.name!r}, "
             f"aspect={self.aspect_release_degrees!r}, "
-            f"release_volume_m3={self.release_volume_m3!r}, "
             f"number_of_runs={self.number_of_runs!r})"
         )

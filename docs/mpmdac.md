@@ -415,10 +415,6 @@ previously validated ~20–28 m/s plateau.
 - **Depth is one step delayed** (previous-step mass). During very fast
   transients the pressure lags by one timestep; in steady flow this is
   irrelevant.
-- **The new settings are not yet exported to the Zarr run metadata**
-  (`constitutive_model`, `shear_modulus`, `hardening_modulus`), following the
-  precedent of `internal_friction_angle` and friends which are also not
-  exported.
 - **Basal friction is grid-side only**: a particle in a cell whose velocity was
   zeroed by friction stops on the grid but keeps its last particle velocity
   below the threshold (as in model 1).

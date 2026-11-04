@@ -2,8 +2,10 @@ use crate::utils::*;
 use core::f32;
 use std::hash::{Hash, Hasher};
 
+/// FNV-1a. Unlike the standard library hashers its output is guaranteed not to
+/// change between Rust versions, so it can name things that are stored on disk.
 #[derive(Default)]
-struct StableHasher(u64);
+pub struct StableHasher(u64);
 
 impl Hasher for StableHasher {
     fn finish(&self) -> u64 {

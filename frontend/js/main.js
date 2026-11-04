@@ -542,17 +542,18 @@ async function selectZarrSite(site) {
     }, demStatus);
 }
 
-/** Derives cell size and bounds from the Zarr coordinate arrays. */
+/** Derives cell size and bounds from the Zarr coordinate arrays, which hold cell centers. */
 function deriveGeoreference({ width, height, x, y }) {
     const spacing = coords => (coords && coords.length > 1)
         ? Math.abs(coords[1] - coords[0])
         : null;
     const cellSize = spacing(x) ?? spacing(y) ?? 1.0;
 
-    const xmin = x ? Math.min(x[0], x[x.length - 1]) : 0;
-    const xmax = x ? Math.max(x[0], x[x.length - 1]) : width * cellSize;
-    const ymin = y ? Math.min(y[0], y[y.length - 1]) : 0;
-    const ymax = y ? Math.max(y[0], y[y.length - 1]) : height * cellSize;
+    const half = cellSize / 2;
+    const xmin = x ? Math.min(x[0], x[x.length - 1]) - half : 0;
+    const xmax = x ? Math.max(x[0], x[x.length - 1]) + half : width * cellSize;
+    const ymin = y ? Math.min(y[0], y[y.length - 1]) - half : 0;
+    const ymax = y ? Math.max(y[0], y[y.length - 1]) + half : height * cellSize;
 
     return { cellSize, bounds: { xmin, xmax, ymin, ymax } };
 }

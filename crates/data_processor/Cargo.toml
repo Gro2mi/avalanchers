@@ -44,6 +44,7 @@ web-sys = { workspace = true }
 
 [dev-dependencies]
 criterion = "0.7"
+ruzstd = "0.9"
 test-log = { workspace = true}
 wiremock = { workspace = true }
 tokio = { workspace = true }

@@ -13,12 +13,12 @@ use compute_core::dem::{Bounds, Dem, GeoMetadata, GeoTiff, TiffData};
 use compute_core::settings::{Settings, SimSettings};
 use compute_core::utils::*;
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 pub mod blosc;
 pub mod caaml_parser;
 pub mod rasterizer;
 pub mod shapefile_reader;
-#[cfg(target_arch = "wasm32")]
+pub mod store_schema;
 pub mod zarr_writer;
 use rasterizer::RasterGrid;
 
@@ -326,6 +326,36 @@ impl EsriGrid {
         }
     }
 
+    /// Builds a grid from a layer on the DEM grid. Layers keep row 0 in the
+    /// south while ESRI ASCII grids list the north row first, so this is where
+    /// the rows are flipped on the way out, mirroring the flip in the loaders.
+    pub fn from_dem_layer(dem: &Dem, data: &[f32]) -> Result<Self, EsriGridError> {
+        let expected = dem.width * dem.height;
+        if data.len() != expected {
+            return Err(EsriGridError::DataSizeMismatch {
+                expected,
+                ncols: dem.width,
+                nrows: dem.height,
+                found: data.len(),
+            });
+        }
+        let mut data = data.to_vec();
+        flip_rows_flat_vec(&mut data, dem.width as u32, dem.height as u32);
+        Ok(Self {
+            header: EsriGridHeader {
+                ncols: dem.width,
+                nrows: dem.height,
+                cellsize: dem.cell_size,
+                nodata_value: Some(-9999.0),
+                xllcorner: Some(dem.bounds.xmin),
+                yllcorner: Some(dem.bounds.ymin),
+                xllcenter: None,
+                yllcenter: None,
+            },
+            data,
+        })
+    }
+
     /// Helper to export the grid directly to a file path.
     pub fn to_file<P: AsRef<Path>>(&self, path: P) -> Result<(), String> {
         let file = File::create(path).map_err(|e| format!("Failed to create file: {}", e))?;
@@ -608,8 +638,8 @@ async fn load_png_as_dem(path: &str) -> Result<Dem, DataProcessorError> {
         data1d,
         data: Vec::new(),
         // TODO bounds were exported wrong. Rework when png files get metadata embedded.
-        x: linspace(bounds.xmin, bounds.xmax, width),
-        y: linspace(bounds.ymin, bounds.ymax, height),
+        x: cell_centers(bounds.xmin, bounds.xmax, width),
+        y: cell_centers(bounds.ymin, bounds.ymax, height),
         cell_size,
         bounds,
         map_factor: 1.0,
@@ -650,8 +680,8 @@ fn esri_grid_to_dem(mut grid: EsriGrid, source: &str) -> Dem {
         height: grid.header.nrows,
         data1d: grid.data,
         data: Vec::new(),
-        x: linspace(bounds.xmin, bounds.xmax, grid.header.ncols),
-        y: linspace(bounds.ymin, bounds.ymax, grid.header.nrows),
+        x: cell_centers(bounds.xmin, bounds.xmax, grid.header.ncols),
+        y: cell_centers(bounds.ymin, bounds.ymax, grid.header.nrows),
         cell_size: grid.header.cellsize,
         bounds,
         map_factor: 1.0,
@@ -688,12 +718,12 @@ fn geo_tiff_to_dem(mut tiff: GeoTiff, source: &str) -> Dem {
         height: tiff.metadata.height as usize,
         data1d,
         data: Vec::new(),
-        x: linspace(
+        x: cell_centers(
             tiff.metadata.bounds.xmin,
             tiff.metadata.bounds.xmax,
             tiff.metadata.width as usize,
         ),
-        y: linspace(
+        y: cell_centers(
             tiff.metadata.bounds.ymin,
             tiff.metadata.bounds.ymax,
             tiff.metadata.height as usize,
@@ -1697,6 +1727,45 @@ NODATA_value  -1
     }
 
     #[test_log::test]
+    fn test_esri_dem_layer_round_trips_through_the_loaders() {
+        // The north row comes first on disk.
+        let file = b"ncols 2\nnrows 3\nxllcorner 100\nyllcorner 200\ncellsize 5\nNODATA_value -9999\n30 31\n20 21\n10 11\n";
+        let dem = load_dem_from_bytes(file, "asc", "test.asc").unwrap();
+        assert_eq!(dem.data1d[..2], [10.0, 11.0]);
+
+        let mut written = Vec::new();
+        EsriGrid::from_dem_layer(&dem, &dem.data1d)
+            .unwrap()
+            .to_writer(&mut written)
+            .unwrap();
+
+        let text = String::from_utf8(written.clone()).unwrap();
+        let rows: Vec<&str> = text.lines().skip(6).collect();
+        assert_eq!(rows, ["30 31", "20 21", "10 11"]);
+
+        let reloaded = load_dem_from_bytes(&written, "asc", "test.asc").unwrap();
+        assert_eq!(reloaded.data1d, dem.data1d);
+        assert_eq!(reloaded.bounds.xmin, 100.0);
+        assert_eq!(reloaded.bounds.ymin, 200.0);
+        assert_eq!(reloaded.cell_size, 5.0);
+        assert_eq!(
+            load_release_areas_from_bytes(&written, "asc").unwrap(),
+            dem.data1d
+        );
+    }
+
+    #[test_log::test]
+    fn test_esri_dem_layer_rejects_a_wrong_size() {
+        let file =
+            b"ncols 2\nnrows 1\nxllcorner 0\nyllcorner 0\ncellsize 5\nNODATA_value -9999\n1 2\n";
+        let dem = load_dem_from_bytes(file, "asc", "test.asc").unwrap();
+        assert!(matches!(
+            EsriGrid::from_dem_layer(&dem, &[1.0]),
+            Err(EsriGridError::DataSizeMismatch { found: 1, .. })
+        ));
+    }
+
+    #[test_log::test]
     fn test_esri_header_missing_origin_errors() {
         // Header missing both xllcorner and xllcenter should error during parsing
         let bad_header = "\
@@ -1779,10 +1848,16 @@ NODATA_value  -999
         );
 
         // Verify bounds
-        assert_eq!(dem.bounds.xmin, dem.x[0]);
-        assert_eq!(dem.bounds.xmax, dem.x[dem.x.len() - 1]);
-        assert_eq!(dem.bounds.ymin, dem.y[0]);
-        assert_eq!(dem.bounds.ymax, dem.y[dem.y.len() - 1]);
+        assert_eq!(dem.bounds.xmin + dem.cell_size / 2.0, dem.x[0]);
+        assert_eq!(
+            dem.bounds.xmax - dem.cell_size / 2.0,
+            dem.x[dem.x.len() - 1]
+        );
+        assert_eq!(dem.bounds.ymin + dem.cell_size / 2.0, dem.y[0]);
+        assert_eq!(
+            dem.bounds.ymax - dem.cell_size / 2.0,
+            dem.y[dem.y.len() - 1]
+        );
 
         // Verify cell size and map factor
         assert_eq!(dem.cell_size, 10.0, "Cell size should be 10.0");

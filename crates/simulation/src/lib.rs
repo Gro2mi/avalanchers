@@ -39,17 +39,18 @@ use anyhow::{Result, bail};
 use compute_core::{
     ComputeOrchestrator, GpuCache, ParticleState, SimInfo, SimInfoFlags, TextureRgba, TimestepData,
     buffers::{AtomicValues, BufferName, CenterOfMassResult, TextureName},
-    dem::{Bounds, Dem},
+    dem::{Bounds, Dem, StableHasher},
     evaluation::MassMovementEvaluation,
     post_processing::*,
     settings::{CrownLineMethod, ReleaseFillMethod, Settings, SimModel, SimSettings},
     utils::*,
 };
+use data_processor::store_schema::RunRecord;
 #[cfg(target_arch = "wasm32")]
-use data_processor::zarr_writer::{ResultGrids, ZarrEntry};
+use data_processor::zarr_writer::ZarrEntry;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Once;
-use web_time::Instant;
+use web_time::{Instant, SystemTime, UNIX_EPOCH};
 
 /// Release-area and crown-line estimation from a DEM and avalanche outline.
 pub mod release_estimation;
@@ -375,13 +376,7 @@ impl Simulation {
     /// Stable hash of the release-area array; part of [`Self::scenario_name`]
     /// so different release masks end up in different scenarios.
     pub fn release_hash(&self) -> u64 {
-        let mut s = DefaultHasher::new();
-        if let Some(release_areas_array) = &self.release_areas_array {
-            for val in release_areas_array.iter() {
-                val.to_bits().hash(&mut s);
-            }
-        }
-        s.finish()
+        hash_release_areas(self.release_areas_array.as_deref().unwrap_or_default())
     }
 
     /// Number of GPU→CPU readbacks issued so far; exposed so tests can verify
@@ -685,8 +680,8 @@ impl Simulation {
                 ymin: bounds_ymin,
                 ymax: bounds_ymax,
             },
-            x: linspace(bounds_xmin, bounds_xmax, width),
-            y: linspace(bounds_ymin, bounds_ymax, height),
+            x: cell_centers(bounds_xmin, bounds_xmax, width),
+            y: cell_centers(bounds_ymin, bounds_ymax, height),
             source: String::new(),
             projection: String::new(),
         };
@@ -1233,22 +1228,23 @@ impl Simulation {
 
     /// Name of the site this simulation writes to, derived from the DEM.
     pub fn site_name(&self) -> String {
-        let source = if !self.dem.source.is_empty() {
-            self.dem.source.as_str()
-        } else {
+        let source = if !self.dem_path.is_empty() {
             self.dem_path.as_str()
+        } else {
+            self.dem.source.as_str()
         };
+        // The source of fetched tiles is a multi-line attribution, not a path.
         let stem = std::path::Path::new(source)
             .file_stem()
             .and_then(|s| s.to_str())
-            .filter(|s| !s.is_empty())
+            .filter(|s| !s.is_empty() && !s.contains('\n'))
             .unwrap_or("default-site")
             .replace("_", "-");
         format!("{}_{:x}", stem, self.dem.calculate_hash())
     }
 
-    /// Name of the scenario, derived from the release areas.
-    pub fn scenario_name(&self) -> String {
+    /// Name of the scenario, derived from the release areas it was run with.
+    pub fn scenario_name(&self, release_areas: &[f32]) -> String {
         let base = match &self.release_areas_path {
             Some(path) => std::path::Path::new(path)
                 .file_stem()
@@ -1264,7 +1260,46 @@ impl Simulation {
                 self.settings.roughness_threshold,
             ),
         };
-        format!("{}_{:x}", base, self.release_hash())
+        format!("{}_{:x}", base, hash_release_areas(release_areas))
+    }
+
+    /// Gathers everything the result stores keep of the finished run.
+    async fn collect_run(&mut self) -> Result<RunRecord> {
+        if self.state < SimulationState::Finished {
+            bail!("Run the simulation before saving results");
+        }
+        let sim_info = self.fetch_sim_info().await?;
+        let release_volume_m3 = self.get_total_volume().await?;
+        let peak_flow_velocity = self.fetch_peak_velocity().await?.clone();
+        let peak_flow_thickness = self.fetch_peak_flow_thickness().await?.to_vec();
+
+        let origin_x = self.dem.bounds.xmin;
+        let origin_y = self.dem.bounds.ymin;
+        let center_of_mass = self.fetch_center_of_mass().await?;
+        let time = center_of_mass.iter().map(|result| result.time).collect();
+        let (center_of_mass_x, center_of_mass_y, travel_length, travel_angle) =
+            trajectory_summary(center_of_mass, origin_x, origin_y);
+
+        let created_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(f64::NAN, |elapsed| elapsed.as_secs_f64());
+
+        Ok(RunRecord {
+            peak_flow_velocity,
+            peak_flow_thickness,
+            center_of_mass_x,
+            center_of_mass_y,
+            time,
+            release_volume_m3,
+            travel_length,
+            travel_angle,
+            final_timestep: sim_info.timestep,
+            simulated_time: sim_info.elapsed_time,
+            number_particles: sim_info.number_particles,
+            stop_flags: sim_info.flags,
+            created_at,
+            settings: self.settings,
+        })
     }
 
     /// Builds an in-memory Zarr store of the current results.
@@ -1273,123 +1308,53 @@ impl Simulation {
     /// responsible for persisting the returned entries.
     #[cfg(target_arch = "wasm32")]
     pub async fn export_zarr_entries(&mut self) -> Result<Vec<ZarrEntry>> {
-        if self.state < SimulationState::Finished {
-            bail!("Run the simulation before saving results");
-        }
-
-        let site_name = self.site_name();
-        let scenario_name = self.scenario_name();
-
+        let run = self.collect_run().await?;
         let release_areas = self.fetch_release_areas().await?.to_vec();
-        self.fetch_peak_velocity().await?;
-        self.fetch_peak_flow_thickness().await?;
-
-        let peak_velocity = self
-            .gpu_cache
-            .peak_velocity
-            .clone()
-            .unwrap_or_else(|| vec![0.0; release_areas.len()]);
-        let peak_flow_thickness = self
-            .gpu_cache
-            .peak_flow_thickness
-            .clone()
-            .unwrap_or_else(|| vec![0.0; release_areas.len()]);
-
-        let settings = serde_json::to_value(self.settings).unwrap_or(serde_json::Value::Null);
-
         Ok(data_processor::zarr_writer::build_result_store(
-            &site_name,
-            &scenario_name,
+            &self.site_name(),
+            &self.scenario_name(&release_areas),
             &self.dem,
-            &ResultGrids {
-                release_areas: &release_areas,
-                peak_velocity: &peak_velocity,
-                peak_flow_thickness: &peak_flow_thickness,
-            },
-            settings,
+            &release_areas,
+            &run,
         ))
     }
 
     /// Native only: appends this run to the Zarr store at
     /// [`Self::output_path`], creating the site (derived from the DEM, see
     /// [`Self::site_name`]) and scenario (derived from the release areas, see
-    /// [`Self::scenario_name`]) entries as needed. Each run stores peak
-    /// velocity, peak flow thickness, release volume and the center-of-mass
-    /// trajectory.
+    /// [`Self::scenario_name`]) entries as needed.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn save(&mut self) -> Result<()> {
-        let mut site_name = std::path::Path::new(&self.dem_path)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("default_site")
-            .to_string()
-            .replace("_", "-");
-        site_name += &format!("_{:x}", self.dem.calculate_hash());
-        let release_areas_str = match &self.release_areas_path {
-            Some(path) => std::path::Path::new(path)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or(path)
-                .to_string()
-                .replace("_", "-"),
-            None => format!(
-                "calculated-elev{}-minslope{}-maxslope{}-rough{}",
-                // TODO save release relevant parameters to zarr store
-                self.settings.release_min_elevation,
-                self.settings.min_slope_angle,
-                self.settings.max_slope_angle,
-                self.settings.roughness_threshold,
-            ),
-        };
+        let run = self.collect_run().await?;
+        let release_areas = self.fetch_release_areas().await?.to_vec();
+        timer_checkpoint("Peak data fetched");
 
-        let scenario_name = format!("{}_{:x}", release_areas_str, self.release_hash());
+        let site_name = self.site_name();
+        let scenario_name = self.scenario_name(&release_areas);
         if self.output.is_none() {
             self.output = Some(data_processor::output::Output::new(&self.output_path)?);
         }
-        let release_areas = self.fetch_release_areas().await?.to_vec();
-
-        self.fetch_peak_velocity().await?;
-        self.fetch_peak_flow_thickness().await?;
-        let release_volume = self.get_total_volume().await?;
-        let origin_x = self.dem.bounds.xmin;
-        let origin_y = self.dem.bounds.ymin;
-        let center_of_mass = self.fetch_center_of_mass().await?;
-        let (center_of_mass_x, center_of_mass_y, travel_length, travel_angle) =
-            trajectory_summary(center_of_mass, origin_x, origin_y);
-        timer_checkpoint("Peak data fetched");
-
-        let output = self.output.as_mut().unwrap();
-        if !output.site_exists(&site_name) {
-            output.add_new_site(&site_name, &self.dem)?;
-        }
-
-        if output.scenario_exists(&site_name, &scenario_name) {
-            output.connect_scenario(&site_name, &scenario_name)?;
-        } else {
-            output.add_new_scenario(
-                &site_name,
-                &scenario_name,
-                10000, // number runs
-                self.settings.max_steps as u64,
-                &release_areas,
-                f32::NAN, // Release aspect is not currently calculated.
-                release_volume,
-                self.dem.y.clone(),
-                &self.dem.x,
-            )?;
-        }
-        output.add_new_run(
-            &site_name,
-            &scenario_name,
-            self.gpu_cache.peak_velocity.as_ref().unwrap(),
-            self.gpu_cache.peak_flow_thickness.as_ref().unwrap(),
-            &center_of_mass_x,
-            &center_of_mass_y,
-            travel_length,
-            travel_angle,
-            &self.settings,
-        )?;
+        let output = self.output.as_ref().unwrap();
+        output.add_run(&site_name, &scenario_name, &self.dem, &release_areas, &run)?;
         Ok(())
+    }
+
+    /// Native only: writes the grid `layer` (`peak_velocity`,
+    /// `peak_flow_thickness` or `release_areas`) to `path` as an ESRI ASCII grid
+    /// georeferenced by the DEM.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn write_asc(&mut self, layer: &str, path: &str) -> Result<()> {
+        let data = match layer {
+            "peak_velocity" => self.fetch_peak_velocity().await?.clone(),
+            "peak_flow_thickness" => self.fetch_peak_flow_thickness().await?.to_vec(),
+            "release_areas" => self.fetch_release_areas().await?.to_vec(),
+            _ => bail!(
+                "Unknown layer \"{layer}\", expected peak_velocity, peak_flow_thickness or release_areas"
+            ),
+        };
+        data_processor::EsriGrid::from_dem_layer(&self.dem, &data)?
+            .to_file(path)
+            .map_err(anyhow::Error::msg)
     }
 
     /// Reads the run info (timestep, dt, stop flags, ...) from the GPU and
@@ -2357,20 +2322,47 @@ fn checked_particle_count(release_cells: u32, particles_per_cell: u32) -> Result
 /// Converts center-of-mass records into absolute world coordinates (adding
 /// the DEM origin) and derives the total travel length and average travel
 /// angle in degrees.
+fn hash_release_areas(release_areas: &[f32]) -> u64 {
+    let mut hasher = StableHasher::default();
+    for value in release_areas {
+        value.to_bits().hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
 fn trajectory_summary(
     center_of_mass: &[CenterOfMassResult],
     origin_x: f32,
     origin_y: f32,
 ) -> (Vec<f32>, Vec<f32>, f32, f32) {
-    let center_of_mass_x: Vec<_> = center_of_mass
-        .iter()
-        .map(|result| origin_x + result.com_x)
-        .collect();
-    let center_of_mass_y: Vec<_> = center_of_mass
-        .iter()
-        .map(|result| origin_y + result.com_y)
-        .collect();
-    let travel_length = center_of_mass
+    // Slots of steps that did not run are NaN and the shader reports (0, 0, 0)
+    // for steps without mass, neither of which is a position.
+    let is_record = |result: &&CenterOfMassResult| {
+        result.total_mass > 0.0
+            && result.com_x.is_finite()
+            && result.com_y.is_finite()
+            && result.elevation.is_finite()
+    };
+    let positions = |origin: f32, coordinate: fn(&CenterOfMassResult) -> f32| {
+        center_of_mass
+            .iter()
+            .map(|result| {
+                if is_record(&result) {
+                    origin + coordinate(result)
+                } else {
+                    f32::NAN
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    let center_of_mass_x = positions(origin_x, |result| result.com_x);
+    let center_of_mass_y = positions(origin_y, |result| result.com_y);
+
+    let records: Vec<_> = center_of_mass.iter().filter(is_record).collect();
+    let (Some(first), Some(last)) = (records.first(), records.last()) else {
+        return (center_of_mass_x, center_of_mass_y, f32::NAN, f32::NAN);
+    };
+    let travel_length = records
         .windows(2)
         .map(|results| {
             let dx = results[1].com_x - results[0].com_x;
@@ -2378,10 +2370,7 @@ fn trajectory_summary(
             dx.hypot(dy)
         })
         .sum::<f32>();
-    let vertical_drop = center_of_mass
-        .first()
-        .zip(center_of_mass.last())
-        .map_or(0.0, |(first, last)| first.elevation - last.elevation);
+    let vertical_drop = first.elevation - last.elevation;
     let travel_angle = if travel_length > 0.0 {
         vertical_drop.atan2(travel_length).to_degrees()
     } else {
@@ -2428,12 +2417,14 @@ mod tests {
                 com_y: 0.0,
                 elevation: 10.0,
                 total_mass: 1.0,
+                ..Default::default()
             },
             CenterOfMassResult {
                 com_x: 3.0,
                 com_y: 4.0,
                 elevation: 5.0,
                 total_mass: 1.0,
+                ..Default::default()
             },
         ];
         let (x, y, length, angle) = trajectory_summary(&center_of_mass, 100.0, 300.0);
@@ -2442,6 +2433,41 @@ mod tests {
         assert_eq!(y, vec![300.0, 304.0]);
         assert!((length - 5.0).abs() < f32::EPSILON);
         assert!((angle - 45.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_trajectory_summary_skips_slots_without_a_record() {
+        let record = |com_x, com_y, elevation, total_mass| CenterOfMassResult {
+            com_x,
+            com_y,
+            elevation,
+            total_mass,
+            ..Default::default()
+        };
+        let center_of_mass = vec![
+            CenterOfMassResult::default(), // slot 0 is never written
+            record(0.0, 0.0, 10.0, 1.0),
+            record(3.0, 4.0, 5.0, 1.0),
+            record(0.0, 0.0, 0.0, 0.0),    // all mass has left
+            CenterOfMassResult::default(), // the run ended
+        ];
+        let (x, y, length, angle) = trajectory_summary(&center_of_mass, 100.0, 300.0);
+
+        assert!(x[0].is_nan() && y[0].is_nan());
+        assert_eq!(x[1..3], [100.0, 103.0]);
+        assert_eq!(y[1..3], [300.0, 304.0]);
+        assert!(x[3].is_nan() && x[4].is_nan());
+        assert!((length - 5.0).abs() < f32::EPSILON);
+        assert!((angle - 45.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_trajectory_summary_without_records_is_nan() {
+        let center_of_mass = vec![CenterOfMassResult::default(); 3];
+        let (x, _, length, angle) = trajectory_summary(&center_of_mass, 100.0, 300.0);
+
+        assert!(x.iter().all(|value| value.is_nan()));
+        assert!(length.is_nan() && angle.is_nan());
     }
 
     #[test_log::test]
@@ -2769,16 +2795,9 @@ mod tests {
         assert_eq!(sim.dem.bounds.xmin, 0.0);
         assert_eq!(sim.dem.bounds.ymax, 13.0);
 
-        // Verify coordinate generation (linspace)
-        // x: 0.0 to 2.0 with width 2 -> [0.0, 2.0]
-        assert_eq!(sim.dem.x.len(), 2);
-        assert_eq!(sim.dem.x[0], 0.0);
-        assert_eq!(sim.dem.x[1], 2.0);
-
-        // y: 10.0 to 13.0 with height 3 -> [10.0, 11.5, 13.0]
-        assert_eq!(sim.dem.y.len(), 3);
-        assert_eq!(sim.dem.y[0], 10.0);
-        assert_eq!(sim.dem.y[2], 13.0);
+        // Coordinates are the cell centers
+        assert_eq!(sim.dem.x, vec![0.5, 1.5]);
+        assert_eq!(sim.dem.y, vec![10.5, 11.5, 12.5]);
         assert_eq!(sim.dem.bounds.xmin, 0.0);
         assert_eq!(sim.dem.bounds.ymin, 10.0);
         assert_eq!(sim.dem.bounds.xmax, 2.0);
@@ -4738,9 +4757,36 @@ mod tests {
     }
 
     #[test_log::test]
+    fn test_write_asc() {
+        let mut sim = setup_simple_sim(40.0, 4.0);
+        block_on(sim.run()).expect("Failed to run simulation");
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let file_path = tmp_dir.path().join("peak_velocity.asc");
+        let path = file_path.to_string_lossy();
+        block_on(sim.write_asc("peak_velocity", &path)).expect("Failed to write grid");
+
+        let bytes = std::fs::read(&file_path).unwrap();
+        let reloaded = data_processor::load_dem_from_bytes(&bytes, "asc", &path).unwrap();
+        let peak_velocity = block_on(sim.fetch_peak_velocity()).unwrap();
+        assert_eq!(&reloaded.data1d, peak_velocity);
+
+        assert!(block_on(sim.write_asc("no_such_layer", &path)).is_err());
+    }
+
+    #[test_log::test]
+    fn test_scenario_name_identifies_the_release() {
+        let sim = setup_simple_sim(40.0, 4.0);
+        let name = sim.scenario_name(&[0.0, 1.0]);
+
+        assert_eq!(name, sim.scenario_name(&[0.0, 1.0]));
+        assert_ne!(name, sim.scenario_name(&[0.0, 2.0]));
+    }
+
+    #[test_log::test]
     fn test_release_hash() {
         let sim = setup_simple_sim(40.0, 4.0);
-        assert_eq!(sim.release_hash(), 8805650549818317918);
+        assert_eq!(sim.release_hash(), 13523635338801950485);
     }
 
     #[test_log::test]

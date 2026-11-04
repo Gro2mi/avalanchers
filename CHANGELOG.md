@@ -27,8 +27,36 @@ All notable changes to this project might be documented in this file.
 - The no-new-cells stop window spans the steps the fastest material needs to travel
   `no_new_cells_travel` cells (CLI `--no-new-cells-travel`, default 65), i.e. round(65 / cfl)
   and at least 10 steps: 72 at CFL 0.9 instead of a fixed 40.
+- Zarr store format 0.2.0, older stores are rejected on open. The native and browser writers
+  now share one layout (`data_processor::store_schema`), so browser exports open everywhere.
+  - `y` ascends with the rows. It was reversed against the data, so label based selection and
+    plots in xarray were mirrored north-south. Row 0 of every grid is the south edge.
+  - `x`/`y` (and `Dem::x`/`y`) are cell centers in float64. They spanned edge to edge, up to
+    half a cell off.
+  - Every setting is stored per run, named as in the settings (`mu` is now
+    `friction_coefficient`, `xsi` is `drag_coefficient`), plus `release_volume_m3` (was a
+    scenario attribute), `final_timestep`, `simulated_time`, `stop_flags`, `number_particles`,
+    `created_at`, `software_version` and the per-step `time`.
+  - Unwritten float values are NaN and integers 4294967295 instead of 0.
+  - Scenarios have no fixed run or timestep capacity. Longer runs were silently cut off.
+  - Run values share chunks of 1024 runs instead of one file each.
+  - `run` and `timestep` have no coordinate arrays, `release_area` is float32, blosc uses
+    zstd level 3 with byte shuffle.
+  - CF: `Conventions`, valid `standard_name`s, `flag_values`/`flag_masks`, and a `spatial_ref`
+    variable with `grid_mapping` when the CRS is known.
+  - Saves are locked per store and survive crashes: arrays are written first and a run only
+    counts once `number_of_runs` is replaced atomically.
+- `travel_length` and `travel_angle` skip steps without a center of mass record. They were NaN
+  and 0 for every run since slot 0 is unused, and earlier inflated by a jump to the DEM origin.
+  They are NaN when the center of mass is disabled.
+- Scenario names hash the release areas that were actually run. The hash covered only releases
+  passed as arrays, so every release from a file got the same one. It uses the stable DEM
+  hasher, so it no longer depends on the Rust version. Site hashes change with the coordinates.
+- The center of mass records carry the simulated time, stored as `time` in the result stores.
 
 ### Added
+- `sim.write_asc(layer, path)` writes `peak_velocity`, `peak_flow_thickness` or `release_areas` as an
+  ESRI ASCII grid, north row first and georeferenced by the DEM.
 - Reusable initial state for back calibration (Rust `Simulation` and Python `PySimulation`):
   `store_initial_state()` prepares once and keeps the seeded, relaxed particle positions and
   masses on the GPU; `update_settings(dict)` changes settings without reloading the data;

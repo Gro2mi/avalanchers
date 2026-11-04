@@ -25,7 +25,7 @@ use zarrs::storage::StorageError;
 use zarrs_filesystem::FilesystemStore;
 
 use compute_core::dem::{Bounds, Dem};
-use compute_core::utils::{linspace, to_2d};
+use compute_core::utils::{cell_centers, to_2d};
 
 #[derive(thiserror::Error, Debug)]
 pub enum TileManagerError {
@@ -287,7 +287,7 @@ impl TileManager {
         let global_attrs = json!({
             "title": "SwissALTI3D DTM Resampled to 5m",
             "comment": "Swiss terrain model resampled from original 2m product",
-            "conventions": "CF-1.8",
+            "Conventions": "CF-1.8",
             "source": "Federal Office of Topography swisstopo",
             "crs": "EPSG:2056",
 
@@ -395,7 +395,6 @@ impl TileManager {
 
         spatial_ref.attributes_mut().extend(
             json!({
-                "_ARRAY_DIMENSIONS": [],
                 "grid_mapping_name": "hotine_oblique_mercator", // LV95 uses a modified oblique mercator
                 "crs_string": "EPSG:2056",
                 "spatial_ref": "PROJCS[\"CH1903+ / LV95\",
@@ -673,8 +672,8 @@ impl TileManager {
             height: rows,
             data1d: data,
             data: Vec::new(),
-            x: linspace(min_e as f32, max_e as f32, cols),
-            y: linspace(min_n as f32, max_n as f32, rows),
+            x: cell_centers(min_e as f32, max_e as f32, cols),
+            y: cell_centers(min_n as f32, max_n as f32, rows),
             cell_size: 5.0,
             bounds: Bounds {
                 xmin: min_e as f32,
@@ -847,55 +846,6 @@ mod tests {
             boundary_val > 50.0 && boundary_val <= 100.0,
             "Boundary value {} should be an average",
             boundary_val
-        );
-    }
-
-    /// 4. Test Y-Axis Flip and Coordinate Math
-    /// Validates the stitching grid logic without making network calls.
-    #[test]
-    fn test_stitching_coordinate_math() {
-        let bbox = BBox {
-            min_northing: 1000,
-            max_northing: 1002, // 3 tiles high
-            min_easting: 2000,
-            max_easting: 2001, // 2 tiles wide
-        };
-
-        let tile_size = 200;
-        let mut max_y_start = 0;
-        let mut min_y_start = 9999;
-
-        // Simulate the loop inside load_and_stitch
-        for n in bbox.min_northing..=bbox.max_northing {
-            for e in bbox.min_easting..=bbox.max_easting {
-                // The critical Y-axis inversion logic
-                let grid_y = (bbox.max_northing - n) as usize;
-                let grid_x = (e - bbox.min_easting) as usize;
-
-                let y_start = grid_y * tile_size;
-                let x_start = grid_x * tile_size;
-
-                if y_start > max_y_start {
-                    max_y_start = y_start;
-                }
-                if y_start < min_y_start {
-                    min_y_start = y_start;
-                }
-
-                // Assert X coordinate goes left to right
-                assert!(x_start <= (2001 - 2000) * tile_size);
-            }
-        }
-
-        // max_northing (1002) should be placed at y_start = 0
-        // min_northing (1000) should be placed at y_start = 400
-        assert_eq!(
-            min_y_start, 0,
-            "Highest northing should map to top of image (Y=0)"
-        );
-        assert_eq!(
-            max_y_start, 400,
-            "Lowest northing should map to bottom of image (Y=400)"
         );
     }
 

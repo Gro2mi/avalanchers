@@ -44,6 +44,9 @@ pub struct CenterOfMassResult {
     pub com_y: f32,
     pub elevation: f32,
     pub total_mass: f32,
+    /// Simulated time at the end of the step.
+    pub time: f32,
+    pub _pad: [f32; 3],
 }
 
 impl Default for CenterOfMassResult {
@@ -53,6 +56,8 @@ impl Default for CenterOfMassResult {
             com_y: f32::NAN,
             elevation: f32::NAN,
             total_mass: f32::NAN,
+            time: f32::NAN,
+            _pad: [0.0; 3],
         }
     }
 }

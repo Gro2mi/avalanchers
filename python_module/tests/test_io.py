@@ -113,12 +113,13 @@ def test_simulation_save():
     data = AvalanchersOutput(path)
     print(data)
     assert data.avalanchers_version == avalanchers.__version__
-    assert data.avalanchers_format == "0.1.0"
+    assert data.avalanchers_format == "0.2.0"
+    assert data.conventions == "CF-1.8"
     assert data.avalanchers_repo == "https://github.com/Gro2mi/avalanchers"
 
     site = data.get_site(site_name)
 
-    expected_site_hash = "d786eb15c92acdd8"
+    expected_site_hash = "5435f4bd7c2c9a31"
     assert site.hash == expected_site_hash, (
         f"Site hash does not match, expected '{expected_site_hash}', got {site.hash}"
     )
@@ -149,16 +150,17 @@ def test_simulation_save():
     assert dem.y.dims == ("y",)
     assert dem.x.size == 87
     assert dem.y.size == 70
+    assert dem.y[0] < dem.y[-1], "Row 0 is the south edge, so y has to ascend"
 
     # Metadata
-    assert dem.attrs["standard_name"] == "elevation"
+    assert dem.attrs["standard_name"] == "surface_altitude"
     assert dem.attrs["long_name"] == "Digital Elevation Model"
     assert dem.attrs["units"] == "m"
 
     scenario = site.get_scenario(site.scenarios[0])
     print(scenario)
 
-    expected_scenario_hash = "d1fba762150c532c"
+    expected_scenario_hash = "1a2ebf85e357a9c8"
     assert scenario.hash == expected_scenario_hash, (
         f"Scenario hash does not match, expected '{expected_scenario_hash}', "
         f"got {scenario.hash}"
@@ -168,7 +170,6 @@ def test_simulation_save():
         f"got {scenario.name}"
     )
     assert scenario.name_no_hash == site_name + "releaseTexture"
-    assert np.isclose(scenario.release_volume_m3, 7283.78076171875, atol=0.4)
     # assert np.isclose(scenario.aspect_release_degrees, None)
     assert scenario.aspect_release_degrees is None
     assert scenario.number_of_runs == 2
@@ -178,10 +179,26 @@ def test_simulation_save():
     assert_dataarray_shape(ds, "peak_flow_velocity", 87, 70)
     assert_dataarray_shape(ds, "peak_flow_thickness", 87, 70)
     assert_dataarray_shape(ds, "release_area", 87, 70)
-    assert np.isclose(ds.mu.isel(run=1).item(), 0.2)
-    assert np.isclose(ds.xsi.isel(run=1).item(), 2000.0)
-    # assert np.isclose(ds.travel_angle.isel(run=1).item(), 25.0)
-    # assert np.isclose(ds.travel_length.isel(run=1).item(), 1000.0)
+    assert ds.sizes["run"] == 2
+    assert np.isclose(ds.release_volume_m3.isel(run=1).item(), 7283.78076171875, atol=0.4)
+    assert np.isclose(ds.friction_coefficient.isel(run=1).item(), 0.2)
+    assert np.isclose(ds.drag_coefficient.isel(run=1).item(), 2000.0)
+    assert ds.released_particles_per_cell.isel(run=1).item() > 0
+    assert np.isfinite(ds.travel_length.isel(run=1).item())
+    assert ds.travel_length.isel(run=1).item() > 0
+    assert ds.final_timestep.isel(run=1).item() > 0
+    time = ds.time.isel(run=1).values
+    time = time[np.isfinite(time)]
+    assert time.size == ds.final_timestep.isel(run=1).item()
+    # The step that stops a run advances the clock without adding a record.
+    remaining = ds.simulated_time.isel(run=1).item() - time[-1]
+    assert 0 <= remaining <= 1.01 * (time[-1] - time[-2])
+    assert scenario.software_versions[ds.software_version.isel(run=1).item()].startswith(
+        avalanchers.__version__
+    )
+    assert np.issubdtype(ds.created_at.dtype, np.datetime64)
+    # x and y are cell centers, so they are spaced by exactly one cell
+    assert np.allclose(np.diff(ds.x.values), ds.cell_size.isel(run=1).item())
     if os.path.exists(path):
         shutil.rmtree(path)
 

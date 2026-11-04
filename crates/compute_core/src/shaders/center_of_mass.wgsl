@@ -41,6 +41,7 @@
 struct CenterOfMassResult {
     com: vec3f,
     total_mass: f32,
+    time: f32,
 }
 
 const CENTER_OF_MASS_BIGGEST_BLOB: u32 = 1u << 4u;
@@ -272,6 +273,7 @@ fn compute_center_of_mass(@builtin(local_invocation_index) li: u32) {
         // new_position = p_star;
         var elevation = get_elevation(vec2f(x, y));
         center_of_mass[timestep].total_mass = total_mass;
+        center_of_mass[timestep].time = sim_info.elapsed_time;
         center_of_mass[timestep].com = select(vec3f(0.0, 0.0, 0.0), vec3f(x, y, elevation), total_mass > 0.0);
     }
 }

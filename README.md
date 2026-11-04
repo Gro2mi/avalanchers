@@ -159,7 +159,8 @@ native and Python paths. After changing the Rust API, regenerate the bindings wi
 
 #### Zarr stores
 
-Stores are expected to follow the layout written by `data_processor::output`:
+Stores follow the layout in `data_processor::store_schema`, written by `data_processor::output` natively and by
+`data_processor::zarr_writer` in the browser. Stores of another `avalanchers_format` are rejected:
 
 ```
 <store>.zarr/
@@ -167,7 +168,18 @@ Stores are expected to follow the layout written by `data_processor::output`:
     dem, x, y        # arrays: the terrain of the site
     <scenario>/      # group, one per scenario
       release_area   # array: the release areas of the scenario
+      peak_flow_velocity, peak_flow_thickness  # (run, y, x)
+      center_of_mass_x, center_of_mass_y, time # (run, timestep), indexed by step, NaN without enable_center_of_mass
+      friction_coefficient, cfl, travel_length, created_at, ...  # (run): results, provenance, every setting
 ```
+
+The `run` dimension grows in blocks, so only the first `number_of_runs` entries (a scenario attribute) are runs;
+`AvalanchersScenario.dataset` already cuts it to those. `x` and `y` are cell centers. Each save holds a lock in the file
+`<store>.zarr.lock` next to the store, so several processes can write to one store.
+
+Grids keep row 0 at the south edge, so `y` ascends with the rows, in the store as well as in arrays such as
+`sim.peak_velocity`. Formats that list the north row first are flipped when they are read and written, see
+`sim.write_asc`. Use `.sortby("y", ascending=False)` on an xarray dataset before exporting it as a north-up raster.
 
 Directory uploads use the browser's `webkitdirectory` support, so the whole store folder has to be selected
 (dropping the folder onto the drop zone works as well).
