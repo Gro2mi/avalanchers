@@ -69,6 +69,13 @@ def test_calibration_parameters_enum_normalization():
     assert params["constitutive_model"] == "mu-i"
     assert avalanchers.calibration_parameters({"sim_model": 3})["sim_model"] == "sliding-block"
     assert avalanchers.calibration_parameters({"sim_model": "block"})["sim_model"] == "sliding-block"
+    assert params["release_fill_method"] == "geodesic"
+    assert (
+        avalanchers.calibration_parameters({"release_fill_method": "Slope_Weighted"})[
+            "release_fill_method"
+        ]
+        == "slope-weighted"
+    )
 
 
 def test_export_calibration_parameters_with_evaluation(tmp_path):

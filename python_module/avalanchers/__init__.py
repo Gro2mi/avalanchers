@@ -41,6 +41,8 @@ CALIBRATION_PARAMETER_DEFAULTS = {
     "release_min_elevation": 1500.0,
     "release_max_elevation": 8848.0,
     "release_area_fraction": None,
+    "release_fill_method": "geodesic",
+    "release_slope_weight": 3.0,
     "outlines_padding": None,
     "velocity_threshold": 0.1,
     "roughness_threshold": 0.01,
@@ -108,6 +110,13 @@ _ENUM_ALIASES = {
         "mui": "mu-i",
         "mu(i)": "mu-i",
         "mu-i-rheology": "mu-i",
+    },
+    "release_fill_method": {
+        "geodesic": "geodesic",
+        "distance": "geodesic",
+        "slope-weighted": "slope-weighted",
+        "slope_weighted": "slope-weighted",
+        "slope": "slope-weighted",
     },
 }
 

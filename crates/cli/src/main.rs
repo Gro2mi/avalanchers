@@ -2,7 +2,7 @@
 use anyhow::Result;
 use clap::Parser;
 use compute_core::settings::{
-    ConstitutiveModel, CrownLineMethod, FrictionModel, Settings, SimModel,
+    ConstitutiveModel, CrownLineMethod, FrictionModel, ReleaseFillMethod, Settings, SimModel,
 };
 #[allow(unused_imports)]
 use compute_core::utils::{MaxValue, timer_checkpoint, timer_get_summary, timer_new};
@@ -34,6 +34,11 @@ fn parse_friction_model(value: &str) -> Result<FrictionModel> {
 fn parse_crown_line_method(value: &str) -> Result<CrownLineMethod> {
     CrownLineMethod::from_str(value)
         .map_err(|err| anyhow::anyhow!("invalid crown line method '{value}': {err}"))
+}
+
+fn parse_release_fill_method(value: &str) -> Result<ReleaseFillMethod> {
+    ReleaseFillMethod::from_str(value)
+        .map_err(|err| anyhow::anyhow!("invalid release fill method '{value}': {err}"))
 }
 
 fn parse_constitutive_model(value: &str) -> Result<ConstitutiveModel> {
@@ -138,6 +143,16 @@ struct Args {
     crown_elevation_band: Option<f32>,
     #[arg(long)]
     min_particles_per_crown_cell: Option<u32>,
+    #[arg(long, value_parser = parse_release_fill_method)]
+    release_fill_method: Option<ReleaseFillMethod>,
+    #[arg(long)]
+    release_slope_weight: Option<f32>,
+    #[arg(long)]
+    release_slope_peak: Option<f32>,
+    #[arg(long)]
+    release_slope_width: Option<f32>,
+    #[arg(long)]
+    release_slope_smoothing_length: Option<f32>,
     #[arg(long)]
     velocity_threshold: Option<f32>,
     #[arg(long)]
@@ -188,6 +203,21 @@ impl Args {
         }
         if let Some(value) = self.min_particles_per_crown_cell {
             settings.min_particles_per_crown_cell = Some(value);
+        }
+        if let Some(value) = self.release_fill_method {
+            settings.release_fill_method = Some(value);
+        }
+        if let Some(value) = self.release_slope_weight {
+            settings.release_slope_weight = Some(value);
+        }
+        if let Some(value) = self.release_slope_peak {
+            settings.release_slope_peak = Some(value);
+        }
+        if let Some(value) = self.release_slope_width {
+            settings.release_slope_width = Some(value);
+        }
+        if let Some(value) = self.release_slope_smoothing_length {
+            settings.release_slope_smoothing_length = Some(value);
         }
         if let Some(value) = self.enable_center_of_mass {
             settings.enable_center_of_mass = Some(value);
@@ -509,6 +539,11 @@ mod tests {
             crown_line_exit_distance: None,
             crown_elevation_band: None,
             min_particles_per_crown_cell: None,
+            release_fill_method: None,
+            release_slope_weight: None,
+            release_slope_peak: None,
+            release_slope_width: None,
+            release_slope_smoothing_length: None,
             enable_center_of_mass: None,
         };
 

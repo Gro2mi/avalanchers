@@ -758,6 +758,56 @@ impl<'de> Deserialize<'de> for CrownLineMethod {
     }
 }
 
+/// How the release estimation orders the potential release cells below the
+/// crown line: by geodesic distance alone, or by a geodesic distance whose
+/// steps through unfavourable release slopes count as longer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReleaseFillMethod {
+    Geodesic,
+    SlopeWeighted,
+}
+
+impl FromStr for ReleaseFillMethod {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_lowercase().replace('_', "-").as_str() {
+            "geodesic" | "distance" => Ok(Self::Geodesic),
+            "slope-weighted" | "slope" => Ok(Self::SlopeWeighted),
+            _ => Err(format!("unknown release fill method: {value}")),
+        }
+    }
+}
+
+impl fmt::Display for ReleaseFillMethod {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(match self {
+            Self::Geodesic => "geodesic",
+            Self::SlopeWeighted => "slope-weighted",
+        })
+    }
+}
+
+impl Serialize for ReleaseFillMethod {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for ReleaseFillMethod {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        String::deserialize(deserializer)?
+            .parse::<Self>()
+            .map_err(D::Error::custom)
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
@@ -819,6 +869,26 @@ pub struct Settings {
     /// Minimum number of entering particles for an outline cell to become a
     /// crown candidate in the `particle-simulation` method (defaults to 2).
     pub min_particles_per_crown_cell: Option<u32>,
+    /// How `release_area_fraction` orders the potential release cells below
+    /// the crown line: `geodesic` distance (default), or `slope-weighted`,
+    /// where steps through slopes outside the typical release range count
+    /// as longer, so the fill reaches further into favourable terrain.
+    pub release_fill_method: Option<ReleaseFillMethod>,
+    /// Blend weight w of the `slope-weighted` fill: a step costs its length
+    /// times 1 + w (1 - mu), with mu the release slope membership. 0 equals
+    /// the geodesic fill (defaults to 3).
+    pub release_slope_weight: Option<f32>,
+    /// Slope angle (deg) of maximum release slope membership of the
+    /// `slope-weighted` fill (defaults to 43, Veitinger et al. 2016).
+    pub release_slope_peak: Option<f32>,
+    /// Half width (deg) of the release slope membership of the
+    /// `slope-weighted` fill: mu is 0.5 at peak +- width (defaults to 11).
+    pub release_slope_width: Option<f32>,
+    /// Gaussian width (m) of the DEM smoothing before the slope of the
+    /// `slope-weighted` fill is computed, so the slope approaches the
+    /// starting-zone scale the release statistics were measured at
+    /// (defaults to 10; 0 uses the raw DEM cells).
+    pub release_slope_smoothing_length: Option<f32>,
     pub velocity_threshold: Option<f32>,
     pub roughness_threshold: Option<f32>,
     pub peak_flow_thickness_threshold: Option<f32>,
@@ -1014,6 +1084,11 @@ mod tests {
             crown_line_exit_distance: Some(0.7),
             crown_elevation_band: Some(0.3),
             min_particles_per_crown_cell: Some(3),
+            release_fill_method: Some(ReleaseFillMethod::SlopeWeighted),
+            release_slope_weight: Some(2.0),
+            release_slope_peak: Some(40.0),
+            release_slope_width: Some(10.0),
+            release_slope_smoothing_length: Some(5.0),
             velocity_threshold: Some(0.001),
             roughness_threshold: Some(0.002),
             peak_flow_thickness_threshold: Some(1.5),
@@ -1475,6 +1550,41 @@ mod tests {
     fn crown_line_method_invalid_string() {
         assert!(CrownLineMethod::from_str("invalid").is_err());
         assert!(CrownLineMethod::from_str("").is_err());
+    }
+
+    #[test]
+    fn release_fill_method_string_roundtrip() {
+        let methods = [
+            (ReleaseFillMethod::Geodesic, "geodesic"),
+            (ReleaseFillMethod::SlopeWeighted, "slope-weighted"),
+        ];
+
+        for (method, string) in methods {
+            assert_eq!(method.to_string(), string);
+            assert_eq!(ReleaseFillMethod::from_str(string), Ok(method));
+        }
+    }
+
+    #[test]
+    fn release_fill_method_string_aliases() {
+        assert_eq!(
+            ReleaseFillMethod::from_str("distance"),
+            Ok(ReleaseFillMethod::Geodesic)
+        );
+        assert_eq!(
+            ReleaseFillMethod::from_str("Slope_Weighted"),
+            Ok(ReleaseFillMethod::SlopeWeighted)
+        );
+        assert_eq!(
+            ReleaseFillMethod::from_str("slope"),
+            Ok(ReleaseFillMethod::SlopeWeighted)
+        );
+    }
+
+    #[test]
+    fn release_fill_method_invalid_string() {
+        assert!(ReleaseFillMethod::from_str("invalid").is_err());
+        assert!(ReleaseFillMethod::from_str("").is_err());
     }
 
     #[test]

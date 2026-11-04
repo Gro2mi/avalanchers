@@ -718,8 +718,8 @@ impl PySimulation {
     /// - ``sim_model`` or ``reference_surface_length``: full preparation,
     /// - release thresholds (slope, elevation, roughness),
     ///   ``released_particles_per_cell``, ``release_area_fraction``, the
-    ///   crown line settings or ``enable_particle_relaxation``: release areas
-    ///   and particle seeding,
+    ///   crown line and release fill settings or
+    ///   ``enable_particle_relaxation``: release areas and particle seeding,
     /// - ``density`` or ``slab_thickness_factor``: particle masses are
     ///   rescaled,
     /// - anything else (friction, drag, cfl, max_steps, flags, ...): the

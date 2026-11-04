@@ -14,14 +14,18 @@
 //! 2. Geodesic fill: chamfer-weighted geodesic distance from the crown line
 //!    inside the outline mask; cells are selected by increasing distance until
 //!    the target share of the outline area is reached. The fill front advances
-//!    parallel to the crown line instead of following the contours.
+//!    parallel to the crown line instead of following the contours. The
+//!    slope-weighted variant lengthens steps through slopes outside the
+//!    typical release range (see [`release_slope_membership`]), so the front
+//!    advances faster through favourable release terrain.
 
 use std::cmp::Ordering;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
 use anyhow::{Result, bail};
-use compute_core::dem::Dem;
+use compute_core::dem::{Dem, smooth_gaussian};
+use compute_core::settings::ReleaseFillMethod;
 use tracing::{info, warn};
 
 /// 8-neighborhood in clockwise order, starting at the top-left diagonal.
@@ -158,6 +162,25 @@ pub struct ReleaseEstimationConfig {
     /// Plausibility window for the crown slope in degrees; violations are only
     /// reported as warnings.
     pub expected_crown_slope_range: (f32, f32),
+    /// How the potential release cells below the crown line are ordered.
+    pub fill_method: ReleaseFillMethod,
+    /// Blend weight w of the slope-weighted fill: a step costs its length
+    /// times 1 + w (1 - mu), so a step through a slope with membership 0 is
+    /// 1 + w times as long. 0 reproduces the geodesic fill.
+    pub slope_weight: f32,
+    /// Slope angle \[deg\] of maximum release slope membership. 43° is the
+    /// slope membership of Veitinger et al. (2016) as implemented in
+    /// AutoATES v2.0 (Toft et al. 2024); human-triggered slab avalanches
+    /// release at a median 38° (IQR 36-40°, Schweizer and Lütschg 2001).
+    pub slope_peak_deg: f32,
+    /// Half width \[deg\] of the release slope membership: 0.5 at
+    /// `slope_peak_deg` +- this (11°, Veitinger et al. 2016).
+    pub slope_width_deg: f32,
+    /// Gaussian width \[m\] of the DEM smoothing before the slope is
+    /// computed. The release slope statistics are starting-zone averages, so
+    /// the slope of fine DEMs is evaluated closer to that scale; 0 uses the
+    /// raw cells.
+    pub slope_smoothing_length: f32,
 }
 
 impl Default for ReleaseEstimationConfig {
@@ -172,8 +195,62 @@ impl Default for ReleaseEstimationConfig {
             min_particles_per_crown_cell: 2,
             crown_exit_distance: 0.75,
             expected_crown_slope_range: (28.0, 60.0),
+            fill_method: ReleaseFillMethod::Geodesic,
+            slope_weight: 3.0,
+            slope_peak_deg: 43.0,
+            slope_width_deg: 11.0,
+            slope_smoothing_length: 10.0,
         }
     }
+}
+
+/// Exponent b of the Cauchy release slope membership (Veitinger et al. 2016):
+/// higher values flatten the top and steepen the flanks of the bell.
+const SLOPE_MEMBERSHIP_STEEPNESS: i32 = 4;
+
+/// Release slope membership in [0, 1]: the generalized bell (Cauchy)
+/// function `1 / (1 + |(slope - peak) / width|^(2b))` that Veitinger et al.
+/// (2016) use for potential slab release areas. With the defaults (peak 43°,
+/// width 11°) it is about 1 between 35° and 50°, 0.5 at 32° and 54° and
+/// below 0.1 under 28° and above 58°.
+pub fn release_slope_membership(slope_deg: f32, peak_deg: f32, width_deg: f32) -> f32 {
+    1.0 / (1.0
+        + ((slope_deg - peak_deg) / width_deg)
+            .abs()
+            .powi(2 * SLOPE_MEMBERSHIP_STEEPNESS))
+}
+
+/// Per-cell release slope membership, with the slope taken on the DEM
+/// smoothed by `config.slope_smoothing_length`.
+fn slope_memberships(dem: &Dem, config: &ReleaseEstimationConfig) -> Vec<f32> {
+    let smoothed = smooth_gaussian(
+        &dem.data1d,
+        dem.width,
+        dem.height,
+        config.slope_smoothing_length / dem.cell_size,
+    );
+    (0..smoothed.len())
+        .map(|idx| {
+            let slope = slope_angle(&smoothed, dem.width, dem.height, dem.cell_size, idx, None);
+            release_slope_membership(slope, config.slope_peak_deg, config.slope_width_deg)
+        })
+        .collect()
+}
+
+fn validate_slope_weighting(config: &ReleaseEstimationConfig) -> Result<()> {
+    if !(config.slope_weight.is_finite() && config.slope_weight >= 0.0) {
+        bail!("release slope weight must be finite and >= 0");
+    }
+    if !config.slope_peak_deg.is_finite() {
+        bail!("release slope peak must be finite");
+    }
+    if !(config.slope_width_deg.is_finite() && config.slope_width_deg > 0.0) {
+        bail!("release slope width must be finite and > 0");
+    }
+    if !(config.slope_smoothing_length.is_finite() && config.slope_smoothing_length >= 0.0) {
+        bail!("release slope smoothing length must be finite and >= 0");
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -618,13 +695,16 @@ fn detect_crown_line_from_gradient(
 }
 
 /// Chamfer-weighted geodesic distance (Dijkstra) from the seed cells, only
-/// traversing `traversable` cells. Unreachable cells stay at infinity.
+/// traversing `traversable` cells. With `cost_factors`, each step is scaled
+/// by the mean factor of the two cells it connects. Unreachable cells stay at
+/// infinity.
 fn geodesic_distance_from(
     seeds: &[bool],
     traversable: &[bool],
     width: usize,
     height: usize,
     cell_size: f32,
+    cost_factors: Option<&[f32]>,
 ) -> Vec<f32> {
     let diagonal_distance = cell_size * std::f32::consts::SQRT_2;
     let mut distance = vec![f32::INFINITY; seeds.len()];
@@ -650,11 +730,14 @@ fn geodesic_distance_from(
             if !traversable[nidx] {
                 continue;
             }
-            let weight = if dx != 0 && dy != 0 {
+            let mut weight = if dx != 0 && dy != 0 {
                 diagonal_distance
             } else {
                 cell_size
             };
+            if let Some(factors) = cost_factors {
+                weight *= 0.5 * (factors[idx] + factors[nidx]);
+            }
             let candidate_distance = d0 + weight;
             if candidate_distance < distance[nidx] {
                 distance[nidx] = candidate_distance;
@@ -912,7 +995,10 @@ fn check_detection(detection: &CrownDetection) -> Result<()> {
 /// Distances are measured through the whole outline; with potential release
 /// areas only those cells are selected, nearest to the crown first, so terrain
 /// that cannot release (too flat, too steep, too rough) is skipped without
-/// cutting off the release terrain behind it.
+/// cutting off the release terrain behind it. With
+/// [`ReleaseFillMethod::SlopeWeighted`], steps through unfavourable release
+/// slopes count as longer, so the fill reaches further into favourable
+/// terrain and less far across benches and rock bands.
 ///
 /// Fails if the outline is empty, covers the whole DEM (crown line detection
 /// needs cells outside the outline), if no inflow boundary exists or if no
@@ -967,7 +1053,28 @@ fn estimate_release_areas_with_crown_impl(
         crown.number_crown_cells, crown.number_components
     );
 
-    let distance = geodesic_distance_from(&crown.crown, roi, width, height, dem.cell_size);
+    let memberships = match config.fill_method {
+        ReleaseFillMethod::Geodesic => None,
+        ReleaseFillMethod::SlopeWeighted => {
+            validate_slope_weighting(config)?;
+            Some(slope_memberships(dem, config))
+        }
+    };
+    // a step through a slope with membership mu is 1 + w (1 - mu) times as long
+    let cost_factors: Option<Vec<f32>> = memberships.as_ref().map(|memberships| {
+        memberships
+            .iter()
+            .map(|membership| 1.0 + config.slope_weight * (1.0 - membership))
+            .collect()
+    });
+    let distance = geodesic_distance_from(
+        &crown.crown,
+        roi,
+        width,
+        height,
+        dem.cell_size,
+        cost_factors.as_deref(),
+    );
 
     validate_potential(potential, roi)?;
     let selectable = |idx: usize| roi[idx] && potential.is_none_or(|p| p[idx]);
@@ -1050,12 +1157,27 @@ fn estimate_release_areas_with_crown_impl(
     }
 
     info!(
-        "Release fill: {} of {} outline cells ({:.0}%), mean crown slope {:.1}°",
+        "Release fill ({}): {} of {} outline cells ({:.0}%), mean crown slope {:.1}°",
+        config.fill_method,
         target,
         number_roi_cells,
         target as f32 / number_roi_cells as f32 * 100.0,
         mean_crown_slope_deg
     );
+    if let Some(memberships) = &memberships {
+        let mean_membership = |cells: &[(f32, usize)]| {
+            cells.iter().map(|&(_, idx)| memberships[idx]).sum::<f32>() / cells.len() as f32
+        };
+        info!(
+            "Slope-weighted fill (w {:.1}, peak {:.0}°, width {:.0}°): mean release slope \
+             membership {:.2} of the selected cells, {:.2} of all reachable candidates",
+            config.slope_weight,
+            config.slope_peak_deg,
+            config.slope_width_deg,
+            mean_membership(&ordered[..target]),
+            mean_membership(&ordered)
+        );
+    }
 
     Ok(ReleaseEstimate {
         release_areas,
@@ -1521,6 +1643,135 @@ mod tests {
 
         // a mask of the wrong size is rejected
         assert!(estimate_release_areas(&dem, &roi, Some(&potential[1..]), &config).is_err());
+    }
+
+    #[test]
+    fn slope_membership_matches_veitinger_bell() {
+        let membership = |slope| release_slope_membership(slope, 43.0, 11.0);
+        assert_eq!(membership(43.0), 1.0);
+        assert!((membership(32.0) - 0.5).abs() < 1e-6);
+        assert!((membership(54.0) - 0.5).abs() < 1e-6);
+        assert!(membership(38.0) > 0.99);
+        assert!(membership(50.0) > 0.95);
+        assert!(membership(28.0) < 0.1);
+        assert!(membership(60.0) < 0.05);
+    }
+
+    /// Crown along the upstream row `y` of the rectangle `x0..x1`.
+    fn crown_row(width: usize, height: usize, y: usize, x0: usize, x1: usize) -> CrownDetection {
+        let crown = rectangle_roi(width, height, x0, x1, y, y + 1);
+        CrownDetection {
+            candidates: crown.clone(),
+            crown,
+            number_crown_cells: x1 - x0,
+            number_components: 1,
+            number_candidates: x1 - x0,
+        }
+    }
+
+    #[test]
+    fn slope_weighted_fill_without_weight_equals_geodesic() {
+        let width = 20;
+        let height = 20;
+        let dem = plane_dem(width, height, 10.0);
+        let roi = rectangle_roi(width, height, 5, 15, 5, 15);
+        let crown = crown_row(width, height, 14, 5, 15);
+        let geodesic = ReleaseEstimationConfig::default();
+        let slope_weighted = ReleaseEstimationConfig {
+            fill_method: ReleaseFillMethod::SlopeWeighted,
+            slope_weight: 0.0,
+            ..Default::default()
+        };
+        let expected =
+            estimate_release_areas_with_crown(&dem, &roi, None, &crown, &geodesic).unwrap();
+        let estimate =
+            estimate_release_areas_with_crown(&dem, &roi, None, &crown, &slope_weighted).unwrap();
+        assert_eq!(estimate.release_areas, expected.release_areas);
+    }
+
+    #[test]
+    fn slope_weighted_fill_extends_into_favourable_slope() {
+        // the plane rises at 40° left of x = 10 and at 25° right of it, below
+        // a straight crown along the upstream row y = 14
+        let width = 20;
+        let height = 20;
+        let cell_size = 10.0;
+        let mut dem = plane_dem(width, height, cell_size);
+        dem.data1d = (0..width * height)
+            .map(|idx| {
+                let (x, y) = (idx % width, idx / width);
+                let slope_deg: f32 = if x < 10 { 40.0 } else { 25.0 };
+                y as f32 * cell_size * slope_deg.to_radians().tan()
+            })
+            .collect();
+        dem.data = to_2d(&dem.data1d, width, height);
+        let roi = rectangle_roi(width, height, 5, 15, 5, 15);
+        let crown = crown_row(width, height, 14, 5, 15);
+        let release_cells = |estimate: &ReleaseEstimate, columns: std::ops::Range<usize>| {
+            (0..width * height)
+                .filter(|&idx| columns.contains(&(idx % width)))
+                .filter(|&idx| estimate.release_areas[idx] > 0.0)
+                .count()
+        };
+
+        let geodesic = ReleaseEstimationConfig {
+            slope_smoothing_length: 0.0,
+            ..Default::default()
+        };
+        let estimate =
+            estimate_release_areas_with_crown(&dem, &roi, None, &crown, &geodesic).unwrap();
+        // rows 14 and 13 complete, then the first 5 cells of row 12
+        assert_eq!(release_cells(&estimate, 5..10), 15);
+        assert_eq!(release_cells(&estimate, 10..15), 10);
+
+        let slope_weighted = ReleaseEstimationConfig {
+            fill_method: ReleaseFillMethod::SlopeWeighted,
+            ..geodesic
+        };
+        let estimate =
+            estimate_release_areas_with_crown(&dem, &roi, None, &crown, &slope_weighted).unwrap();
+        assert_eq!(estimate.number_release_cells, 25); // still 25% of 100 cells
+        let favourable = release_cells(&estimate, 5..9);
+        let unfavourable = release_cells(&estimate, 11..15);
+        assert!(
+            favourable > 2 * unfavourable,
+            "{favourable} cells on the 40° half, {unfavourable} on the 25° half"
+        );
+        // every column keeps the crown row: the fill stays attached to it
+        for x in 5..15 {
+            assert!(
+                estimate.release_areas[14 * width + x] > 0.0,
+                "crown cell {x}"
+            );
+        }
+    }
+
+    #[test]
+    fn slope_weighted_fill_rejects_invalid_parameters() {
+        let dem = plane_dem(20, 20, 10.0);
+        let roi = rectangle_roi(20, 20, 5, 15, 5, 15);
+        let crown = crown_row(20, 20, 14, 5, 15);
+        let valid = ReleaseEstimationConfig {
+            fill_method: ReleaseFillMethod::SlopeWeighted,
+            ..Default::default()
+        };
+        assert!(estimate_release_areas_with_crown(&dem, &roi, None, &crown, &valid).is_ok());
+        for invalid in [
+            ReleaseEstimationConfig {
+                slope_weight: -1.0,
+                ..valid.clone()
+            },
+            ReleaseEstimationConfig {
+                slope_width_deg: 0.0,
+                ..valid.clone()
+            },
+            ReleaseEstimationConfig {
+                slope_smoothing_length: f32::NAN,
+                ..valid.clone()
+            },
+        ] {
+            assert!(estimate_release_areas_with_crown(&dem, &roi, None, &crown, &invalid).is_err());
+        }
     }
 
     #[test]

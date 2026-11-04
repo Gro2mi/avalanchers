@@ -42,7 +42,7 @@ use compute_core::{
     dem::{Bounds, Dem},
     evaluation::MassMovementEvaluation,
     post_processing::*,
-    settings::{CrownLineMethod, Settings, SimModel, SimSettings},
+    settings::{CrownLineMethod, ReleaseFillMethod, Settings, SimModel, SimSettings},
     utils::*,
 };
 #[cfg(target_arch = "wasm32")]
@@ -127,6 +127,11 @@ struct ReleaseConfig {
     crown_line_exit_distance: Option<f32>,
     crown_elevation_band: Option<f32>,
     min_particles_per_crown_cell: Option<u32>,
+    release_fill_method: ReleaseFillMethod,
+    release_slope_weight: Option<f32>,
+    release_slope_peak: Option<f32>,
+    release_slope_width: Option<f32>,
+    release_slope_smoothing_length: Option<f32>,
     enable_particle_relaxation: bool,
 }
 
@@ -189,6 +194,19 @@ pub struct SimulationLoadResult {
     /// Entry count threshold of the particle-simulation crown line method;
     /// `None` keeps the default.
     pub min_particles_per_crown_cell: Option<u32>,
+    /// How the release cells below the crown line are ordered; `None` falls
+    /// back to the geodesic fill.
+    pub release_fill_method: Option<ReleaseFillMethod>,
+    /// Blend weight of the slope-weighted fill; `None` keeps the default.
+    pub release_slope_weight: Option<f32>,
+    /// Peak (deg) of the release slope membership; `None` keeps the default.
+    pub release_slope_peak: Option<f32>,
+    /// Half width (deg) of the release slope membership; `None` keeps the
+    /// default.
+    pub release_slope_width: Option<f32>,
+    /// DEM smoothing width (m) for the release slope; `None` keeps the
+    /// default.
+    pub release_slope_smoothing_length: Option<f32>,
     /// Number of compute steps dispatched per GPU submission. The OS might reset the GPU or interrupt the submission, if computing a batch takes too long.
     pub batch_compute_steps: Option<u32>,
     pub particle_sort_interval: Option<u32>,
@@ -231,6 +249,11 @@ pub struct Simulation {
     crown_line_exit_distance: Option<f32>,
     crown_elevation_band: Option<f32>,
     min_particles_per_crown_cell: Option<u32>,
+    release_fill_method: ReleaseFillMethod,
+    release_slope_weight: Option<f32>,
+    release_slope_peak: Option<f32>,
+    release_slope_width: Option<f32>,
+    release_slope_smoothing_length: Option<f32>,
     release_areas_array: Option<Vec<f32>>,
     /// Crown line detected by release area estimation; empty unless
     /// `release_area_fraction` was set.
@@ -288,6 +311,11 @@ impl Simulation {
             crown_line_exit_distance: None,
             crown_elevation_band: None,
             min_particles_per_crown_cell: None,
+            release_fill_method: ReleaseFillMethod::Geodesic,
+            release_slope_weight: None,
+            release_slope_peak: None,
+            release_slope_width: None,
+            release_slope_smoothing_length: None,
             release_areas_array: None,
             crown_line: Vec::new(),
             crown_candidates: Vec::new(),
@@ -394,6 +422,11 @@ impl Simulation {
             crown_line_exit_distance: settings.crown_line_exit_distance,
             crown_elevation_band: settings.crown_elevation_band,
             min_particles_per_crown_cell: settings.min_particles_per_crown_cell,
+            release_fill_method: settings.release_fill_method,
+            release_slope_weight: settings.release_slope_weight,
+            release_slope_peak: settings.release_slope_peak,
+            release_slope_width: settings.release_slope_width,
+            release_slope_smoothing_length: settings.release_slope_smoothing_length,
             output_path: settings.output_path.clone(),
         })
     }
@@ -433,6 +466,13 @@ impl Simulation {
         self.crown_line_exit_distance = data.crown_line_exit_distance;
         self.crown_elevation_band = data.crown_elevation_band;
         self.min_particles_per_crown_cell = data.min_particles_per_crown_cell;
+        self.release_fill_method = data
+            .release_fill_method
+            .unwrap_or(ReleaseFillMethod::Geodesic);
+        self.release_slope_weight = data.release_slope_weight;
+        self.release_slope_peak = data.release_slope_peak;
+        self.release_slope_width = data.release_slope_width;
+        self.release_slope_smoothing_length = data.release_slope_smoothing_length;
         self.crown_line = Vec::new();
         self.crown_candidates = Vec::new();
         self.potential_release_areas = Vec::new();
@@ -778,6 +818,21 @@ impl Simulation {
         if let Some(count) = patch.min_particles_per_crown_cell {
             self.min_particles_per_crown_cell = Some(count);
         }
+        if let Some(method) = patch.release_fill_method {
+            self.release_fill_method = method;
+        }
+        if let Some(weight) = patch.release_slope_weight {
+            self.release_slope_weight = Some(weight);
+        }
+        if let Some(peak) = patch.release_slope_peak {
+            self.release_slope_peak = Some(peak);
+        }
+        if let Some(width) = patch.release_slope_width {
+            self.release_slope_width = Some(width);
+        }
+        if let Some(length) = patch.release_slope_smoothing_length {
+            self.release_slope_smoothing_length = Some(length);
+        }
         Ok(())
     }
 
@@ -793,6 +848,11 @@ impl Simulation {
             crown_line_exit_distance: self.crown_line_exit_distance,
             crown_elevation_band: self.crown_elevation_band,
             min_particles_per_crown_cell: self.min_particles_per_crown_cell,
+            release_fill_method: self.release_fill_method,
+            release_slope_weight: self.release_slope_weight,
+            release_slope_peak: self.release_slope_peak,
+            release_slope_width: self.release_slope_width,
+            release_slope_smoothing_length: self.release_slope_smoothing_length,
             enable_particle_relaxation: self.enable_particle_relaxation,
         }
     }
@@ -1566,8 +1626,8 @@ impl Simulation {
                 None => match self.release_area_fraction {
                     Some(fraction) => {
                         info!(
-                            "Estimating release areas from crown line (fraction {fraction:.2}, method {})",
-                            self.crown_line_method
+                            "Estimating release areas from crown line (fraction {fraction:.2}, method {}, fill {})",
+                            self.crown_line_method, self.release_fill_method
                         );
                         let defaults = release_estimation::ReleaseEstimationConfig::default();
                         let config = release_estimation::ReleaseEstimationConfig {
@@ -1587,6 +1647,19 @@ impl Simulation {
                                 self.settings.max_slope_angle,
                             ),
                             min_crown_slope_deg: self.settings.min_slope_angle,
+                            fill_method: self.release_fill_method,
+                            slope_weight: self
+                                .release_slope_weight
+                                .unwrap_or(defaults.slope_weight),
+                            slope_peak_deg: self
+                                .release_slope_peak
+                                .unwrap_or(defaults.slope_peak_deg),
+                            slope_width_deg: self
+                                .release_slope_width
+                                .unwrap_or(defaults.slope_width_deg),
+                            slope_smoothing_length: self
+                                .release_slope_smoothing_length
+                                .unwrap_or(defaults.slope_smoothing_length),
                             ..defaults
                         };
                         // the threshold classification on the GPU marks every
@@ -2940,6 +3013,39 @@ mod tests {
             assert_eq!(is_crown, expected, "at ({x},{y})");
         }
         // 256 outline cells -> 25% -> 64 release cells on the upstream rows
+        assert_eq!(sim.number_particles(), 64 * 8);
+        let release_areas =
+            block_on(sim.fetch_release_areas()).expect("Failed to fetch release areas");
+        assert_eq!(release_areas.iter().filter(|&&t| t > 0.0).count(), 64);
+    }
+
+    #[test_log::test]
+    fn test_release_estimation_slope_weighted_fill_end_to_end() {
+        let width = 24;
+        let height = 24;
+        let cell_size = 5.0;
+        // inclined plane draining towards decreasing y
+        let dem_data: Vec<f32> = (0..width * height)
+            .map(|idx| 2000.0 + (idx / width) as f32 * 5.0)
+            .collect();
+        let mut sim: Simulation = block_on(Simulation::new()).expect("Failed to create Simulation");
+        block_on(sim.create(Settings::default())).expect("Failed to create simulation");
+        sim.set_dem(&dem_data, width, height, cell_size)
+            .expect("Failed to set DEM");
+        let roi: Vec<bool> = (0..width * height)
+            .map(|idx| {
+                let (x, y) = (idx % width, idx / width);
+                (4..20).contains(&x) && (4..20).contains(&y)
+            })
+            .collect();
+        sim.set_roi(&roi).expect("Failed to set ROI");
+        sim.release_area_fraction = Some(0.25);
+        sim.release_fill_method = ReleaseFillMethod::SlopeWeighted;
+
+        block_on(sim.run()).expect("Failed to run simulation");
+        assert_eq!(sim.state, SimulationState::Finished);
+        // the uniform 45° plane weights every step alike: 256 outline cells
+        // -> 25% -> 64 release cells
         assert_eq!(sim.number_particles(), 64 * 8);
         let release_areas =
             block_on(sim.fetch_release_areas()).expect("Failed to fetch release areas");
