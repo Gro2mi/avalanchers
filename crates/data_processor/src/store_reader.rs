@@ -365,8 +365,13 @@ mod tests {
     #[test_log::test]
     fn test_release_round_trips_through_the_store() {
         let (_tmp_dir, path) = store(&[("north_def", &RELEASE_A)]);
-        let loaded = block_on(load_release_areas(&format!("{path}/pass_abc/north_def"))).unwrap();
-        assert_eq!(loaded, RELEASE_A);
+        let loaded = block_on(load_release_areas(
+            &format!("{path}/pass_abc/north_def"),
+            &Default::default(),
+            1.0,
+        ))
+        .unwrap();
+        assert_eq!(loaded.thickness, RELEASE_A);
     }
 
     #[test_log::test]

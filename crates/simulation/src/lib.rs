@@ -245,6 +245,9 @@ pub struct Simulation {
     /// Destination of [`Simulation::save`] (Zarr store path or prefix).
     pub output_path: String,
     release_areas_path: Option<String>,
+    /// Whether the file at `release_areas_path` held the release thickness;
+    /// set when it is loaded.
+    release_thickness_in_file: bool,
     release_area_fraction: Option<f32>,
     crown_line_method: CrownLineMethod,
     crown_line_exit_distance: Option<f32>,
@@ -307,6 +310,7 @@ impl Simulation {
             gpu_cache: GpuCache::default(),
             sim_info: SimInfo::default(),
             release_areas_path: None,
+            release_thickness_in_file: false,
             release_area_fraction: None,
             crown_line_method: CrownLineMethod::FlowRouting,
             crown_line_exit_distance: None,
@@ -861,9 +865,13 @@ impl Simulation {
     }
 
     /// Whether the release thickness comes from `slab_thickness_factor`
-    /// (computed or estimated release areas) rather than a file or array.
+    /// (computed or estimated release areas, shapefiles without thickness
+    /// attributes) rather than a file or array.
     fn release_thickness_from_settings(&self) -> bool {
-        self.release_areas_path.is_none() && self.release_areas_array.is_none()
+        match &self.release_areas_path {
+            Some(_) => !self.release_thickness_in_file,
+            None => self.release_areas_array.is_none(),
+        }
     }
 
     fn preparation_stage(&self, initial: &InitialState) -> PreparationStage {
@@ -1553,7 +1561,9 @@ impl Simulation {
     /// Determines the release areas and returns the number of release cells.
     ///
     /// Sources are tried in priority order: a release-area file
-    /// (`release_areas_path`), a directly set array
+    /// (`release_areas_path`; shapefiles are rasterized onto the DEM, with
+    /// `slab_thickness_factor` if they have no thickness attributes), a
+    /// directly set array
     /// ([`Self::set_release_areas`]), crown-line estimation from the outline
     /// (`release_area_fraction`, also fills [`Self::crown_line`]), and finally
     /// automatic computation from roughness and slope thresholds on the GPU.
@@ -1572,9 +1582,15 @@ impl Simulation {
         let number_release_cells = match &self.release_areas_path {
             Some(path) => {
                 info!("Loading release areas from path: {}", path);
-                let data = data_processor::load_release_areas(path)
-                    .await
-                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                let release_areas = data_processor::load_release_areas(
+                    path,
+                    &self.dem,
+                    self.settings.slab_thickness_factor,
+                )
+                .await
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                self.release_thickness_in_file = release_areas.thickness_from_file;
+                let data = release_areas.thickness;
                 self.validate_release_areas_len(&data)?;
                 self.orchestrator
                     .write_buffer(BufferName::ReleaseAreas, &data)
@@ -3741,6 +3757,74 @@ mod tests {
         );
         info!("Read number_release_cells: {:?}", number_release_cells);
     }
+    /// Writes a shapefile covering the west half of `dem` and returns its path.
+    fn write_release_shapefile(
+        dir: &tempfile::TempDir,
+        dem: &Dem,
+        thickness: Option<f64>,
+    ) -> String {
+        use shapefile::dbase::{FieldValue, Record, TableWriterBuilder};
+        use shapefile::{Point, Polygon, PolygonRing, Writer};
+
+        let bounds = &dem.bounds;
+        let (xmin, ymin) = (bounds.xmin as f64, bounds.ymin as f64);
+        let (xmid, ymax) = (
+            (bounds.xmin as f64 + bounds.xmax as f64) / 2.0,
+            bounds.ymax as f64,
+        );
+        let path = dir.path().join("release.shp");
+        let table =
+            TableWriterBuilder::new().add_numeric_field("thickness".try_into().unwrap(), 10, 3);
+        let mut writer = Writer::from_path(&path, table).unwrap();
+        let mut record = Record::default();
+        record.insert("thickness".to_string(), FieldValue::Numeric(thickness));
+        let ring = vec![
+            Point::new(xmin, ymin),
+            Point::new(xmin, ymax),
+            Point::new(xmid, ymax),
+            Point::new(xmid, ymin),
+            Point::new(xmin, ymin),
+        ];
+        writer
+            .write_shape_and_record(
+                &Polygon::with_rings(vec![PolygonRing::Outer(ring)]),
+                &record,
+            )
+            .unwrap();
+        path.to_str().unwrap().to_string()
+    }
+
+    #[test_log::test]
+    fn test_shapefile_release_thickness_comes_from_attributes_before_settings() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        for (attribute, expected, from_settings) in [(Some(2.5), 2.5, false), (None, 1.75, true)] {
+            let mut sim = block_on(Simulation::new()).expect("Failed to create Simulation");
+            block_on(sim.create_example(INCLINED_PLANE_PATH)).unwrap();
+            sim.settings.slab_thickness_factor = 1.75;
+            sim.release_areas_path = Some(write_release_shapefile(&tmp_dir, &sim.dem, attribute));
+
+            block_on(sim.prepare()).expect("Failed to prepare simulation");
+
+            let release_thickness = block_on(sim.fetch_release_areas()).unwrap();
+            let released: Vec<f32> = release_thickness
+                .iter()
+                .copied()
+                .filter(|&x| x > 0.0)
+                .collect();
+            assert!(!released.is_empty());
+            assert!(released.iter().all(|&x| x == expected));
+            assert_eq!(sim.release_thickness_from_settings(), from_settings);
+        }
+    }
+
+    #[test_log::test]
+    fn test_release_thickness_is_not_from_settings_for_arrays() {
+        let mut sim = block_on(Simulation::new()).expect("Failed to create Simulation");
+        assert!(sim.release_thickness_from_settings());
+        sim.release_areas_array = Some(vec![1.0]);
+        assert!(!sim.release_thickness_from_settings());
+    }
+
     #[test_log::test]
     fn test_load_release_areas_gar() {
         let mut sim = block_on(Simulation::new()).expect("Failed to create Simulation");
@@ -3845,8 +3929,13 @@ mod tests {
         sim.settings.released_particles_per_cell = 10;
         info!("Sim settings: {:?}", sim.settings);
         block_on(sim.analyze_terrain()).expect("Failed to analyze terrain");
-        let data = block_on(data_processor::load_release_areas(RELEASE_TEXTURE_PATH))
-            .expect("Failed to read release areas");
+        let data = block_on(data_processor::load_release_areas(
+            RELEASE_TEXTURE_PATH,
+            &sim.dem,
+            sim.settings.slab_thickness_factor,
+        ))
+        .expect("Failed to read release areas")
+        .thickness;
         let number_release_cells: u32 =
             block_on(sim.load_release_areas()).expect("Failed to load_release_areas");
         let estimated_release_volume = block_on(sim.orchestrator.run_initialize_particles(

@@ -192,6 +192,11 @@ areas and a warning. Saving into the same store continues the scenario.
 { "dem_path": "avalanchers.zarr/avaWog/avaWogreleaseTexture" }
 ```
 
+`release_areas_path` also accepts a polygon shapefile (`.shp`) in the coordinate system of the DEM, native and Python
+only. All its features are rasterized onto the DEM grid: cells whose center lies inside a polygon release, holes stay
+free. As in AvaFrame, the thickness of each feature comes from its `thickness` or `d0` attribute, either all features
+or none must have one, and features must not overlap. Without these attributes `slab_thickness_factor` is used.
+
 Directory uploads use the browser's `webkitdirectory` support, so the whole store folder has to be selected
 (dropping the folder onto the drop zone works as well).
 

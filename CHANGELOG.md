@@ -53,8 +53,13 @@ All notable changes to this project might be documented in this file.
   passed as arrays, so every release from a file got the same one. It uses the stable DEM
   hasher, so it no longer depends on the Rust version. Site hashes change with the coordinates.
 - The center of mass records carry the simulated time, stored as `time` in the result stores.
+- Holes in outline polygons are no longer part of the region of interest. They were filled.
 
 ### Added
+- `release_areas_path` accepts polygon shapefiles (`.shp`, native and Python). All features are
+  rasterized onto the DEM grid; holes stay free. As in AvaFrame, the thickness of each feature comes
+  from its `thickness` or `d0` attribute, either all features or none must have one, and features
+  must not overlap. Without these attributes `slab_thickness_factor` is used.
 - `dem_path` and `release_areas_path` accept paths into a result store, such as
   `avalanchers.zarr/avaWog/avaWogreleaseTexture`, so the DEM and, if present, the release areas
   of an earlier run can be reused. Saving into the same store continues the scenario.

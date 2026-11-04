@@ -44,6 +44,8 @@ pub enum DataProcessorError {
     RasterError(#[from] crate::rasterizer::RasterizerError),
     #[error("Failed to read DEM: {0}")]
     DemError(String),
+    #[error("Failed to load release areas: {0}")]
+    ReleaseAreasError(String),
     #[error("Failed to create sim settings: {0}")]
     SimSettingsError(String),
     #[error("No outlines padding provided")]
@@ -744,10 +746,81 @@ fn geo_tiff_to_dem(mut tiff: GeoTiff, source: &str) -> Dem {
     dem
 }
 
-pub async fn load_release_areas(path: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+/// Release thickness per cell, as loaded from a file or result store.
+pub struct ReleaseAreas {
+    pub thickness: Vec<f32>,
+    /// False for shapefiles without thickness attributes, which use the
+    /// thickness passed to [`load_release_areas`].
+    pub thickness_from_file: bool,
+}
+
+/// Rasterizes the polygons of a shapefile onto the DEM grid: cells whose center
+/// lies inside a polygon get the thickness of its feature, all others 0.
+/// Features without thickness attributes get `default_thickness`; as in
+/// AvaFrame, either all features or none must have one and features must not
+/// overlap. The shapefile has to use the coordinate system of the DEM.
+fn load_release_areas_from_shapefile(
+    path: &str,
+    dem: &Dem,
+    default_thickness: f32,
+) -> Result<ReleaseAreas, DataProcessorError> {
+    let features = shapefile_reader::read_release_features(path)?;
+    let number_with_thickness = features.iter().filter(|f| f.thickness.is_some()).count();
+    if number_with_thickness != 0 && number_with_thickness != features.len() {
+        return Err(DataProcessorError::ReleaseAreasError(format!(
+            "{path}: only {number_with_thickness} of {} features have a thickness",
+            features.len()
+        )));
+    }
+
+    let mut grid = RasterGrid {
+        origin_x: dem.bounds.xmin as f64,
+        origin_y: dem.bounds.ymin as f64,
+        cell_size: dem.cell_size as f64,
+        width: dem.width,
+        height: dem.height,
+        data: vec![false; dem.width * dem.height],
+    };
+    let mut thickness = vec![0.0; grid.data.len()];
+    let mut covered = vec![false; grid.data.len()];
+    for (index, feature) in features.iter().enumerate() {
+        grid.data.fill(false);
+        grid.rasterize(&feature.polygon);
+        for (cell, _) in grid.data.iter().enumerate().filter(|(_, inside)| **inside) {
+            if covered[cell] {
+                return Err(DataProcessorError::ReleaseAreasError(format!(
+                    "{path}: feature {index} overlaps another feature"
+                )));
+            }
+            covered[cell] = true;
+            thickness[cell] = feature.thickness.unwrap_or(default_thickness);
+        }
+    }
+    if !covered.iter().any(|&inside| inside) {
+        return Err(DataProcessorError::ReleaseAreasError(format!(
+            "{path} covers no cell of the DEM; does it use the coordinate system of the DEM?"
+        )));
+    }
+    Ok(ReleaseAreas {
+        thickness,
+        thickness_from_file: number_with_thickness > 0,
+    })
+}
+
+/// Loads the per-cell release thickness from a file or result store. Rasters
+/// have to match the DEM grid; shapefiles are rasterized onto `dem`, with
+/// `default_thickness` if they have no thickness attributes.
+pub async fn load_release_areas(
+    path: &str,
+    dem: &Dem,
+    default_thickness: f32,
+) -> Result<ReleaseAreas, Box<dyn std::error::Error>> {
     #[cfg(not(target_arch = "wasm32"))]
     if store_schema::split_store_path(path).is_some() {
-        return Ok(store_reader::read_release_areas(path)?);
+        return Ok(ReleaseAreas {
+            thickness: store_reader::read_release_areas(path)?,
+            thickness_from_file: true,
+        });
     }
 
     let ext = std::path::Path::new(path)
@@ -756,6 +829,13 @@ pub async fn load_release_areas(path: &str) -> Result<Vec<f32>, Box<dyn std::err
         .unwrap_or("");
 
     let data: Vec<f32> = match ext.to_lowercase().as_str() {
+        "shp" => {
+            return Ok(load_release_areas_from_shapefile(
+                path,
+                dem,
+                default_thickness,
+            )?);
+        }
         "asc" => {
             let mut grid = EsriGrid::from_file(path)?;
             grid.flip_y();
@@ -776,7 +856,10 @@ pub async fn load_release_areas(path: &str) -> Result<Vec<f32>, Box<dyn std::err
         }
         _ => return Err(format!("Unsupported release format: {}", ext).into()),
     };
-    Ok(data)
+    Ok(ReleaseAreas {
+        thickness: data,
+        thickness_from_file: true,
+    })
 }
 
 /// Loads release areas from raw bytes. `ext` selects the parser, e.g. "asc" or "tif".
@@ -1367,10 +1450,312 @@ mod tests {
 
         write_png(&base_path, &rgba, 2, 2).unwrap();
 
-        let release_areas = load_release_areas(base_path.with_extension("png").to_str().unwrap())
+        let release_areas = load_release_areas(
+            base_path.with_extension("png").to_str().unwrap(),
+            &Dem::default(),
+            1.0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(release_areas.thickness, vec![0.0, 1.0, 2.0, 2.55]);
+        assert!(release_areas.thickness_from_file);
+    }
+
+    /// A DEM whose origin is not a multiple of its cell size.
+    fn release_test_dem(width: usize, height: usize) -> Dem {
+        Dem {
+            width,
+            height,
+            cell_size: 10.0,
+            bounds: Bounds {
+                xmin: 1003.0,
+                xmax: 1003.0 + 10.0 * width as f32,
+                ymin: 2007.0,
+                ymax: 2007.0 + 10.0 * height as f32,
+            },
+            ..Default::default()
+        }
+    }
+
+    fn rectangle(xmin: f64, ymin: f64, xmax: f64, ymax: f64) -> Vec<shapefile::Point> {
+        vec![
+            shapefile::Point::new(xmin, ymin),
+            shapefile::Point::new(xmin, ymax),
+            shapefile::Point::new(xmax, ymax),
+            shapefile::Point::new(xmax, ymin),
+            shapefile::Point::new(xmin, ymin),
+        ]
+    }
+
+    /// Writes one feature per entry of `features`, each with a value of the
+    /// numeric attribute `field`, and returns the path.
+    fn write_shapefile_with_field(
+        dir: &tempfile::TempDir,
+        field: &str,
+        features: Vec<(Vec<shapefile::Point>, Option<f64>)>,
+    ) -> String {
+        let path = dir.path().join("release.shp");
+        let table = shapefile::dbase::TableWriterBuilder::new().add_numeric_field(
+            field.try_into().unwrap(),
+            10,
+            3,
+        );
+        let mut writer = shapefile::Writer::from_path(&path, table).unwrap();
+        for (ring, value) in features {
+            let mut record = shapefile::dbase::Record::default();
+            record.insert(
+                field.to_string(),
+                shapefile::dbase::FieldValue::Numeric(value),
+            );
+            writer
+                .write_shape_and_record(
+                    &shapefile::Polygon::with_rings(vec![shapefile::PolygonRing::Outer(ring)]),
+                    &record,
+                )
+                .unwrap();
+        }
+        path.to_str().unwrap().to_string()
+    }
+
+    /// Writes one feature per entry of `features` and returns the path.
+    fn write_shapefile(
+        dir: &tempfile::TempDir,
+        name: &str,
+        features: Vec<Vec<shapefile::PolygonRing<shapefile::Point>>>,
+    ) -> String {
+        let path = dir.path().join(name);
+        let mut writer =
+            shapefile::Writer::from_path(&path, shapefile::dbase::TableWriterBuilder::new())
+                .unwrap();
+        for rings in features {
+            writer
+                .write_shape_and_record(
+                    &shapefile::Polygon::with_rings(rings),
+                    &shapefile::dbase::Record::default(),
+                )
+                .unwrap();
+        }
+        path.to_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn test_load_release_areas_rasterizes_all_shapefile_features_on_the_dem_grid() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let path = write_shapefile(
+            &tmp_dir,
+            "release.shp",
+            vec![
+                // south-west corner: columns 0-1 of row 0
+                vec![shapefile::PolygonRing::Outer(rectangle(
+                    1003.0, 2007.0, 1023.0, 2017.0,
+                ))],
+                // north-east corner, reaching past the DEM: column 3 of rows 1-2
+                vec![shapefile::PolygonRing::Outer(rectangle(
+                    1033.0, 2017.0, 1100.0, 2100.0,
+                ))],
+            ],
+        );
+
+        let release_areas = load_release_areas(&path, &release_test_dem(4, 3), 1.5)
             .await
             .unwrap();
-        assert_eq!(release_areas, vec![0.0, 1.0, 2.0, 2.55]);
+
+        #[rustfmt::skip]
+        assert_eq!(release_areas.thickness, vec![
+            1.5, 1.5, 0.0, 0.0, // south
+            0.0, 0.0, 0.0, 1.5,
+            0.0, 0.0, 0.0, 1.5, // north
+        ]);
+        assert!(!release_areas.thickness_from_file);
+    }
+
+    #[tokio::test]
+    async fn test_load_release_areas_reads_the_thickness_of_each_shapefile_feature() {
+        for field in ["thickness", "THICKNESS", "d0", "D0"] {
+            let tmp_dir = tempfile::tempdir().unwrap();
+            let path = write_shapefile_with_field(
+                &tmp_dir,
+                field,
+                vec![
+                    (rectangle(1003.0, 2007.0, 1013.0, 2017.0), Some(0.5)),
+                    (rectangle(1013.0, 2007.0, 1023.0, 2017.0), Some(2.25)),
+                ],
+            );
+
+            let release_areas = load_release_areas(&path, &release_test_dem(3, 1), 9.0)
+                .await
+                .unwrap();
+
+            assert_eq!(release_areas.thickness, vec![0.5, 2.25, 0.0], "{field}");
+            assert!(release_areas.thickness_from_file);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_load_release_areas_uses_the_default_for_empty_thickness_attributes() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let path = write_shapefile_with_field(
+            &tmp_dir,
+            "thickness",
+            vec![(rectangle(1003.0, 2007.0, 1013.0, 2017.0), None)],
+        );
+
+        let release_areas = load_release_areas(&path, &release_test_dem(1, 1), 9.0)
+            .await
+            .unwrap();
+
+        assert_eq!(release_areas.thickness, vec![9.0]);
+        assert!(!release_areas.thickness_from_file);
+    }
+
+    #[tokio::test]
+    async fn test_load_release_areas_works_without_a_dbf_file() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let path = write_shapefile_with_field(
+            &tmp_dir,
+            "thickness",
+            vec![(rectangle(1003.0, 2007.0, 1013.0, 2017.0), Some(0.5))],
+        );
+        fs::remove_file(tmp_dir.path().join("release.dbf")).unwrap();
+
+        let release_areas = load_release_areas(&path, &release_test_dem(1, 1), 9.0)
+            .await
+            .unwrap();
+
+        assert_eq!(release_areas.thickness, vec![9.0]);
+    }
+
+    #[tokio::test]
+    async fn test_load_release_areas_rejects_partial_shapefile_thickness() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let path = write_shapefile_with_field(
+            &tmp_dir,
+            "thickness",
+            vec![
+                (rectangle(1003.0, 2007.0, 1013.0, 2017.0), Some(0.5)),
+                (rectangle(1013.0, 2007.0, 1023.0, 2017.0), None),
+            ],
+        );
+
+        let error = load_release_areas(&path, &release_test_dem(3, 1), 1.0)
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("only 1 of 2 features"));
+    }
+
+    #[tokio::test]
+    async fn test_load_release_areas_rejects_negative_shapefile_thickness() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let path = write_shapefile_with_field(
+            &tmp_dir,
+            "thickness",
+            vec![(rectangle(1003.0, 2007.0, 1013.0, 2017.0), Some(-1.0))],
+        );
+
+        let error = load_release_areas(&path, &release_test_dem(1, 1), 1.0)
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("invalid thickness"));
+    }
+
+    #[tokio::test]
+    async fn test_load_release_areas_rejects_overlapping_shapefile_features() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let path = write_shapefile_with_field(
+            &tmp_dir,
+            "thickness",
+            vec![
+                (rectangle(1003.0, 2007.0, 1023.0, 2017.0), Some(0.5)),
+                (rectangle(1013.0, 2007.0, 1033.0, 2017.0), Some(1.0)),
+            ],
+        );
+
+        let error = load_release_areas(&path, &release_test_dem(3, 1), 1.0)
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("feature 1 overlaps"));
+    }
+
+    #[tokio::test]
+    async fn test_load_release_areas_allows_shapefile_features_sharing_an_edge() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        // the shared edge runs through the cell centers of column 1
+        let path = write_shapefile_with_field(
+            &tmp_dir,
+            "thickness",
+            vec![
+                (rectangle(1003.0, 2007.0, 1018.0, 2017.0), Some(0.5)),
+                (rectangle(1018.0, 2007.0, 1033.0, 2017.0), Some(1.0)),
+            ],
+        );
+
+        let release_areas = load_release_areas(&path, &release_test_dem(3, 1), 9.0)
+            .await
+            .unwrap();
+
+        assert_eq!(release_areas.thickness, vec![0.5, 1.0, 1.0]);
+    }
+
+    #[tokio::test]
+    async fn test_load_release_areas_keeps_shapefile_holes_free() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let path = write_shapefile(
+            &tmp_dir,
+            "release.shp",
+            vec![vec![
+                shapefile::PolygonRing::Outer(rectangle(1003.0, 2007.0, 1033.0, 2037.0)),
+                shapefile::PolygonRing::Inner(rectangle(1013.0, 2017.0, 1023.0, 2027.0)),
+            ]],
+        );
+
+        let release_areas = load_release_areas(&path, &release_test_dem(3, 3), 1.0)
+            .await
+            .unwrap();
+
+        #[rustfmt::skip]
+        assert_eq!(release_areas.thickness, vec![
+            1.0, 1.0, 1.0,
+            1.0, 0.0, 1.0,
+            1.0, 1.0, 1.0,
+        ]);
+    }
+
+    #[tokio::test]
+    async fn test_load_release_areas_accepts_uppercase_shapefile_extension() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let path = write_shapefile(
+            &tmp_dir,
+            "release.SHP",
+            vec![vec![shapefile::PolygonRing::Outer(rectangle(
+                1003.0, 2007.0, 1013.0, 2017.0,
+            ))]],
+        );
+
+        let release_areas = load_release_areas(&path, &release_test_dem(1, 1), 1.0)
+            .await
+            .unwrap();
+        assert_eq!(release_areas.thickness, vec![1.0]);
+    }
+
+    #[tokio::test]
+    async fn test_load_release_areas_rejects_shapefile_outside_the_dem() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let path = write_shapefile(
+            &tmp_dir,
+            "release.shp",
+            vec![vec![shapefile::PolygonRing::Outer(rectangle(
+                0.0, 0.0, 10.0, 10.0,
+            ))]],
+        );
+
+        let error = load_release_areas(&path, &release_test_dem(3, 3), 1.0)
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("covers no cell of the DEM"));
     }
 
     #[tokio::test]
