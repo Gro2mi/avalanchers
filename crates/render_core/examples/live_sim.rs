@@ -71,7 +71,7 @@ fn window_icon() -> anyhow::Result<Icon> {
 /// They fill unset fields on load and are the double-click reset targets of the
 /// sliders.
 const DEFAULT_DENSITY: f32 = 200.0;
-const DEFAULT_SLAB_THICKNESS: f32 = 1.0;
+const DEFAULT_RELEASE_THICKNESS: f32 = 1.0;
 const DEFAULT_FRICTION_COEFFICIENT: f32 = 0.2;
 const DEFAULT_DRAG_COEFFICIENT: f32 = 2000.0;
 const DEFAULT_CFL: f32 = 0.9;
@@ -92,9 +92,6 @@ const DEFAULT_REFERENCE_SURFACE_LENGTH: f32 = 0.0;
 /// showing concrete values and makes the draft-vs-applied comparison exact.
 fn apply_panel_defaults(settings: &mut Settings) {
     settings.density.get_or_insert(DEFAULT_DENSITY);
-    settings
-        .slab_thickness_factor
-        .get_or_insert(DEFAULT_SLAB_THICKNESS);
     settings
         .friction_coefficient
         .get_or_insert(DEFAULT_FRICTION_COEFFICIENT);
@@ -245,7 +242,7 @@ impl Overlay {
             Overlay::GridMomentum => OverlayRange::new(0.0, 200_000.0)
                 .with_threshold(100.0)
                 .with_unit("kg·m/s"),
-            // Slab thickness in metres; release textures typically hold 1.0 m.
+            // Release thickness in metres; release textures typically hold 1.0 m.
             Overlay::ReleaseAreas => OverlayRange::new(0.0, 2.0)
                 .with_threshold(0.01)
                 .with_unit("m"),
@@ -1300,14 +1297,23 @@ impl ApplicationHandler for Viewer {
                                         50.0..=500.0,
                                         5.0,
                                     );
-                                    f32_slider(
-                                        ui,
-                                        "slab thickness",
-                                        DEFAULT_SLAB_THICKNESS,
-                                        &mut draft.slab_thickness_factor,
-                                        0.1..=5.0,
-                                        0.05,
+                                    let mut override_thickness = draft.release_thickness.is_some();
+                                    ui.checkbox(
+                                        &mut override_thickness,
+                                        "override release thickness",
                                     );
+                                    if override_thickness {
+                                        f32_slider(
+                                            ui,
+                                            "release thickness",
+                                            DEFAULT_RELEASE_THICKNESS,
+                                            &mut draft.release_thickness,
+                                            0.1..=5.0,
+                                            0.05,
+                                        );
+                                    } else {
+                                        draft.release_thickness = None;
+                                    }
                                     f32_slider(
                                         ui,
                                         "friction coefficient",

@@ -864,18 +864,31 @@ impl Simulation {
         }
     }
 
-    /// Whether the release thickness comes from `slab_thickness_factor`
-    /// (computed or estimated release areas, shapefiles without thickness
-    /// attributes) rather than a file or array.
-    fn release_thickness_from_settings(&self) -> bool {
+    /// Whether the release source holds a thickness per cell (a file or
+    /// array) rather than only release cells (computed or estimated release
+    /// areas, shapefiles without thickness attributes).
+    fn release_source_has_thickness(&self) -> bool {
         match &self.release_areas_path {
-            Some(_) => !self.release_thickness_in_file,
-            None => self.release_areas_array.is_none(),
+            Some(_) => self.release_thickness_in_file,
+            None => self.release_areas_array.is_some(),
         }
+    }
+
+    /// The thickness all release cells have under `settings`; `None` if the
+    /// release source sets it per cell.
+    fn uniform_release_thickness(&self, settings: &SimSettings) -> Option<f32> {
+        settings
+            .release_thickness_override()
+            .or((!self.release_source_has_thickness())
+                .then_some(compute_core::DEFAULT_RELEASE_THICKNESS))
     }
 
     fn preparation_stage(&self, initial: &InitialState) -> PreparationStage {
         let (old, new) = (&initial.settings, &self.settings);
+        let (old_thickness, new_thickness) = (
+            self.uniform_release_thickness(old),
+            self.uniform_release_thickness(new),
+        );
         if old.sim_model != new.sim_model
             || old.grid_shape_x != new.grid_shape_x
             || old.grid_shape_y != new.grid_shape_y
@@ -893,10 +906,12 @@ impl Simulation {
             || old.roughness_threshold != new.roughness_threshold
             || old.released_particles_per_cell != new.released_particles_per_cell
             || initial.release != self.release_config()
+            // a thickness per cell cannot be rescaled to a uniform one
+            || old_thickness.is_some() != new_thickness.is_some()
         {
             return PreparationStage::Release;
         }
-        if old.density != new.density || old.slab_thickness_factor != new.slab_thickness_factor {
+        if old.density != new.density || old_thickness != new_thickness {
             return PreparationStage::ParticleMass;
         }
         PreparationStage::None
@@ -939,9 +954,11 @@ impl Simulation {
     /// effect; only the preparation stages they affect run again:
     ///
     /// - model, grid or reference surface: full preparation,
-    /// - release thresholds, particles per cell or release configuration:
+    /// - release thresholds, particles per cell, release configuration or
+    ///   a `release_thickness` set on a release with its own thickness:
     ///   release areas and particle seeding,
-    /// - density or release thickness: the particle masses are rescaled,
+    /// - density or a changed uniform release thickness: the particle masses
+    ///   are rescaled,
     /// - anything else: the stored particles are restored as they are.
     pub async fn restore_initial_state(&mut self) -> Result<()> {
         let Some(initial) = &self.initial_state else {
@@ -968,16 +985,21 @@ impl Simulation {
             PreparationStage::ParticleMass | PreparationStage::None => {}
         }
 
-        let thickness_from_settings = self.release_thickness_from_settings();
-        let Some(initial) = &mut self.initial_state else {
+        let Some(stored_settings) = self.initial_state.as_ref().map(|initial| initial.settings)
+        else {
             bail!("No initial state stored; call store_initial_state first");
         };
         // the ratios are taken against the stored settings, so repeated
         // restores do not drift
-        let thickness_scale = if thickness_from_settings {
-            self.settings.slab_thickness_factor / initial.settings.slab_thickness_factor
-        } else {
-            1.0
+        let thickness_scale = match (
+            self.uniform_release_thickness(&stored_settings),
+            self.uniform_release_thickness(&self.settings),
+        ) {
+            (Some(stored), Some(current)) => current / stored,
+            _ => 1.0,
+        };
+        let Some(initial) = &mut self.initial_state else {
+            bail!("No initial state stored; call store_initial_state first");
         };
         let mass_scale = self.settings.density / initial.settings.density * thickness_scale;
         if thickness_scale != initial.release_areas_scale {
@@ -1561,12 +1583,14 @@ impl Simulation {
     /// Determines the release areas and returns the number of release cells.
     ///
     /// Sources are tried in priority order: a release-area file
-    /// (`release_areas_path`; shapefiles are rasterized onto the DEM, with
-    /// `slab_thickness_factor` if they have no thickness attributes), a
+    /// (`release_areas_path`; shapefiles are rasterized onto the DEM), a
     /// directly set array
     /// ([`Self::set_release_areas`]), crown-line estimation from the outline
     /// (`release_area_fraction`, also fills [`Self::crown_line`]), and finally
     /// automatic computation from roughness and slope thresholds on the GPU.
+    /// `release_thickness` replaces the thickness of every release cell; if
+    /// unset, sources without a thickness of their own get
+    /// [`compute_core::DEFAULT_RELEASE_THICKNESS`].
     /// Fixes [`Self::number_particles`] and moves the state to
     /// [`SimulationState::ReleaseAreasComputed`].
     async fn load_release_areas(&mut self) -> Result<u32> {
@@ -1585,12 +1609,16 @@ impl Simulation {
                 let release_areas = data_processor::load_release_areas(
                     path,
                     &self.dem,
-                    self.settings.slab_thickness_factor,
+                    self.settings.release_thickness_or_default(),
                 )
                 .await
                 .map_err(|error| anyhow::anyhow!(error.to_string()))?;
                 self.release_thickness_in_file = release_areas.thickness_from_file;
-                let data = release_areas.thickness;
+                let data = if release_areas.thickness_from_file {
+                    self.override_release_thickness(&release_areas.thickness)
+                } else {
+                    release_areas.thickness
+                };
                 self.validate_release_areas_len(&data)?;
                 self.orchestrator
                     .write_buffer(BufferName::ReleaseAreas, &data)
@@ -1603,8 +1631,9 @@ impl Simulation {
                 Some(data) => {
                     info!("Loading release areas from provided array");
                     self.validate_release_areas_len(data)?;
+                    let data = self.override_release_thickness(data);
                     self.orchestrator
-                        .write_buffer(BufferName::ReleaseAreas, data)
+                        .write_buffer(BufferName::ReleaseAreas, &data)
                         .await?;
                     data.iter()
                         .filter(|&&x| x > compute_core::RELEASE_THICKNESS_THRESHOLD)
@@ -1619,7 +1648,7 @@ impl Simulation {
                         let defaults = release_estimation::ReleaseEstimationConfig::default();
                         let config = release_estimation::ReleaseEstimationConfig {
                             fraction,
-                            slab_thickness: self.settings.slab_thickness_factor,
+                            release_thickness: self.settings.release_thickness_or_default(),
                             crown_exit_distance: self
                                 .crown_line_exit_distance
                                 .unwrap_or(defaults.crown_exit_distance),
@@ -1746,6 +1775,24 @@ impl Simulation {
             (number_release_cells as f64 / (self.dem.width * self.dem.height) as f64 * 100.0)
         );
         Ok(number_release_cells)
+    }
+
+    /// The release cells of a file or array with `release_thickness`, if set.
+    fn override_release_thickness(&self, release_areas: &[f32]) -> Vec<f32> {
+        let Some(thickness) = self.settings.release_thickness_override() else {
+            return release_areas.to_vec();
+        };
+        warn!("`release_thickness` of {thickness} m replaces the thickness of the release source");
+        release_areas
+            .iter()
+            .map(|&cell| {
+                if cell > compute_core::RELEASE_THICKNESS_THRESHOLD {
+                    thickness
+                } else {
+                    cell
+                }
+            })
+            .collect()
     }
 
     fn validate_release_areas_len(&self, release_areas: &[f32]) -> Result<()> {
@@ -3795,12 +3842,22 @@ mod tests {
     }
 
     #[test_log::test]
-    fn test_shapefile_release_thickness_comes_from_attributes_before_settings() {
+    fn test_shapefile_release_thickness_prefers_setting_then_attributes() {
         let tmp_dir = tempfile::tempdir().unwrap();
-        for (attribute, expected, from_settings) in [(Some(2.5), 2.5, false), (None, 1.75, true)] {
+        for (attribute, setting, expected, has_thickness) in [
+            (Some(2.5), f32::NAN, 2.5, true),
+            (
+                None,
+                f32::NAN,
+                compute_core::DEFAULT_RELEASE_THICKNESS,
+                false,
+            ),
+            (Some(2.5), 1.75, 1.75, true),
+            (None, 1.75, 1.75, false),
+        ] {
             let mut sim = block_on(Simulation::new()).expect("Failed to create Simulation");
             block_on(sim.create_example(INCLINED_PLANE_PATH)).unwrap();
-            sim.settings.slab_thickness_factor = 1.75;
+            sim.settings.release_thickness = setting;
             sim.release_areas_path = Some(write_release_shapefile(&tmp_dir, &sim.dem, attribute));
 
             block_on(sim.prepare()).expect("Failed to prepare simulation");
@@ -3813,16 +3870,53 @@ mod tests {
                 .collect();
             assert!(!released.is_empty());
             assert!(released.iter().all(|&x| x == expected));
-            assert_eq!(sim.release_thickness_from_settings(), from_settings);
+            assert_eq!(sim.release_source_has_thickness(), has_thickness);
         }
     }
 
     #[test_log::test]
-    fn test_release_thickness_is_not_from_settings_for_arrays() {
+    fn test_arrays_hold_their_own_release_thickness() {
         let mut sim = block_on(Simulation::new()).expect("Failed to create Simulation");
-        assert!(sim.release_thickness_from_settings());
+        assert!(!sim.release_source_has_thickness());
         sim.release_areas_array = Some(vec![1.0]);
-        assert!(!sim.release_thickness_from_settings());
+        assert!(sim.release_source_has_thickness());
+    }
+
+    #[test_log::test]
+    fn test_computed_release_thickness_defaults_and_can_be_set() {
+        for (setting, expected) in [
+            (f32::NAN, compute_core::DEFAULT_RELEASE_THICKNESS),
+            (1.75, 1.75),
+        ] {
+            let mut sim = block_on(Simulation::new()).expect("Failed to create Simulation");
+            block_on(sim.create_example(INCLINED_PLANE_PATH)).unwrap();
+            sim.release_areas_path = None;
+            sim.settings.release_thickness = setting;
+            sim.settings.release_min_elevation = 0.0;
+            block_on(sim.prepare()).expect("Failed to prepare simulation");
+
+            let release_thickness = block_on(sim.fetch_release_areas()).unwrap();
+            let released: Vec<f32> = release_thickness
+                .iter()
+                .copied()
+                .filter(|&x| x > 0.0)
+                .collect();
+            assert!(!released.is_empty());
+            assert!(released.iter().all(|&x| x == expected));
+        }
+    }
+
+    #[test_log::test]
+    fn test_release_thickness_replaces_the_thickness_of_release_cells() {
+        let mut sim = setup_varying_release_sim();
+        sim.settings.release_thickness = 1.5;
+        block_on(sim.prepare()).expect("Failed to prepare simulation");
+
+        let release_thickness = block_on(sim.fetch_release_areas()).unwrap();
+        let released = release_thickness.iter().filter(|&&x| x == 1.5).count();
+        let free = release_thickness.iter().filter(|&&x| x == 0.0).count();
+        assert_eq!(released, 64);
+        assert_eq!(free, 40 * 40 - 64);
     }
 
     #[test_log::test]
@@ -3932,7 +4026,7 @@ mod tests {
         let data = block_on(data_processor::load_release_areas(
             RELEASE_TEXTURE_PATH,
             &sim.dem,
-            sim.settings.slab_thickness_factor,
+            sim.settings.release_thickness_or_default(),
         ))
         .expect("Failed to read release areas")
         .thickness;
@@ -4255,6 +4349,18 @@ mod tests {
         sim
     }
 
+    /// [`setup_restore_sim`] with a thickness that differs between release cells.
+    fn setup_varying_release_sim() -> Simulation {
+        let mut sim = setup_restore_sim(SimModel::Curvilinear);
+        let mut release = sim.release_areas_array.clone().unwrap();
+        for (index, thickness) in release.iter_mut().enumerate() {
+            *thickness *= 1.0 + (index % 2) as f32;
+        }
+        sim.set_release_areas(&release)
+            .expect("Failed to set release");
+        sim
+    }
+
     /// Step count, peak flow thickness and peak velocity of a full run.
     fn run_and_collect(sim: &mut Simulation) -> (u32, Vec<f32>, Vec<f32>) {
         block_on(sim.run()).expect("Failed to run");
@@ -4371,6 +4477,62 @@ mod tests {
         assert_eq!(sim.number_particles(), number_particles / 2);
         let (_, thickness, _) = run_and_collect(&mut sim);
         assert!(thickness.iter().any(|h| *h > 0.0));
+    }
+
+    #[test_log::test]
+    fn test_restore_initial_state_applies_release_thickness() {
+        let mut sim = setup_varying_release_sim();
+        block_on(sim.store_initial_state()).expect("Failed to store initial state");
+
+        // a thickness per cell becomes uniform, which needs new particle masses
+        let patch = Settings {
+            release_thickness: Some(2.0),
+            ..Default::default()
+        };
+        sim.update_settings(&patch)
+            .expect("Failed to update settings");
+        block_on(sim.restore_initial_state()).expect("Failed to restore");
+        let release_thickness = block_on(sim.fetch_release_areas()).unwrap();
+        assert_eq!(release_thickness.iter().filter(|&&x| x == 2.0).count(), 64);
+        let positions = block_on(sim.fetch_particles_position())
+            .expect("Failed to fetch positions")
+            .clone();
+        let mass = block_on(sim.fetch_particles_mass())
+            .expect("Failed to fetch mass")
+            .clone();
+        assert!(mass.iter().all(|m| (m - mass[0]).abs() <= 1e-4 * mass[0]));
+
+        // a uniform thickness only rescales the stored particles
+        let patch = Settings {
+            release_thickness: Some(4.0),
+            ..Default::default()
+        };
+        sim.update_settings(&patch)
+            .expect("Failed to update settings");
+        block_on(sim.restore_initial_state()).expect("Failed to restore");
+        let release_thickness = block_on(sim.fetch_release_areas()).unwrap();
+        assert_eq!(release_thickness.iter().filter(|&&x| x == 4.0).count(), 64);
+        let restored_positions = block_on(sim.fetch_particles_position())
+            .expect("Failed to fetch positions")
+            .clone();
+        let restored_mass = block_on(sim.fetch_particles_mass())
+            .expect("Failed to fetch mass")
+            .clone();
+        assert_eq!(positions, restored_positions);
+        for (m, restored) in mass.iter().zip(&restored_mass) {
+            assert!((m * 2.0 - restored).abs() <= 1e-6 * restored.abs());
+        }
+    }
+
+    #[test_log::test]
+    fn test_update_settings_rejects_release_thickness_below_threshold() {
+        let mut sim = setup_restore_sim(SimModel::Curvilinear);
+        let patch = Settings {
+            release_thickness: Some(0.0),
+            ..Default::default()
+        };
+        assert!(sim.update_settings(&patch).is_err());
+        assert_eq!(sim.settings.release_thickness_override(), None);
     }
 
     #[test_log::test]
@@ -4611,7 +4773,6 @@ mod tests {
                 "friction_model": "voellmy",
                 "max_steps": 40,
                 "released_particles_per_cell": 4,
-                "slab_thickness_factor": 1.0,
                 "friction_coefficient": 0.2,
                 "drag_coefficient": 2000.0,
                 "velocity_threshold": 0.1,
@@ -4765,12 +4926,12 @@ mod tests {
         let release_none_str = match &release_areas_none {
             Some(path) => path.replace('_', ""),
             None => format!(
-                "calculated-elev{}-minslope{}-maxslope{}-rough{}-slab{}",
+                "calculated-elev{}-minslope{}-maxslope{}-rough{}-thickness{}",
                 settings.release_min_elevation,
                 settings.min_slope_angle,
                 settings.max_slope_angle,
                 settings.roughness_threshold,
-                settings.slab_thickness_factor,
+                settings.release_thickness,
             ),
         };
         let scenario_name_none = format!(
@@ -4783,12 +4944,12 @@ mod tests {
         assert_eq!(
             scenario_name_none,
             format!(
-                "pathwithunderscores/demfile1.tif_calculated-elev{}-minslope{}-maxslope{}-rough{}-slab{}_{hash_hex}",
+                "pathwithunderscores/demfile1.tif_calculated-elev{}-minslope{}-maxslope{}-rough{}-thickness{}_{hash_hex}",
                 settings.release_min_elevation,
                 settings.min_slope_angle,
                 settings.max_slope_angle,
                 settings.roughness_threshold,
-                settings.slab_thickness_factor,
+                settings.release_thickness,
             )
         );
     }
@@ -5021,7 +5182,6 @@ mod avawog_diagnostics {
                 "friction_model": "voellmy",
                 "max_steps": 3000,
                 "released_particles_per_cell": 4,
-                "slab_thickness_factor": 1.0,
                 "friction_coefficient": 0.2,
                 "drag_coefficient": 2000.0,
                 "velocity_threshold": 0.1,

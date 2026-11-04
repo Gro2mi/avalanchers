@@ -457,6 +457,10 @@ const WORKGROUP_SIZE_2D: u32 = 16;
 /// relax_particles, evaluate_mass_movement and chamfer (.wgsl).
 pub const RELEASE_THICKNESS_THRESHOLD: f32 = 0.01;
 
+/// Release thickness (m) of release areas that hold none of their own, used
+/// unless `release_thickness` is set.
+pub const DEFAULT_RELEASE_THICKNESS: f32 = 1.0;
+
 // soft sphere relaxation of the freshly initialized particles: overlapping
 // particles repel each other until they reach the hexagonal packing spacing
 const RELAXATION_ITERATIONS: u32 = 30;
@@ -1068,6 +1072,11 @@ impl ComputeOrchestrator {
         sim_settings: &settings::SimSettings,
         roi: &[bool],
     ) -> Result<u32> {
+        // the shader writes this thickness into the release cells
+        let sim_settings = settings::SimSettings {
+            release_thickness: sim_settings.release_thickness_or_default(),
+            ..*sim_settings
+        };
         self.resources.write_buffer(
             &self.queue,
             BufferName::SimSettings,

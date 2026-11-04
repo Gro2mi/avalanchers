@@ -19,7 +19,7 @@ CALIBRATION_PARAMETER_DEFAULTS = {
     "friction_model": "voellmy",
     "constitutive_model": "drucker-prager",
     "density": 200.0,
-    "slab_thickness_factor": 1.0,
+    "release_thickness": None,
     "friction_coefficient": 0.2,
     "drag_coefficient": 2000.0,
     "n0": 70.0,

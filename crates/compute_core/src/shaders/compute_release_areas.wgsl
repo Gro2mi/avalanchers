@@ -41,9 +41,9 @@ fn compute_release_areas(@builtin(global_invocation_id) id: vec3<u32>) {
         release_areas[idx] = 0f;
     } else {
         // release cell
-        release_areas[idx] = sim_settings.slab_thickness;
+        release_areas[idx] = sim_settings.release_thickness;
         atomicAdd(&atomic_values.number_release_cells, 1u);
-        debug[0] = f32(sim_settings.slab_thickness);
+        debug[0] = f32(sim_settings.release_thickness);
     }
 }
 
@@ -121,7 +121,7 @@ struct SimSettings {
     grid_shape: vec2u,
     world_size: vec2f,
     snow_density: f32,
-    slab_thickness: f32,
+    release_thickness: f32,
     friction_coefficient: f32,
     drag_coefficient: f32,
     n0: f32,

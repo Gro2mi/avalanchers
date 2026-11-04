@@ -82,7 +82,7 @@ impl Overlay {
             Self::GridMass => OverlayRange::new(0.0, 5_000.0)
                 .with_threshold(1.0)
                 .with_unit("kg"),
-            // Slab thickness in metres; release textures typically hold 1.0 m.
+            // Release thickness in metres; release textures typically hold 1.0 m.
             Self::ReleaseAreas => OverlayRange::new(0.0, 2.0)
                 .with_threshold(0.01)
                 .with_unit("m"),

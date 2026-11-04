@@ -675,12 +675,14 @@
                                             value="200" class="form-control slider-value-input">
                                     </div>
                                     <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
-                                        <label for="slabThicknessSlider" class="control-label mb-0">Slab thickness
-                                            factor:</label>
-                                        <input type="range" id="slabThicknessSlider" min="0.1" max="5" value="1"
-                                            step="0.05" class="form-range w-auto" style="max-width:200px;">
-                                        <input type="number" id="slabThicknessSliderValue" min="0.1" max="5" step="0.05"
-                                            value="1" class="form-control slider-value-input">
+                                        <label for="releaseThicknessOverride" class="control-label mb-0">Override release
+                                            thickness (m):</label>
+                                        <input type="checkbox" id="releaseThicknessOverride"
+                                            class="form-check-input mt-0">
+                                        <input type="range" id="releaseThicknessSlider" min="0.1" max="5" value="1"
+                                            step="0.05" class="form-range w-auto" style="max-width:200px;" disabled>
+                                        <input type="number" id="releaseThicknessSliderValue" min="0.1" max="5" step="0.05"
+                                            value="1" class="form-control slider-value-input" disabled>
                                     </div>
                                     <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
                                         <label for="minSlopeAngleSlider" class="control-label mb-0">Min slope angle

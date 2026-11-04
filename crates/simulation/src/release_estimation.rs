@@ -128,7 +128,7 @@ pub struct ReleaseEstimationConfig {
     /// Target release area as a fraction of the outline area (typically 0.2 - 0.3).
     pub fraction: f32,
     /// Snow thickness \[m\] written to the selected release cells.
-    pub slab_thickness: f32,
+    pub release_thickness: f32,
     /// Crown components whose mean elevation is below this share of the outline
     /// elevation range are discarded as flank gullies (0.5 keeps the top half,
     /// 0 disables the filter).
@@ -187,7 +187,7 @@ impl Default for ReleaseEstimationConfig {
     fn default() -> Self {
         Self {
             fraction: 0.25,
-            slab_thickness: 1.0,
+            release_thickness: compute_core::DEFAULT_RELEASE_THICKNESS,
             crown_elevation_band: 0.0,
             min_crown_slope_deg: 28.0,
             min_crown_component_cells: 3,
@@ -1116,7 +1116,7 @@ fn estimate_release_areas_with_crown_impl(
 
     let mut release_areas = vec![0.0f32; roi.len()];
     for &(_, idx) in &ordered[..target] {
-        release_areas[idx] = config.slab_thickness;
+        release_areas[idx] = config.release_thickness;
     }
 
     let crown_indices: Vec<usize> = crown
@@ -1427,7 +1427,7 @@ mod tests {
         let roi = rectangle_roi(width, height, 5, 15, 5, 15);
         let config = ReleaseEstimationConfig {
             fraction: 0.25,
-            slab_thickness: 1.5,
+            release_thickness: 1.5,
             ..Default::default()
         };
         let estimate = estimate_release_areas(&dem, &roi, None, &config).unwrap();

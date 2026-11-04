@@ -10,6 +10,7 @@ use std::{fmt, fs};
 use tracing::{debug, error, info, trace, warn};
 
 use crate::dem::Dem;
+use crate::{DEFAULT_RELEASE_THICKNESS, RELEASE_THICKNESS_THRESHOLD};
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -86,7 +87,10 @@ pub struct SimSettings {
     pub world_size_x: f32,
     pub world_size_y: f32,
     pub density: f32,
-    pub slab_thickness_factor: f32,
+    /// Release thickness (m) replacing that of the release source, NaN if
+    /// unset; read it with [`Self::release_thickness_override`].
+    #[serde(deserialize_with = "deserialize_release_thickness")]
+    pub release_thickness: f32,
     pub friction_coefficient: f32,
     pub drag_coefficient: f32,
     pub n0: f32,
@@ -139,7 +143,7 @@ impl Hash for SimSettings {
         self.world_size_x.to_bits().hash(state);
         self.world_size_y.to_bits().hash(state);
         self.density.to_bits().hash(state);
-        self.slab_thickness_factor.to_bits().hash(state);
+        self.release_thickness.to_bits().hash(state);
         self.friction_coefficient.to_bits().hash(state);
         self.drag_coefficient.to_bits().hash(state);
         self.n0.to_bits().hash(state);
@@ -172,6 +176,13 @@ impl Hash for SimSettings {
     }
 }
 
+/// An unset `release_thickness` is NaN, which JSON holds as null.
+fn deserialize_release_thickness<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<f32, D::Error> {
+    Ok(Option::<f32>::deserialize(deserializer)?.unwrap_or(f32::NAN))
+}
+
 impl Default for SimSettings {
     fn default() -> Self {
         Self::new()
@@ -196,6 +207,13 @@ impl SimSettings {
     /// without producing NaN or meaningless friction. The mu(I) parameters
     /// are only checked when the mu(I) rheology is in use.
     pub fn validate(&self) -> Result<(), String> {
+        if let Some(thickness) = self.release_thickness_override()
+            && !(thickness.is_finite() && thickness > RELEASE_THICKNESS_THRESHOLD)
+        {
+            return Err(format!(
+                "`release_thickness` must be above {RELEASE_THICKNESS_THRESHOLD} m, got {thickness}"
+            ));
+        }
         if self.uses_mu_i() {
             let finite = [
                 ("i0", self.i0),
@@ -231,6 +249,18 @@ impl SimSettings {
         Ok(())
     }
 
+    /// The `release_thickness` setting; `None` keeps the thickness of the
+    /// release source.
+    pub fn release_thickness_override(&self) -> Option<f32> {
+        (!self.release_thickness.is_nan()).then_some(self.release_thickness)
+    }
+
+    /// Thickness of release areas that hold none of their own.
+    pub fn release_thickness_or_default(&self) -> f32 {
+        self.release_thickness_override()
+            .unwrap_or(DEFAULT_RELEASE_THICKNESS)
+    }
+
     pub fn calculate_hash(&self) -> u64 {
         let mut s = DefaultHasher::new();
         self.hash(&mut s);
@@ -248,7 +278,7 @@ impl SimSettings {
             world_size_x: 1.0,
             world_size_y: 1.0,
             density: 200.0,
-            slab_thickness_factor: 1.0,
+            release_thickness: f32::NAN,
 
             friction_coefficient: 0.2,
             drag_coefficient: 2000.0,
@@ -326,8 +356,8 @@ impl SimSettings {
         if let Some(val) = patch.density {
             settings.density = val;
         }
-        if let Some(val) = patch.slab_thickness_factor {
-            settings.slab_thickness_factor = val;
+        if let Some(val) = patch.release_thickness {
+            settings.release_thickness = val;
         }
         if let Some(val) = patch.friction_coefficient {
             settings.friction_coefficient = val;
@@ -825,7 +855,11 @@ pub struct Settings {
     pub friction_model: Option<FrictionModel>,
     pub released_particles_per_cell: Option<u32>,
     pub density: Option<f32>,
-    pub slab_thickness_factor: Option<f32>,
+    /// Release thickness (m), measured normal to the slope, of every release
+    /// cell. If unset, rasters, arrays, stores and shapefiles with thickness
+    /// attributes keep their own thickness and all other release areas get
+    /// [`DEFAULT_RELEASE_THICKNESS`].
+    pub release_thickness: Option<f32>,
     pub friction_coefficient: Option<f32>,
     pub drag_coefficient: Option<f32>,
     pub n0: Option<f32>,
@@ -1015,7 +1049,7 @@ mod tests {
         assert_eq!(settings.world_size_x, 1.0);
         assert_eq!(settings.world_size_y, 1.0);
         assert_eq!(settings.density, 200.0);
-        assert_eq!(settings.slab_thickness_factor, 1.0);
+        assert_eq!(settings.release_thickness_override(), None);
         assert_eq!(settings.friction_coefficient, 0.2);
         assert_eq!(settings.drag_coefficient, 2000.0);
         assert_eq!(settings.cfl, 0.9);
@@ -1059,7 +1093,7 @@ mod tests {
             friction_model: Some(FrictionModel::VoellmyMinShear),
             released_particles_per_cell: Some(3),
             density: Some(123.4),
-            slab_thickness_factor: Some(5.6),
+            release_thickness: Some(5.6),
             friction_coefficient: Some(0.2),
             drag_coefficient: Some(999.0),
             n0: Some(1.0),
@@ -1116,7 +1150,7 @@ mod tests {
         assert_eq!(sim_settings.friction_model, 2);
         assert_eq!(sim_settings.released_particles_per_cell, 3);
         assert_eq!(sim_settings.density, 123.4);
-        assert_eq!(sim_settings.slab_thickness_factor, 5.6);
+        assert_eq!(sim_settings.release_thickness_override(), Some(5.6));
         assert_eq!(sim_settings.friction_coefficient, 0.2);
         assert_eq!(sim_settings.drag_coefficient, 999.0);
         assert_eq!(sim_settings.cfl, 0.9);
@@ -1195,6 +1229,32 @@ mod tests {
     }
 
     #[test_log::test]
+    fn test_settings_reject_the_former_slab_thickness_factor() {
+        // an alias would turn a value rasters ignored into an override
+        let error = Settings::loads(r#"{"slab_thickness_factor": 1.0}"#).unwrap_err();
+        assert!(error.to_string().contains("slab_thickness_factor"));
+    }
+
+    #[test_log::test]
+    fn test_release_thickness_must_exceed_the_release_threshold() {
+        let mut settings = SimSettings::new();
+        assert!(settings.validate().is_ok(), "unset is valid");
+        assert_eq!(
+            settings.release_thickness_or_default(),
+            DEFAULT_RELEASE_THICKNESS
+        );
+
+        for invalid in [-1.0, 0.0, RELEASE_THICKNESS_THRESHOLD, f32::INFINITY] {
+            settings.release_thickness = invalid;
+            assert!(settings.validate().is_err(), "accepted {invalid}");
+        }
+
+        settings.release_thickness = 0.5;
+        assert!(settings.validate().is_ok());
+        assert_eq!(settings.release_thickness_or_default(), 0.5);
+    }
+
+    #[test_log::test]
     fn test_simsettings_to_json_and_read_back() {
         let settings = SimSettings::new();
         let mut file = NamedTempFile::new().unwrap();
@@ -1217,8 +1277,8 @@ mod tests {
         assert_eq!(settings.world_size_y, deserialized.world_size_y);
         assert_eq!(settings.density, deserialized.density);
         assert_eq!(
-            settings.slab_thickness_factor,
-            deserialized.slab_thickness_factor
+            settings.release_thickness_override(),
+            deserialized.release_thickness_override()
         );
         assert_eq!(
             settings.friction_coefficient,

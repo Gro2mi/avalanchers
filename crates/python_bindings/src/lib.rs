@@ -720,8 +720,9 @@ impl PySimulation {
     ///   ``released_particles_per_cell``, ``release_area_fraction``, the
     ///   crown line and release fill settings or
     ///   ``enable_particle_relaxation``: release areas and particle seeding,
-    /// - ``density`` or ``slab_thickness_factor``: particle masses are
-    ///   rescaled,
+    /// - ``density`` or a changed ``release_thickness``: particle masses are
+    ///   rescaled; setting it on a release with its own thickness seeds
+    ///   the particles again,
     /// - anything else (friction, drag, cfl, max_steps, flags, ...): the
     ///   stored particles are restored as they are.
     pub fn restore_initial_state(&mut self) -> PyResult<()> {

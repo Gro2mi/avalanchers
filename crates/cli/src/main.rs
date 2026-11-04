@@ -96,7 +96,7 @@ struct Args {
     #[arg(long)]
     density: Option<f32>,
     #[arg(long)]
-    slab_thickness_factor: Option<f32>,
+    release_thickness: Option<f32>,
     #[arg(long)]
     friction_coefficient: Option<f32>,
     #[arg(long)]
@@ -255,8 +255,8 @@ impl Args {
         if let Some(value) = self.density {
             settings.density = Some(value);
         }
-        if let Some(value) = self.slab_thickness_factor {
-            settings.slab_thickness_factor = Some(value);
+        if let Some(value) = self.release_thickness {
+            settings.release_thickness = Some(value);
         }
         if let Some(value) = self.friction_coefficient {
             settings.friction_coefficient = Some(value);
@@ -507,7 +507,7 @@ mod tests {
             no_new_cells_travel: None,
             reference_surface_length: None,
             released_particles_per_cell: None,
-            slab_thickness_factor: None,
+            release_thickness: None,
             friction_coefficient: None,
             drag_coefficient: None,
             n0: None,

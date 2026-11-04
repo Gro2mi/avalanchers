@@ -419,6 +419,7 @@ fn setting_units(name: &str) -> Option<&'static str> {
         | "grain_diameter"
         | "release_min_elevation"
         | "release_max_elevation"
+        | "release_thickness"
         | "peak_flow_thickness_threshold"
         | "reference_surface_length" => "m",
         "density" => "kg/m3",

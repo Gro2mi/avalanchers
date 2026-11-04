@@ -122,7 +122,7 @@ struct SimSettings {
     grid_shape: vec2u,
     world_size: vec2f,
     snow_density: f32,
-    slab_thickness: f32,
+    release_thickness: f32,
     friction_coefficient: f32,
     drag_coefficient: f32,
     n0: f32,

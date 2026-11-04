@@ -43,7 +43,8 @@ const zarrScenarioDropdown = document.getElementById('zarrScenarioDropdown');
 const simModelDropdown = document.getElementById('simModelDropdown');
 const frictionModelDropdown = document.getElementById('frictionModelDropdown');
 const densitySlider = document.getElementById('densitySlider');
-const slabThicknessSlider = document.getElementById('slabThicknessSlider');
+const releaseThicknessOverride = document.getElementById('releaseThicknessOverride');
+const releaseThicknessSlider = document.getElementById('releaseThicknessSlider');
 const minSlopeAngleSlider = document.getElementById('minSlopeAngleSlider');
 const maxSlopeAngleSlider = document.getElementById('maxSlopeAngleSlider');
 const releaseMinElevationSlider = document.getElementById('releaseMinElevationSlider');
@@ -271,7 +272,13 @@ function bindSlider(slider, valueId, format) {
 }
 
 bindSlider(densitySlider, 'densitySliderValue');
-bindSlider(slabThicknessSlider, 'slabThicknessSliderValue', v => parseFloat(v).toFixed(2));
+bindSlider(releaseThicknessSlider, 'releaseThicknessSliderValue', v => parseFloat(v).toFixed(2));
+const updateReleaseThicknessControls = () => {
+    releaseThicknessSlider.disabled = !releaseThicknessOverride.checked;
+    document.getElementById('releaseThicknessSliderValue').disabled = !releaseThicknessOverride.checked;
+};
+releaseThicknessOverride.addEventListener('change', updateReleaseThicknessControls);
+updateReleaseThicknessControls();
 bindSlider(minSlopeAngleSlider, 'minSlopeAngleSliderValue', v => parseFloat(v).toFixed(1));
 bindSlider(maxSlopeAngleSlider, 'maxSlopeAngleSliderValue', v => parseFloat(v).toFixed(1));
 bindSlider(releaseMinElevationSlider, 'releaseMinElevationSliderValue');
@@ -311,7 +318,6 @@ function getSettings() {
         sim_model: simModelDropdown.value,
         friction_model: frictionModelDropdown.selectedIndex,
         density: parseFloat(densitySlider.value),
-        slab_thickness_factor: parseFloat(slabThicknessSlider.value),
         min_slope_angle: parseFloat(minSlopeAngleSlider.value),
         max_slope_angle: parseFloat(maxSlopeAngleSlider.value),
         release_min_elevation: parseFloat(releaseMinElevationSlider.value),
@@ -327,6 +333,9 @@ function getSettings() {
         enable_earth_pressure_coefficient: document.getElementById('enable_earth_pressure_coefficient').checked,
         internal_friction_angle: parseFloat(internalFrictionAngleSlider.value),
     };
+    if (releaseThicknessOverride.checked) {
+        simSettings.release_thickness = parseFloat(releaseThicknessSlider.value);
+    }
     return simSettings;
 }
 

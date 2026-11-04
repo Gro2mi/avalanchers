@@ -5,6 +5,12 @@ All notable changes to this project might be documented in this file.
 ## [Unreleased]
 
 ### Changed
+- **Breaking:** `slab_thickness_factor` is now `release_thickness` in metres
+  (`--release-thickness` in the CLI) and the old key is rejected. It is unset by default: rasters,
+  arrays, stores and shapefile attributes keep their thickness, all other release areas get 1 m.
+  If set, it replaces the thickness of every release cell, with a warning for sources that have
+  their own; rasters and arrays used to ignore it. It must be above 0.01 m. Result stores keep it
+  as `release_thickness`, NaN if unset.
 - `terrain-following` (model 0) is now a depth-averaged grid MPM like the curvilinear
   model, formulated in 3D Cartesian coordinates: 3D APIC transfer, gravity, hydrostatic
   pressure and basal friction on the grid with bed-normal projection; particles keep the
@@ -59,7 +65,7 @@ All notable changes to this project might be documented in this file.
 - `release_areas_path` accepts polygon shapefiles (`.shp`, native and Python). All features are
   rasterized onto the DEM grid; holes stay free. As in AvaFrame, the thickness of each feature comes
   from its `thickness` or `d0` attribute, either all features or none must have one, and features
-  must not overlap. Without these attributes `slab_thickness_factor` is used.
+  must not overlap. Without these attributes the thickness is 1 m.
 - `dem_path` and `release_areas_path` accept paths into a result store, such as
   `avalanchers.zarr/avaWog/avaWogreleaseTexture`, so the DEM and, if present, the release areas
   of an earlier run can be reused. Saving into the same store continues the scenario.
@@ -71,7 +77,7 @@ All notable changes to this project might be documented in this file.
   `restore_initial_state()` resets particle state and the peak fields for the next `run()`.
   Changed settings re-run only the preparation stage they affect: model or reference surface
   the full preparation, release thresholds, particles per cell or crown settings the release
-  and seeding, density or `slab_thickness_factor` a mass rescale.
+  and seeding, density or a changed uniform `release_thickness` a mass rescale.
 - `run()` no longer repeats terrain analysis, release areas and particle seeding when the
   particles are already initialized (after `prepare()` or `restore_initial_state()`).
 - `sliding-block` (model 3): the previous per-particle terrain-following model.

@@ -195,7 +195,10 @@ areas and a warning. Saving into the same store continues the scenario.
 `release_areas_path` also accepts a polygon shapefile (`.shp`) in the coordinate system of the DEM, native and Python
 only. All its features are rasterized onto the DEM grid: cells whose center lies inside a polygon release, holes stay
 free. As in AvaFrame, the thickness of each feature comes from its `thickness` or `d0` attribute, either all features
-or none must have one, and features must not overlap. Without these attributes `slab_thickness_factor` is used.
+or none must have one, and features must not overlap. Without these attributes the thickness is 1 m.
+
+`release_thickness` (m, unset by default) replaces the thickness of every release cell, whatever the release source,
+and logs a warning if that source has a thickness of its own.
 
 Directory uploads use the browser's `webkitdirectory` support, so the whole store folder has to be selected
 (dropping the folder onto the drop zone works as well).
