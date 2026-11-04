@@ -181,6 +181,17 @@ Grids keep row 0 at the south edge, so `y` ascends with the rows, in the store a
 `sim.peak_velocity`. Formats that list the north row first are flipped when they are read and written, see
 `sim.write_asc`. Use `.sortby("y", ascending=False)` on an xarray dataset before exporting it as a north-up raster.
 
+Stores also work as inputs. In the settings, `dem_path` accepts `<store>.zarr`, `<store>.zarr/<site>` or
+`<store>.zarr/<site>/<scenario>`; a site or scenario can be named in full, without its hash, or by its hash, and may be
+left out if it is the only one. The release areas of the selected scenario are used too, unless `release_areas_path` is
+set, which can point into a store as well, or `release_area_fraction` is set and no scenario was named. A site with
+several scenarios is an error unless one is named or another release is set; a site with none gets calculated release
+areas and a warning. Saving into the same store continues the scenario.
+
+```json
+{ "dem_path": "avalanchers.zarr/avaWog/avaWogreleaseTexture" }
+```
+
 Directory uploads use the browser's `webkitdirectory` support, so the whole store folder has to be selected
 (dropping the folder onto the drop zone works as well).
 

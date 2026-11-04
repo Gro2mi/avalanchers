@@ -39,6 +39,33 @@ fn attributes(value: Value) -> Attributes {
     }
 }
 
+/// Splits `<store>.zarr/<node>/<node>` into the store and the nodes below it,
+/// or returns `None` for a path outside of a store.
+pub fn split_store_path(path: &str) -> Option<(&str, Vec<&str>)> {
+    let separators = ['/', '\\'];
+    let mut end = 0;
+    for segment in path.split(separators) {
+        end += segment.len();
+        if segment.to_lowercase().ends_with(".zarr") {
+            let nodes = path[end..]
+                .split(separators)
+                .filter(|node| !node.is_empty())
+                .collect();
+            return Some((&path[..end], nodes));
+        }
+        end += 1;
+    }
+    None
+}
+
+/// Name of the deepest node of a store path without its hash suffix, which is
+/// the name its results are saved under again.
+pub fn store_path_stem(path: &str) -> Option<&str> {
+    let (_, nodes) = split_store_path(path)?;
+    let node = nodes.last()?;
+    Some(node.rsplit_once('_').map_or(*node, |(stem, _)| stem))
+}
+
 /// Cell center eastings of the DEM grid.
 pub fn x_coordinates(dem: &Dem) -> Vec<f64> {
     cell_centers_f64(dem.bounds.xmin, dem.bounds.xmax, dem.width)
@@ -431,6 +458,28 @@ mod tests {
             created_at: 8.0,
             settings,
         }
+    }
+
+    #[test]
+    fn test_store_paths_are_split_at_the_store() {
+        assert_eq!(
+            split_store_path("C:\\data\\runs.zarr\\site_a/sc_b"),
+            Some(("C:\\data\\runs.zarr", vec!["site_a", "sc_b"]))
+        );
+        assert_eq!(split_store_path("runs.ZARR/"), Some(("runs.ZARR", vec![])));
+        assert_eq!(split_store_path("data/dem.asc"), None);
+        assert_eq!(split_store_path("data/zarr/dem.tif"), None);
+    }
+
+    #[test]
+    fn test_store_path_stems_drop_the_hash() {
+        assert_eq!(store_path_stem("runs.zarr/a-b_123"), Some("a-b"));
+        assert_eq!(
+            store_path_stem("runs.zarr/site_1/rough0.01_2"),
+            Some("rough0.01")
+        );
+        assert_eq!(store_path_stem("runs.zarr"), None);
+        assert_eq!(store_path_stem("dem_1.asc"), None);
     }
 
     #[test]

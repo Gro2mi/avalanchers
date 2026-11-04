@@ -45,7 +45,7 @@ use compute_core::{
     settings::{CrownLineMethod, ReleaseFillMethod, Settings, SimModel, SimSettings},
     utils::*,
 };
-use data_processor::store_schema::RunRecord;
+use data_processor::store_schema::{RunRecord, store_path_stem};
 #[cfg(target_arch = "wasm32")]
 use data_processor::zarr_writer::ZarrEntry;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -396,6 +396,14 @@ impl Simulation {
     /// instance; pair the result with [`Self::apply_data`].
     pub async fn load_data(settings: &Settings) -> Result<SimulationLoadResult> {
         timer_checkpoint("Start create");
+        #[cfg(not(target_arch = "wasm32"))]
+        let (dem_path, release_areas_path) = data_processor::store_reader::resolve_paths(settings)?;
+        #[cfg(target_arch = "wasm32")]
+        let (dem_path, release_areas_path) = (
+            settings.dem_path.clone(),
+            settings.release_areas_path.clone(),
+        );
+
         let (settings_result, dem_result, outline) =
             data_processor::create_sim_settings_and_dem(settings).await?;
         settings_result.validate().map_err(anyhow::Error::msg)?;
@@ -410,8 +418,8 @@ impl Simulation {
             roi: outline,
             batch_compute_steps: settings.batch_compute_steps,
             particle_sort_interval: settings.particle_sort_interval,
-            dem_path: settings.dem_path.clone().unwrap_or_default(),
-            release_areas_path: settings.release_areas_path.clone(),
+            dem_path: dem_path.unwrap_or_default(),
+            release_areas_path,
             release_area_fraction: settings.release_area_fraction,
             crown_line_method: settings.crown_line_method,
             crown_line_exit_distance: settings.crown_line_exit_distance,
@@ -1234,9 +1242,8 @@ impl Simulation {
             self.dem.source.as_str()
         };
         // The source of fetched tiles is a multi-line attribution, not a path.
-        let stem = std::path::Path::new(source)
-            .file_stem()
-            .and_then(|s| s.to_str())
+        let stem = store_path_stem(source)
+            .or_else(|| std::path::Path::new(source).file_stem()?.to_str())
             .filter(|s| !s.is_empty() && !s.contains('\n'))
             .unwrap_or("default-site")
             .replace("_", "-");
@@ -1246,9 +1253,8 @@ impl Simulation {
     /// Name of the scenario, derived from the release areas it was run with.
     pub fn scenario_name(&self, release_areas: &[f32]) -> String {
         let base = match &self.release_areas_path {
-            Some(path) => std::path::Path::new(path)
-                .file_stem()
-                .and_then(|s| s.to_str())
+            Some(path) => store_path_stem(path)
+                .or_else(|| std::path::Path::new(path).file_stem()?.to_str())
                 .unwrap_or(path)
                 .to_string()
                 .replace("_", "-"),
@@ -4754,6 +4760,40 @@ mod tests {
         assert_eq!(sim.get_state(), SimulationState::Finished);
         block_on(sim.save_with_path(&file_path.to_string_lossy()))
             .expect("Failed to save simulation");
+    }
+
+    /// A run started from a store continues the scenario it came from.
+    #[test_log::test]
+    fn test_runs_import_their_inputs_from_a_store() {
+        let mut sim = setup_simple_sim(40.0, 4.0);
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let path = tmp_dir.path().join("runs.zarr").display().to_string();
+        block_on(sim.run()).expect("Failed to run simulation");
+        block_on(sim.save_with_path(&path)).expect("Failed to save simulation");
+        let release = block_on(sim.fetch_release_areas()).unwrap().to_vec();
+        let site = sim.site_name();
+        let scenario = sim.scenario_name(&release);
+
+        let settings = Settings {
+            dem_path: Some(path.clone()),
+            output_path: Some(path.clone()),
+            sim_model: Some(SimModel::SlidingBlock),
+            ..Default::default()
+        };
+        let mut imported = block_on(Simulation::new()).expect("Failed to create Simulation");
+        block_on(imported.create(settings)).expect("Failed to create simulation");
+        assert_eq!(imported.dem.width, sim.dem.width);
+        assert_eq!(imported.dem.data1d, sim.dem.data1d);
+        assert_eq!(imported.site_name(), site);
+
+        block_on(imported.run()).expect("Failed to run imported simulation");
+        assert_eq!(block_on(imported.fetch_release_areas()).unwrap(), release);
+        assert_eq!(imported.scenario_name(&release), scenario);
+        block_on(imported.save()).expect("Failed to save imported simulation");
+
+        let metadata = std::fs::read(format!("{path}/{site}/{scenario}/zarr.json")).unwrap();
+        let metadata: serde_json::Value = serde_json::from_slice(&metadata).unwrap();
+        assert_eq!(metadata["attributes"]["number_of_runs"], 2);
     }
 
     #[test_log::test]

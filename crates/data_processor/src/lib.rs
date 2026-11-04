@@ -27,6 +27,8 @@ use tile_manager::TileManager;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod output;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod store_reader;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod tile_manager;
 
 #[allow(unused_imports)]
@@ -51,6 +53,9 @@ pub enum DataProcessorError {
     #[cfg(not(target_arch = "wasm32"))]
     #[error("Failed to create tile manager")]
     TileManagerError(#[from] crate::tile_manager::TileManagerError),
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error(transparent)]
+    Store(#[from] crate::output::OutputError),
     #[error("Unsupported DEM format: {0}")]
     UnsupportedDemFormat(String),
     #[error("No DEM provided")]
@@ -740,6 +745,11 @@ fn geo_tiff_to_dem(mut tiff: GeoTiff, source: &str) -> Dem {
 }
 
 pub async fn load_release_areas(path: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if store_schema::split_store_path(path).is_some() {
+        return Ok(store_reader::read_release_areas(path)?);
+    }
+
     let ext = std::path::Path::new(path)
         .extension()
         .and_then(|s| s.to_str())
@@ -791,6 +801,11 @@ pub fn load_release_areas_from_bytes(
 }
 
 pub async fn load_dem(path: &str) -> Result<Dem, DataProcessorError> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if store_schema::split_store_path(path).is_some() {
+        return finalize_dem(store_reader::read_dem(path)?);
+    }
+
     let ext = std::path::Path::new(path)
         .extension()
         .and_then(|s| s.to_str())

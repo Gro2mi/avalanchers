@@ -199,6 +199,14 @@ def test_simulation_save():
     assert np.issubdtype(ds.created_at.dtype, np.datetime64)
     # x and y are cell centers, so they are spaced by exactly one cell
     assert np.allclose(np.diff(ds.x.values), ds.cell_size.isel(run=1).item())
+    # The store provides the DEM and release of a further run of the same scenario.
+    imported = avalanchers.PySimulation.new()
+    imported.create({"dem_path": f"{path}/{site_name}", "output_path": path})
+    imported.run()
+    imported.save()
+    assert scenario.number_of_runs == 3
+    assert len(data.list_all_scenarios()) == 1
+
     if os.path.exists(path):
         shutil.rmtree(path)
 

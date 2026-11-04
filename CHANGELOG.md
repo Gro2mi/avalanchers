@@ -55,6 +55,9 @@ All notable changes to this project might be documented in this file.
 - The center of mass records carry the simulated time, stored as `time` in the result stores.
 
 ### Added
+- `dem_path` and `release_areas_path` accept paths into a result store, such as
+  `avalanchers.zarr/avaWog/avaWogreleaseTexture`, so the DEM and, if present, the release areas
+  of an earlier run can be reused. Saving into the same store continues the scenario.
 - `sim.write_asc(layer, path)` writes `peak_velocity`, `peak_flow_thickness` or `release_areas` as an
   ESRI ASCII grid, north row first and georeferenced by the DEM.
 - Reusable initial state for back calibration (Rust `Simulation` and Python `PySimulation`):

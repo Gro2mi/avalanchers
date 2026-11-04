@@ -12,7 +12,7 @@ use compute_core::dem::Dem;
 use half::f16;
 use serde_json::{Value, json};
 use std::fs::{self, File};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 #[allow(unused_imports)]
 use tracing::{debug, error, info, trace, warn};
@@ -107,7 +107,7 @@ impl Output {
 
         let _lock = output.lock()?;
         if output.node_exists("") {
-            output.check_format()?;
+            check_format(&output.store, &output.path)?;
         } else {
             let mut root = GroupBuilder::new().build(output.store.clone(), "/")?;
             root.attributes_mut()
@@ -176,23 +176,6 @@ impl Output {
             .open(path)?;
         file.lock()?;
         Ok(file)
-    }
-
-    fn check_format(&self) -> Result<(), OutputError> {
-        let root = Group::open(self.store.clone(), "/")?;
-        let found = root
-            .attributes()
-            .get("avalanchers_format")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
-        if found != FORMAT_VERSION {
-            return Err(OutputError::Format {
-                path: self.path.display().to_string(),
-                found: found.to_string(),
-                expected: FORMAT_VERSION,
-            });
-        }
-        Ok(())
     }
 
     fn node_path(&self, node: &str) -> PathBuf {
@@ -523,6 +506,24 @@ impl Output {
         fs::rename(&temporary, &target)?;
         Ok(())
     }
+}
+
+/// Errors unless the store at `path` has the format [`FORMAT_VERSION`].
+pub(crate) fn check_format(store: &Arc<FilesystemStore>, path: &Path) -> Result<(), OutputError> {
+    let root = Group::open(store.clone(), "/")?;
+    let found = root
+        .attributes()
+        .get("avalanchers_format")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    if found != FORMAT_VERSION {
+        return Err(OutputError::Format {
+            path: path.display().to_string(),
+            found: found.to_string(),
+            expected: FORMAT_VERSION,
+        });
+    }
+    Ok(())
 }
 
 /// Width of the `timestep` dimension for a series of `length` values.
