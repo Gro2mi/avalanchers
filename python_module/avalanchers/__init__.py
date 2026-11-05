@@ -20,6 +20,7 @@ CALIBRATION_PARAMETER_DEFAULTS = {
     "constitutive_model": "drucker-prager",
     "density": 200.0,
     "release_thickness": None,
+    "release_swe": None,
     "friction_coefficient": 0.2,
     "drag_coefficient": 2000.0,
     "n0": 70.0,

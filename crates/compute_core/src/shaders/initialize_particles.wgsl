@@ -34,7 +34,11 @@ fn initialize_particles(@builtin(global_invocation_id) cell: vec3<u32>) {
     var rng_seed = pcg_hash((cell.x * 73856093u) ^
     (cell.y * 19349663u) ^
     seed);
-    let factor = 1.0 / cos(radians(slope_angle_buffer[idx]));
+    // a thickness is measured normal to the slope, SWE per horizontal area
+    var factor = 1.0 / cos(radians(slope_angle_buffer[idx]));
+    if !is_nan(sim_settings.release_swe) {
+        factor = 1.0;
+    }
     let cell_volume = snow_thickness * sim_settings.cell_size * sim_settings.cell_size * factor;
     let cell_mass = cell_volume * sim_settings.snow_density;
     atomicAdd(&atomic_values.release_volume, u32(round(cell_volume)));
@@ -158,7 +162,8 @@ struct SimSettings {
     no_new_cells_travel: f32,
     // Gaussian width (m) of the curvilinear reference surface; 0 disables it
     reference_surface_length: f32,
-    _pad1: u32,
+    // snow water equivalent (kg/m2) of the release cells; NaN if unset
+    release_swe: f32,
 };
 
 struct AtomicValues {

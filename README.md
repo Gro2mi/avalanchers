@@ -200,6 +200,11 @@ or none must have one, and features must not overlap. Without these attributes t
 `release_thickness` (m, unset by default) replaces the thickness of every release cell, whatever the release source,
 and logs a warning if that source has a thickness of its own.
 
+`release_swe` (kg/m², the same as mm of water, unset by default) can be set instead of `release_thickness`; setting
+both is an error. It must be positive, and `release_swe / density` must be above 0.01 m. It is the mass per horizontal
+area, so a release cell holds `release_swe * cell_size²` of snow whatever its slope, while `release_thickness` is
+measured normal to the slope.
+
 Directory uploads use the browser's `webkitdirectory` support, so the whole store folder has to be selected
 (dropping the folder onto the drop zone works as well).
 

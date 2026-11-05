@@ -72,6 +72,10 @@ All notable changes to this project might be documented in this file.
   shortened the runout: the energy line benchmark is now 5 m from its reference, not 307 m.
 
 ### Added
+- `release_swe` (`--release-swe` in the CLI) sets the release by snow water equivalent in kg/m²
+  instead of `release_thickness`; setting both is an error. It is the mass per horizontal area, so
+  a release cell holds `release_swe * cell_size²` whatever its slope. It must be positive, and
+  `release_swe / density` must be above 0.01 m. Result stores keep it as `release_swe`, NaN if unset.
 - CLI flags `--release-max-elevation` and `--enable-particle-relaxation`.
 - `release_areas_path` accepts polygon shapefiles (`.shp`, native and Python). All features are
   rasterized onto the DEM grid; holes stay free. As in AvaFrame, the thickness of each feature comes

@@ -908,6 +908,8 @@ impl Simulation {
             || initial.release != self.release_config()
             // a thickness per cell cannot be rescaled to a uniform one
             || old_thickness.is_some() != new_thickness.is_some()
+            // the slope factor of the masses differs per cell
+            || old.release_swe_override().is_some() != new.release_swe_override().is_some()
         {
             return PreparationStage::Release;
         }
@@ -954,9 +956,10 @@ impl Simulation {
     /// effect; only the preparation stages they affect run again:
     ///
     /// - model, grid or reference surface: full preparation,
-    /// - release thresholds, particles per cell, release configuration or
-    ///   a `release_thickness` set on a release with its own thickness:
-    ///   release areas and particle seeding,
+    /// - release thresholds, particles per cell, release configuration,
+    ///   a `release_thickness` set on a release with its own thickness or
+    ///   a switch between `release_thickness` and `release_swe`: release
+    ///   areas and particle seeding,
     /// - density or a changed uniform release thickness: the particle masses
     ///   are rescaled,
     /// - anything else: the stored particles are restored as they are.
@@ -1588,8 +1591,9 @@ impl Simulation {
     /// ([`Self::set_release_areas`]), crown-line estimation from the outline
     /// (`release_area_fraction`, also fills [`Self::crown_line`]), and finally
     /// automatic computation from roughness and slope thresholds on the GPU.
-    /// `release_thickness` replaces the thickness of every release cell; if
-    /// unset, sources without a thickness of their own get
+    /// `release_thickness` or `release_swe / density` replaces the thickness
+    /// of every release cell; if neither is set, sources without a thickness
+    /// of their own get
     /// [`compute_core::DEFAULT_RELEASE_THICKNESS`].
     /// Fixes [`Self::number_particles`] and moves the state to
     /// [`SimulationState::ReleaseAreasComputed`].
@@ -1777,12 +1781,13 @@ impl Simulation {
         Ok(number_release_cells)
     }
 
-    /// The release cells of a file or array with `release_thickness`, if set.
+    /// The release cells of a file or array with the thickness of the
+    /// settings, if set.
     fn override_release_thickness(&self, release_areas: &[f32]) -> Vec<f32> {
         let Some(thickness) = self.settings.release_thickness_override() else {
             return release_areas.to_vec();
         };
-        warn!("`release_thickness` of {thickness} m replaces the thickness of the release source");
+        warn!("A release thickness of {thickness} m replaces the thickness of the release source");
         release_areas
             .iter()
             .map(|&cell| {
@@ -4557,6 +4562,95 @@ mod tests {
         for (m, restored) in mass.iter().zip(&restored_mass) {
             assert!((m * 2.0 - restored).abs() <= 1e-6 * restored.abs());
         }
+    }
+
+    fn total_particle_mass(sim: &mut Simulation) -> f32 {
+        block_on(sim.fetch_particles_mass())
+            .expect("Failed to fetch mass")
+            .iter()
+            .sum()
+    }
+
+    fn assert_close(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() <= 1e-3 * expected,
+            "{actual} != {expected}"
+        );
+    }
+
+    #[test_log::test]
+    fn test_release_swe_sets_the_mass_per_horizontal_area() {
+        let mut sim = setup_restore_sim(SimModel::Curvilinear);
+        sim.settings.release_swe = 150.0;
+        block_on(sim.prepare()).expect("Failed to prepare");
+
+        // 64 cells of 5 m on a 30 degree slope: no slope factor
+        assert_close(total_particle_mass(&mut sim), 150.0 * 25.0 * 64.0);
+        let thickness = 150.0 / sim.settings.density;
+        let release_areas = block_on(sim.fetch_release_areas()).unwrap();
+        assert_eq!(
+            release_areas.iter().filter(|&&x| x == thickness).count(),
+            64
+        );
+    }
+
+    #[test_log::test]
+    fn test_restore_initial_state_applies_release_swe() {
+        let mut sim = setup_restore_sim(SimModel::Curvilinear);
+        sim.settings.density = 200.0;
+        sim.settings.release_thickness = 1.0;
+        block_on(sim.store_initial_state()).expect("Failed to store initial state");
+        let thickness_mass = total_particle_mass(&mut sim);
+        assert_close(
+            thickness_mass,
+            200.0 * 25.0 * 64.0 / 30f32.to_radians().cos(),
+        );
+
+        // the same thickness as before, but without the slope factor
+        let mut apply = |patch: Settings| {
+            sim.update_settings(&patch)
+                .expect("Failed to update settings");
+            block_on(sim.restore_initial_state()).expect("Failed to restore");
+            total_particle_mass(&mut sim)
+        };
+        let swe_mass = apply(Settings {
+            release_swe: Some(200.0),
+            ..Default::default()
+        });
+        assert_close(swe_mass, 200.0 * 25.0 * 64.0);
+
+        // SWE fixes the mass, so a denser snowpack is only thinner
+        let denser_mass = apply(Settings {
+            density: Some(400.0),
+            ..Default::default()
+        });
+        assert_close(denser_mass, swe_mass);
+
+        let doubled_mass = apply(Settings {
+            release_swe: Some(400.0),
+            ..Default::default()
+        });
+        assert_close(doubled_mass, 2.0 * swe_mass);
+
+        let restored_mass = apply(Settings {
+            density: Some(200.0),
+            release_thickness: Some(1.0),
+            ..Default::default()
+        });
+        assert_close(restored_mass, thickness_mass);
+    }
+
+    #[test_log::test]
+    fn test_update_settings_rejects_both_release_thickness_and_swe() {
+        let mut sim = setup_restore_sim(SimModel::Curvilinear);
+        let patch = Settings {
+            release_thickness: Some(1.0),
+            release_swe: Some(100.0),
+            ..Default::default()
+        };
+        assert!(sim.update_settings(&patch).is_err());
+        assert_eq!(sim.settings.release_swe_override(), None);
+        assert_eq!(sim.settings.release_thickness_override(), None);
     }
 
     #[test_log::test]

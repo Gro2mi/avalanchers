@@ -423,6 +423,7 @@ fn setting_units(name: &str) -> Option<&'static str> {
         | "peak_flow_thickness_threshold"
         | "reference_surface_length" => "m",
         "density" => "kg/m3",
+        "release_swe" => "kg/m2",
         "velocity_threshold" => "m/s",
         "drag_coefficient" => "m/s2",
         "internal_friction_angle"

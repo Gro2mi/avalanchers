@@ -385,7 +385,8 @@ struct SimSettings {
     no_new_cells_travel: f32,
     // Gaussian width (m) of the curvilinear reference surface; 0 disables it
     reference_surface_length: f32,
-    _pad1: u32,
+    // snow water equivalent (kg/m2) of the release cells; NaN if unset
+    release_swe: f32,
 };
 
 struct AtomicValues {

@@ -98,6 +98,8 @@ struct Args {
     #[arg(long)]
     release_thickness: Option<f32>,
     #[arg(long)]
+    release_swe: Option<f32>,
+    #[arg(long)]
     friction_coefficient: Option<f32>,
     #[arg(long)]
     drag_coefficient: Option<f32>,
@@ -264,6 +266,9 @@ impl Args {
         }
         if let Some(value) = self.release_thickness {
             settings.release_thickness = Some(value);
+        }
+        if let Some(value) = self.release_swe {
+            settings.release_swe = Some(value);
         }
         if let Some(value) = self.friction_coefficient {
             settings.friction_coefficient = Some(value);
@@ -518,6 +523,7 @@ mod tests {
             reference_surface_length: None,
             released_particles_per_cell: None,
             release_thickness: None,
+            release_swe: None,
             friction_coefficient: None,
             drag_coefficient: None,
             n0: None,

@@ -1225,6 +1225,7 @@ mod tests {
             released_particles_per_cell: Some(3),
             density: Some(4.0),
             release_thickness: Some(5.0),
+            release_swe: None,
             friction_coefficient: Some(6.0),
             drag_coefficient: Some(7.0),
             n0: Some(1.0),
