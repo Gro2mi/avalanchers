@@ -12,9 +12,10 @@ use std::collections::HashMap;
 use std::hash::Hash;
 use std::mem::size_of;
 use wgpu::{
-    Adapter, BindGroup, BufferUsages, CommandEncoderDescriptor, ComputePassDescriptor,
-    ComputePipeline, Device, DeviceDescriptor, Extent3d, Features, Instance, InstanceDescriptor,
-    Limits, PowerPreference, Queue, RequestAdapterOptions, TextureFormat, TextureUsages,
+    Adapter, BindGroup, BufferUsages, CommandEncoder, CommandEncoderDescriptor,
+    ComputePassDescriptor, ComputePipeline, Device, DeviceDescriptor, Extent3d, Features, Instance,
+    InstanceDescriptor, Limits, PowerPreference, Queue, RequestAdapterOptions, TextureFormat,
+    TextureUsages,
 };
 
 // use log::{debug, info, warn, error};
@@ -347,8 +348,17 @@ fn magnitude_diff(a: &[f32; 3], b: &[f32; 3]) -> f32 {
 
 use std::collections::BTreeMap;
 use wgpu::Backends;
+
+/// An instance of the primary backends. The OpenGL backend is left out: each
+/// of its instances keeps 16 MB of GPU memory after it is dropped.
+fn create_instance() -> Instance {
+    let mut descriptor = InstanceDescriptor::new_without_display_handle();
+    descriptor.backends = Backends::PRIMARY;
+    Instance::new(descriptor)
+}
+
 pub async fn list_devices() -> Result<Vec<String>> {
-    let instance = Instance::new(InstanceDescriptor::new_without_display_handle());
+    let instance = create_instance();
     let adapters = instance.enumerate_adapters(Backends::PRIMARY).await;
 
     // Map to group details by device name:
@@ -451,6 +461,18 @@ pub async fn list_devices() -> Result<Vec<String>> {
 
 const WORKGROUP_SIZE_2D: u32 = 16;
 
+/// Jump flooding steps n/2, n/4, ..., 1 with n the next power of two >= the
+/// larger grid dimension.
+fn chamfer_flood_steps(max_dimension: u32) -> Vec<ChamferParams> {
+    let first_step = (max_dimension.next_power_of_two() / 2).max(1);
+    std::iter::successors(Some(first_step), |step| (*step > 1).then_some(step / 2))
+        .map(|step| ChamferParams {
+            step,
+            ..Default::default()
+        })
+        .collect()
+}
+
 /// Release thickness (m) above which a cell counts as a release cell: it is
 /// seeded with particles, bounds the relaxation and is left out of the
 /// evaluation. Mirrored as a constant in initialize_particles,
@@ -458,7 +480,7 @@ const WORKGROUP_SIZE_2D: u32 = 16;
 pub const RELEASE_THICKNESS_THRESHOLD: f32 = 0.01;
 
 /// Release thickness (m) of release areas that hold none of their own, used
-/// unless `release_thickness` is set.
+/// unless `release_thickness` or `release_swe` is set.
 pub const DEFAULT_RELEASE_THICKNESS: f32 = 1.0;
 
 // soft sphere relaxation of the freshly initialized particles: overlapping
@@ -578,7 +600,7 @@ impl ComputeOrchestrator {
     }
     pub async fn new_with_gpu(target_gpu: Option<String>) -> Result<Self> {
         // first search for VULKAN backend to speed up GPU selection, see dev branch
-        let instance = Instance::new(InstanceDescriptor::new_without_display_handle());
+        let instance = create_instance();
         let mut selected_adapter = None;
 
         // 1. If a target string was provided, search by Device ID (if numeric) or Name
@@ -589,7 +611,7 @@ impl ComputeOrchestrator {
                 .unwrap_or(&target)
                 .trim()
                 .to_string();
-            let adapters = instance.enumerate_adapters(Backends::all()).await;
+            let adapters = instance.enumerate_adapters(Backends::PRIMARY).await;
 
             // Try parsing the target string as a number (supports both hex "0x1E84" and decimal)
             let target_id = Self::parse_numeric_id(&target);
@@ -884,6 +906,32 @@ impl ComputeOrchestrator {
         dispatch_number_workgroups_y: u32,
         dispatch_number_workgroups_z: u32,
     ) -> Result<()> {
+        let mut encoder = self
+            .device
+            .create_command_encoder(&CommandEncoderDescriptor {
+                label: Some(&format!("Compute Encoder for shader: {}", shader_name)),
+            });
+        self.encode_shader(
+            &mut encoder,
+            shader_name,
+            dispatch_number_workgroups_x,
+            dispatch_number_workgroups_y,
+            dispatch_number_workgroups_z,
+        )?;
+        self.queue.submit(Some(encoder.finish()));
+
+        Ok(())
+    }
+
+    /// Records one dispatch of `shader_name` as its own compute pass.
+    fn encode_shader(
+        &self,
+        encoder: &mut CommandEncoder,
+        shader_name: &ShaderName,
+        dispatch_number_workgroups_x: u32,
+        dispatch_number_workgroups_y: u32,
+        dispatch_number_workgroups_z: u32,
+    ) -> Result<()> {
         if dispatch_number_workgroups_x == 0
             || dispatch_number_workgroups_y == 0
             || dispatch_number_workgroups_z == 0
@@ -902,25 +950,17 @@ impl ComputeOrchestrator {
 
         let bind_group = config.create_bind_group(&self.device, &self.resources)?;
 
-        let mut encoder = self
-            .device
-            .create_command_encoder(&CommandEncoderDescriptor {
-                label: Some(&format!("Compute Encoder for shader: {}", shader_name)),
-            });
-        {
-            let mut compute_pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some(&format!("{} Pass", shader_name)),
-                timestamp_writes: None,
-            });
-            compute_pass.set_pipeline(&config.pipeline);
-            compute_pass.set_bind_group(0, &bind_group, &[]);
-            compute_pass.dispatch_workgroups(
-                dispatch_number_workgroups_x,
-                dispatch_number_workgroups_y,
-                dispatch_number_workgroups_z,
-            );
-        }
-        self.queue.submit(Some(encoder.finish()));
+        let mut compute_pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some(&format!("{} Pass", shader_name)),
+            timestamp_writes: None,
+        });
+        compute_pass.set_pipeline(&config.pipeline);
+        compute_pass.set_bind_group(0, &bind_group, &[]);
+        compute_pass.dispatch_workgroups(
+            dispatch_number_workgroups_x,
+            dispatch_number_workgroups_y,
+            dispatch_number_workgroups_z,
+        );
 
         Ok(())
     }
@@ -1159,23 +1199,10 @@ impl ComputeOrchestrator {
             .ok_or_else(|| anyhow!("CenterOfMass buffer has no slot for timestep {timestep}"))
     }
 
-    /// Computes the diagonal-normalized chamfer distance between the simulated
-    /// cells (`grid_peak_flow_thickness > peak_flow_thickness_threshold`) and
-    /// the region-of-interest bitmask on the GPU.
-    ///
-    /// Seeds two nearest-neighbor fields, propagates the nearest seeds with the
-    /// jump flooding algorithm (one dispatch per power-of-two step size), and
-    /// reduces the distances in a single workgroup. The result distances are
-    /// normalized by the length of the grid diagonal in world units.
-    /// Dispatches the chamfer distance pipeline: seeds two nearest-neighbor
-    /// fields, propagates the nearest seeds with the jump flooding algorithm
-    /// (one dispatch per power-of-two step size) and reduces the distances
-    /// into the chamfer section of the unified EvaluationResult buffer.
-    /// Requires SimSettings and the EvaluationResult buffer to be initialized.
-    async fn dispatch_chamfer_distance(
-        &mut self,
-        sim_settings: &settings::SimSettings,
-    ) -> Result<()> {
+    /// Allocates the chamfer buffers on the first evaluation of a grid. They
+    /// need no reset between evaluations: chamfer_prepare writes every cell of
+    /// both nearest fields and the snapshots are copied from them.
+    fn ensure_chamfer_buffers(&mut self, sim_settings: &settings::SimSettings) -> Result<()> {
         let cell_count = usize::try_from(sim_settings.grid_shape_x)
             .ok()
             .and_then(|width| {
@@ -1185,8 +1212,15 @@ impl ComputeOrchestrator {
             })
             .ok_or_else(|| anyhow!("Grid buffer size overflow"))?;
         let nearest_bytes = cell_count * size_of::<[u32; 2]>();
+        if self
+            .resources
+            .get_buffer(&BufferName::ChamferNearestRoi)
+            .is_some_and(|buffer| buffer.size() == nearest_bytes as u64)
+        {
+            return Ok(());
+        }
+
         let nearest_usage = BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST;
-        // recreated on every call, so the fields always match the current grid size
         self.add_buffer(BufferName::ChamferNearestRoi, nearest_bytes, nearest_usage);
         self.add_buffer(
             BufferName::ChamferNearestRoiSnapshot,
@@ -1204,50 +1238,78 @@ impl ComputeOrchestrator {
             size_of::<ChamferParams>(),
             BufferUsages::UNIFORM | BufferUsages::COPY_DST,
         );
-
-        let dispatch_x = sim_settings.grid_shape_x.div_ceil(WORKGROUP_SIZE_2D);
-        let dispatch_y = sim_settings.grid_shape_y.div_ceil(WORKGROUP_SIZE_2D);
-        self.run_shader(&ShaderName::ChamferPrepare, dispatch_x, dispatch_y, 1)
-            .await?;
-
-        // jump flooding: steps n/2, n/4, ..., 1 with n the next power of two
-        // >= the larger grid dimension
-        let max_dimension = sim_settings.grid_shape_x.max(sim_settings.grid_shape_y);
-        let mut step = max_dimension.next_power_of_two() / 2;
-        if step == 0 {
-            step = 1;
-        }
-        loop {
-            self.copy_buffer(
-                BufferName::ChamferNearestRoi,
-                BufferName::ChamferNearestRoiSnapshot,
-            )?;
-            self.copy_buffer(
-                BufferName::ChamferNearestSim,
-                BufferName::ChamferNearestSimSnapshot,
-            )?;
-            self.write_buffer(
-                BufferName::ChamferParams,
-                &[ChamferParams {
-                    step,
-                    _padding: [0; 3],
-                }],
-            )
-            .await?;
-            self.run_shader(&ShaderName::ChamferFlood, dispatch_x, dispatch_y, 1)
-                .await?;
-            if step == 1 {
-                break;
-            }
-            step /= 2;
-        }
-
-        self.run_shader(&ShaderName::ChamferReduce, 1, 1, 1).await?;
+        let steps = chamfer_flood_steps(sim_settings.grid_shape_x.max(sim_settings.grid_shape_y));
+        self.add_buffer_with_data(BufferName::ChamferSteps, &steps, BufferUsages::COPY_SRC);
         Ok(())
     }
 
-    /// Copies the full contents of one named buffer into another on the GPU.
-    fn copy_buffer(&self, source: BufferName, destination: BufferName) -> Result<()> {
+    /// Records the chamfer distance between the simulated cells
+    /// (`grid_peak_flow_thickness > peak_flow_thickness_threshold`) and the
+    /// region-of-interest bitmask: seeds two nearest-neighbor fields,
+    /// propagates the nearest seeds with the jump flooding algorithm (one
+    /// dispatch per power-of-two step size) and reduces the distances into the
+    /// chamfer section of the unified EvaluationResult buffer. Requires
+    /// SimSettings, the EvaluationResult buffer and the chamfer buffers to be
+    /// initialized.
+    ///
+    /// A `queue.write_buffer` would land before the whole submission, so each
+    /// flood pass gets its step by a copy from the steps buffer, ordered
+    /// between the passes.
+    fn encode_chamfer_distance(
+        &self,
+        encoder: &mut CommandEncoder,
+        sim_settings: &settings::SimSettings,
+    ) -> Result<()> {
+        let dispatch_x = sim_settings.grid_shape_x.div_ceil(WORKGROUP_SIZE_2D);
+        let dispatch_y = sim_settings.grid_shape_y.div_ceil(WORKGROUP_SIZE_2D);
+        self.encode_shader(
+            encoder,
+            &ShaderName::ChamferPrepare,
+            dispatch_x,
+            dispatch_y,
+            1,
+        )?;
+
+        let steps = self
+            .resources
+            .get_buffer(&BufferName::ChamferSteps)
+            .ok_or_else(|| anyhow!("Buffer '{}' not found", BufferName::ChamferSteps))?;
+        let params = self
+            .resources
+            .get_buffer(&BufferName::ChamferParams)
+            .ok_or_else(|| anyhow!("Buffer '{}' not found", BufferName::ChamferParams))?;
+        let params_size = size_of::<ChamferParams>() as u64;
+        for offset in (0..steps.size()).step_by(params_size as usize) {
+            self.encode_copy_buffer(
+                encoder,
+                BufferName::ChamferNearestRoi,
+                BufferName::ChamferNearestRoiSnapshot,
+            )?;
+            self.encode_copy_buffer(
+                encoder,
+                BufferName::ChamferNearestSim,
+                BufferName::ChamferNearestSimSnapshot,
+            )?;
+            encoder.copy_buffer_to_buffer(steps, offset, params, 0, params_size);
+            self.encode_shader(
+                encoder,
+                &ShaderName::ChamferFlood,
+                dispatch_x,
+                dispatch_y,
+                1,
+            )?;
+        }
+
+        self.encode_shader(encoder, &ShaderName::ChamferReduce, 1, 1, 1)
+    }
+
+    /// Records a copy of the full contents of one named buffer into another.
+    fn encode_copy_buffer(
+        &self,
+        encoder: &mut CommandEncoder,
+        source: BufferName,
+        destination: BufferName,
+    ) -> Result<()> {
         let source_buffer = self
             .resources
             .get_buffer(&source)
@@ -1257,13 +1319,7 @@ impl ComputeOrchestrator {
             .get_buffer(&destination)
             .ok_or_else(|| anyhow!("Buffer '{}' not found", destination))?;
         let size = source_buffer.size().min(destination_buffer.size());
-        let mut encoder = self
-            .device
-            .create_command_encoder(&CommandEncoderDescriptor {
-                label: Some(&format!("Copy {} to {} Encoder", source, destination)),
-            });
         encoder.copy_buffer_to_buffer(source_buffer, 0, destination_buffer, 0, size);
-        self.queue.submit(Some(encoder.finish()));
         Ok(())
     }
 
@@ -1306,11 +1362,24 @@ impl ComputeOrchestrator {
 
         let dispatch_x = sim_settings.grid_shape_x.div_ceil(WORKGROUP_SIZE_2D);
         let dispatch_y = sim_settings.grid_shape_y.div_ceil(WORKGROUP_SIZE_2D);
-        self.run_shader(&ShaderName::EvaluateMassMovement, dispatch_x, dispatch_y, 1)
-            .await?;
-        self.dispatch_chamfer_distance(sim_settings).await?;
-        self.run_shader(&ShaderName::ComputeBeelineDistance, 1, 1, 1)
-            .await?;
+        self.ensure_chamfer_buffers(sim_settings)?;
+        // one submission: every submission in flight holds a command encoder,
+        // and wgpu pools those for the lifetime of the device
+        let mut encoder = self
+            .device
+            .create_command_encoder(&CommandEncoderDescriptor {
+                label: Some("GPU Evaluation Encoder"),
+            });
+        self.encode_shader(
+            &mut encoder,
+            &ShaderName::EvaluateMassMovement,
+            dispatch_x,
+            dispatch_y,
+            1,
+        )?;
+        self.encode_chamfer_distance(&mut encoder, sim_settings)?;
+        self.encode_shader(&mut encoder, &ShaderName::ComputeBeelineDistance, 1, 1, 1)?;
+        self.queue.submit(Some(encoder.finish()));
 
         let raw = self
             .read_buffer::<EvaluationResult>(BufferName::EvaluationResult)
@@ -1554,24 +1623,24 @@ impl ComputeOrchestrator {
                     .and_then(|height| width.checked_mul(height))
             })
             .ok_or_else(|| anyhow!("Grid buffer size overflow"))?;
-        // recreated on every call, so the sizes always match the current
-        // grid and particle count
-        self.add_buffer(
+        // reused while the grid and particle count stay the same; every
+        // iteration overwrites them, so they need no reset
+        self.ensure_buffer(
             BufferName::ParticlesPositionRelax,
             number_release_particles as usize * size_of::<[f32; 2]>(),
             BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
         );
-        self.add_buffer(
+        self.ensure_buffer(
             BufferName::RelaxGridHead,
             grid_cell_count * size_of::<u32>(),
             BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
         );
-        self.add_buffer(
+        self.ensure_buffer(
             BufferName::ParticleNext,
             number_release_particles as usize * size_of::<u32>(),
             BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
         );
-        self.add_buffer(
+        self.ensure_buffer(
             BufferName::RelaxParams,
             size_of::<RelaxParams>(),
             BufferUsages::UNIFORM | BufferUsages::COPY_DST,
@@ -1590,32 +1659,50 @@ impl ComputeOrchestrator {
             number_release_particles.div_ceil(self.max_compute_invocations_per_workgroup);
         let dispatch_grid_x = sim_settings.grid_shape_x.div_ceil(WORKGROUP_SIZE_2D);
         let dispatch_grid_y = sim_settings.grid_shape_y.div_ceil(WORKGROUP_SIZE_2D);
+        // one submission, see evaluate_gpu
+        let mut encoder = self
+            .device
+            .create_command_encoder(&CommandEncoderDescriptor {
+                label: Some("Particle Relaxation Encoder"),
+            });
         for _ in 0..RELAXATION_ITERATIONS {
             // all threads read the snapshot of the previous iteration
-            self.copy_buffer(
+            self.encode_copy_buffer(
+                &mut encoder,
                 BufferName::ParticlesPosition,
                 BufferName::ParticlesPositionRelax,
             )?;
-            self.run_shader(
+            self.encode_shader(
+                &mut encoder,
                 &ShaderName::RelaxClearGrid,
                 dispatch_grid_x,
                 dispatch_grid_y,
                 1,
-            )
-            .await?;
-            self.run_shader(&ShaderName::RelaxBuildGrid, dispatch_particles_1d, 1, 1)
-                .await?;
-            self.run_shader(&ShaderName::RelaxParticles, dispatch_particles_1d, 1, 1)
-                .await?;
+            )?;
+            self.encode_shader(
+                &mut encoder,
+                &ShaderName::RelaxBuildGrid,
+                dispatch_particles_1d,
+                1,
+                1,
+            )?;
+            self.encode_shader(
+                &mut encoder,
+                &ShaderName::RelaxParticles,
+                dispatch_particles_1d,
+                1,
+                1,
+            )?;
         }
         // the start elevation was sampled at the seed position
-        self.run_shader(
+        self.encode_shader(
+            &mut encoder,
             &ShaderName::RelaxSampleElevation,
             dispatch_particles_1d,
             1,
             1,
-        )
-        .await?;
+        )?;
+        self.queue.submit(Some(encoder.finish()));
         Ok(())
     }
 
@@ -2298,6 +2385,17 @@ impl ComputeOrchestrator {
         self.resources.write_buffer(&self.queue, name, data)
     }
 
+    /// Allocates a buffer unless one of this size exists, which keeps its contents.
+    fn ensure_buffer(&mut self, name: BufferName, size_bytes: usize, usage: BufferUsages) {
+        let exists = self
+            .resources
+            .get_buffer(&name)
+            .is_some_and(|buffer| buffer.size() == size_bytes as u64);
+        if !exists {
+            self.add_buffer(name, size_bytes, usage);
+        }
+    }
+
     pub fn add_buffer(&mut self, name: BufferName, size_bytes: usize, usage: BufferUsages) {
         self.resources
             .add_buffer(&self.device, name, size_bytes, usage);
@@ -2797,6 +2895,22 @@ mod tests {
                 "start elevation {elevation} at ({x}, {y}), expected {expected}"
             );
         }
+
+        // seeding again reuses the buffers until the particle count changes
+        let relax_buffer = |orchestrator: &ComputeOrchestrator, name| -> wgpu::Buffer {
+            orchestrator.resources.get_buffer(&name).unwrap().clone()
+        };
+        let snapshot = relax_buffer(&orchestrator, BufferName::ParticlesPositionRelax);
+        let grid_head = relax_buffer(&orchestrator, BufferName::RelaxGridHead);
+        block_on(orchestrator.relax_particles(&settings, 2)).expect("Relaxation failed");
+        assert!(snapshot == relax_buffer(&orchestrator, BufferName::ParticlesPositionRelax));
+        assert!(grid_head == relax_buffer(&orchestrator, BufferName::RelaxGridHead));
+
+        block_on(orchestrator.relax_particles(&settings, 1)).expect("Relaxation failed");
+        assert_eq!(
+            relax_buffer(&orchestrator, BufferName::ParticlesPositionRelax).size(),
+            size_of::<[f32; 2]>() as u64
+        );
     }
 
     #[test_log::test]
@@ -3238,6 +3352,127 @@ mod tests {
             .expect("GPU evaluation without simulated cells failed");
         assert!(empty_simulation.chamfer.is_infinite());
         assert_eq!(empty_simulation.sim_to_roi, 0.0);
+    }
+
+    /// A simulated cell and a region of interest cell at the two ends of a
+    /// row of `width` cells of 5 m.
+    fn evaluate_row_ends(
+        orchestrator: &mut ComputeOrchestrator,
+        width: u32,
+    ) -> (settings::SimSettings, MassMovementEvaluation) {
+        let settings = settings::SimSettings {
+            grid_shape_x: width,
+            grid_shape_y: 1,
+            cell_size: 5.0,
+            peak_flow_thickness_threshold: 1.0,
+            ..Default::default()
+        };
+        orchestrator
+            .create_buffers_and_texture_descriptions(&settings)
+            .expect("Failed to create GPU resources");
+        orchestrator
+            .resources
+            .add_texture_with_data(
+                &orchestrator.device,
+                &orchestrator.queue,
+                &vec![50.0f32; width as usize],
+                TextureName::Dem,
+                Extent3d {
+                    width,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                TextureFormat::R32Float,
+                TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+            )
+            .expect("Failed to upload DEM");
+        let mut thickness = vec![0.0f32; width as usize];
+        thickness[0] = 2.0;
+        block_on(orchestrator.write_buffer(BufferName::GridPeakFlowThickness, &thickness))
+            .expect("Failed to write peak flow thicknesses");
+        let mut roi = vec![0u32; (width as usize).div_ceil(32)];
+        let last_cell = width as usize - 1;
+        roi[last_cell / 32] = 1 << (last_cell % 32);
+        block_on(orchestrator.write_buffer(BufferName::RegionOfInterest, &roi))
+            .expect("Failed to write region of interest");
+        let result = block_on(orchestrator.evaluate_gpu(&settings)).expect("GPU evaluation failed");
+        (settings, result)
+    }
+
+    fn row_ends_distance(width: u32) -> f64 {
+        let (length, height) = (width as f64 * 5.0, 5.0f64);
+        (width - 1) as f64 * 5.0 / length.hypot(height)
+    }
+
+    #[test_log::test]
+    fn test_instance_leaves_out_opengl() {
+        let adapters = block_on(create_instance().enumerate_adapters(Backends::all()));
+        assert!(
+            adapters
+                .iter()
+                .all(|adapter| adapter.get_info().backend != wgpu::Backend::Gl)
+        );
+    }
+
+    #[test_log::test]
+    fn test_chamfer_flood_steps_halve_down_to_one() {
+        let steps = |max_dimension| -> Vec<u32> {
+            chamfer_flood_steps(max_dimension)
+                .iter()
+                .map(|params| params.step)
+                .collect()
+        };
+        assert_eq!(steps(1), [1]);
+        assert_eq!(steps(2), [1]);
+        assert_eq!(steps(3), [2, 1]);
+        assert_eq!(steps(209), [128, 64, 32, 16, 8, 4, 2, 1]);
+    }
+
+    #[test_log::test]
+    fn test_evaluate_gpu_chamfer_applies_every_flood_step() {
+        // a single step size would not carry the seeds across the row
+        let mut orchestrator =
+            block_on(ComputeOrchestrator::new()).expect("Failed to create ComputeOrchestrator");
+        let (_, result) = evaluate_row_ends(&mut orchestrator, 64);
+        assert!(
+            (result.sim_to_roi - row_ends_distance(64)).abs() < 1e-5,
+            "sim_to_roi was {}",
+            result.sim_to_roi
+        );
+    }
+
+    #[test_log::test]
+    fn test_evaluate_gpu_reuses_the_chamfer_buffers() {
+        let mut orchestrator =
+            block_on(ComputeOrchestrator::new()).expect("Failed to create ComputeOrchestrator");
+        let (settings, first) = evaluate_row_ends(&mut orchestrator, 64);
+        let chamfer_buffers = [
+            BufferName::ChamferParams,
+            BufferName::ChamferSteps,
+            BufferName::ChamferNearestRoi,
+            BufferName::ChamferNearestRoiSnapshot,
+            BufferName::ChamferNearestSim,
+            BufferName::ChamferNearestSimSnapshot,
+        ];
+        let buffers = |orchestrator: &ComputeOrchestrator| -> Vec<wgpu::Buffer> {
+            chamfer_buffers
+                .iter()
+                .map(|name| orchestrator.resources.get_buffer(name).unwrap().clone())
+                .collect()
+        };
+        let allocated = buffers(&orchestrator);
+
+        let second = block_on(orchestrator.evaluate_gpu(&settings)).expect("GPU evaluation failed");
+        assert_eq!(buffers(&orchestrator), allocated);
+        assert_eq!(first.sim_to_roi, second.sim_to_roi);
+
+        // a new grid gets buffers and flood steps of its own size
+        let (_, smaller) = evaluate_row_ends(&mut orchestrator, 8);
+        assert!(
+            (smaller.sim_to_roi - row_ends_distance(8)).abs() < 1e-5,
+            "sim_to_roi was {}",
+            smaller.sim_to_roi
+        );
     }
 
     #[test_log::test]

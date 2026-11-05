@@ -187,6 +187,7 @@ pub enum BufferName {
 
     // chamfer distance between simulated cells and the region of interest
     ChamferParams,
+    ChamferSteps,
     ChamferNearestRoi,
     ChamferNearestRoiSnapshot,
     ChamferNearestSim,
@@ -250,6 +251,7 @@ impl BufferName {
             BufferName::CenterOfMassLabels => "center_of_mass_labels",
             BufferName::CenterOfMassBlobMass => "center_of_mass_blob_mass",
             BufferName::ChamferParams => "chamfer_params",
+            BufferName::ChamferSteps => "chamfer_steps",
             BufferName::ChamferNearestRoi => "chamfer_nearest_roi",
             BufferName::ChamferNearestRoiSnapshot => "chamfer_nearest_roi_snapshot",
             BufferName::ChamferNearestSim => "chamfer_nearest_sim",
@@ -314,6 +316,7 @@ impl std::str::FromStr for BufferName {
             "center_of_mass_labels" => Ok(BufferName::CenterOfMassLabels),
             "center_of_mass_blob_mass" => Ok(BufferName::CenterOfMassBlobMass),
             "chamfer_params" => Ok(BufferName::ChamferParams),
+            "chamfer_steps" => Ok(BufferName::ChamferSteps),
             "chamfer_nearest_roi" => Ok(BufferName::ChamferNearestRoi),
             "chamfer_nearest_roi_snapshot" => Ok(BufferName::ChamferNearestRoiSnapshot),
             "chamfer_nearest_sim" => Ok(BufferName::ChamferNearestSim),
@@ -1121,6 +1124,7 @@ mod tests {
             (BufferName::CenterOfMassLabels, "center_of_mass_labels"),
             (BufferName::CenterOfMassBlobMass, "center_of_mass_blob_mass"),
             (BufferName::ChamferParams, "chamfer_params"),
+            (BufferName::ChamferSteps, "chamfer_steps"),
             (BufferName::ChamferNearestRoi, "chamfer_nearest_roi"),
             (
                 BufferName::ChamferNearestRoiSnapshot,

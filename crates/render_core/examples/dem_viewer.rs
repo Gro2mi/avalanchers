@@ -121,9 +121,11 @@ impl ApplicationHandler for Viewer {
                 .expect("failed to create window"),
         );
 
-        let instance = wgpu::Instance::new(
-            wgpu::InstanceDescriptor::new_with_display_handle_from_env(Box::new(window.clone())),
-        );
+        let mut descriptor =
+            wgpu::InstanceDescriptor::new_with_display_handle_from_env(Box::new(window.clone()));
+        // each OpenGL instance keeps 16 MB of GPU memory after it is dropped
+        descriptor.backends = wgpu::Backends::PRIMARY;
+        let instance = wgpu::Instance::new(descriptor);
         let surface = instance
             .create_surface(window.clone())
             .expect("failed to create surface");

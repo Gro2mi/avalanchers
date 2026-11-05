@@ -4,6 +4,16 @@ All notable changes to this project might be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- Repeated GPU evaluations no longer grow GPU memory until the driver reports `Out of Memory`.
+  `evaluate` records its passes into one command encoder instead of about 30 submissions, and the
+  chamfer buffers are allocated once per grid instead of on every call. The particle relaxation
+  records its 30 iterations the same way and reuses its buffers while the grid and particle count
+  stay the same.
+- Creating a simulation or a headless render context no longer leaves 16 MB of GPU memory behind
+  after it is dropped. Only the primary backends (Vulkan, Metal, DX12, WebGPU) are used; the unused
+  OpenGL backend caused this.
+
 ### Changed
 - **Breaking:** `slab_thickness_factor` is now `release_thickness` in metres
   (`--release-thickness` in the CLI) and the old key is rejected. It is unset by default: rasters,

@@ -109,6 +109,21 @@ fn render_with(
 }
 
 #[test]
+fn headless_context_leaves_out_opengl() {
+    let Ok(ctx) = pollster::block_on(GpuContext::headless()) else {
+        eprintln!("skipping: no GPU adapter available");
+        return;
+    };
+
+    let adapters = pollster::block_on(ctx.instance.enumerate_adapters(wgpu::Backends::all()));
+    assert!(
+        adapters
+            .iter()
+            .all(|adapter| adapter.get_info().backend != wgpu::Backend::Gl)
+    );
+}
+
+#[test]
 fn renders_dem_surface_with_shading() {
     let Ok(ctx) = pollster::block_on(GpuContext::headless()) else {
         eprintln!("skipping: no GPU adapter available");
