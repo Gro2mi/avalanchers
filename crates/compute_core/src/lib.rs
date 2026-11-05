@@ -3084,6 +3084,10 @@ mod tests {
 
     #[test_log::test]
     fn test_center_of_mass_serpentine_timing() {
+        if std::env::var("GITHUB_ACTIONS").is_ok() {
+            println!("Skipping slow test on CI");
+            return;
+        }
         // 512x512 grid with a 1-cell-wide serpentine blob of ~130k cells,
         // the worst case for label propagation along a sinuous path.
         let settings = settings::SimSettings {

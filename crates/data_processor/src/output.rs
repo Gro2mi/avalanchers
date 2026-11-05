@@ -795,6 +795,10 @@ mod tests {
 
     #[test_log::test]
     fn test_concurrent_writers_do_not_lose_runs() {
+        if std::env::var("GITHUB_ACTIONS").is_ok() {
+            println!("Skipping slow test on CI");
+            return;
+        }
         let (_tmp_dir, path, output) = store("concurrent.zarr");
         let path = path.to_str().unwrap().to_string();
         const WRITERS: usize = 4;

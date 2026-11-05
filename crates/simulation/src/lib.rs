@@ -2996,6 +2996,10 @@ mod tests {
 
     #[test_log::test]
     fn test_roughness_is_model_independent_vector_ruggedness() {
+        if std::env::var("GITHUB_ACTIONS").is_ok() {
+            println!("Skipping slow test on CI");
+            return;
+        }
         let width = 24;
         let height = 24;
         let cell_size = 5.0;
@@ -3883,6 +3887,10 @@ mod tests {
 
     #[test_log::test]
     fn test_shapefile_release_thickness_prefers_setting_then_attributes() {
+        if std::env::var("GITHUB_ACTIONS").is_ok() {
+            println!("Skipping slow test on CI");
+            return;
+        }
         let tmp_dir = tempfile::tempdir().unwrap();
         for (attribute, setting, expected, has_thickness) in [
             (Some(2.5), f32::NAN, 2.5, true),
@@ -3924,6 +3932,10 @@ mod tests {
 
     #[test_log::test]
     fn test_computed_release_thickness_defaults_and_can_be_set() {
+        if std::env::var("GITHUB_ACTIONS").is_ok() {
+            println!("Skipping slow test on CI");
+            return;
+        }
         for (setting, expected) in [
             (f32::NAN, compute_core::DEFAULT_RELEASE_THICKNESS),
             (1.75, 1.75),

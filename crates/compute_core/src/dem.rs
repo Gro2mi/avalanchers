@@ -1,5 +1,4 @@
 use crate::utils::*;
-use core::f32;
 use std::hash::{Hash, Hasher};
 
 /// FNV-1a. Unlike the standard library hashers its output is guaranteed not to
