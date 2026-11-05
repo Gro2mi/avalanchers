@@ -56,9 +56,10 @@ fn update_sim_info(@builtin(global_invocation_id) global_id: vec3<u32>) {
     sim_info.max_velocity = bitcast<f32>(atomicLoad(&atomic_values.peak_velocity));
     // MPM case
     var expected_max_velocity = bitcast<f32>(atomicLoad(&atomic_values.expected_max_velocity));
-    // Particle case
-    if expected_max_velocity < 1e-6 {
-        expected_max_velocity = sim_info.max_velocity + sqrt(g * max_flow_thickness);
+    // Particle case: no grid shader tracks the CFL speed of the sliding block,
+    // so its run maximum is kept here
+    if sim_settings.model_type == 3u || expected_max_velocity < 1e-6 {
+        expected_max_velocity = max(expected_max_velocity, sim_info.max_velocity + sqrt(g * max_flow_thickness));
         atomicStore(&atomic_values.expected_max_velocity, bitcast<u32>(expected_max_velocity));
     }
     let expected_dt = sim_settings.cfl * sim_settings.cell_size / expected_max_velocity;

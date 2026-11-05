@@ -2959,6 +2959,37 @@ mod tests {
     }
 
     #[test_log::test]
+    fn test_release_max_elevation_excludes_higher_cells() {
+        let (width, height, cell_size) = (24, 24, 5.0);
+        // 31 degrees, steep enough for the default release slope window
+        let dem: Vec<f32> = (0..width * height)
+            .map(|idx| 2000.0 + (idx / width) as f32 * 3.0)
+            .collect();
+        let max_elevation = 2030.0;
+
+        let mut sim: Simulation = block_on(Simulation::new()).expect("Failed to create Simulation");
+        let settings = Settings {
+            release_max_elevation: Some(max_elevation),
+            ..Default::default()
+        };
+        block_on(sim.create(settings)).expect("Failed to create simulation");
+        sim.set_dem(&dem, width, height, cell_size)
+            .expect("Failed to set DEM");
+        sim.set_roi(&vec![true; width * height])
+            .expect("Failed to set ROI");
+        block_on(sim.prepare()).expect("Failed to prepare simulation");
+
+        let release = block_on(sim.fetch_release_areas()).expect("Failed to fetch release areas");
+        let released = |above: bool| {
+            (0..dem.len())
+                .filter(|&idx| release[idx] > 0.0 && (dem[idx] > max_elevation) == above)
+                .count()
+        };
+        assert!(released(false) > 0, "no release below the limit");
+        assert_eq!(released(true), 0, "cells above the limit released");
+    }
+
+    #[test_log::test]
     fn test_roughness_is_model_independent_vector_ruggedness() {
         let width = 24;
         let height = 24;
@@ -3352,7 +3383,7 @@ mod tests {
             "Particles stopped at step 0: {}",
             state.iter().filter(|state| state.timestep == 0).count()
         );
-        assert_eq!(state.iter().filter(|state| state.timestep > 3).count(), 0);
+        assert_eq!(state.iter().filter(|state| state.timestep > 4).count(), 0);
         assert_eq!(state.iter().filter(|state| state.stopped).count(), 16);
         assert_eq!(state.iter().filter(|state| state.out_of_bounds).count(), 16);
         for p in state.iter() {
@@ -3456,6 +3487,10 @@ mod tests {
             state.iter().filter(|state| state.timestep == 0).count()
         );
         assert!(state.iter().filter(|state| state.timestep == 0).count() < 20);
+        // the timestep data follows the middle particle until it falls off the DEM
+        let tracked = &state[state.len() / 2];
+        assert!(tracked.out_of_bounds);
+        let tracked_steps = tracked.timestep as usize;
 
         let max_velocity = block_on(sim.fetch_peak_velocity()).expect("Failed to get max velocity");
 
@@ -3478,7 +3513,7 @@ mod tests {
         );
 
         // velocity X should be above 30.0 after step 500
-        for i in 500..timesteps {
+        for i in 500..tracked_steps {
             let vel_x = timestep_data.velocity[i][0];
             assert!(
                 vel_x > 30.0,
@@ -4122,9 +4157,9 @@ mod tests {
         assert_eq!(advanced.timestep, 1);
         assert_eq!(sim.state, SimulationState::Running);
 
-        // the particles leave the 6x6 DEM during the third step
-        let resumed = block_on(sim.run_n_steps(2)).expect("Failed to resume simulation");
-        assert_eq!(resumed.timestep, 3);
+        // the particles leave the 6x6 DEM during the fourth step
+        let resumed = block_on(sim.run_n_steps(3)).expect("Failed to resume simulation");
+        assert_eq!(resumed.timestep, 4);
 
         let finished = block_on(sim.run_n_steps(1)).expect("Failed to resume simulation");
         assert_eq!(finished.timestep, resumed.timestep);
@@ -4137,7 +4172,7 @@ mod tests {
     #[test_log::test]
     fn test_run_n_steps_clamps_to_max_steps() {
         let mut sim = setup_simple_sim(40.0, 3.0);
-        // the particles would need three steps to leave the DEM
+        // the particles would need four steps to leave the DEM
         sim.settings.max_steps = 1;
 
         let result = block_on(sim.run_n_steps(u32::MAX)).expect("Failed to advance simulation");
@@ -4677,6 +4712,84 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Simulation on a 64x64 slope with a release block on its upper part.
+    fn setup_slope_sim(settings: Settings) -> Simulation {
+        let (size, cell_size) = (64, 5.0);
+        let mut sim: Simulation = block_on(Simulation::new()).expect("Failed to create Simulation");
+        block_on(sim.create(settings)).expect("Failed to create simulation");
+        sim.set_dem(
+            &create_slope(size, size, cell_size, 35.0),
+            size,
+            size,
+            cell_size,
+        )
+        .expect("Failed to set DEM");
+        let release: Vec<f32> = (0..size * size)
+            .map(|idx| {
+                let (x, y) = (idx % size, idx / size);
+                if (44..54).contains(&x) && (24..40).contains(&y) {
+                    2.0
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        sim.set_release_areas(&release)
+            .expect("Failed to set release areas");
+        sim
+    }
+
+    #[test_log::test]
+    fn test_sliding_block_timestep_keeps_the_cfl_bound() {
+        let cfl = 0.5;
+        let mut sim = setup_slope_sim(Settings {
+            sim_model: Some(SimModel::SlidingBlock),
+            friction_coefficient: Some(0.1),
+            cfl: Some(cfl),
+            ..Default::default()
+        });
+        let cell_size = 5.0;
+        let first = block_on(sim.run_n_steps(1)).expect("Failed to step");
+        let mut last_dt = first.dt;
+        for _ in 0..15 {
+            let info = block_on(sim.run_n_steps(1)).expect("Failed to step");
+            assert!(
+                info.max_velocity * info.dt <= cfl * cell_size * 1.0001,
+                "moved {} m in a step at speed {}",
+                info.max_velocity * info.dt,
+                info.max_velocity
+            );
+            last_dt = info.dt;
+        }
+        assert!(
+            last_dt < first.dt,
+            "dt {last_dt} did not follow the accelerating flow from {}",
+            first.dt
+        );
+    }
+
+    #[test_log::test]
+    fn test_mpmdac_compaction_densifies_the_material() {
+        let mut sim = setup_slope_sim(Settings {
+            sim_model: Some(SimModel::MpmDaC),
+            // any compression compacts
+            compaction_pressure: Some(1.0),
+            ..Default::default()
+        });
+        block_on(sim.run_n_steps(40)).expect("Failed to step");
+        let strain = block_on(
+            sim.orchestrator
+                .read_buffer::<[f32; 2]>(BufferName::ParticlesVolumetricStrain),
+        )
+        .expect("Failed to read the volumetric strain");
+        let compaction = || strain.iter().map(|state| state[1]);
+        assert!(compaction().any(|value| value > 0.0), "nothing compacted");
+        assert!(
+            compaction().all(|value| value >= 0.0),
+            "compaction strain must not be negative"
+        );
     }
 
     #[test_log::test]

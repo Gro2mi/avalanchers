@@ -60,8 +60,19 @@ All notable changes to this project might be documented in this file.
   hasher, so it no longer depends on the Rust version. Site hashes change with the coordinates.
 - The center of mass records carry the simulated time, stored as `time` in the result stores.
 - Holes in outline polygons are no longer part of the region of interest. They were filled.
+- `release_max_elevation` now limits the release areas. It had no effect before, cells above it
+  were released.
+- MPMDAC: the plastic compaction strain had the wrong sign, so compaction enlarged the particle
+  volume in the internal force instead of shrinking it. Peak speeds drop by about 10 % at the
+  default `bulk_modulus`.
+- Sliding block: the timestep follows the CFL condition. It stayed at the value of the first step,
+  so particles could move several cells per step. Runs now take about three times as many steps,
+  and the `particle-simulation` crown line detection is affected as well.
+- Sliding block: the fixed velocity damping of 1 % per step is gone. It depended on the timestep and
+  shortened the runout: the energy line benchmark is now 5 m from its reference, not 307 m.
 
 ### Added
+- CLI flags `--release-max-elevation` and `--enable-particle-relaxation`.
 - `release_areas_path` accepts polygon shapefiles (`.shp`, native and Python). All features are
   rasterized onto the DEM grid; holes stay free. As in AvaFrame, the thickness of each feature comes
   from its `thickness` or `d0` attribute, either all features or none must have one, and features

@@ -872,9 +872,9 @@ pub struct Settings {
 
     pub cfl: Option<f32>,
     /// Minimum slope angle (deg) of release terrain. Together with
-    /// `max_slope_angle`, `release_min_elevation` and `roughness_threshold`
-    /// it defines the potential release areas, from which the
-    /// `release_area_fraction` estimation selects its release cells.
+    /// `max_slope_angle`, `release_min_elevation`, `release_max_elevation` and
+    /// `roughness_threshold` it defines the potential release areas, from
+    /// which the `release_area_fraction` estimation selects its release cells.
     pub min_slope_angle: Option<f32>,
     pub max_slope_angle: Option<f32>,
     pub release_min_elevation: Option<f32>,
@@ -971,7 +971,7 @@ pub struct Settings {
     /// to true).
     pub enable_particle_relaxation: Option<bool>,
     /// Center the mass of the biggest connected mass blob instead of the
-    /// whole grid (defaults to true).
+    /// whole grid (defaults to false).
     pub center_of_mass_biggest_blob: Option<bool>,
 }
 

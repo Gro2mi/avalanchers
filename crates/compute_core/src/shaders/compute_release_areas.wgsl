@@ -35,6 +35,7 @@ fn compute_release_areas(@builtin(global_invocation_id) id: vec3<u32>) {
 
     if slope_angle < sim_settings.min_slope_angle || slope_angle > sim_settings.max_slope_angle 
         || elevation < sim_settings.min_elevation
+        || elevation > sim_settings.release_max_elevation
         || roughness > sim_settings.roughness_threshold
         || forest > 1e-3 {
         // no release cell

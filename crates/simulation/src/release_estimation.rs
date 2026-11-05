@@ -1088,7 +1088,8 @@ fn estimate_release_areas_with_crown_impl(
     if ordered.is_empty() {
         bail!(
             "no potential release cell of the outline is reachable from the crown line; \
-             check min_slope_angle, max_slope_angle, release_min_elevation and roughness_threshold"
+             check min_slope_angle, max_slope_angle, release_min_elevation, \
+             release_max_elevation and roughness_threshold"
         );
     }
 

@@ -145,7 +145,6 @@ fn compute_particles(
     let grid_velocity_buffer_value = grid_velocity_buffer[position_to_idx(position.xy)];
     let visc_factor = 0.001 * (length(velocity) - length(grid_velocity_buffer_value));
     // velocity = velocity * (1 - visc_factor);
-    velocity = 0.99 * velocity;
 
     // --- compute resisting accelerations ---
     // particle-equivalent flow depth: density * h_particle reproduces the

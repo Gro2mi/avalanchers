@@ -117,9 +117,10 @@ fn transfer_p2g_mpmdac(p_idx: u32, cell: vec2u) {
         eps_v_e = eps_v_e + d_eps_v;
         p_vol = -sim_settings.bulk_modulus * eps_v_e;
         if p_vol > sim_settings.compaction_pressure {
-            let delta = eps_v_e + sim_settings.compaction_pressure / sim_settings.bulk_modulus;
-            eps_v_p = eps_v_p + delta;
-            eps_v_e = -sim_settings.compaction_pressure / sim_settings.bulk_modulus;
+            // eps_v_e is negative in compression, the compaction strain positive
+            let plateau = -sim_settings.compaction_pressure / sim_settings.bulk_modulus;
+            eps_v_p = eps_v_p + (plateau - eps_v_e);
+            eps_v_e = plateau;
             p_vol = sim_settings.compaction_pressure;
         }
         if eps_v_e > 0.5 {
@@ -135,7 +136,7 @@ fn transfer_p2g_mpmdac(p_idx: u32, cell: vec2u) {
 
     // plastic compaction densifies the material; the particle volume in the
     // force scatter shrinks accordingly
-    let density_ratio = max(1.0 + eps_v_p, 0.5);
+    let density_ratio = 1.0 + eps_v_p;
     let particle_volume = p_mass / (sim_settings.snow_density * density_ratio);
 
     // total mean pressure: lithostatic (from the grid depth) plus the elastic
