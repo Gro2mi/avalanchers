@@ -1053,7 +1053,9 @@ impl PySimulation {
         self.get_layer_f32(py, data)
     }
 
-    /// ``(height, width)`` float32 array of the slope aspect in degrees.
+    /// ``(height, width)`` float32 array of the slope aspect: the direction
+    /// the slope faces (downhill) in degrees clockwise from north, -1 on flat
+    /// cells.
     #[getter]
     pub fn slope_aspect<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f32>>> {
         let data = self
@@ -1118,6 +1120,41 @@ impl PySimulation {
         Ok(PyTimestepData {
             inner: data.clone(),
         })
+    }
+
+    /// Mean slope angle of the release cells in degrees, NaN if there are none.
+    #[getter]
+    pub fn get_release_mean_slope_angle(&mut self) -> PyResult<f32> {
+        Ok(self
+            .inner
+            .release_area_terrain()
+            .block_on()
+            .map_runtime_err()?
+            .slope_angle)
+    }
+
+    /// Circular mean of the release cells' slope aspect: the direction they
+    /// face (downhill) in degrees clockwise from north. NaN if there are no
+    /// release cells with an aspect or their aspects cancel out.
+    #[getter]
+    pub fn get_release_mean_aspect(&mut self) -> PyResult<f32> {
+        Ok(self
+            .inner
+            .release_area_terrain()
+            .block_on()
+            .map_runtime_err()?
+            .slope_aspect)
+    }
+
+    /// Mean DEM elevation of the release cells in metres, NaN if there are none.
+    #[getter]
+    pub fn get_release_mean_elevation(&mut self) -> PyResult<f32> {
+        Ok(self
+            .inner
+            .release_area_terrain()
+            .block_on()
+            .map_runtime_err()?
+            .elevation)
     }
 
     /// DEM elevation threshold below which no avalanche is simulated.

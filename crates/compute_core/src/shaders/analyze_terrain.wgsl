@@ -57,10 +57,9 @@ fn analyze_terrain(@builtin(global_invocation_id) cell: vec3<u32>) {
 
     var slope_aspect_deg = 0.0;
     if length(vec2f(dx, dy)) > 1e-5 {
-        // Match the curvilinear shader convention: aspect is measured clockwise from north,
-        // using the terrain gradient direction, not the opposite-facing surface normal.
-        let aspect_rad = atan2(dy, dx);
-            slope_aspect_deg = ((90.0 - degrees(aspect_rad)) % 360.0 + 360.0) % 360.0;
+        // GIS aspect: the bearing the slope faces (downhill), clockwise from north
+        let aspect_rad = atan2(-dy, -dx);
+        slope_aspect_deg = ((90.0 - degrees(aspect_rad)) % 360.0 + 360.0) % 360.0;
     } else {
         slope_aspect_deg = -1.0;
     }

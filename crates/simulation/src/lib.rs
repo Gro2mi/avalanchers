@@ -284,6 +284,75 @@ pub struct Simulation {
     output: Option<data_processor::output::Output>,
 }
 
+/// Mean terrain of the release area, see [`Simulation::release_area_terrain`].
+/// A value is NaN if no release cell contributes to it.
+#[derive(Clone, Copy, Debug)]
+pub struct ReleaseAreaTerrain {
+    /// Mean slope angle in degrees.
+    pub slope_angle: f32,
+    /// Circular mean of the slope aspect in degrees, see
+    /// [`Simulation::fetch_slope_aspect`]. NaN if the aspects cancel out.
+    pub slope_aspect: f32,
+    /// Mean DEM elevation in metres.
+    pub elevation: f32,
+}
+
+/// Averages the terrain over the release cells. The outermost cells are left
+/// out, because not every terrain kernel writes them, and flat cells (aspect
+/// -1) have no aspect to contribute.
+fn mean_release_terrain(
+    release_areas: &[f32],
+    slope_angle: &[f32],
+    slope_aspect: &[f32],
+    elevation: &[f32],
+    width: usize,
+    height: usize,
+) -> ReleaseAreaTerrain {
+    let (mut slope_sum, mut slope_count) = (0.0f64, 0u32);
+    let (mut elevation_sum, mut elevation_count) = (0.0f64, 0u32);
+    let (mut east, mut north, mut aspect_count) = (0.0f64, 0.0f64, 0u32);
+    for y in 1..height.saturating_sub(1) {
+        for x in 1..width.saturating_sub(1) {
+            let idx = y * width + x;
+            let in_release = release_areas[idx] > compute_core::RELEASE_THICKNESS_THRESHOLD;
+            if !in_release {
+                continue;
+            }
+            if slope_angle[idx].is_finite() {
+                slope_sum += slope_angle[idx] as f64;
+                slope_count += 1;
+            }
+            if elevation[idx].is_finite() {
+                elevation_sum += elevation[idx] as f64;
+                elevation_count += 1;
+            }
+            if slope_aspect[idx].is_finite() && slope_aspect[idx] >= 0.0 {
+                let aspect = (slope_aspect[idx] as f64).to_radians();
+                east += aspect.sin();
+                north += aspect.cos();
+                aspect_count += 1;
+            }
+        }
+    }
+    let mean = |sum: f64, count: u32| {
+        if count == 0 {
+            f32::NAN
+        } else {
+            (sum / count as f64) as f32
+        }
+    };
+    let slope_aspect = if east.hypot(north) <= 1e-6 * aspect_count as f64 {
+        f32::NAN
+    } else {
+        east.atan2(north).to_degrees().rem_euclid(360.0) as f32
+    };
+    ReleaseAreaTerrain {
+        slope_angle: mean(slope_sum, slope_count),
+        slope_aspect,
+        elevation: mean(elevation_sum, elevation_count),
+    }
+}
+
 impl Simulation {
     /// Creates an empty simulation on the default GPU adapter.
     pub async fn new() -> Result<Self> {
@@ -1919,7 +1988,8 @@ impl Simulation {
         Ok(self.gpu_cache.slope_angle.as_deref().unwrap())
     }
 
-    /// Per-cell slope aspect in degrees from terrain analysis.
+    /// Per-cell slope aspect from terrain analysis: the direction the slope
+    /// faces (downhill) in degrees clockwise from north, -1 on flat cells.
     pub async fn fetch_slope_aspect(&mut self) -> Result<&[f32]> {
         if self.state < SimulationState::TerrainAnalyzed {
             bail!("Terrain metrics must be computed before reading slope aspect texture");
@@ -2051,6 +2121,22 @@ impl Simulation {
             );
         }
         Ok(self.gpu_cache.release_areas.as_deref().unwrap())
+    }
+
+    /// Mean slope angle, aspect and elevation of the release cells in effect
+    /// for this run; requires [`SimulationState::ReleaseAreasComputed`].
+    pub async fn release_area_terrain(&mut self) -> Result<ReleaseAreaTerrain> {
+        let release_areas = self.fetch_release_areas().await?.to_vec();
+        let slope_angle = self.fetch_slope_angle().await?.to_vec();
+        let slope_aspect = self.fetch_slope_aspect().await?.to_vec();
+        Ok(mean_release_terrain(
+            &release_areas,
+            &slope_angle,
+            &slope_aspect,
+            &self.dem.data1d,
+            self.dem.width,
+            self.dem.height,
+        ))
     }
 
     /// Per-cell maximum flow velocity over the whole run; requires
@@ -3623,8 +3709,8 @@ mod tests {
             0.0, 0.0, 65.90516, 63.43495, 65.90516, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         ];
         let expected_slope_aspect: &[f32] = &[
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 206.56505, 180.0, 153.43495, 0.0, 0.0, 270.0, -1.0, 90.0,
-            0.0, 0.0, 333.43494, 0.0, 26.565048, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 26.565048, 0.0, 333.43494, 0.0, 0.0, 90.0, -1.0, 270.0,
+            0.0, 0.0, 153.43495, 180.0, 206.56505, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         ];
         let expected_terrain_l_x: &[f32] = &[
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.4142135, 1.0, 1.4142135, 0.0, 0.0, 1.4142135, 1.0,
@@ -3726,10 +3812,9 @@ mod tests {
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 65.90516, 63.43495, 65.90516, 0.0, 0.0, 45.0, 0.0, 45.0,
             0.0, 0.0, 65.90516, 63.43495, 65.90516, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         ];
-        // TODO one calculates slope aspect wrong
         let expected_slope_aspect: &[f32] = &[
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 206.56505, 180.0, 153.43495, 0.0, 0.0, 270.0, -1.0, 90.0,
-            0.0, 0.0, 333.43494, 0.0, 26.565048, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 26.565048, 0.0, 333.43494, 0.0, 0.0, 90.0, -1.0, 270.0,
+            0.0, 0.0, 153.43495, 180.0, 206.56505, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         ];
         let expected_normals_x: &[f32] = &[
             0.0,
@@ -4319,6 +4404,95 @@ mod tests {
         assert_eq!(direct_positions.len(), sorted_positions.len());
         assert!(mass_error < 5e-3 * max_mass);
         assert!(centroid_error < 1e-2);
+    }
+
+    #[test]
+    fn test_mean_release_terrain_uses_only_valid_release_cells() {
+        const N: usize = 5;
+        let mut release = [0.0f32; N * N];
+        let mut slope = [50.0f32; N * N];
+        let mut aspect = [180.0f32; N * N];
+        let mut elevation = [9000.0f32; N * N];
+        for (idx, cell_slope, cell_aspect, cell_elevation) in [
+            (N + 1, 30.0, 350.0, 1000.0),
+            (N + 2, 40.0, 10.0, 2000.0),
+            // flat: no aspect, but slope and elevation still count
+            (N + 3, 20.0, -1.0, 3000.0),
+            // no data
+            (2 * N + 1, f32::NAN, f32::NAN, f32::NAN),
+        ] {
+            release[idx] = 1.0;
+            slope[idx] = cell_slope;
+            aspect[idx] = cell_aspect;
+            elevation[idx] = cell_elevation;
+        }
+        // the outermost cells and thin cells are not part of the mean
+        release[0] = 1.0;
+        release[2 * N + 2] = compute_core::RELEASE_THICKNESS_THRESHOLD;
+
+        let mean = mean_release_terrain(&release, &slope, &aspect, &elevation, N, N);
+        assert!((mean.slope_angle - 30.0).abs() < 1e-4);
+        assert!((mean.elevation - 2000.0).abs() < 1e-2);
+        // a circular mean: 350 and 10 degrees average to north, not south
+        assert!(mean.slope_aspect.min(360.0 - mean.slope_aspect) < 1e-3);
+    }
+
+    #[test]
+    fn test_mean_release_terrain_is_nan_without_a_mean() {
+        const N: usize = 4;
+        let zeros = [0.0f32; N * N];
+        let empty = mean_release_terrain(&zeros, &zeros, &zeros, &zeros, N, N);
+        assert!(empty.slope_angle.is_nan());
+        assert!(empty.slope_aspect.is_nan());
+        assert!(empty.elevation.is_nan());
+
+        let mut release = [0.0f32; N * N];
+        let mut aspect = [0.0f32; N * N];
+        release[N + 1] = 1.0;
+        release[N + 2] = 1.0;
+        aspect[N + 2] = 180.0;
+        let opposed = mean_release_terrain(&release, &zeros, &aspect, &zeros, N, N);
+        assert!(opposed.slope_aspect.is_nan());
+        assert_eq!(opposed.slope_angle, 0.0);
+    }
+
+    #[test_log::test]
+    fn test_release_area_terrain_on_a_tilted_plane() {
+        // the plane rises to the east and north, and the release sits off centre
+        // in both directions, so a swapped layout gives another elevation
+        const N: usize = 24;
+        const CELL: f32 = 5.0;
+        let (rise_x, rise_y) = (0.3f32, 0.4f32);
+        let dem: Vec<f32> = (0..N * N)
+            .map(|idx| {
+                let (x, y) = ((idx % N) as f32, (idx / N) as f32);
+                1000.0 + (rise_x * x + rise_y * y) * CELL
+            })
+            .collect();
+        let mut release = vec![0.0; N * N];
+        for y in 4..10 {
+            for x in 12..20 {
+                release[y * N + x] = 1.0;
+            }
+        }
+        for model in [SimModel::Curvilinear, SimModel::SlidingBlock] {
+            let mut sim = setup_simple_sim(0.0, CELL);
+            sim.settings.sim_model = model.as_int();
+            sim.set_dem(&dem, N, N, CELL).expect("Failed to set DEM");
+            sim.set_release_areas(&release)
+                .expect("Failed to set release");
+            block_on(sim.prepare()).expect("Failed to prepare simulation");
+
+            let terrain =
+                block_on(sim.release_area_terrain()).expect("Failed to average the terrain");
+            let expected_elevation = 1000.0 + (rise_x * 15.5 + rise_y * 6.5) * CELL;
+            let expected_angle = rise_x.hypot(rise_y).atan().to_degrees();
+            // the plane rises to the north-east, so it faces south-west
+            let expected_aspect = 90.0 - (-rise_y).atan2(-rise_x).to_degrees();
+            assert!((terrain.elevation - expected_elevation).abs() < 1e-2);
+            assert!((terrain.slope_angle - expected_angle).abs() < 0.1);
+            assert!((terrain.slope_aspect - expected_aspect).abs() < 0.1);
+        }
     }
 
     #[test_log::test]

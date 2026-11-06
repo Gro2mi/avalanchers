@@ -19,6 +19,9 @@ All notable changes to this project might be documented in this file.
   OpenGL backend caused this.
 
 ### Changed
+- **Breaking:** `slope_aspect` is now the direction the slope faces (downhill), as in GIS and
+  avalanche bulletins: a north-facing slope is 0 degrees. It used to be the uphill bearing, 180
+  degrees off. Flat cells stay -1.
 - **Breaking:** `grid_mass` and `grid_momentum` now return f32 in kg and kg m/s on every GPU instead
   of raw quantized integers, so callers no longer divide by `MASS_FACTOR` and `MOMENTUM_FACTOR`.
 - **Breaking:** `slab_thickness_factor` is now `release_thickness` in metres
@@ -88,6 +91,9 @@ All notable changes to this project might be documented in this file.
   shortened the runout: the energy line benchmark is now 5 m from its reference, not 307 m.
 
 ### Added
+- `Simulation::release_area_terrain` and the Python getters `release_mean_slope_angle`,
+  `release_mean_aspect` and `release_mean_elevation` give the mean terrain of the release cells.
+  The aspect is a circular mean.
 - `release_swe` (`--release-swe` in the CLI) sets the release by snow water equivalent in kg/m²
   instead of `release_thickness`; setting both is an error. It is the mass per horizontal area, so
   a release cell holds `release_swe * cell_size²` whatever its slope. It must be positive, and

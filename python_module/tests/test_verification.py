@@ -149,6 +149,18 @@ def test_curvilinear_elapsed_time_uses_executed_timestep():
 
 
 @pytest.mark.slow
+@pytest.mark.parametrize("angle", [0.0, 45.0, 135.0, 270.0])
+def test_release_mean_terrain_on_a_plane(angle):
+    sim, slope, direction = plane_simulation(angle)
+    # the release covers cells 12..52, centred at 160 m in x and y
+    assert sim.release_mean_elevation == pytest.approx(1000.0 + 160.0 * slope.sum(), abs=0.01)
+    assert sim.release_mean_slope_angle == pytest.approx(35.0, abs=0.01)
+    # the plane falls along direction, which is the way it faces
+    facing = (90.0 - math.degrees(math.atan2(direction[1], direction[0]))) % 360.0
+    difference = (sim.release_mean_aspect - facing + 180.0) % 360.0 - 180.0
+    assert difference == pytest.approx(0.0, abs=0.01)
+
+
 def test_stopped_batch_preserves_last_grid_snapshot():
     # a 2-cell no-new-cells travel gives a 40-step window at CFL 0.05
     sim, _, _ = plane_simulation(0.0, friction=10.0, no_new_cells_travel=2.0)
