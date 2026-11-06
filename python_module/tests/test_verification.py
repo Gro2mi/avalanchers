@@ -80,7 +80,7 @@ def test_curvilinear_pressure_uses_normal_thickness_and_full_metric(angle):
     sim, slope, _ = plane_simulation(angle)
     before = np.asarray(sim.particles_position_xy, dtype=np.float64)
     sim.run_n_steps(1)
-    mass = np.asarray(sim.grid_mass, dtype=np.float64).reshape((64, 64)) / 10.0
+    mass = np.asarray(sim.grid_mass, dtype=np.float64).reshape((64, 64))
     jac = np.asarray(sim.terrain_geometry_z, dtype=np.float64)
     # The terrain kernel leaves the excluded outermost cells uninitialized.
     jac = np.pad(jac[1:-1, 1:-1], 1, mode="edge")
@@ -116,8 +116,8 @@ def test_geometric_transport_is_independent_of_curvature_load_flag(normal_load_c
     used_dt = info.dt
     before = np.asarray(sim.particles_position_xy, dtype=np.float64)
     sim.run_n_steps(1)
-    mass = np.asarray(sim.grid_mass, dtype=np.float64).reshape((64, 64)) / 10.0
-    momentum = np.asarray(sim.grid_momentum, dtype=np.float64).reshape((64, 64, 2)) / 100.0
+    mass = np.asarray(sim.grid_mass, dtype=np.float64).reshape((64, 64))
+    momentum = np.asarray(sim.grid_momentum, dtype=np.float64).reshape((64, 64, 2))
     node_velocity = momentum / (mass[:, :, None] + 1e-6)
     node_velocity[mass < 0.01] = 0.0
     dem = dem.astype(np.float64)
@@ -154,7 +154,7 @@ def test_stopped_batch_preserves_last_grid_snapshot():
     sim, _, _ = plane_simulation(0.0, friction=10.0, no_new_cells_travel=2.0)
     info = sim.run_n_steps(100)
     assert info.flags & (1 << 31)
-    mass = np.asarray(sim.grid_mass, dtype=np.float64).sum() / 10.0
+    mass = np.asarray(sim.grid_mass, dtype=np.float64).sum()
     assert mass == pytest.approx(np.asarray(sim.particles_mass).sum(), rel=0.01)
     final_time = info.elapsed_time
     assert sim.run_n_steps(1).elapsed_time == final_time

@@ -36,8 +36,8 @@ fn grid_physics_mpmdac(@builtin(global_invocation_id) id: vec3u) {
     let u = f32(grid_momentum_atomic[idx * 2]) * INV_MOMENTUM_FACTOR / (mass + 1e-6); // no_atomic_float
     let v = f32(grid_momentum_atomic[idx * 2 + 1]) * INV_MOMENTUM_FACTOR / (mass + 1e-6); // no_atomic_float
     // atomic_float let mass = grid_mass_atomic[idx];
-    // atomic_float let u = grid_momentum_atomic[idx * 2] / mass;
-    // atomic_float let v = grid_momentum_atomic[idx * 2 + 1] / mass;
+    // atomic_float let u = grid_momentum_atomic[idx * 2] / (mass + 1e-6);
+    // atomic_float let v = grid_momentum_atomic[idx * 2 + 1] / (mass + 1e-6);
     let h = mass / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size * J);
 
     let current_peak_flow_thickness = peak_flow_thickness[idx];

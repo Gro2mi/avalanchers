@@ -151,8 +151,8 @@ impl<T> From<(Vec<T>, Vec<T>, Vec<T>, Vec<T>)> for TextureRgba<T> {
 pub struct GpuCache {
     pub particles_position: Option<Vec<[f32; 2]>>,
     pub particles_mass: Option<Vec<f32>>,
-    pub grid_mass: Option<Vec<u32>>,
-    pub grid_momentum: Option<Vec<i32>>,
+    pub grid_mass: Option<Vec<f32>>,
+    pub grid_momentum: Option<Vec<f32>>,
     pub particles_velocity: Option<Vec<[f32; 2]>>,
     pub particles_velocity_z: Option<Vec<f32>>,
     pub particles_stopped: Option<Vec<ParticleState>>,

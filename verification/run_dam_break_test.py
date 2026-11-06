@@ -5,8 +5,8 @@ Adapted from AvaFrame's ``runScripts/runDamBreak.py`` +
 reading them back, the avalanchers simulation is created, run and sampled
 directly in this script - no output files are needed before the analysis.
 
-The numerical flow fields are decoded DIRECTLY from the simulation's
-quantized ``grid_mass`` / ``grid_momentum`` buffers (the exact fields the
+The numerical flow fields are derived DIRECTLY from the simulation's
+``grid_mass`` / ``grid_momentum`` fields (the exact fields the
 grid physics pass consumed) every ``DAM_BREAK_CFG["save_interval"]`` seconds
 of simulated time, and compared to the analytic dam break solution of
 Faccanoni & Mangeney (2012, Test 2, case 1.2, dry bed, Coulomb friction).

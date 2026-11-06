@@ -5,6 +5,10 @@ All notable changes to this project might be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- GPUs with float atomics no longer produce NaN velocities on empty grid nodes in the curvilinear,
+  MPMDAC and sliding block models, and show the particle height jitter again.
+- The curvilinear model no longer produces NaN when the flow reaches the outermost grid nodes on
+  GPUs that evaluate 0/0 strictly.
 - Repeated GPU evaluations no longer grow GPU memory until the driver reports `Out of Memory`.
   `evaluate` records its passes into one command encoder instead of about 30 submissions, and the
   chamfer buffers are allocated once per grid instead of on every call. The particle relaxation
@@ -15,6 +19,8 @@ All notable changes to this project might be documented in this file.
   OpenGL backend caused this.
 
 ### Changed
+- **Breaking:** `grid_mass` and `grid_momentum` now return f32 in kg and kg m/s on every GPU instead
+  of raw quantized integers, so callers no longer divide by `MASS_FACTOR` and `MOMENTUM_FACTOR`.
 - **Breaking:** `slab_thickness_factor` is now `release_thickness` in metres
   (`--release-thickness` in the CLI) and the old key is rejected. It is unset by default: rasters,
   arrays, stores and shapefile attributes keep their thickness, all other release areas get 1 m.

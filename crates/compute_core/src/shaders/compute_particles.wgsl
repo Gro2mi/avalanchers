@@ -125,7 +125,7 @@ fn compute_particles(
                 interpolated_grad_h += weight * grad_h[node_idx];
                 
                 interpolated_mass += weight * f32(grid_mass_atomic[node_idx]) * INV_MASS_FACTOR; // no_atomic_float
-                // atomic_float interpolated_h += weight * grid_mass_atomic[node_idx];
+                // atomic_float interpolated_mass += weight * grid_mass_atomic[node_idx];
             }
         }
         interpolated_h = interpolated_mass / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size) * safe_normal_z;

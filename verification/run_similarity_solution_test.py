@@ -8,9 +8,9 @@ in this script, no output files are generated first.
 
 The parabolic release heap (thickness relTh at the center, 0 at the edges
 of the ellipse with main axes L_x, L_y) is built in memory and handed to
-the simulation with ``set_release_areas``; the flow fields are decoded
-DIRECTLY from the simulation's quantized ``grid_mass`` /
-``grid_momentum`` buffers at every save time and compared to the analytic
+the simulation with ``set_release_areas``; the flow fields are derived
+DIRECTLY from the simulation's ``grid_mass`` /
+``grid_momentum`` fields at every save time and compared to the analytic
 solution (relative L2/LMax errors of flow thickness and momentum). The
 same plots as the AvaFrame simiSol module are produced (see
 ``similarity_solution_test.py``): the 2x6 summary figure (twin-axis

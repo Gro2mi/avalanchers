@@ -12,10 +12,9 @@ results of an avalanchers simulation (see the companion script
 ``run_similarity_solution_test.py``). No avaframe imports, no output
 files.
 
-The numerical flow fields are decoded DIRECTLY from the simulation's
-quantized ``grid_mass`` / ``grid_momentum`` buffers (the same fields the
-grid physics pass consumed); the mass/momentum quantization factors MUST
-match ``crates/compute_core/src/shaders/utils.wgsl``.
+The numerical flow fields are derived DIRECTLY from the simulation's
+``grid_mass`` / ``grid_momentum`` fields (the same fields the grid physics
+pass consumed).
 
 Deviation from the AvaFrame momentum profiles: com1DFA fields carry a
 vertical velocity component (h*vz curves), avalanchers' depth-averaged
@@ -34,10 +33,6 @@ import math
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap, Normalize
-
-# p2g quantization constants - MUST match crates/compute_core/src/shaders/utils.wgsl.
-MASS_FACTOR = 1e1       # p2g stores round(mass * MASS_FACTOR) as u32
-MOMENTUM_FACTOR = 1e2   # p2g stores round(mass * velocity * MOMENTUM_FACTOR) as i32
 
 # plot constants mirroring avaframe/out3Plot/plotUtilsCfg.ini
 FIG_W = 6
@@ -73,12 +68,12 @@ def fields_from_grid(sim, shape, cell_size, density, jac):
 
     These are exactly the fields the grid physics pass consumed this step.
     Returns flow thickness (normal to the surface, m), along-slope and
-    cross-slope velocity, and the dequantized grid mass, all as
+    cross-slope velocity, and the grid mass, all as
     (nrows, ncols) arrays, row 0 = south.
     """
     nrows, ncols = shape
-    mass = np.asarray(sim.grid_mass, dtype=np.float64) * (1.0 / MASS_FACTOR)
-    mom = np.asarray(sim.grid_momentum, dtype=np.float64) * (1.0 / MOMENTUM_FACTOR)
+    mass = np.asarray(sim.grid_mass, dtype=np.float64)
+    mom = np.asarray(sim.grid_momentum, dtype=np.float64)
     mom = mom.reshape((nrows * ncols, 2))
     # mirror the shader's decode: nodes below the mass quantization floor are empty
     has_mass = mass >= 1e-2
@@ -94,7 +89,7 @@ def fields_from_grid(sim, shape, cell_size, density, jac):
 
 
 def check_grid_mass_consistency(sim, grid_mass, particle_mass):
-    """The dequantized grid mass must match the particle total mass."""
+    """The grid mass must match the particle total mass."""
     grid_total = float(grid_mass.sum())
     particle_total = float(np.nansum(particle_mass))
     if particle_total <= 0:
@@ -102,8 +97,7 @@ def check_grid_mass_consistency(sim, grid_mass, particle_mass):
     rel = abs(grid_total - particle_total) / particle_total
     if rel > 0.01:
         print(f"WARNING: grid mass ({grid_total:.1f} kg) differs from particle mass "
-              f"({particle_total:.1f} kg) by {100.0 * rel:.2f}% - MASS_FACTOR/"
-              f"MOMENTUM_FACTOR no longer match crates/compute_core/src/shaders/utils.wgsl")
+              f"({particle_total:.1f} kg) by {100.0 * rel:.2f}%")
 
 
 # ---------------------------------------------------------------------------

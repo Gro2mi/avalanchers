@@ -1261,19 +1261,17 @@ impl PySimulation {
         Ok(mass.to_pyarray(py))
     }
 
-    /// u32 array of the per-cell deposited mass as quantized by p2g
-    /// (scaled by ``MASS_FACTOR`` in the shader utils), ``height * width``.
+    /// f32 array of the per-cell deposited mass in kg, ``height * width``.
     #[getter]
-    fn get_grid_mass<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<u32>>> {
+    fn get_grid_mass<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<f32>>> {
         let data = self.inner.fetch_grid_mass().block_on().map_runtime_err()?;
         Ok(data.to_pyarray(py))
     }
 
-    /// i32 array of the per-cell deposited momentum as quantized by p2g
-    /// (``u, v`` interleaved, scaled by ``MOMENTUM_FACTOR`` in the shader
-    /// utils), ``height * width * 2``.
+    /// f32 array of the per-cell deposited momentum in kg m/s (``u, v``
+    /// interleaved), ``height * width * 2``.
     #[getter]
-    fn get_grid_momentum<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<i32>>> {
+    fn get_grid_momentum<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<f32>>> {
         let data = self
             .inner
             .fetch_grid_momentum()

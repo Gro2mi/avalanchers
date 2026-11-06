@@ -72,8 +72,8 @@ fn grid_physics_curvilinear(@builtin(global_invocation_id) id: vec3u) {
     let node_is_empty = mass < 1e-2;
     var u = select(f32(grid_momentum_atomic[idx * 2]) * INV_MOMENTUM_FACTOR / (mass + 1e-6), 0.0, node_is_empty); // no_atomic_float
     var v = select(f32(grid_momentum_atomic[idx * 2 + 1]) * INV_MOMENTUM_FACTOR / (mass + 1e-6), 0.0, node_is_empty); // no_atomic_float
-    // atomic_float var u = grid_momentum_atomic[idx * 2] / mass;
-    // atomic_float var v = grid_momentum_atomic[idx * 2 + 1] / mass;
+    // atomic_float var u = select(grid_momentum_atomic[idx * 2] / mass, 0.0, node_is_empty);
+    // atomic_float var v = select(grid_momentum_atomic[idx * 2 + 1] / mass, 0.0, node_is_empty);
 
     // Geometric transport is required even when the curvature correction
     // to basal normal load is disabled.
@@ -235,7 +235,8 @@ fn get_h(x: u32, y: u32) -> f32 {
     let J = textureLoad(terrain_geometry_texture, vec2i(i32(x), i32(y)), 0).z;
     let mass = f32(grid_mass_atomic[idx]) * INV_MASS_FACTOR; // no_atomic_float
     // atomic_float let mass = grid_mass_atomic[idx];
-    return mass / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size * J);
+    // the terrain metrics of the outermost nodes are 0, where this would be 0/0
+    return select(0.0, mass / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size * J), J > 0.0);
 }
 
 fn get_h2_atomic_u32(x: u32, y: u32) -> f32 {

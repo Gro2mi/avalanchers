@@ -2165,38 +2165,56 @@ impl Simulation {
         Ok(self.gpu_cache.particles_mass.as_ref().unwrap())
     }
 
-    /// Raw per-cell deposited mass, as quantized by p2g (u32, scaled by
-    /// `MASS_FACTOR` in the shader utils). The buffers reflect the p2g deposit
-    /// of the most recently completed step, i.e. the mass field the grid
-    /// physics pass consumed.
-    pub async fn fetch_grid_mass(&mut self) -> Result<&Vec<u32>> {
+    /// Per-cell deposited mass in kg. The buffers reflect the
+    /// p2g deposit of the most recently completed step, i.e. the mass field
+    /// the grid physics pass consumed.
+    pub async fn fetch_grid_mass(&mut self) -> Result<&Vec<f32>> {
         if self.state < SimulationState::ParticlesInitialized {
             bail!("Simulation must be initialized before reading grid buffers");
         }
         if self.gpu_cache.grid_mass.is_none() {
             self.gpu_cache.read_count += 1;
-            self.gpu_cache.grid_mass = Some(
+            // MASS_FACTOR of utils.wgsl
+            const MASS_FACTOR: f32 = 1e1;
+            let mass = if self.orchestrator.has_float32_atomic() {
+                self.orchestrator
+                    .read_buffer::<f32>(BufferName::GridMass)
+                    .await?
+            } else {
                 self.orchestrator
                     .read_buffer::<u32>(BufferName::GridMass)
-                    .await?,
-            );
+                    .await?
+                    .iter()
+                    .map(|mass| *mass as f32 / MASS_FACTOR)
+                    .collect()
+            };
+            self.gpu_cache.grid_mass = Some(mass);
         }
         Ok(self.gpu_cache.grid_mass.as_ref().unwrap())
     }
 
-    /// Raw per-cell deposited momentum as quantized by p2g (i32 pairs
-    /// `u, v` per cell, scaled by `MOMENTUM_FACTOR` in the shader utils).
-    pub async fn fetch_grid_momentum(&mut self) -> Result<&Vec<i32>> {
+    /// Per-cell deposited momentum in kg m/s on every GPU, as `u, v` pairs.
+    pub async fn fetch_grid_momentum(&mut self) -> Result<&Vec<f32>> {
         if self.state < SimulationState::ParticlesInitialized {
             bail!("Simulation must be initialized before reading grid buffers");
         }
         if self.gpu_cache.grid_momentum.is_none() {
             self.gpu_cache.read_count += 1;
-            self.gpu_cache.grid_momentum = Some(
+            // MOMENTUM_FACTOR of utils.wgsl
+            const MOMENTUM_FACTOR: f32 = 1e2;
+            let momentum = if self.orchestrator.has_float32_atomic() {
+                self.orchestrator
+                    .read_buffer::<f32>(BufferName::GridMomentum)
+                    .await?
+            } else {
                 self.orchestrator
                     .read_buffer::<i32>(BufferName::GridMomentum)
-                    .await?,
-            );
+                    .await?
+                    .iter()
+                    .map(|momentum| *momentum as f32 / MOMENTUM_FACTOR)
+                    .collect()
+            };
+            self.gpu_cache.grid_momentum = Some(momentum);
         }
         Ok(self.gpu_cache.grid_momentum.as_ref().unwrap())
     }
@@ -4237,7 +4255,8 @@ mod tests {
     #[test_log::test]
     fn test_sorted_p2g_matches_direct_p2g() {
         // integer grid sums do not depend on the deposit order, so the
-        // tile-sorted P2G must reproduce the direct P2G exactly
+        // tile-sorted P2G must reproduce the direct P2G exactly; float atomics
+        // do, and the sorted path quantizes per tile, so they only agree closely
         let run = |sort_interval: u32| {
             let mut sim = setup_simple_sim(30.0, 5.0);
             sim.settings.sim_model = SimModel::Curvilinear.as_int();
@@ -4261,13 +4280,103 @@ mod tests {
             positions.sort_by(|a, b| a.partial_cmp(b).unwrap());
             let grid_mass: Vec<u32> = block_on(sim.orchestrator.read_buffer(BufferName::GridMass))
                 .expect("Failed to read grid mass");
-            (positions, grid_mass)
+            (positions, grid_mass, sim.orchestrator.has_float32_atomic())
         };
-        let (direct_positions, direct_mass) = run(0);
-        let (sorted_positions, sorted_mass) = run(3);
+        let (direct_positions, direct_mass, float_atomics) = run(0);
+        let (sorted_positions, sorted_mass, _) = run(3);
         assert!(direct_mass.iter().any(|mass| *mass > 0));
-        assert_eq!(direct_mass, sorted_mass);
-        assert_eq!(direct_positions, sorted_positions);
+        if !float_atomics {
+            assert_eq!(direct_mass, sorted_mass);
+            assert_eq!(direct_positions, sorted_positions);
+            return;
+        }
+
+        let max_mass = direct_mass
+            .iter()
+            .map(|bits| f32::from_bits(*bits))
+            .fold(0.0, f32::max);
+        let mass_error = direct_mass
+            .iter()
+            .zip(&sorted_mass)
+            .map(|(a, b)| (f32::from_bits(*a) - f32::from_bits(*b)).abs())
+            .fold(0.0, f32::max);
+        let centroid = |positions: &[[f32; 2]]| {
+            let sum = positions.iter().fold([0.0f64; 2], |sum, p| {
+                [sum[0] + p[0] as f64, sum[1] + p[1] as f64]
+            });
+            [
+                sum[0] / positions.len() as f64,
+                sum[1] / positions.len() as f64,
+            ]
+        };
+        let (direct_centroid, sorted_centroid) =
+            (centroid(&direct_positions), centroid(&sorted_positions));
+        let centroid_error = (direct_centroid[0] - sorted_centroid[0])
+            .hypot(direct_centroid[1] - sorted_centroid[1]);
+        info!(
+            "sorted vs direct P2G: mass error {mass_error} of {max_mass}, centroid error {centroid_error}"
+        );
+        assert_eq!(direct_positions.len(), sorted_positions.len());
+        assert!(mass_error < 5e-3 * max_mass);
+        assert!(centroid_error < 1e-2);
+    }
+
+    #[test_log::test]
+    fn test_grid_fetchers_match_the_particle_totals() {
+        // the fetched grid fields are in kg and kg m/s on every GPU
+        // the front reaches the outermost nodes, whose zero metrics must not give NaN
+        let mut sim = setup_simple_sim(30.0, 5.0);
+        sim.settings.sim_model = SimModel::Curvilinear.as_int();
+        sim.enable_particle_relaxation = false;
+        sim.set_dem(&create_slope(40, 40, 5.0, 30.0), 40, 40, 5.0)
+            .expect("Failed to set DEM");
+        let mut release = vec![0.0; 40 * 40];
+        for y in 12..28 {
+            for x in 16..28 {
+                release[y * 40 + x] = 1.0;
+            }
+        }
+        sim.set_release_areas(&release)
+            .expect("Failed to set release");
+        block_on(sim.run_n_steps(40)).expect("Failed to run");
+
+        let masses = block_on(sim.fetch_particles_mass())
+            .expect("Failed to fetch particle mass")
+            .clone();
+        let velocities = block_on(sim.fetch_particles_velocity())
+            .expect("Failed to fetch particle velocity")
+            .clone();
+        let particle_mass: f64 = masses.iter().map(|mass| *mass as f64).sum();
+        let particle_momentum =
+            masses
+                .iter()
+                .zip(&velocities)
+                .fold([0.0f64; 2], |sum, (mass, velocity)| {
+                    [
+                        sum[0] + (*mass * velocity[0]) as f64,
+                        sum[1] + (*mass * velocity[1]) as f64,
+                    ]
+                });
+
+        let grid_mass = block_on(sim.fetch_grid_mass()).expect("Failed to fetch grid mass");
+        let grid_mass: f64 = grid_mass.iter().map(|mass| *mass as f64).sum();
+        let grid_momentum =
+            block_on(sim.fetch_grid_momentum()).expect("Failed to fetch grid momentum");
+        let grid_momentum = grid_momentum
+            .chunks_exact(2)
+            .fold([0.0f64; 2], |sum, node| {
+                [sum[0] + node[0] as f64, sum[1] + node[1] as f64]
+            });
+
+        let momentum_error = (grid_momentum[0] - particle_momentum[0])
+            .hypot(grid_momentum[1] - particle_momentum[1]);
+        let momentum_scale = particle_momentum[0].hypot(particle_momentum[1]);
+        info!(
+            "grid vs particles: mass {grid_mass} / {particle_mass}, momentum {grid_momentum:?} / {particle_momentum:?}"
+        );
+        assert!((grid_mass - particle_mass).abs() < 1e-2 * particle_mass);
+        assert!(momentum_scale > 0.0);
+        assert!(momentum_error < 0.2 * momentum_scale);
     }
 
     #[test_log::test]
@@ -4296,19 +4405,33 @@ mod tests {
             sim.set_release_areas(&release)
                 .expect("Failed to set release");
             block_on(sim.run_n_steps(1)).expect("Failed to run");
-            let mass: Vec<u32> = block_on(sim.orchestrator.read_buffer(BufferName::GridMass))
-                .expect("Failed to read grid mass");
-            let sums: Vec<i32> = block_on(sim.orchestrator.read_buffer(BufferName::GridForces))
-                .expect("Failed to read weak pressure sums");
+            // float atomics hold kg directly; otherwise dequantize with
+            // MASS_FACTOR = 1e1 and PRESSURE_FACTOR = 1e3 (utils.wgsl)
+            let (mass, sums): (Vec<f32>, Vec<f32>) = if sim.orchestrator.has_float32_atomic() {
+                (
+                    block_on(sim.orchestrator.read_buffer(BufferName::GridMass))
+                        .expect("Failed to read grid mass"),
+                    block_on(sim.orchestrator.read_buffer(BufferName::GridForces))
+                        .expect("Failed to read weak pressure sums"),
+                )
+            } else {
+                let mass: Vec<u32> = block_on(sim.orchestrator.read_buffer(BufferName::GridMass))
+                    .expect("Failed to read grid mass");
+                let sums: Vec<i32> = block_on(sim.orchestrator.read_buffer(BufferName::GridForces))
+                    .expect("Failed to read weak pressure sums");
+                (
+                    mass.iter().map(|mass| *mass as f32 * 0.1).collect(),
+                    sums.iter().map(|sum| *sum as f32 * 1e-3).collect(),
+                )
+            };
             (mass, sums, sim.settings.density)
         };
 
         let (_, centred_sums, _) = run(false);
-        assert!(centred_sums.iter().all(|sum| *sum == 0));
+        assert!(centred_sums.iter().all(|sum| *sum == 0.0));
 
         let (mass, sums, density) = run(true);
-        // dequantize with MASS_FACTOR = 1e1 and PRESSURE_FACTOR = 1e3 (utils.wgsl)
-        let node_mass = |x: usize, y: usize| mass[y * N + x] as f32 * 0.1;
+        let node_mass = |x: usize, y: usize| mass[y * N + x];
         let thickness = |x: usize, y: usize| node_mass(x, y) / (density * CELL * CELL);
         let mut interior = Vec::new();
         let mut edge = Vec::new();
@@ -4319,8 +4442,8 @@ mod tests {
                     continue;
                 }
                 let weak = [
-                    sums[(y * N + x) * 2] as f32 * 1e-3 / node_mass(x, y),
-                    sums[(y * N + x) * 2 + 1] as f32 * 1e-3 / node_mass(x, y),
+                    sums[(y * N + x) * 2] / node_mass(x, y),
+                    sums[(y * N + x) * 2 + 1] / node_mass(x, y),
                 ];
                 let centred = [
                     (thickness(x + 1, y) - thickness(x - 1, y)) / (2.0 * CELL),
