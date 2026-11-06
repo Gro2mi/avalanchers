@@ -150,6 +150,7 @@ jobs:
             --run-types Tests \
             --verbose \
             --skip-clean \
+            --timeout 600 \
             --fail-under 80 \
             -p compute_core -p data_processor -p simulation
 
@@ -158,7 +159,7 @@ jobs:
         run: pip install .
 
       - name: Install pytest dependencies
-        run: pip install pytest ruff
+        run: pip install pytest ruff pandas pyarrow scipy matplotlib
 
       - name: Python Linting
         run: ruff check ./python_module
