@@ -209,7 +209,7 @@ def main():
     parser.add_argument("--mu", type=float, default=None,
                         help="Coulomb friction coefficient")
     parser.add_argument("--sim-model", default=None,
-                        help="terrain-following | curvilinear | mpmdac")
+                        help="terrain-following | 3d | curvilinear | mpmdac")
     parser.add_argument("--friction-model", default=None,
                         help="coulomb | voellmy | voellmy-min-shear | samosat")
     parser.add_argument("--max-steps", type=int, default=None)

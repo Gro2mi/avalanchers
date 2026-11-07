@@ -4,6 +4,20 @@
 // Hessian components are passed as (B_xx, B_xy, B_yy), the layout written by
 // analyze_terrain.wgsl into the curvature texture.
 
+// The terrain-following model stores velocities in the surface plane: the 3D
+// tangent velocity rotated into the horizontal plane by the rotation that takes
+// the bed normal to z. Unlike the horizontal projection this keeps the magnitude,
+// so length(v2) is the true speed, and the map is linear on any plane, so grid
+// averages and APIC stay exact there. The components are not dx/dt.
+fn surface_to_tangent(v2: vec2f, n: vec3f) -> vec3f {
+    let along_slope = dot(n.xy, v2);
+    return vec3f(v2 - along_slope / (1.0 + n.z) * n.xy, -along_slope);
+}
+
+fn tangent_to_surface(v3: vec3f, n: vec3f) -> vec2f {
+    return v3.xy - v3.z / (1.0 + n.z) * n.xy;
+}
+
 // Removes the bed-normal component.
 fn tangent_project(v: vec3f, n: vec3f) -> vec3f {
     return v - dot(v, n) * n;

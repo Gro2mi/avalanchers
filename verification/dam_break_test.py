@@ -93,7 +93,8 @@ def flow_coordinates(header, frame):
     return x_map * ex + y_map * ey, -x_map * ey + y_map * ex
 
 
-def fields_from_grid(sim, shape, cell_size, density, jac, frame=None):
+def fields_from_grid(sim, shape, cell_size, density, jac, frame=None,
+                     surface_velocity=False):
     """Decode the sim's grid mass/momentum getters into thickness + velocity.
 
     These are exactly the fields the grid physics pass consumed this step
@@ -117,9 +118,13 @@ def fields_from_grid(sim, shape, cell_size, density, jac, frame=None):
     vel_v = vel_v.reshape(shape)
     thickness = mass / (density * cell_size * cell_size * jac)
     if frame is not None:
-        # rotate the grid velocity into the flow frame (flow / cross-flow)
+        # rotate the grid velocity into the flow frame (flow / cross-flow); a
+        # horizontal dx/dt needs the metric to measure surface distance, a
+        # surface velocity (see SURFACE_VELOCITY_MODELS) already does
         ex, ey = frame["e_down"]
-        u_flow = (vel_u * ex + vel_v * ey) / frame["cos_phi"]
+        u_flow = vel_u * ex + vel_v * ey
+        if not surface_velocity:
+            u_flow = u_flow / frame["cos_phi"]
         v_cross = -vel_u * ey + vel_v * ex
         return thickness, u_flow, v_cross, mass
     return thickness, vel_u, vel_v, mass

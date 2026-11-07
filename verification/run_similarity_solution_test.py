@@ -183,6 +183,7 @@ def run_simulation(settings, cfg):
     x1_grid = (x_map - cfg["center"][0]) / cos_z
     y1_grid = y_map - cfg["center"][1]
     jac = sst.jacobian(dem, cs)
+    surface_velocity = settings["sim_model"].lower() in sst.SURFACE_VELOCITY_MODELS
 
     samples = {"t": [], "h": [], "u": [], "v": []}
     errors = {k: [] for k in ("h_l2", "h_l2rel", "h_lmax", "h_lmaxrel",
@@ -193,7 +194,8 @@ def run_simulation(settings, cfg):
     def record(info):
         """Sample the grid fields, compare to the analytic solution."""
         t = info.grid_elapsed_time
-        h, u, v, mass = sst.fields_from_grid(sim, dem.shape, cs, density, jac)
+        h, u, v, mass = sst.fields_from_grid(sim, dem.shape, cs, density, jac,
+                                             surface_velocity)
         samples["t"].append(t)
         samples["h"].append(h)
         samples["u"].append(u)
@@ -220,7 +222,7 @@ def run_simulation(settings, cfg):
 
     info = sim.run_n_steps(1)
     first_h, _, _, first_mass = sst.fields_from_grid(sim, dem.shape, cs,
-                                                     density, jac)
+                                                     density, jac, surface_velocity)
     sst.check_grid_mass_consistency(
         sim, first_mass, np.asarray(sim.particles_mass, dtype=np.float64))
     last_step = -1

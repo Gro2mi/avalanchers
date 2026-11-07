@@ -23,7 +23,6 @@ use compute_core::settings::{FrictionModel, Settings, SimModel};
 use compute_core::{ComputeOrchestrator, SimInfo, buffers::BufferName};
 use render_core::{OrbitCamera, OverlayRange, ParticleBuffers, Renderer, TerrainData};
 use simulation::{Simulation, SimulationState};
-use wgpu::util::DeviceExt;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -294,8 +293,7 @@ fn attach_overlay(
 /// speed; every other particle buffer exists for both models.
 fn clone_particle_buffers(
     orchestrator: &ComputeOrchestrator,
-    particle_count: u32,
-) -> anyhow::Result<[wgpu::Buffer; 5]> {
+) -> anyhow::Result<([wgpu::Buffer; 4], Option<wgpu::Buffer>)> {
     let clone_buffer = |name: BufferName| -> anyhow::Result<wgpu::Buffer> {
         orchestrator
             .resources
@@ -304,24 +302,15 @@ fn clone_particle_buffers(
             .ok_or_else(|| anyhow::anyhow!("simulation buffer '{name}' is missing"))
     };
 
-    let velocity_z = clone_buffer(BufferName::ParticlesVelocityZ).unwrap_or_else(|_| {
-        tracing::debug!("no vertical velocity buffer; colouring by horizontal speed");
-        orchestrator
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Zero Vertical Velocity"),
-                contents: bytemuck::cast_slice(&vec![0.0f32; particle_count as usize]),
-                usage: wgpu::BufferUsages::STORAGE,
-            })
-    });
-
-    Ok([
-        clone_buffer(BufferName::ParticlesPosition)?,
-        clone_buffer(BufferName::ParticlesVelocity)?,
-        velocity_z,
-        clone_buffer(BufferName::ParticlesState)?,
-        clone_buffer(BufferName::ParticlesElevation)?,
-    ])
+    Ok((
+        [
+            clone_buffer(BufferName::ParticlesPosition)?,
+            clone_buffer(BufferName::ParticlesVelocity)?,
+            clone_buffer(BufferName::ParticlesState)?,
+            clone_buffer(BufferName::ParticlesElevation)?,
+        ],
+        clone_buffer(BufferName::ParticlesVelocityZ).ok(),
+    ))
 }
 
 /// The simulation and cloned handles to its GPU state. wgpu resources are reference
@@ -334,7 +323,9 @@ struct SimulationView {
     instance: wgpu::Instance,
     terrain: TerrainData,
     grids: Vec<(BufferName, wgpu::Buffer)>,
-    particles: [wgpu::Buffer; 5],
+    particles: [wgpu::Buffer; 4],
+    /// Absent for models without a vertical velocity.
+    velocity_z: Option<wgpu::Buffer>,
     particle_count: u32,
     info: SimInfo,
     exaggeration: f32,
@@ -423,7 +414,7 @@ impl SimulationView {
             .into_iter()
             .map(clone_grid)
             .collect::<anyhow::Result<Vec<_>>>()?;
-        self.particles = clone_particle_buffers(orchestrator, self.info.number_particles)?;
+        (self.particles, self.velocity_z) = clone_particle_buffers(orchestrator)?;
         self.particle_count = self.info.number_particles;
         self.failed = false;
         self.final_info_reported = false;
@@ -587,7 +578,7 @@ fn start_simulation(settings: Settings, exaggeration: f32) -> anyhow::Result<Sim
         .map(|name| Ok((name.clone(), clone_buffer(name)?)))
         .collect::<anyhow::Result<Vec<_>>>()?;
 
-    let particles = clone_particle_buffers(orchestrator, info.number_particles)?;
+    let (particles, velocity_z) = clone_particle_buffers(orchestrator)?;
 
     let device = orchestrator.device.clone();
     let queue = orchestrator.queue.clone();
@@ -603,6 +594,7 @@ fn start_simulation(settings: Settings, exaggeration: f32) -> anyhow::Result<Sim
         terrain,
         grids,
         particles,
+        velocity_z,
         particle_count: info.number_particles,
         info,
         exaggeration,
@@ -637,9 +629,9 @@ fn write_snapshot(sim: &SimulationView, overlay: Overlay, path: &str) -> anyhow:
         (std::env::var("LIVE_SIM_NO_PARTICLES").is_err()).then_some(ParticleBuffers {
             position: &sim.particles[0],
             velocity: &sim.particles[1],
-            velocity_z: &sim.particles[2],
-            stopped: &sim.particles[3],
-            elevation: &sim.particles[4],
+            velocity_z: sim.velocity_z.as_ref(),
+            stopped: &sim.particles[2],
+            elevation: &sim.particles[3],
             grid_mass: None,
         }),
     );
@@ -810,9 +802,9 @@ impl Viewer {
         let buffers = self.show_particles.then(|| ParticleBuffers {
             position: &self.sim.particles[0],
             velocity: &self.sim.particles[1],
-            velocity_z: &self.sim.particles[2],
-            stopped: &self.sim.particles[3],
-            elevation: &self.sim.particles[4],
+            velocity_z: self.sim.velocity_z.as_ref(),
+            stopped: &self.sim.particles[2],
+            elevation: &self.sim.particles[3],
             grid_mass: Some(self.sim.grid(&BufferName::GridMass)),
         });
         view.renderer.set_particles(&self.sim.device, buffers);
@@ -1234,6 +1226,7 @@ impl ApplicationHandler for Viewer {
                                             SimModel::TerrainFollowing,
                                             "Terrain-following",
                                         );
+                                        ui.selectable_value(&mut model, SimModel::ThreeD, "3D");
                                         ui.selectable_value(
                                             &mut model,
                                             SimModel::Curvilinear,
@@ -1574,6 +1567,15 @@ impl ApplicationHandler for Viewer {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Network-backed loaders (reqwest/hyper) need a Tokio reactor even though the
+    // examples drive futures with pollster; a multi-thread runtime runs the IO driver
+    // on its worker threads so pollster::block_on can make progress.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("failed to build Tokio runtime");
+    let _runtime_guard = runtime.enter();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

@@ -12,7 +12,7 @@ struct Uniforms {
     // grid width, grid height, cell size, height offset above the surface
     grid: vec4<f32>,
     // jitter amplitude (0 = off), grid mass to flow thickness factor,
-    // 1 if the grid mass is stored as f32 bits, unused
+    // 1 if the grid mass is stored as f32 bits, 1 if velocities_z is bound
     jitter: vec4<f32>,
 };
 
@@ -60,9 +60,9 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     var out: VertexOutput;
     out.clip_position = u.view_proj * vec4<f32>(world, 1.0);
     out.offset = offset;
-    // Vertical velocity is zero for models without a z component, so the ramp still
-    // shows horizontal speed there.
-    out.speed = length(vec3<f32>(velocities[index], velocities_z[index]));
+    // Models without a z component colour by the magnitude of their 2D velocity.
+    let velocity_z = select(0.0, velocities_z[index], u.jitter.w > 0.5);
+    out.speed = length(vec3<f32>(velocities[index], velocity_z));
     // stopped (bit 31) or resting (bit 26); the low bits only count slow steps
     out.moving = select(1.0, 0.0, (stopped[index] & ((1u << 31u) | (1u << 26u))) != 0u);
     return out;

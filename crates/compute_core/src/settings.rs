@@ -117,8 +117,8 @@ pub struct SimSettings {
     // MPMDAC compressibility; bulk_modulus 0 = incompressible
     pub bulk_modulus: f32,
     pub compaction_pressure: f32,
-    /// Curvilinear: stop once the total momentum falls below this fraction of
-    /// its peak; 0 disables the criterion.
+    /// Grid flow models: stop once the total momentum falls below this fraction
+    /// of its peak; 0 disables the criterion.
     pub momentum_stop_fraction: f32,
     /// The no-new-cells stop window spans round(travel / cfl) steps, at least
     /// 10: the steps the fastest material needs to travel this many cells.
@@ -706,6 +706,8 @@ pub enum SimModel {
     MpmDaC,
     /// Legacy per-particle sliding-block model (former model 0).
     SlidingBlock,
+    /// Terrain-following grid model that carries the full 3D Cartesian velocity.
+    ThreeD,
 }
 
 impl SimModel {
@@ -715,6 +717,7 @@ impl SimModel {
             1 => Some(Self::Curvilinear),
             2 => Some(Self::MpmDaC),
             3 => Some(Self::SlidingBlock),
+            4 => Some(Self::ThreeD),
             _ => None,
         }
     }
@@ -725,6 +728,7 @@ impl SimModel {
             Self::Curvilinear => 1,
             Self::MpmDaC => 2,
             Self::SlidingBlock => 3,
+            Self::ThreeD => 4,
         }
     }
 }
@@ -738,6 +742,7 @@ impl FromStr for SimModel {
             "curvilinear" | "curvi" | "c" => Ok(Self::Curvilinear),
             "mpmdac" | "mpm-dac" | "mpm_depth_averaged_curvilinear" => Ok(Self::MpmDaC),
             "sliding-block" | "block" | "b" => Ok(Self::SlidingBlock),
+            "3d" => Ok(Self::ThreeD),
             _ => Err(format!("unknown simulation model: {value}")),
         }
     }
@@ -750,6 +755,7 @@ impl fmt::Display for SimModel {
             Self::Curvilinear => "curvilinear",
             Self::MpmDaC => "mpmdac",
             Self::SlidingBlock => "sliding-block",
+            Self::ThreeD => "3d",
         })
     }
 }
@@ -895,7 +901,7 @@ pub struct Settings {
     pub max_steps: Option<u32>,
     pub sim_model: Option<SimModel>,
     pub batch_compute_steps: Option<u32>,
-    /// Steps between particle sorts for the tile-sorted curvilinear P2G (default 25);
+    /// Steps between particle sorts for the tile-sorted P2G of the grid flow models (default 25);
     /// 0 disables it.
     pub particle_sort_interval: Option<u32>,
     pub friction_model: Option<FrictionModel>,
@@ -994,7 +1000,7 @@ pub struct Settings {
     /// Compaction pressure (Pa) above which the MPMDAC material densifies
     /// plastically (irreversibly); the volumetric pressure is capped there.
     pub compaction_pressure: Option<f32>,
-    /// Curvilinear: stop once the total grid momentum falls below this
+    /// Grid flow models: stop once the total grid momentum falls below this
     /// fraction of its peak, e.g. 0.01; 0 or unset disables the criterion.
     pub momentum_stop_fraction: Option<f32>,
     /// The simulation stops when fewer than 4 cells were newly reached within
@@ -1494,6 +1500,7 @@ mod tests {
             SimModel::Curvilinear,
             SimModel::MpmDaC,
             SimModel::SlidingBlock,
+            SimModel::ThreeD,
         ];
 
         for model in models {
@@ -1512,7 +1519,8 @@ mod tests {
 
         assert_eq!(SimModel::from_int(3), Some(SimModel::SlidingBlock));
 
-        assert_eq!(SimModel::from_int(4), None);
+        assert_eq!(SimModel::from_int(4), Some(SimModel::ThreeD));
+        assert_eq!(SimModel::from_int(5), None);
         assert_eq!(SimModel::from_int(u32::MAX), None);
     }
 

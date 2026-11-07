@@ -110,7 +110,8 @@ def test_simulation_binding_smoke():
     stopped = sim.stopped
 
     assert positions.ndim == 2 and positions.shape[1] == 3
-    assert velocities.ndim == 2 and velocities.shape[1] == 3
+    # (n, 2) for terrain-following, which has no z velocity, else (n, 3)
+    assert velocities.ndim == 2 and velocities.shape[1] in (2, 3)
     assert elevations.ndim == 1
     assert stopped.ndim == 1
 
@@ -222,8 +223,10 @@ def test_simulation_setters_and_getters():
     velocities_xy = sim.particles_velocity_xy
     assert positions.shape[1] == 3
     assert positions_xy.shape[1] == 2
-    assert velocities.shape[1] == 3
+    # (n, 2) for terrain-following, which has no z velocity, else (n, 3)
+    assert velocities.shape[1] in (2, 3)
     assert velocities_xy.shape[1] == 2
+    np.testing.assert_array_equal(velocities[:, :2], velocities_xy)
     assert sim.particles_elevation.ndim == 1
     assert sim.stopped.ndim == 1
 

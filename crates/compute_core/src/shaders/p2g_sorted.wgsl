@@ -1,4 +1,5 @@
-// Curvilinear P2G over particles in tile-sorted order (see sort_particles.wgsl).
+// P2G over particles in tile-sorted order (see sort_particles.wgsl), for the
+// models with a 2D velocity (p2g_2d_sorted) and the 3D model (p2g_3d_sorted).
 // A workgroup whose particles touch at most SHARED_TILE x SHARED_TILE nodes
 // accumulates the quantized contributions in workgroup memory and flushes
 // each non-zero node sum with one global atomic; otherwise it falls back to
@@ -16,91 +17,167 @@
 // atomic_float @group(0) @binding(6) var<storage, read_write> grid_momentum_atomic: array<atomic<f32>>;
 @group(0) @binding(7) var<storage> particles_affine_matrix: array<mat2x2f>;
 @group(0) @binding(8) var<storage> sorted_particle_index: array<u32>;
+// z components of the 3D model; the 2D layout ends at binding 8
+@group(0) @binding(9) var<storage> particles_velocity_z: array<f32>;
+@group(0) @binding(10) var<storage, read_write> grid_momentum_z_atomic: array<atomic<i32>>; // no_atomic_float
+// atomic_float @group(0) @binding(10) var<storage, read_write> grid_momentum_z_atomic: array<atomic<f32>>;
+@group(0) @binding(11) var<storage> particles_affine_z: array<vec2f>;
 
 const P2G_SORTED_WG_SIZE: u32 = 256u;
-const SHARED_TILE: u32 = 32u;
+// 31 keeps the four tiles of the 3D kernel inside the 16 KiB of workgroup
+// memory WebGPU guarantees; 32 would exceed it by the box variables
+const SHARED_TILE: u32 = 31u;
 const SHARED_TILE_NODES: u32 = SHARED_TILE * SHARED_TILE;
 
 // zero-initialized at the start of every workgroup
 var<workgroup> tile_mass: array<atomic<u32>, SHARED_TILE_NODES>;
 var<workgroup> tile_momentum_x: array<atomic<i32>, SHARED_TILE_NODES>;
 var<workgroup> tile_momentum_y: array<atomic<i32>, SHARED_TILE_NODES>;
+var<workgroup> tile_momentum_z: array<atomic<i32>, SHARED_TILE_NODES>;
 var<workgroup> box_min: array<atomic<u32>, 2>;
 var<workgroup> box_max: array<atomic<u32>, 2>;
 var<workgroup> box: vec4<u32>;
 
+struct SortedParticle {
+    valid: bool,
+    p_idx: u32,
+    grid_pos: vec2f,
+    base_node: vec2u,
+}
+
 @compute @workgroup_size(P2G_SORTED_WG_SIZE, 1, 1)
-fn p2g_curvilinear_sorted(
+fn p2g_2d_sorted(
     @builtin(local_invocation_id) lid: vec3u,
     @builtin(workgroup_id) wid: vec3u,
 ) {
-    if lid.x == 0u {
+    let particle = load_sorted_particle(lid.x, wid.x);
+    let node_box = shared_node_box(lid.x);
+    if node_box.x > node_box.z {
+        return; // no valid particle in this workgroup
+    }
+    if !box_fits_tile(node_box) {
+        if particle.valid {
+            transfer_p2g_with_affine(particle.p_idx, particles_affine_matrix[particle.p_idx]);
+        }
+        return;
+    }
+    if particle.valid {
+        deposit_to_tile(particle, node_box);
+    }
+    workgroupBarrier();
+    flush_tile(lid.x, node_box);
+}
+
+@compute @workgroup_size(P2G_SORTED_WG_SIZE, 1, 1)
+fn p2g_3d_sorted(
+    @builtin(local_invocation_id) lid: vec3u,
+    @builtin(workgroup_id) wid: vec3u,
+) {
+    let particle = load_sorted_particle(lid.x, wid.x);
+    let node_box = shared_node_box(lid.x);
+    if node_box.x > node_box.z {
+        return; // no valid particle in this workgroup
+    }
+    if !box_fits_tile(node_box) {
+        if particle.valid {
+            transfer_p2g_with_affine(particle.p_idx, particles_affine_matrix[particle.p_idx]);
+            transfer_p2g_z(particle.p_idx);
+        }
+        return;
+    }
+    if particle.valid {
+        deposit_to_tile(particle, node_box);
+        deposit_z_to_tile(particle, node_box);
+    }
+    workgroupBarrier();
+    flush_tile(lid.x, node_box);
+    flush_tile_z(lid.x, node_box);
+}
+
+// Must be called in uniform control flow, it contains barriers.
+fn load_sorted_particle(lane: u32, group: u32) -> SortedParticle {
+    if lane == 0u {
         atomicStore(&box_min[0], 0xFFFFFFFFu);
         atomicStore(&box_min[1], 0xFFFFFFFFu);
     }
     workgroupBarrier();
 
-    let slot = wid.x * P2G_SORTED_WG_SIZE + lid.x;
-    var valid = slot < sim_info.number_particles && (sim_info.flags & SIM_INFO_STOPPED) == 0u;
-    var p_idx = 0u;
-    var grid_pos = vec2f(0.0);
-    var base_node = vec2u(0u);
-    if valid {
-        p_idx = sorted_particle_index[slot];
-        let cell = position_to_cell(particles_position[p_idx]);
-        valid = cell.x >= 3u && cell.x < sim_settings.grid_shape.x - 3u
+    let slot = group * P2G_SORTED_WG_SIZE + lane;
+    var particle = SortedParticle(false, 0u, vec2f(0.0), vec2u(0u));
+    particle.valid = slot < sim_info.number_particles && (sim_info.flags & SIM_INFO_STOPPED) == 0u;
+    if particle.valid {
+        particle.p_idx = sorted_particle_index[slot];
+        let cell = position_to_cell(particles_position[particle.p_idx]);
+        particle.valid = cell.x >= 3u && cell.x < sim_settings.grid_shape.x - 3u
             && cell.y >= 3u && cell.y < sim_settings.grid_shape.y - 3u;
     }
-    if valid {
+    if particle.valid {
         // same stencil as transfer_p2g_with_affine
-        grid_pos = particles_position[p_idx] / sim_settings.cell_size - vec2f(0.5);
-        base_node = vec2u(floor(grid_pos - vec2f(0.5)));
-        atomicMin(&box_min[0], base_node.x);
-        atomicMin(&box_min[1], base_node.y);
-        atomicMax(&box_max[0], base_node.x);
-        atomicMax(&box_max[1], base_node.y);
+        particle.grid_pos = particles_position[particle.p_idx] / sim_settings.cell_size - vec2f(0.5);
+        particle.base_node = vec2u(floor(particle.grid_pos - vec2f(0.5)));
+        atomicMin(&box_min[0], particle.base_node.x);
+        atomicMin(&box_min[1], particle.base_node.y);
+        atomicMax(&box_max[0], particle.base_node.x);
+        atomicMax(&box_max[1], particle.base_node.y);
     }
     workgroupBarrier();
-    if lid.x == 0u {
+    return particle;
+}
+
+// Node range of the workgroup, identical in all invocations.
+fn shared_node_box(lane: u32) -> vec4u {
+    if lane == 0u {
         box = vec4u(atomicLoad(&box_min[0]), atomicLoad(&box_min[1]),
                     atomicLoad(&box_max[0]), atomicLoad(&box_max[1]));
     }
-    let node_box = workgroupUniformLoad(&box);
-    if node_box.x > node_box.z {
-        return; // no valid particle in this workgroup
-    }
-    let fits = node_box.z + 3u - node_box.x <= SHARED_TILE && node_box.w + 3u - node_box.y <= SHARED_TILE;
-    if !fits {
-        if valid {
-            transfer_p2g_with_affine(p_idx, particles_affine_matrix[p_idx]);
-        }
-        return;
-    }
+    return workgroupUniformLoad(&box);
+}
 
-    if valid {
-        let p_mass = particles_mass[p_idx];
-        let p_velocity = particles_velocity[p_idx];
-        let affine_matrix = particles_affine_matrix[p_idx];
-        for (var i: u32 = 0; i < 3; i++) {
-            for (var j: u32 = 0; j < 3; j++) {
-                let node_coords = base_node + vec2u(i, j);
-                let distance = calculate_distance_to_node(grid_pos, node_coords);
-                let weight = calculate_weight(distance);
-                let local = node_coords - node_box.xy;
-                let tile_idx = local.y * SHARED_TILE + local.x;
-                let affine_velocity = p_velocity - affine_matrix * distance;
-                let mass = u32(round(p_mass * weight * MASS_FACTOR));
-                let momentum_x = quantize_momentum_component(p_mass * affine_velocity.x * weight * MOMENTUM_FACTOR);
-                let momentum_y = quantize_momentum_component(p_mass * affine_velocity.y * weight * MOMENTUM_FACTOR);
-                if mass != 0u { atomicAdd(&tile_mass[tile_idx], mass); }
-                if momentum_x != 0 { atomicAdd(&tile_momentum_x[tile_idx], momentum_x); }
-                if momentum_y != 0 { atomicAdd(&tile_momentum_y[tile_idx], momentum_y); }
-            }
+fn box_fits_tile(node_box: vec4u) -> bool {
+    return node_box.z + 3u - node_box.x <= SHARED_TILE && node_box.w + 3u - node_box.y <= SHARED_TILE;
+}
+
+fn deposit_to_tile(particle: SortedParticle, node_box: vec4u) {
+    let p_mass = particles_mass[particle.p_idx];
+    let p_velocity = particles_velocity[particle.p_idx];
+    let affine_matrix = particles_affine_matrix[particle.p_idx];
+    for (var i: u32 = 0; i < 3; i++) {
+        for (var j: u32 = 0; j < 3; j++) {
+            let node_coords = particle.base_node + vec2u(i, j);
+            let distance = calculate_distance_to_node(particle.grid_pos, node_coords);
+            let weight = calculate_weight(distance);
+            let local = node_coords - node_box.xy;
+            let tile_idx = local.y * SHARED_TILE + local.x;
+            let affine_velocity = p_velocity - affine_matrix * distance;
+            let mass = u32(round(p_mass * weight * MASS_FACTOR));
+            let momentum_x = quantize_momentum_component(p_mass * affine_velocity.x * weight * MOMENTUM_FACTOR);
+            let momentum_y = quantize_momentum_component(p_mass * affine_velocity.y * weight * MOMENTUM_FACTOR);
+            if mass != 0u { atomicAdd(&tile_mass[tile_idx], mass); }
+            if momentum_x != 0 { atomicAdd(&tile_momentum_x[tile_idx], momentum_x); }
+            if momentum_y != 0 { atomicAdd(&tile_momentum_y[tile_idx], momentum_y); }
         }
     }
-    workgroupBarrier();
+}
 
-    for (var tile_idx = lid.x; tile_idx < SHARED_TILE_NODES; tile_idx += P2G_SORTED_WG_SIZE) {
+fn deposit_z_to_tile(particle: SortedParticle, node_box: vec4u) {
+    let p_mass = particles_mass[particle.p_idx];
+    let p_velocity_z = particles_velocity_z[particle.p_idx];
+    let affine_z = particles_affine_z[particle.p_idx];
+    for (var i: u32 = 0; i < 3; i++) {
+        for (var j: u32 = 0; j < 3; j++) {
+            let node_coords = particle.base_node + vec2u(i, j);
+            let distance = calculate_distance_to_node(particle.grid_pos, node_coords);
+            let weight = calculate_weight(distance);
+            let local = node_coords - node_box.xy;
+            let affine_velocity_z = p_velocity_z - dot(affine_z, distance);
+            let momentum_z = quantize_momentum_component(p_mass * affine_velocity_z * weight * MOMENTUM_FACTOR);
+            if momentum_z != 0 { atomicAdd(&tile_momentum_z[local.y * SHARED_TILE + local.x], momentum_z); }
+        }
+    }
+}
+
+fn flush_tile(lane: u32, node_box: vec4u) {
+    for (var tile_idx = lane; tile_idx < SHARED_TILE_NODES; tile_idx += P2G_SORTED_WG_SIZE) {
         let node = node_box.xy + vec2u(tile_idx % SHARED_TILE, tile_idx / SHARED_TILE);
         if node.x >= sim_settings.grid_shape.x || node.y >= sim_settings.grid_shape.y {
             continue;
@@ -118,6 +195,44 @@ fn p2g_curvilinear_sorted(
     }
 }
 
+fn flush_tile_z(lane: u32, node_box: vec4u) {
+    for (var tile_idx = lane; tile_idx < SHARED_TILE_NODES; tile_idx += P2G_SORTED_WG_SIZE) {
+        let node = node_box.xy + vec2u(tile_idx % SHARED_TILE, tile_idx / SHARED_TILE);
+        if node.x >= sim_settings.grid_shape.x || node.y >= sim_settings.grid_shape.y {
+            continue;
+        }
+        let momentum_z = atomicLoad(&tile_momentum_z[tile_idx]);
+        if momentum_z != 0 { atomicAdd(&grid_momentum_z_atomic[xy_to_idx(node)], momentum_z); } // no_atomic_float
+        // atomic_float if momentum_z != 0 { atomicAdd(&grid_momentum_z_atomic[xy_to_idx(node)], f32(momentum_z) * INV_MOMENTUM_FACTOR); }
+    }
+}
+
+// import transfer_p2g_z.wgsl;
+// BEGIN transfer_p2g_z.wgsl
+// z row of the 3D APIC transfer, on the stencil of transfer_p2g_with_affine.
+// Pure library module: the importing module provides particles_velocity_z,
+// particles_affine_z and grid_momentum_z_atomic.
+fn transfer_p2g_z(p_idx: u32) {
+    let grid_pos = particles_position[p_idx] / sim_settings.cell_size - vec2f(0.5);
+    let base_node = vec2u(floor(grid_pos - vec2f(0.5)));
+    let p_mass = particles_mass[p_idx];
+    let p_velocity_z = particles_velocity_z[p_idx];
+    let affine_z = particles_affine_z[p_idx];
+    for (var i: u32 = 0; i < 3; i++) {
+        for (var j: u32 = 0; j < 3; j++) {
+            let node_coords = base_node + vec2u(i, j);
+            let distance = calculate_distance_to_node(grid_pos, node_coords);
+            let weight = calculate_weight(distance);
+            let idx = xy_to_idx(node_coords);
+            let affine_velocity_z = p_velocity_z - dot(affine_z, distance);
+            // atomic_float atomicAdd(&grid_momentum_z_atomic[idx], p_mass * affine_velocity_z * weight);
+            let quantized_z = quantize_momentum_component(p_mass * affine_velocity_z * weight * MOMENTUM_FACTOR); // no_atomic_float
+            if quantized_z != 0 { atomicAdd(&grid_momentum_z_atomic[idx], quantized_z); } // no_atomic_float
+        }
+    }
+}
+
+// END transfer_p2g_z.wgsl
 // import transfer_p2g.wgsl;
 // BEGIN transfer_p2g.wgsl
 fn quantize_momentum_component(value: f32) -> i32 {
@@ -229,6 +344,8 @@ const SIM_INFO_LOW_MOMENTUM: u32 = 1u << 27u;
 // reversible low-speed state; the low bits hold the rest start step while resting
 // and the consecutive slow-step count while moving
 const PARTICLE_RESTING: u32 = 1u << 26u;
+// consecutive slow steps before a particle rests
+const REST_STEPS: u32 = 20u;
 const PARTICLE_FLYING: u32 = 1u << 27u;
 const PARTICLE_OUT_OF_BOUNDS: u32 = 1u << 28u;
 const PARTICLE_IS_NAN: u32 = 1u << 29u;
@@ -297,6 +414,34 @@ struct AtomicValues {
     // f32 bits of the largest total momentum so far
     peak_momentum: atomic<u32>,
 };
+
+// Reversible resting: a particle rests after REST_STEPS consecutive slow steps
+// and wakes once the gathered grid speed exceeds twice the threshold. Resting
+// particles keep depositing mass but no momentum and do not move, which removes
+// sub-threshold creep inside deposits. Returns the new state: its low bits hold
+// the slow-step counter while moving and the rest start step while resting.
+fn next_rest_state(previous_state: u32, speed: f32, timestep: u32) -> u32 {
+    let low_mask = PARTICLE_RESTING - 1u;
+    var resting = (previous_state & PARTICLE_RESTING) != 0u;
+    var low_bits = previous_state & low_mask;
+    if resting {
+        if speed > 2.0 * sim_settings.velocity_threshold {
+            resting = false;
+            low_bits = 0u;
+        }
+    } else if speed < sim_settings.velocity_threshold {
+        low_bits = min(low_bits + 1u, REST_STEPS);
+        if low_bits >= REST_STEPS {
+            resting = true;
+            low_bits = timestep & low_mask;
+        }
+    } else {
+        low_bits = 0u;
+    }
+    return (previous_state & ~(PARTICLE_RESTING | low_mask))
+        | select(0u, PARTICLE_RESTING, resting)
+        | low_bits;
+}
 
 struct G2PUpdate {
     velocity: vec2f,

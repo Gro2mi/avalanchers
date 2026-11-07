@@ -308,11 +308,11 @@ fn particles_are_drawn_on_top_of_the_terrain() {
     let stopped = vec![0u32; count as usize];
     let elevations: Vec<f32> = (0..count).map(|i| 1000.0 + i as f32 * 3.0).collect();
 
-    let render_particles = |velocities_z: &[f32]| {
+    let render_particles = |velocities_z: Option<&[f32]>| {
         render_with(&ctx, &terrain, |renderer, device| {
             let position = storage_buffer(device, &positions);
             let velocity = storage_buffer(device, &velocities);
-            let velocity_z = storage_buffer(device, velocities_z);
+            let velocity_z = velocities_z.map(|values| storage_buffer(device, values));
             let stopped = storage_buffer(device, &stopped);
             let elevation = storage_buffer(device, &elevations);
 
@@ -321,7 +321,7 @@ fn particles_are_drawn_on_top_of_the_terrain() {
                 Some(ParticleBuffers {
                     position: &position,
                     velocity: &velocity,
-                    velocity_z: &velocity_z,
+                    velocity_z: velocity_z.as_ref(),
                     stopped: &stopped,
                     elevation: &elevation,
                     grid_mass: None,
@@ -333,9 +333,10 @@ fn particles_are_drawn_on_top_of_the_terrain() {
     };
 
     // A vertical component raises the total speed, shifting particles up the colour
-    // ramp; a zero-filled buffer (the MPM stand-in) keeps horizontal-speed colouring.
-    let flat = render_particles(&vec![0.0f32; count as usize]);
-    let plunging = render_particles(&vec![8.0f32; count as usize]);
+    // ramp; without a z velocity the colour follows the 2D velocity alone.
+    let flat = render_particles(Some(&vec![0.0f32; count as usize]));
+    let plunging = render_particles(Some(&vec![8.0f32; count as usize]));
+    let without_z = render_particles(None);
 
     let changed = plain.iter().zip(&flat).filter(|(a, b)| a != b).count();
     assert!(
@@ -345,6 +346,10 @@ fn particles_are_drawn_on_top_of_the_terrain() {
     assert_ne!(
         flat, plunging,
         "vertical velocity should contribute to the speed colouring"
+    );
+    assert_eq!(
+        flat, without_z,
+        "a missing z velocity should colour like a zero z velocity"
     );
 }
 

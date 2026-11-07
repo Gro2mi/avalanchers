@@ -131,6 +131,17 @@ curvilinear/Coulomb verification suite; other comparison configurations explicit
 skip this benchmark. The derivation and finite-release assumptions are documented
 in [the model review](docs/curvilinear_model_review.md#curvature-verification-analytical-reference).
 
+### Terrain-following velocity convention
+
+The `terrain-following` model stores velocities in the surface plane: the 3D
+tangent velocity rotated into the horizontal plane by the rotation that takes the
+bed normal to z. The norm of `particles_velocity` is therefore the true speed, but
+unlike curvilinear velocities the components are not `(dx/dt, dy/dt)`. A particle
+reaching a differently inclined bed loses the velocity component normal to it, so
+flows are deflected by side walls instead of running up them. There is no z velocity:
+`particles_velocity` is `(n, 2)` and `fetch_particles_velocity_z` returns an
+error. The `3d` model carries the full Cartesian vector instead, at a higher cost.
+
 ### Python
 
 `python avalanchers_example.py`
@@ -216,6 +227,15 @@ rather than the C `zstd` bindings, because `zstd-sys` needs a clang cross-compil
 ### Benchmarks
 
 ``cargo bench -p simulation``
+
+Computation time of the terrain-following, 3d and curvilinear models on the
+avaWog test case, a full run until the simulation stops by itself:
+
+``cargo bench -p simulation --bench model_benchmark``
+
+Append ``-- terrain-following`` (or ``3d``, ``curvilinear``) to run one model only.
+Criterion reports the change against the previous run and writes HTML reports to
+``target/criterion``.
 
 ## Code Guidelines
 

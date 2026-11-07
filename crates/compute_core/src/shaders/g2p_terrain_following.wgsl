@@ -31,44 +31,76 @@ struct TimestepData {
 @group(0) @binding(11) var<storage, read_write> particles_affine_matrix: array<mat2x2<f32>>;
 @group(0) @binding(12) var dem_texture: texture_2d<f32>;
 @group(0) @binding(13) var<storage, read_write> particles_elevation: array<f32>;
-@group(0) @binding(14) var<storage, read_write> particles_velocity_z: array<f32>;
-@group(0) @binding(15) var<storage, read> grid_velocity_z: array<f32>;
-@group(0) @binding(16) var<storage, read_write> particles_affine_z: array<vec2f>;
 // xyz = Hessian (B_xx, B_xy, B_yy), w = plan curvature (analyze_terrain.wgsl)
-@group(0) @binding(17) var curvature_texture: texture_2d<f32>;
+@group(0) @binding(14) var curvature_texture: texture_2d<f32>;
+// z components of the 3D model; the terrain-following layout ends at binding 14
+@group(0) @binding(15) var<storage, read_write> particles_velocity_z: array<f32>;
+@group(0) @binding(16) var<storage, read> grid_velocity_z: array<f32>;
+@group(0) @binding(17) var<storage, read_write> particles_affine_z: array<vec2f>;
 
 override WG_SIZE_1D: u32 = 1u;
-@compute @workgroup_size(WG_SIZE_1D, 1, 1)
-fn g2p_terrain_following(
-    @builtin(global_invocation_id) pId: vec3<u32>,
-    @builtin(local_invocation_id) lId: vec3<u32>
-) {
-    let particleId = pId.x;
 
-    if particleId >= sim_info.number_particles {
-        return;
-    }
-    if (sim_info.flags & SIM_INFO_STOPPED) != 0u {
-        return;
-    }
-    if (particles_state[particleId] & PARTICLE_STOPPED) != 0u {
+// Velocities live in the surface plane (see surface_to_tangent). A particle that
+// reaches a differently inclined bed loses the velocity component normal to it,
+// as the grid projection of the 3D model removes it: kept at full speed, a flow
+// would run up steep side walls instead of being deflected by them.
+@compute @workgroup_size(WG_SIZE_1D, 1, 1)
+fn g2p_terrain_following(@builtin(global_invocation_id) pId: vec3<u32>) {
+    let particleId = pId.x;
+    if particle_is_inactive(particleId) {
         return;
     }
     let position_xy = particles_position[particleId];
     let uv = position_to_uv(position_xy);
     let normal = get_normal(uv);
-
     if is_nan(normal.x) {
-        var state = sim_info.timestep;
-        state |= PARTICLE_STOPPED;
-        particles_state[particleId] = state;
-        atomicAdd(&atomic_values.stopped_particles, 1u);
-        sim_info.flags |= SIM_INFO_PARTICLE_OUT_OF_DEM_DATA;
+        stop_outside_dem(particleId);
         return;
     }
 
-    // 3D APIC gather; the shared xy gather is inlined here because the
-    // z component uses the same stencil and weights
+    let update = transfer_g2p(particleId);
+    if update_rest_state(particleId, length(update.velocity)) {
+        particles_velocity[particleId] = vec2f(0.0);
+        particles_affine_matrix[particleId] = mat2x2<f32>(vec2f(0.0), vec2f(0.0));
+        return;
+    }
+
+    let velocity = surface_to_tangent(update.velocity, normal);
+    let v_prev = surface_to_tangent(particles_velocity[particleId], normal);
+    let position = advance_on_bed(particleId, position_xy, uv, normal, v_prev, velocity);
+    let normal_new = get_normal(position_to_uv(position.xy));
+    // outside the DEM data the next step flags the particle
+    let new_velocity = select(velocity, tangent_project(velocity, normal_new), is_finite(normal_new.z));
+    let surface_velocity = select(update.velocity, tangent_to_surface(new_velocity, normal_new), is_finite(normal_new.z));
+    particles_velocity[particleId] = surface_velocity;
+    // The gather uses particle-minus-node offsets; C uses node-minus-particle.
+    particles_affine_matrix[particleId] = update.affine_matrix * -1.0;
+
+    if particleId == sim_info.number_particles / 2u {
+        record_output(position, new_velocity, normal_new, uv);
+    }
+    stop_if_invalid(particleId, position, surface_velocity.x);
+}
+
+// 3D APIC: the velocity is carried as a vector tangent to the bed and rotated
+// into the tangent plane at the new position.
+@compute @workgroup_size(WG_SIZE_1D, 1, 1)
+fn g2p_3d(@builtin(global_invocation_id) pId: vec3<u32>) {
+    let particleId = pId.x;
+    if particle_is_inactive(particleId) {
+        return;
+    }
+    let position_xy = particles_position[particleId];
+    let uv = position_to_uv(position_xy);
+    let normal = get_normal(uv);
+    if is_nan(normal.x) {
+        stop_outside_dem(particleId);
+        clear_z(particleId);
+        return;
+    }
+
+    // the shared xy gather is inlined here because the z component uses the
+    // same stencil and weights
     let grid_pos = position_xy / sim_settings.cell_size - vec2f(0.5);
     let base_node = vec2u(floor(grid_pos - vec2f(0.5)));
     var interpolated_velocity_xy = vec2f(0.0);
@@ -93,23 +125,18 @@ fn g2p_terrain_following(
         }
     }
     let interpolated_velocity = vec3f(interpolated_velocity_xy, interpolated_velocity_z);
-    let v_prev = vec3f(particles_velocity[particleId], particles_velocity_z[particleId]);
-    let dt = sim_info.dt;
+    if update_rest_state(particleId, length(interpolated_velocity)) {
+        particles_velocity[particleId] = vec2f(0.0);
+        particles_affine_matrix[particleId] = mat2x2<f32>(vec2f(0.0), vec2f(0.0));
+        clear_z(particleId);
+        return;
+    }
 
-    // reprojection: curvature-corrected arc step, snap onto the DEM, rotate
-    // the velocity into the tangent plane at the new position
-    let v_step = arc_step_velocity(v_prev, interpolated_velocity);
-    let kappa = normal.z * get_bed_curvature(uv, v_step);
-    var position = arc_step(vec3f(position_xy, particles_elevation[particleId]), v_step, normal, kappa, dt);
-    let uv_new = position_to_uv(position.xy);
-    let elevation = get_elevation(uv_new);
-    position.z = elevation;
-    let normal_new = get_normal(uv_new);
+    let v_prev = vec3f(particles_velocity[particleId], particles_velocity_z[particleId]);
+    let position = advance_on_bed(particleId, position_xy, uv, normal, v_prev, interpolated_velocity);
+    let normal_new = get_normal(position_to_uv(position.xy));
     // outside the DEM data the next step flags the particle
     let new_velocity = select(interpolated_velocity, tangent_project_preserve_speed(interpolated_velocity, normal_new), is_finite(normal_new.z));
-
-    particles_position[particleId] = position.xy;
-    particles_elevation[particleId] = elevation;
     particles_velocity[particleId] = new_velocity.xy;
     particles_velocity_z[particleId] = new_velocity.z;
 
@@ -118,62 +145,103 @@ fn g2p_terrain_following(
     particles_affine_z[particleId] = affine_z * -1.0;
 
     if particleId == sim_info.number_particles / 2u {
-        var current: TimestepData;
-        current.position = position;
-        current.velocity = new_velocity;
-        current.uv = uv;
-        current.dt = dt;
-        current.acceleration_tangential = vec3f(0.0);
-        current.acceleration_friction_magnitude = 0.0;
-        current.elevation = elevation;
-        current.normal = normal_new;
-        current.g_eff = 0.0;
-        current.acceleration_normal = vec3f(0.0);
-        current._pad1 = 0.0;
-        current._pad2 = vec2f(0.0);
-        update_output_data(0u, sim_info.timestep - 1, current);
+        record_output(position, new_velocity, normal_new, uv);
     }
-    if particleId == sim_info.number_particles / 2u {
-        out_debug[0] = f32(position.x);
-        out_debug[1] = f32(position.y);
-        out_debug[2] = f32(uv.x);
-        out_debug[3] = f32(uv.y);
-        out_debug[5] = f32(sim_info.timestep);
-        out_debug[6] = f32(sim_info.number_particles);
-        out_debug[7] = f32(sim_settings.released_particles_per_cell);
-        out_debug[8] = f32(sim_settings.grid_shape.x);
-        out_debug[9] = f32(sim_settings.grid_shape.y);
-        out_debug[10] = f32(sim_settings.world_size.x);
-        out_debug[11] = f32(sim_settings.world_size.y);
-        out_debug[12] = f32(sim_settings.friction_coefficient);
+    if stop_if_invalid(particleId, position, new_velocity.x) {
+        clear_z(particleId);
     }
+}
 
-    if length(interpolated_velocity) < sim_settings.velocity_threshold {
-        var state = sim_info.timestep;
-        state |= PARTICLE_STOPPED;
-        particles_state[particleId] = state;
-        atomicAdd(&atomic_values.stopped_particles, 1u);
-        return;
-    }
+fn clear_z(particleId: u32) {
+    particles_velocity_z[particleId] = 0.0;
+    particles_affine_z[particleId] = vec2f(0.0);
+}
 
+fn particle_is_inactive(particleId: u32) -> bool {
+    return particleId >= sim_info.number_particles
+        || (sim_info.flags & SIM_INFO_STOPPED) != 0u
+        || (particles_state[particleId] & PARTICLE_STOPPED) != 0u;
+}
+
+// Stopped particles keep depositing mass, but no stale momentum.
+fn stop_particle(particleId: u32, state_flags: u32) {
+    particles_state[particleId] = sim_info.timestep | PARTICLE_STOPPED | state_flags;
+    particles_velocity[particleId] = vec2f(0.0);
+    particles_affine_matrix[particleId] = mat2x2<f32>(vec2f(0.0), vec2f(0.0));
+    atomicAdd(&atomic_values.stopped_particles, 1u);
+}
+
+fn stop_outside_dem(particleId: u32) {
+    stop_particle(particleId, 0u);
+    sim_info.flags |= SIM_INFO_PARTICLE_OUT_OF_DEM_DATA;
+}
+
+// Returns whether the particle rests after this step.
+fn update_rest_state(particleId: u32, speed: f32) -> bool {
+    let state = next_rest_state(particles_state[particleId], speed, sim_info.timestep);
+    particles_state[particleId] = state;
+    let resting = (state & PARTICLE_RESTING) != 0u;
+    if resting {
+        atomicAdd(&atomic_values.resting_particles, 1u);
+    }
+    return resting;
+}
+
+// Curvature-corrected arc step, snapped onto the DEM.
+fn advance_on_bed(particleId: u32, position_xy: vec2f, uv: vec2f, normal: vec3f, v_prev: vec3f, velocity: vec3f) -> vec3f {
+    let dt = sim_info.dt;
+    let v_step = arc_step_velocity(v_prev, velocity);
+    let kappa = normal.z * get_bed_curvature(uv, v_step);
+    var position = arc_step(vec3f(position_xy, particles_elevation[particleId]), v_step, normal, kappa, dt);
+    let elevation = get_elevation(position_to_uv(position.xy));
+    position.z = elevation;
+    particles_position[particleId] = position.xy;
+    particles_elevation[particleId] = elevation;
+    return position;
+}
+
+fn record_output(position: vec3f, velocity: vec3f, normal: vec3f, uv: vec2f) {
+    var current: TimestepData;
+    current.position = position;
+    current.velocity = velocity;
+    current.uv = uv;
+    current.dt = sim_info.dt;
+    current.acceleration_tangential = vec3f(0.0);
+    current.acceleration_friction_magnitude = 0.0;
+    current.elevation = position.z;
+    current.normal = normal;
+    current.g_eff = 0.0;
+    current.acceleration_normal = vec3f(0.0);
+    current._pad1 = 0.0;
+    current._pad2 = vec2f(0.0);
+    update_output_data(0u, sim_info.timestep - 1, current);
+
+    out_debug[0] = f32(position.x);
+    out_debug[1] = f32(position.y);
+    out_debug[2] = f32(uv.x);
+    out_debug[3] = f32(uv.y);
+    out_debug[5] = f32(sim_info.timestep);
+    out_debug[6] = f32(sim_info.number_particles);
+    out_debug[7] = f32(sim_settings.released_particles_per_cell);
+    out_debug[8] = f32(sim_settings.grid_shape.x);
+    out_debug[9] = f32(sim_settings.grid_shape.y);
+    out_debug[10] = f32(sim_settings.world_size.x);
+    out_debug[11] = f32(sim_settings.world_size.y);
+    out_debug[12] = f32(sim_settings.friction_coefficient);
+}
+
+// Stops particles that became invalid or left the grid; returns whether it did.
+fn stop_if_invalid(particleId: u32, position: vec3f, velocity_x: f32) -> bool {
     if is_nan(position.x) {
-        var state = sim_info.timestep;
-        state |= PARTICLE_STOPPED;
-        state |= PARTICLE_OUT_OF_DEM_DATA;
-        particles_state[particleId] = state;
-        atomicAdd(&atomic_values.stopped_particles, 1u);
+        stop_particle(particleId, PARTICLE_OUT_OF_DEM_DATA);
         sim_info.flags |= SIM_INFO_IS_NAN;
         sim_info.flags |= SIM_INFO_PARTICLE_OUT_OF_DEM_DATA;
-        return;
+        return true;
     }
-    if is_nan(new_velocity.x) {
-        var state = sim_info.timestep;
-        state |= PARTICLE_STOPPED;
-        state |= PARTICLE_OUT_OF_DEM_DATA;
-        particles_state[particleId] = state;
-        atomicAdd(&atomic_values.stopped_particles, 1u);
+    if is_nan(velocity_x) {
+        stop_particle(particleId, PARTICLE_OUT_OF_DEM_DATA);
         sim_info.flags |= SIM_INFO_IS_NAN;
-        return;
+        return true;
     }
 
     // we leave a two cell boundary
@@ -181,14 +249,11 @@ fn g2p_terrain_following(
         || position.x > sim_settings.world_size.x - 2.0 * sim_settings.cell_size
         || position.y < 2.0 * sim_settings.cell_size
         || position.y > sim_settings.world_size.y - 2.0 * sim_settings.cell_size {
-        var state = sim_info.timestep;
-        state |= PARTICLE_STOPPED;
-        state |= PARTICLE_OUT_OF_BOUNDS;
-        particles_state[particleId] = state;
-        atomicAdd(&atomic_values.stopped_particles, 1u);
+        stop_particle(particleId, PARTICLE_OUT_OF_BOUNDS);
         sim_info.flags |= SIM_INFO_OUT_OF_BOUNDS;
-        return;
+        return true;
     }
+    return false;
 }
 
 // bed curvature d^T H d along the horizontal part of the unit velocity
@@ -213,6 +278,33 @@ fn update_output_data(trajectory: u32, timestep: u32, timestep_data: TimestepDat
     out_timestep_data[timestep].trajectories[trajectory] = timestep_data;
 }
 
+// import transfer_g2p_affine.wgsl;
+// BEGIN transfer_g2p_affine.wgsl
+fn transfer_g2p(p_idx: u32) -> G2PUpdate {
+    let grid_pos = particles_position[p_idx] / sim_settings.cell_size - vec2f(0.5);
+    let base_node = vec2u(floor(grid_pos - vec2f(0.5)));
+    
+    var interpolated_velocity = vec2f(0.0);
+    var new_affine_matrix = mat2x2<f32>(vec2<f32>(0.0), vec2<f32>(0.0));
+
+    for (var i: u32 = 0; i < 3; i++) {
+        for (var j: u32 = 0; j < 3; j++) {
+            let node_coords = base_node + vec2u(i, j);
+            let distance = calculate_distance_to_node(grid_pos, node_coords);
+            let weight = calculate_weight(distance);
+            let idx = xy_to_idx(node_coords);
+            let grid_vel = grid_velocity[idx];
+            interpolated_velocity += weight * grid_vel;
+            new_affine_matrix += 4.0 * weight * mat2x2<f32>(
+                grid_vel * distance.x,
+                grid_vel * distance.y
+            );
+        }
+    }
+    return G2PUpdate(interpolated_velocity, new_affine_matrix);
+}
+
+// END transfer_g2p_affine.wgsl
 // import cartesian_geometry.wgsl;
 // BEGIN cartesian_geometry.wgsl
 // Cartesian surface geometry for the terrain-following models.
@@ -220,6 +312,20 @@ fn update_output_data(trajectory: u32, timestep: u32, timestep_data: TimestepDat
 // tangent to the bed z = B(x, y) with unit normal n = (-grad(B), 1) / J.
 // Hessian components are passed as (B_xx, B_xy, B_yy), the layout written by
 // analyze_terrain.wgsl into the curvature texture.
+
+// The terrain-following model stores velocities in the surface plane: the 3D
+// tangent velocity rotated into the horizontal plane by the rotation that takes
+// the bed normal to z. Unlike the horizontal projection this keeps the magnitude,
+// so length(v2) is the true speed, and the map is linear on any plane, so grid
+// averages and APIC stay exact there. The components are not dx/dt.
+fn surface_to_tangent(v2: vec2f, n: vec3f) -> vec3f {
+    let along_slope = dot(n.xy, v2);
+    return vec3f(v2 - along_slope / (1.0 + n.z) * n.xy, -along_slope);
+}
+
+fn tangent_to_surface(v3: vec3f, n: vec3f) -> vec2f {
+    return v3.xy - v3.z / (1.0 + n.z) * n.xy;
+}
 
 // Removes the bed-normal component.
 fn tangent_project(v: vec3f, n: vec3f) -> vec3f {
@@ -337,6 +443,8 @@ const SIM_INFO_LOW_MOMENTUM: u32 = 1u << 27u;
 // reversible low-speed state; the low bits hold the rest start step while resting
 // and the consecutive slow-step count while moving
 const PARTICLE_RESTING: u32 = 1u << 26u;
+// consecutive slow steps before a particle rests
+const REST_STEPS: u32 = 20u;
 const PARTICLE_FLYING: u32 = 1u << 27u;
 const PARTICLE_OUT_OF_BOUNDS: u32 = 1u << 28u;
 const PARTICLE_IS_NAN: u32 = 1u << 29u;
@@ -405,6 +513,34 @@ struct AtomicValues {
     // f32 bits of the largest total momentum so far
     peak_momentum: atomic<u32>,
 };
+
+// Reversible resting: a particle rests after REST_STEPS consecutive slow steps
+// and wakes once the gathered grid speed exceeds twice the threshold. Resting
+// particles keep depositing mass but no momentum and do not move, which removes
+// sub-threshold creep inside deposits. Returns the new state: its low bits hold
+// the slow-step counter while moving and the rest start step while resting.
+fn next_rest_state(previous_state: u32, speed: f32, timestep: u32) -> u32 {
+    let low_mask = PARTICLE_RESTING - 1u;
+    var resting = (previous_state & PARTICLE_RESTING) != 0u;
+    var low_bits = previous_state & low_mask;
+    if resting {
+        if speed > 2.0 * sim_settings.velocity_threshold {
+            resting = false;
+            low_bits = 0u;
+        }
+    } else if speed < sim_settings.velocity_threshold {
+        low_bits = min(low_bits + 1u, REST_STEPS);
+        if low_bits >= REST_STEPS {
+            resting = true;
+            low_bits = timestep & low_mask;
+        }
+    } else {
+        low_bits = 0u;
+    }
+    return (previous_state & ~(PARTICLE_RESTING | low_mask))
+        | select(0u, PARTICLE_RESTING, resting)
+        | low_bits;
+}
 
 struct G2PUpdate {
     velocity: vec2f,

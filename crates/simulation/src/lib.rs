@@ -1131,6 +1131,7 @@ impl Simulation {
             match self.settings.sim_model {
                 model
                     if model == SimModel::TerrainFollowing.as_int()
+                        || model == SimModel::ThreeD.as_int()
                         || model == SimModel::SlidingBlock.as_int() =>
                 {
                     self.orchestrator
@@ -1183,6 +1184,7 @@ impl Simulation {
             model if model == SimModel::TerrainFollowing.as_int() => {
                 self.orchestrator.step_terrain_following(steps).await?
             }
+            model if model == SimModel::ThreeD.as_int() => self.orchestrator.step_3d(steps).await?,
             model if model == SimModel::Curvilinear.as_int() => {
                 self.orchestrator.step_curvilinear(steps).await?
             }
@@ -2223,10 +2225,17 @@ impl Simulation {
     }
 
     /// Particle vertical velocities. Curvilinear velocities are reconstructed
-    /// tangent to the bed; MPMDAC still returns a synthetic zero component.
+    /// tangent to the bed; MPMDAC still returns a synthetic zero component. The
+    /// terrain-following model has no vertical velocity, asking for it is an error.
     pub async fn fetch_particles_velocity_z(&mut self) -> Result<&Vec<f32>> {
         if self.state < SimulationState::ParticlesInitialized {
             bail!("Simulation must be initialized before reading particles");
+        }
+        if self.settings.sim_model == SimModel::TerrainFollowing.as_int() {
+            bail!(
+                "The terrain-following model has no vertical velocity: particle velocities \
+                 are 2D vectors in the surface plane, use the 3d model for a z component"
+            );
         }
         if self.gpu_cache.particles_velocity_z.is_none() {
             self.gpu_cache.read_count += 1;
@@ -4351,9 +4360,19 @@ mod tests {
         // integer grid sums do not depend on the deposit order, so the
         // tile-sorted P2G must reproduce the direct P2G exactly; float atomics
         // do, and the sorted path quantizes per tile, so they only agree closely
+        for model in [
+            SimModel::Curvilinear,
+            SimModel::TerrainFollowing,
+            SimModel::ThreeD,
+        ] {
+            check_sorted_p2g_matches_direct_p2g(model);
+        }
+    }
+
+    fn check_sorted_p2g_matches_direct_p2g(model: SimModel) {
         let run = |sort_interval: u32| {
             let mut sim = setup_simple_sim(30.0, 5.0);
-            sim.settings.sim_model = SimModel::Curvilinear.as_int();
+            sim.settings.sim_model = model.as_int();
             sim.enable_particle_relaxation = false;
             sim.orchestrator.particle_sort_interval = sort_interval;
             sim.set_dem(&create_slope(40, 40, 5.0, 30.0), 40, 40, 5.0)
@@ -4413,6 +4432,79 @@ mod tests {
         assert_eq!(direct_positions.len(), sorted_positions.len());
         assert!(mass_error < 5e-3 * max_mass);
         assert!(centroid_error < 1e-2);
+    }
+
+    /// Wall time of a full run per grid model on one scenario. Run with
+    /// `cargo test -p simulation --release model_timing -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "benchmark"]
+    fn model_timing() {
+        // 3 km x 1 km bed flattening into a runout, with cross-slope undulation
+        const COLS: usize = 600;
+        const ROWS: usize = 200;
+        const CELL: f32 = 5.0;
+        let mut dem = vec![0.0; COLS * ROWS];
+        for row in 0..ROWS {
+            for col in 0..COLS {
+                let x = col as f32 * CELL;
+                let y = row as f32 * CELL;
+                let length = COLS as f32 * CELL;
+                dem[row * COLS + col] =
+                    0.85 * x * x / (2.0 * length) + 4.0 * (y / 60.0).sin() * (x / 300.0).cos();
+            }
+        }
+        let release_block = |rows: std::ops::Range<usize>, cols: std::ops::Range<usize>| {
+            let mut release = vec![0.0; COLS * ROWS];
+            for row in rows {
+                for col in cols.clone() {
+                    release[row * COLS + col] = 1.0;
+                }
+            }
+            release
+        };
+        let releases = [
+            release_block(80..120, 480..520),
+            release_block(40..160, 450..550),
+        ];
+
+        for (release, model) in releases.iter().flat_map(|release| {
+            [
+                SimModel::Curvilinear,
+                SimModel::TerrainFollowing,
+                SimModel::ThreeD,
+            ]
+            .map(|model| (release, model))
+        }) {
+            let mut best = f64::INFINITY;
+            let mut steps = 0;
+            let mut flags = SimInfoFlags::empty();
+            let mut particles = 0;
+            for _ in 0..3 {
+                let mut sim = block_on(Simulation::new()).expect("Failed to create Simulation");
+                let settings = Settings {
+                    sim_model: Some(model),
+                    ..Default::default()
+                };
+                block_on(sim.create(settings)).expect("Failed to create simulation");
+                sim.enable_particle_relaxation = false;
+                sim.set_dem(&dem, COLS, ROWS, CELL)
+                    .expect("Failed to set DEM");
+                sim.set_release_areas(release)
+                    .expect("Failed to set release");
+                block_on(sim.prepare()).expect("Failed to prepare");
+                let start = Instant::now();
+                block_on(sim.run()).expect("Failed to run");
+                best = best.min(start.elapsed().as_secs_f64());
+                let info = block_on(sim.fetch_sim_info()).expect("Failed to read sim info");
+                steps = info.timestep;
+                flags = info.parsed_flags();
+                particles = info.number_particles;
+            }
+            println!(
+                "{model}: {best:.2} s, {steps} steps, {:.3} ms/step, {particles} particles, {flags:?}",
+                best * 1e3 / steps as f64
+            );
+        }
     }
 
     #[test]
@@ -4663,9 +4755,19 @@ mod tests {
     #[test_log::test]
     fn test_momentum_stop_fraction_stops_decaying_flow() {
         // a block spreading on flat ground gains and then loses momentum
+        for model in [
+            SimModel::Curvilinear,
+            SimModel::TerrainFollowing,
+            SimModel::ThreeD,
+        ] {
+            check_momentum_stop_fraction(model);
+        }
+    }
+
+    fn check_momentum_stop_fraction(model: SimModel) {
         let run = |fraction: f32| {
             let mut sim = setup_simple_sim(0.0, 5.0);
-            sim.settings.sim_model = SimModel::Curvilinear.as_int();
+            sim.settings.sim_model = model.as_int();
             sim.settings.friction_coefficient = 0.05;
             sim.settings.momentum_stop_fraction = fraction;
             sim.settings.max_steps = 2000;
@@ -4999,10 +5101,52 @@ mod tests {
     }
 
     #[test_log::test]
-    fn test_terrain_following_velocity_is_tangent_to_bed() {
+    fn test_terrain_following_has_no_vertical_velocity() {
+        let mut sim = setup_restore_sim(SimModel::TerrainFollowing);
+        block_on(sim.prepare()).expect("Failed to prepare");
+        block_on(sim.run_n_steps(2)).expect("Failed to run");
+        let error = block_on(sim.fetch_particles_velocity_z())
+            .expect_err("terrain-following has no vertical velocity");
+        assert!(error.to_string().contains("no vertical velocity"));
+        assert!(
+            sim.orchestrator
+                .resources
+                .get_buffer(&BufferName::ParticlesVelocityZ)
+                .is_none()
+        );
+    }
+
+    #[test_log::test]
+    fn test_nodes_outside_the_flow_keep_zero_velocity() {
+        const N: usize = 40;
+        for model in [SimModel::TerrainFollowing, SimModel::ThreeD] {
+            let mut sim = setup_restore_sim(model);
+            block_on(sim.prepare()).expect("Failed to prepare");
+            block_on(sim.run_n_steps(10)).expect("Failed to run");
+            let mass: Vec<u32> = block_on(sim.orchestrator.read_buffer(BufferName::GridMass))
+                .expect("Failed to read grid mass");
+            let velocity: Vec<[f32; 2]> =
+                block_on(sim.orchestrator.read_buffer(BufferName::GridVelocity))
+                    .expect("Failed to read grid velocity");
+            let mut flowing = 0;
+            for y in 1..N - 1 {
+                for x in 1..N - 1 {
+                    let empty =
+                        (y - 1..=y + 1).all(|ny| (x - 1..=x + 1).all(|nx| mass[ny * N + nx] == 0));
+                    let moving = velocity[y * N + x] != [0.0, 0.0];
+                    assert!(!(empty && moving), "{model}: node ({x}, {y}) has no flow");
+                    flowing += usize::from(moving);
+                }
+            }
+            assert!(flowing > 0, "{model}: the flow must move");
+        }
+    }
+
+    #[test_log::test]
+    fn test_3d_velocity_is_tangent_to_bed() {
         let slope_angle: f32 = 40.0;
         let mut sim = setup_simple_sim(slope_angle, 3.0);
-        sim.settings.sim_model = SimModel::TerrainFollowing.as_int();
+        sim.settings.sim_model = SimModel::ThreeD.as_int();
         sim.set_dem(&create_slope(16, 16, 3.0, slope_angle), 16, 16, 3.0)
             .expect("Failed to set interior test DEM");
         let mut release = vec![0.0; 16 * 16];
@@ -5013,14 +5157,14 @@ mod tests {
         }
         sim.set_release_areas(&release)
             .expect("Failed to set interior release");
-        block_on(sim.prepare()).expect("Failed to prepare terrain-following simulation");
+        block_on(sim.prepare()).expect("Failed to prepare 3D simulation");
         let start_x: Vec<f32> = block_on(sim.fetch_particles_position())
             .expect("Failed to read positions")
             .iter()
             .map(|p| p[0])
             .collect();
 
-        block_on(sim.run_n_steps(5)).expect("Failed to advance terrain-following simulation");
+        block_on(sim.run_n_steps(5)).expect("Failed to advance 3D simulation");
         let velocity_z = block_on(sim.fetch_particles_velocity_z())
             .expect("Failed to fetch vertical velocity")
             .clone();

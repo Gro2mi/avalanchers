@@ -127,8 +127,8 @@ define_shaders! {
     G2P => "g2p",
     G2PMPMDAC => "g2p_mpmdac",
     P2G => "p2g",
-    P2GCurvilinear => "p2g" entry_point "p2g_curvilinear",
-    P2GCurvilinearSorted => "p2g_sorted" entry_point "p2g_curvilinear_sorted",
+    P2G2D => "p2g" entry_point "p2g_2d",
+    P2G2DSorted => "p2g_sorted" entry_point "p2g_2d_sorted",
     P2GWeakPressure => "p2g_weak_pressure",
     // the four particle sort kernels share one source file
     SortClearBins => "sort_particles" entry_point "sort_clear_bins",
@@ -139,9 +139,13 @@ define_shaders! {
     GridPhysicsCurvilinear => "grid_physics_curvilinear",
     GridPhysicsMPMDAC => "grid_physics_mpmdac",
     GridPhysics => "grid_physics",
-    P2GTerrainFollowing => "p2g" entry_point "p2g_terrain_following",
     GridPhysicsTerrainFollowing => "grid_physics_terrain_following",
     G2PTerrainFollowing => "g2p_terrain_following",
+    // the 3D model shares its physics with the terrain-following sources
+    P2G3D => "p2g" entry_point "p2g_3d",
+    P2G3DSorted => "p2g_sorted" entry_point "p2g_3d_sorted",
+    GridPhysics3D => "grid_physics_terrain_following" entry_point "grid_physics_3d",
+    G2P3D => "g2p_terrain_following" entry_point "g2p_3d",
     Friction => "friction",
     CurvilinearGeometry => "curvilinear_geometry",
     CartesianGeometry => "cartesian_geometry",
@@ -153,6 +157,7 @@ define_shaders! {
     TransferG2P => "transfer_g2p",
     TransferG2PAffine => "transfer_g2p_affine",
     TransferP2G => "transfer_p2g",
+    TransferP2GZ => "transfer_p2g_z",
     TestTransforms => "test_transforms",
     TestSampling => "test_sampling",
     TestFriction => "test_friction",
@@ -1991,11 +1996,11 @@ pub fn create_shader_configs(
         },
     ));
     shader_configs.insert(
-        ShaderName::P2GCurvilinear,
+        ShaderName::P2G2D,
         ComputeShaderConfig::new_with_constants(
             device,
-            ShaderName::P2GCurvilinear,
-            load_shader_source(ShaderName::P2GCurvilinear, has_float32_atomic),
+            ShaderName::P2G2D,
+            load_shader_source(ShaderName::P2G2D, has_float32_atomic),
             &curvilinear_p2g_bindings,
             &[("WG_SIZE_1D", max_compute_invocations_per_workgroup as f64)],
         )?,
@@ -2014,11 +2019,11 @@ pub fn create_shader_configs(
         storage_buffer(true),
     ));
     shader_configs.insert(
-        ShaderName::P2GCurvilinearSorted,
+        ShaderName::P2G2DSorted,
         ComputeShaderConfig::new(
             device,
-            ShaderName::P2GCurvilinearSorted,
-            load_shader_source(ShaderName::P2GCurvilinearSorted, has_float32_atomic),
+            ShaderName::P2G2DSorted,
+            load_shader_source(ShaderName::P2G2DSorted, has_float32_atomic),
             &sorted_p2g_bindings,
         )?,
     );
@@ -2368,8 +2373,9 @@ pub fn create_shader_configs(
             ],
         )?,
     );
-    // the terrain-following (Cartesian) model reuses the curvilinear binding
-    // layouts and appends its z-component buffers
+    // the terrain-following model reuses the curvilinear binding layouts; the 3D
+    // model appends its z-component buffers, so its z-only bindings come last in
+    // the sources the two models share
     let existing_bindings = |shader: ShaderName| -> Vec<(String, BindingType)> {
         let config = shader_configs
             .get(&shader)
@@ -2386,8 +2392,8 @@ pub fn create_shader_configs(
         has_dynamic_offset: false,
         min_binding_size: None,
     };
-    let mut terrain_following_p2g_bindings = existing_bindings(ShaderName::P2GCurvilinear);
-    terrain_following_p2g_bindings.extend([
+    let mut three_d_p2g_bindings = existing_bindings(ShaderName::P2G2D);
+    three_d_p2g_bindings.extend([
         // Binding 8:
         (
             BufferName::ParticlesVelocityZ.to_string(),
@@ -2401,48 +2407,63 @@ pub fn create_shader_configs(
             storage_buffer(true),
         ),
     ]);
+    let mut three_d_sorted_p2g_bindings = existing_bindings(ShaderName::P2G2DSorted);
+    three_d_sorted_p2g_bindings.extend([
+        // Binding 9:
+        (
+            BufferName::ParticlesVelocityZ.to_string(),
+            storage_buffer(true),
+        ),
+        // Binding 10:
+        (BufferName::GridMomentumZ.to_string(), storage_buffer(false)),
+        // Binding 11:
+        (
+            BufferName::ParticlesAffineZ.to_string(),
+            storage_buffer(true),
+        ),
+    ]);
     let mut terrain_following_grid_physics_bindings =
         existing_bindings(ShaderName::GridPhysicsCurvilinear);
     // binding 12 (weak-form pressure) is curvilinear only
     terrain_following_grid_physics_bindings
         .retain(|(name, _)| *name != BufferName::GridForces.to_string());
-    terrain_following_grid_physics_bindings.extend([
+    let mut three_d_grid_physics_bindings = terrain_following_grid_physics_bindings.clone();
+    three_d_grid_physics_bindings.extend([
         // Binding 12:
         (BufferName::GridMomentumZ.to_string(), storage_buffer(true)),
         // Binding 13:
         (BufferName::GridVelocityZ.to_string(), storage_buffer(false)),
     ]);
     let mut terrain_following_g2p_bindings = existing_bindings(ShaderName::G2P);
-    terrain_following_g2p_bindings.extend([
+    // the curvilinear binding 14 is the z velocity, which this model does not have
+    terrain_following_g2p_bindings
+        .retain(|(name, _)| *name != BufferName::ParticlesVelocityZ.to_string());
+    // Binding 14:
+    terrain_following_g2p_bindings.push((
+        TextureName::Curvature.to_string(),
+        BindingType::Texture {
+            multisampled: false,
+            view_dimension: wgpu::TextureViewDimension::D2,
+            sample_type: wgpu::TextureSampleType::Float {
+                filterable: has_float32_filterable,
+            },
+        },
+    ));
+    let mut three_d_g2p_bindings = terrain_following_g2p_bindings.clone();
+    three_d_g2p_bindings.extend([
         // Binding 15:
-        (BufferName::GridVelocityZ.to_string(), storage_buffer(true)),
+        (
+            BufferName::ParticlesVelocityZ.to_string(),
+            storage_buffer(false),
+        ),
         // Binding 16:
+        (BufferName::GridVelocityZ.to_string(), storage_buffer(true)),
+        // Binding 17:
         (
             BufferName::ParticlesAffineZ.to_string(),
             storage_buffer(false),
         ),
-        // Binding 17:
-        (
-            TextureName::Curvature.to_string(),
-            BindingType::Texture {
-                multisampled: false,
-                view_dimension: wgpu::TextureViewDimension::D2,
-                sample_type: wgpu::TextureSampleType::Float {
-                    filterable: has_float32_filterable,
-                },
-            },
-        ),
     ]);
-    shader_configs.insert(
-        ShaderName::P2GTerrainFollowing,
-        ComputeShaderConfig::new_with_constants(
-            device,
-            ShaderName::P2GTerrainFollowing,
-            load_shader_source(ShaderName::P2GTerrainFollowing, has_float32_atomic),
-            &terrain_following_p2g_bindings,
-            &[("WG_SIZE_1D", max_compute_invocations_per_workgroup as f64)],
-        )?,
-    );
     shader_configs.insert(
         ShaderName::GridPhysicsTerrainFollowing,
         ComputeShaderConfig::new(
@@ -2459,6 +2480,44 @@ pub fn create_shader_configs(
             ShaderName::G2PTerrainFollowing,
             load_shader_source(ShaderName::G2PTerrainFollowing, has_float32_atomic),
             &terrain_following_g2p_bindings,
+            &[("WG_SIZE_1D", max_compute_invocations_per_workgroup as f64)],
+        )?,
+    );
+    shader_configs.insert(
+        ShaderName::P2G3D,
+        ComputeShaderConfig::new_with_constants(
+            device,
+            ShaderName::P2G3D,
+            load_shader_source(ShaderName::P2G3D, has_float32_atomic),
+            &three_d_p2g_bindings,
+            &[("WG_SIZE_1D", max_compute_invocations_per_workgroup as f64)],
+        )?,
+    );
+    shader_configs.insert(
+        ShaderName::P2G3DSorted,
+        ComputeShaderConfig::new(
+            device,
+            ShaderName::P2G3DSorted,
+            load_shader_source(ShaderName::P2G3DSorted, has_float32_atomic),
+            &three_d_sorted_p2g_bindings,
+        )?,
+    );
+    shader_configs.insert(
+        ShaderName::GridPhysics3D,
+        ComputeShaderConfig::new(
+            device,
+            ShaderName::GridPhysics3D,
+            load_shader_source(ShaderName::GridPhysics3D, has_float32_atomic),
+            &three_d_grid_physics_bindings,
+        )?,
+    );
+    shader_configs.insert(
+        ShaderName::G2P3D,
+        ComputeShaderConfig::new_with_constants(
+            device,
+            ShaderName::G2P3D,
+            load_shader_source(ShaderName::G2P3D, has_float32_atomic),
+            &three_d_g2p_bindings,
             &[("WG_SIZE_1D", max_compute_invocations_per_workgroup as f64)],
         )?,
     );
@@ -3162,6 +3221,57 @@ mod tests {
         source
     }
 
+    /// Bytes of workgroup memory each entry point of a shader statically uses.
+    fn workgroup_memory(shader: ShaderName) -> Vec<(String, u32)> {
+        let source = load_shader_source(shader, false);
+        let module = naga::front::wgsl::parse_str(source).expect("shader must parse");
+        let info = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .expect("shader must validate");
+        module
+            .entry_points
+            .iter()
+            .enumerate()
+            .map(|(index, entry_point)| {
+                let bytes = module
+                    .global_variables
+                    .iter()
+                    .filter(|(handle, variable)| {
+                        variable.space == naga::AddressSpace::WorkGroup
+                            && !info.get_entry_point(index)[*handle].is_empty()
+                    })
+                    .map(|(_, variable)| module.types[variable.ty].inner.size(module.to_ctx()))
+                    .sum();
+                (entry_point.name.clone(), bytes)
+            })
+            .collect()
+    }
+
+    // browsers only guarantee this much, and only pipeline creation checks it
+    #[test]
+    fn workgroup_memory_stays_within_the_webgpu_default() {
+        const WEBGPU_DEFAULT: u32 = 16384;
+        for &shader in ShaderName::ALL {
+            let source = load_shader_source(shader, false);
+            if !source.contains("@compute") || shader.source_file().starts_with("test_") {
+                continue;
+            }
+            for (entry_point, bytes) in workgroup_memory(shader) {
+                assert!(
+                    bytes <= WEBGPU_DEFAULT,
+                    "{entry_point} uses {bytes} bytes of workgroup memory"
+                );
+            }
+        }
+        // four 31 x 31 tiles of 4 bytes plus the box variables
+        let sorted = workgroup_memory(ShaderName::P2G3DSorted);
+        let bytes = sorted.iter().find(|(name, _)| name == "p2g_3d_sorted");
+        assert_eq!(bytes.map(|(_, bytes)| *bytes), Some(4 * 31 * 31 * 4 + 32));
+    }
+
     #[test]
     fn restore_line_endings_keeps_the_endings_of_the_original() {
         assert_eq!(restore_line_endings("a\nb\n", "x\ny\n"), "a\nb\n");
@@ -3171,8 +3281,10 @@ mod tests {
     #[test]
     fn p2g_shaders_validate_with_integer_and_float_atomics() {
         for shader in [
-            ShaderName::P2GCurvilinear,
-            ShaderName::P2GCurvilinearSorted,
+            ShaderName::P2G2D,
+            ShaderName::P2G2DSorted,
+            ShaderName::P2G3D,
+            ShaderName::P2G3DSorted,
             ShaderName::P2GWeakPressure,
         ] {
             for has_float32_atomic in [false, true] {
@@ -3191,6 +3303,7 @@ mod tests {
             ShaderName::AnalyzeTerrainCurvilinear,
             ShaderName::GridPhysicsCurvilinear,
             ShaderName::GridPhysicsTerrainFollowing,
+            ShaderName::GridPhysics3D,
             ShaderName::GridPhysics,
         ] {
             for has_float32_atomic in [false, true] {

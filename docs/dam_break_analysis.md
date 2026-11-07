@@ -19,7 +19,7 @@ No solver changes were made during this analysis.
 In [G2P](../crates/compute_core/src/shaders/g2p.wgsl), a particle whose
 interpolated speed is below `velocity_threshold` is marked `PARTICLE_STOPPED`.
 Subsequent steps skip its motion, but
-[P2G](../crates/compute_core/src/shaders/p2g.wgsl) (`p2g_curvilinear`) still
+[P2G](../crates/compute_core/src/shaders/p2g.wgsl) (`p2g_2d`) still
 deposits its mass and stored momentum every step.
 
 Controlled runs (default settings, ≈20 s):

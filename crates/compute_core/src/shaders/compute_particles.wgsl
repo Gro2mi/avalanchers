@@ -345,6 +345,20 @@ fn get_curvature(uv: vec2f) -> vec3f {
 // Hessian components are passed as (B_xx, B_xy, B_yy), the layout written by
 // analyze_terrain.wgsl into the curvature texture.
 
+// The terrain-following model stores velocities in the surface plane: the 3D
+// tangent velocity rotated into the horizontal plane by the rotation that takes
+// the bed normal to z. Unlike the horizontal projection this keeps the magnitude,
+// so length(v2) is the true speed, and the map is linear on any plane, so grid
+// averages and APIC stay exact there. The components are not dx/dt.
+fn surface_to_tangent(v2: vec2f, n: vec3f) -> vec3f {
+    let along_slope = dot(n.xy, v2);
+    return vec3f(v2 - along_slope / (1.0 + n.z) * n.xy, -along_slope);
+}
+
+fn tangent_to_surface(v3: vec3f, n: vec3f) -> vec2f {
+    return v3.xy - v3.z / (1.0 + n.z) * n.xy;
+}
+
 // Removes the bed-normal component.
 fn tangent_project(v: vec3f, n: vec3f) -> vec3f {
     return v - dot(v, n) * n;
@@ -565,6 +579,8 @@ const SIM_INFO_LOW_MOMENTUM: u32 = 1u << 27u;
 // reversible low-speed state; the low bits hold the rest start step while resting
 // and the consecutive slow-step count while moving
 const PARTICLE_RESTING: u32 = 1u << 26u;
+// consecutive slow steps before a particle rests
+const REST_STEPS: u32 = 20u;
 const PARTICLE_FLYING: u32 = 1u << 27u;
 const PARTICLE_OUT_OF_BOUNDS: u32 = 1u << 28u;
 const PARTICLE_IS_NAN: u32 = 1u << 29u;
@@ -633,6 +649,34 @@ struct AtomicValues {
     // f32 bits of the largest total momentum so far
     peak_momentum: atomic<u32>,
 };
+
+// Reversible resting: a particle rests after REST_STEPS consecutive slow steps
+// and wakes once the gathered grid speed exceeds twice the threshold. Resting
+// particles keep depositing mass but no momentum and do not move, which removes
+// sub-threshold creep inside deposits. Returns the new state: its low bits hold
+// the slow-step counter while moving and the rest start step while resting.
+fn next_rest_state(previous_state: u32, speed: f32, timestep: u32) -> u32 {
+    let low_mask = PARTICLE_RESTING - 1u;
+    var resting = (previous_state & PARTICLE_RESTING) != 0u;
+    var low_bits = previous_state & low_mask;
+    if resting {
+        if speed > 2.0 * sim_settings.velocity_threshold {
+            resting = false;
+            low_bits = 0u;
+        }
+    } else if speed < sim_settings.velocity_threshold {
+        low_bits = min(low_bits + 1u, REST_STEPS);
+        if low_bits >= REST_STEPS {
+            resting = true;
+            low_bits = timestep & low_mask;
+        }
+    } else {
+        low_bits = 0u;
+    }
+    return (previous_state & ~(PARTICLE_RESTING | low_mask))
+        | select(0u, PARTICLE_RESTING, resting)
+        | low_bits;
+}
 
 struct G2PUpdate {
     velocity: vec2f,

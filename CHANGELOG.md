@@ -34,22 +34,29 @@ All notable changes to this project might be documented in this file.
   If set, it replaces the thickness of every release cell, with a warning for sources that have
   their own; rasters and arrays used to ignore it. It must be above 0.01 m. Result stores keep it
   as `release_thickness`, NaN if unset.
-- `terrain-following` (model 0) is now a depth-averaged grid MPM like the curvilinear
-  model, formulated in 3D Cartesian coordinates: 3D APIC transfer, gravity, hydrostatic
-  pressure and basal friction on the grid with bed-normal projection; particles keep the
-  curvature-corrected arc step and snap onto the DEM.
+- **Breaking:** `terrain-following` (model 0) is now a depth-averaged grid MPM like the
+  curvilinear model, with gravity, hydrostatic pressure and basal friction on the grid and the
+  curvature-corrected arc step on the particles, which snap onto the DEM. Velocities stay in the
+  surface plane and are transferred as 2D vectors: the tangent velocity rotated into the horizontal
+  plane, so their magnitude is the true speed but their components are not `dx/dt`. There is no z
+  velocity: `fetch_particles_velocity_z` returns an error and Python `particles_velocity` is
+  `(n, 2)` for this model. It runs about as fast as the curvilinear model.
 - The particle arc step no longer adds the displacement twice per step.
-- Curvilinear: basal friction now also acts below `velocity_threshold`, so Coulomb friction
-  holds material at rest while the driving force is below yield, independent of the timestep.
-- Curvilinear: slow particles no longer freeze permanently. They rest after 20 consecutive
-  steps below `velocity_threshold` and are reactivated once the grid speed exceeds twice the
-  threshold. Resting particles keep depositing mass but do not move.
-- Curvilinear: the simulation also stops (`AT_REST` flag) once 99% of the particles rest or
-  are stopped. The 40-step no-new-cells criterion is unchanged.
-- Curvilinear: the CFL timestep follows the current maximum of `v + sqrt(g h)` instead of the
-  run's all-time maximum, so dt grows again once the flow slows down.
-- Curvilinear: the CFL wave speed uses the bed-normal gravity `g cos(theta)` instead of `g`.
-- Curvilinear: grid nodes whose 3x3 neighbourhood holds no mass skip the grid update.
+- Curvilinear, terrain-following, 3D: basal friction now also acts below `velocity_threshold`, so
+  Coulomb friction holds material at rest while the driving force is below yield, independent of
+  the timestep.
+- Curvilinear, terrain-following, 3D: slow particles no longer freeze permanently. They rest after
+  20 consecutive steps below `velocity_threshold` and are reactivated once the grid speed exceeds
+  twice the threshold. Resting particles keep depositing mass but do not move.
+- Curvilinear, terrain-following, 3D: the simulation also stops (`AT_REST` flag) once 99% of the
+  particles rest or are stopped. The 40-step no-new-cells criterion is unchanged.
+- Curvilinear, terrain-following, 3D: the CFL timestep follows the current maximum of
+  `v + sqrt(g h)` instead of the run's all-time maximum, so dt grows again once the flow slows down.
+- Curvilinear, terrain-following, 3D: the CFL wave speed uses the bed-normal gravity `g cos(theta)`
+  instead of `g`.
+- Curvilinear, terrain-following, 3D: grid nodes whose 3x3 neighbourhood holds no mass skip the
+  grid update.
+- Terrain-following, 3D: particles stopped for good no longer deposit their last velocity.
 - P2G skips atomic adds of zero momentum, which removes most atomics of resting particles.
 - Default `batch_compute_steps` is 50 (was 200).
 - Default `cfl` is 0.9 (was 0.5).
@@ -123,13 +130,15 @@ All notable changes to this project might be documented in this file.
 - `run()` no longer repeats terrain analysis, release areas and particle seeding when the
   particles are already initialized (after `prepare()` or `restore_initial_state()`).
 - `sliding-block` (model 3): the previous per-particle terrain-following model.
+- `3d` (model 4): the terrain-following model with a full 3D Cartesian velocity through P2G and G2P.
+  Slower than `terrain-following` but keeps the z velocity and affine state on the particles.
 - Optional particle elevation jitter in the renderer (live viewer key `J`).
-- `particle_sort_interval` (CLI `--particle-sort-interval`, default 25): curvilinear P2G over
-  particles sorted by 8x8-cell tiles, accumulating each workgroup in shared memory before the
+- `particle_sort_interval` (CLI `--particle-sort-interval`, default 25): curvilinear,
+  terrain-following and 3D P2G over particles sorted by 8x8-cell tiles, accumulating each workgroup in shared memory before the
   global atomics; 0 disables it. Results are identical to the direct P2G on the integer-atomic
   grid; on the float-atomic grid the shared sums keep the integer quantization.
-- `momentum_stop_fraction` (CLI `--momentum-stop-fraction`, default 0 = off): stops a curvilinear
-  run once the total grid momentum falls below this fraction of its peak (flag `LOW_MOMENTUM`).
+- `momentum_stop_fraction` (CLI `--momentum-stop-fraction`, default 0 = off): stops a curvilinear,
+  terrain-following or 3D run once the total grid momentum falls below this fraction of its peak (flag `LOW_MOMENTUM`).
 - `reference_surface_length` (CLI `--reference-surface-length`, default 0 = off): curvilinear
   gully confinement. Bed inclined by beta against a Gaussian-smoothed reference surface of this
   width counts as a gully wall: the snow beside it presses it with its lateral stress, so the

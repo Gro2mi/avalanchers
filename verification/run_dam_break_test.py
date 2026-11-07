@@ -153,13 +153,15 @@ def build_geometry(sim, header, frame):
     }
 
 
-def sample_fields(sim, dem, header, frame, density):
+def sample_fields(sim, dem, header, frame, density, sim_model):
     """One field sample decoded from the grid mass/momentum buffers."""
     import dam_break_test
+    from similarity_solution_test import SURFACE_VELOCITY_MODELS
 
     jac = dam_break_test.jacobian(dem["rasterData"], header["cellsize"])
     h, u, v, mass = dam_break_test.fields_from_grid(
-        sim, dem["rasterData"].shape, header["cellsize"], density, jac, frame=frame)
+        sim, dem["rasterData"].shape, header["cellsize"], density, jac, frame=frame,
+        surface_velocity=sim_model.lower() in SURFACE_VELOCITY_MODELS)
     return {"h": h, "u": u, "v": v}, mass
 
 
@@ -238,7 +240,8 @@ def run_simulation(settings, cfg):
         """Sample the fields, compare to the analytic solution, append."""
         nonlocal running_peak
         t = info.grid_elapsed_time
-        sample, mass = sample_fields(sim, dem, header, frame, density)
+        sample, mass = sample_fields(sim, dem, header, frame, density,
+                                     settings["sim_model"])
         if check_consistency:
             dam_break_test.check_grid_mass_consistency(
                 sim, mass, np.asarray(sim.particles_mass, dtype=np.float64))

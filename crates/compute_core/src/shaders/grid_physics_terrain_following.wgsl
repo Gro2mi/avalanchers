@@ -13,49 +13,107 @@
 @group(0) @binding(9) var<storage, read_write> grid_velocity: array<vec2f>;
 @group(0) @binding(10) var<storage, read_write> grid_peak_velocity: array<f32>;
 // binding 11 (basal topography) is shared with the curvilinear layout, unused here
+// z components of the 3D model; the terrain-following layout ends at binding 11
 @group(0) @binding(12) var<storage> grid_momentum_z_atomic: array<i32>; // no_atomic_float
 // atomic_float @group(0) @binding(12) var<storage> grid_momentum_z_atomic: array<f32>;
 @group(0) @binding(13) var<storage, read_write> grid_velocity_z: array<f32>;
 
-// Cartesian counterpart of grid_physics_curvilinear: the node velocity is a
-// 3D vector tangent to the bed, forces are projected with the bed normal.
+// Cartesian counterpart of grid_physics_curvilinear: forces act on a 3D velocity
+// tangent to the bed and are projected with the bed normal. The node keeps the
+// velocity in the surface plane (see surface_to_tangent).
 @compute @workgroup_size(WG_SIZE_2D, WG_SIZE_2D, 1)
 fn grid_physics_terrain_following(@builtin(global_invocation_id) id: vec3u) {
-    if id.x < 1 || id.x >= (sim_settings.grid_shape.x - 1) || id.y < 1 || id.y >= (sim_settings.grid_shape.y - 1) {
+    if node_is_skipped(id.xy) {
         return;
     }
-    if (sim_info.flags & SIM_INFO_STOPPED) != 0u {
-        return;
-    }
-
-    let use_curvature: bool = (sim_settings.flags & (1u << 0u)) != 0u;
-    let use_particle_interaction: bool = (sim_settings.flags & (1u << 1u)) != 0u;
-
     let idx = xy_to_idx(id.xy);
+    if neighbourhood_is_empty(id.xy) {
+        grid_velocity[idx] = vec2f(0.0);
+        return;
+    }
     let n = textureLoad(terrain_geometry_texture, vec2<i32>(id.xy), 0).xyz;
-    let hessian = textureLoad(curvature_texture, vec2<i32>(id.xy), 0).xyz;
+    if !is_finite(n.z) {
+        grid_velocity[idx] = vec2f(0.0);
+        return;
+    }
+    let mass = node_mass(idx);
+    let velocity = surface_to_tangent(node_velocity_xy(idx, mass), n);
+    grid_velocity[idx] = tangent_to_surface(update_node(id.xy, n, velocity, mass), n);
+}
+
+// The same update on a node velocity carried as a full 3D vector.
+@compute @workgroup_size(WG_SIZE_2D, WG_SIZE_2D, 1)
+fn grid_physics_3d(@builtin(global_invocation_id) id: vec3u) {
+    if node_is_skipped(id.xy) {
+        return;
+    }
+    let idx = xy_to_idx(id.xy);
+    if neighbourhood_is_empty(id.xy) {
+        grid_velocity[idx] = vec2f(0.0);
+        grid_velocity_z[idx] = 0.0;
+        return;
+    }
+    let n = textureLoad(terrain_geometry_texture, vec2<i32>(id.xy), 0).xyz;
     if !is_finite(n.z) {
         grid_velocity[idx] = vec2f(0.0);
         grid_velocity_z[idx] = 0.0;
         return;
     }
+    let mass = node_mass(idx);
+    let w = select(f32(grid_momentum_z_atomic[idx]) * INV_MOMENTUM_FACTOR / (mass + 1e-6), 0.0, mass < 1e-2); // no_atomic_float
+    // atomic_float let w = select(grid_momentum_z_atomic[idx] / mass, 0.0, mass < 1e-2);
+    // particles on differently inclined beds scatter into this node
+    let velocity = tangent_project(vec3f(node_velocity_xy(idx, mass), w), n);
+    let new_velocity = update_node(id.xy, n, velocity, mass);
+    grid_velocity[idx] = new_velocity.xy;
+    grid_velocity_z[idx] = new_velocity.z;
+}
 
-    // 1. Decode height and velocity
-    let mass = f32(grid_mass_atomic[idx]) * INV_MASS_FACTOR; // no_atomic_float
-    // atomic_float let mass = grid_mass_atomic[idx];
-    // Nodes holding less mass than the p2g quantization floor carry no
-    // meaningful velocity (see grid_physics_curvilinear).
+fn node_is_skipped(xy: vec2u) -> bool {
+    return xy.x < 1 || xy.x >= (sim_settings.grid_shape.x - 1) || xy.y < 1 || xy.y >= (sim_settings.grid_shape.y - 1)
+        || (sim_info.flags & SIM_INFO_STOPPED) != 0u;
+}
+
+// No particle gathers from a node whose 3x3 neighbourhood holds no mass: each
+// particle deposits at least a quarter of its mass onto its stencil centre,
+// which neighbours all nine nodes the particle gathers from.
+fn neighbourhood_is_empty(xy: vec2u) -> bool {
+    for (var y = xy.y - 1u; y <= xy.y + 1u; y++) {
+        for (var x = xy.x - 1u; x <= xy.x + 1u; x++) {
+            if f32(grid_mass_atomic[x_y_to_idx(x, y)]) > 0.0 {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+fn node_mass(idx: u32) -> f32 {
+    return f32(grid_mass_atomic[idx]) * INV_MASS_FACTOR; // no_atomic_float
+    // atomic_float return grid_mass_atomic[idx];
+}
+
+// Nodes holding less mass than the p2g quantization floor carry no meaningful
+// velocity (see grid_physics_curvilinear).
+fn node_velocity_xy(idx: u32, mass: f32) -> vec2f {
     let node_is_empty = mass < 1e-2;
     let u = select(f32(grid_momentum_atomic[idx * 2]) * INV_MOMENTUM_FACTOR / (mass + 1e-6), 0.0, node_is_empty); // no_atomic_float
     let v = select(f32(grid_momentum_atomic[idx * 2 + 1]) * INV_MOMENTUM_FACTOR / (mass + 1e-6), 0.0, node_is_empty); // no_atomic_float
-    let w = select(f32(grid_momentum_z_atomic[idx]) * INV_MOMENTUM_FACTOR / (mass + 1e-6), 0.0, node_is_empty); // no_atomic_float
     // atomic_float let u = select(grid_momentum_atomic[idx * 2] / mass, 0.0, node_is_empty);
     // atomic_float let v = select(grid_momentum_atomic[idx * 2 + 1] / mass, 0.0, node_is_empty);
-    // atomic_float let w = select(grid_momentum_z_atomic[idx] / mass, 0.0, node_is_empty);
-    // particles on differently inclined beds scatter into this node
-    let velocity = tangent_project(vec3f(u, v, w), n);
+    return vec2f(u, v);
+}
 
-    let h = get_h(id.x, id.y);
+// Applies gravity, pressure and friction to the tangent velocity of a node and
+// records the node's diagnostics. Returns the new tangent velocity.
+fn update_node(xy: vec2u, n: vec3f, velocity: vec3f, mass: f32) -> vec3f {
+    let use_curvature: bool = (sim_settings.flags & (1u << 0u)) != 0u;
+    let use_particle_interaction: bool = (sim_settings.flags & (1u << 1u)) != 0u;
+
+    let idx = xy_to_idx(xy);
+    let hessian = textureLoad(curvature_texture, vec2<i32>(xy), 0).xyz;
+
+    let h = get_h(xy.x, xy.y);
     let current_peak_flow_thickness = peak_flow_thickness[idx];
     if current_peak_flow_thickness < h {
         // only if previously cell was empty, we count it as a new cell for diagnostics
@@ -79,8 +137,8 @@ fn grid_physics_terrain_following(@builtin(global_invocation_id) id: vec3u) {
     // 3. Driving accelerations: tangential gravity and hydrostatic pressure
     let gravity_acceleration = vec3f(0.0, 0.0, -g) + g * n.z * n;
     let grad_h = vec2f(
-        (get_h(id.x + 1, id.y) - get_h(id.x - 1, id.y)) / (2.0 * sim_settings.cell_size),
-        (get_h(id.x, id.y + 1) - get_h(id.x, id.y - 1)) / (2.0 * sim_settings.cell_size)
+        (get_h(xy.x + 1, xy.y) - get_h(xy.x - 1, xy.y)) / (2.0 * sim_settings.cell_size),
+        (get_h(xy.x, xy.y + 1) - get_h(xy.x, xy.y - 1)) / (2.0 * sim_settings.cell_size)
     );
     let k = 1.0;
     let pressure_acceleration = select(vec3f(0.0), -g_normal * k * surface_gradient(n, grad_h), use_particle_interaction);
@@ -88,19 +146,18 @@ fn grid_physics_terrain_following(@builtin(global_invocation_id) id: vec3u) {
     let proposed = tangent_project(velocity + sim_info.dt * (gravity_acceleration + pressure_acceleration), n);
     let proposed_speed = length(proposed);
 
-    // 4. Basal friction, applied as a scaling factor that cannot reverse the flow
-    var new_velocity = proposed;
-    if proposed_speed > sim_settings.velocity_threshold {
-        let friction_acceleration = basal_friction_acceleration(g_normal, sim_settings.snow_density, proposed_speed, h, sim_settings.friction_model);
-        if (friction_acceleration * sim_info.dt) >= proposed_speed {
-            new_velocity = vec3f(0.0);
-        } else {
-            new_velocity = proposed * (1.0 - friction_acceleration * sim_info.dt / proposed_speed);
-        }
+    // 4. Basal friction, applied as a scaling factor that cannot reverse the
+    // flow. It acts at every speed, so Coulomb resistance also acts as static
+    // friction: a node at rest stays at rest while the driving acceleration is
+    // below the yield value, independent of dt. Evaluating at no less than
+    // velocity_threshold keeps the low-speed gate of the shared friction model
+    // from switching it off.
+    let friction_speed = max(proposed_speed, sim_settings.velocity_threshold);
+    let friction_acceleration = basal_friction_acceleration(g_normal, sim_settings.snow_density, friction_speed, h, sim_settings.friction_model);
+    var new_velocity = vec3f(0.0);
+    if (friction_acceleration * sim_info.dt) < proposed_speed {
+        new_velocity = proposed * (1.0 - friction_acceleration * sim_info.dt / proposed_speed);
     }
-
-    grid_velocity[idx] = new_velocity.xy;
-    grid_velocity_z[idx] = new_velocity.z;
 
     let v_mag = length(new_velocity);
     if !is_nan(v_mag) && h > 1e-3 && bitcast<u32>(v_mag) > atomicLoad(&atomic_values.peak_velocity) {
@@ -109,20 +166,29 @@ fn grid_physics_terrain_following(@builtin(global_invocation_id) id: vec3u) {
     if !is_nan(v_mag) && h > 1e-3 {
         grid_peak_velocity[idx] = max(grid_peak_velocity[idx], v_mag);
     }
+    if sim_settings.momentum_stop_fraction > 0.0 && !is_nan(v_mag) {
+        // total momentum in kg m/s as a 64-bit sum of two u32 atomics
+        let node_momentum = u32(round(mass * v_mag));
+        if node_momentum > 0u {
+            let previous = atomicAdd(&atomic_values.momentum_lo, node_momentum);
+            if previous > 0xFFFFFFFFu - node_momentum {
+                atomicAdd(&atomic_values.momentum_hi, 1u);
+            }
+        }
+    }
 
-    let expected_cell_velocity = v_mag + sqrt(g * h);
+    // gravity waves travel at sqrt(g cos(theta) h) on the inclined bed
+    let expected_cell_velocity = v_mag + sqrt(g * h * n.z);
     if !is_nan(expected_cell_velocity) && h > 1e-3 && bitcast<u32>(expected_cell_velocity) > atomicLoad(&atomic_values.expected_max_velocity) {
         atomicMax(&atomic_values.expected_max_velocity, bitcast<u32>(expected_cell_velocity));
     }
+    return new_velocity;
 }
 
 // bed-normal flow thickness of a node
 fn get_h(x: u32, y: u32) -> f32 {
-    let idx = x_y_to_idx(x, y);
     let n_z = textureLoad(terrain_geometry_texture, vec2i(i32(x), i32(y)), 0).z;
-    let mass = f32(grid_mass_atomic[idx]) * INV_MASS_FACTOR; // no_atomic_float
-    // atomic_float let mass = grid_mass_atomic[idx];
-    return mass / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size) * n_z;
+    return node_mass(x_y_to_idx(x, y)) / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size) * n_z;
 }
 
 // import cartesian_geometry.wgsl;
@@ -132,6 +198,20 @@ fn get_h(x: u32, y: u32) -> f32 {
 // tangent to the bed z = B(x, y) with unit normal n = (-grad(B), 1) / J.
 // Hessian components are passed as (B_xx, B_xy, B_yy), the layout written by
 // analyze_terrain.wgsl into the curvature texture.
+
+// The terrain-following model stores velocities in the surface plane: the 3D
+// tangent velocity rotated into the horizontal plane by the rotation that takes
+// the bed normal to z. Unlike the horizontal projection this keeps the magnitude,
+// so length(v2) is the true speed, and the map is linear on any plane, so grid
+// averages and APIC stay exact there. The components are not dx/dt.
+fn surface_to_tangent(v2: vec2f, n: vec3f) -> vec3f {
+    let along_slope = dot(n.xy, v2);
+    return vec3f(v2 - along_slope / (1.0 + n.z) * n.xy, -along_slope);
+}
+
+fn tangent_to_surface(v3: vec3f, n: vec3f) -> vec2f {
+    return v3.xy - v3.z / (1.0 + n.z) * n.xy;
+}
 
 // Removes the bed-normal component.
 fn tangent_project(v: vec3f, n: vec3f) -> vec3f {
@@ -320,6 +400,8 @@ const SIM_INFO_LOW_MOMENTUM: u32 = 1u << 27u;
 // reversible low-speed state; the low bits hold the rest start step while resting
 // and the consecutive slow-step count while moving
 const PARTICLE_RESTING: u32 = 1u << 26u;
+// consecutive slow steps before a particle rests
+const REST_STEPS: u32 = 20u;
 const PARTICLE_FLYING: u32 = 1u << 27u;
 const PARTICLE_OUT_OF_BOUNDS: u32 = 1u << 28u;
 const PARTICLE_IS_NAN: u32 = 1u << 29u;
@@ -388,6 +470,34 @@ struct AtomicValues {
     // f32 bits of the largest total momentum so far
     peak_momentum: atomic<u32>,
 };
+
+// Reversible resting: a particle rests after REST_STEPS consecutive slow steps
+// and wakes once the gathered grid speed exceeds twice the threshold. Resting
+// particles keep depositing mass but no momentum and do not move, which removes
+// sub-threshold creep inside deposits. Returns the new state: its low bits hold
+// the slow-step counter while moving and the rest start step while resting.
+fn next_rest_state(previous_state: u32, speed: f32, timestep: u32) -> u32 {
+    let low_mask = PARTICLE_RESTING - 1u;
+    var resting = (previous_state & PARTICLE_RESTING) != 0u;
+    var low_bits = previous_state & low_mask;
+    if resting {
+        if speed > 2.0 * sim_settings.velocity_threshold {
+            resting = false;
+            low_bits = 0u;
+        }
+    } else if speed < sim_settings.velocity_threshold {
+        low_bits = min(low_bits + 1u, REST_STEPS);
+        if low_bits >= REST_STEPS {
+            resting = true;
+            low_bits = timestep & low_mask;
+        }
+    } else {
+        low_bits = 0u;
+    }
+    return (previous_state & ~(PARTICLE_RESTING | low_mask))
+        | select(0u, PARTICLE_RESTING, resting)
+        | low_bits;
+}
 
 struct G2PUpdate {
     velocity: vec2f,

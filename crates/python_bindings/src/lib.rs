@@ -13,7 +13,7 @@ use compute_core::{
     SimInfo, TimestepData,
     evaluation::{ChamferDistance, MassMovementEvaluation},
     list_devices,
-    settings::Settings,
+    settings::{Settings, SimModel},
 };
 use data_processor::{settings_from_json_file, settings_to_json_file};
 use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray2, ToPyArray};
@@ -1230,12 +1230,17 @@ impl PySimulation {
         flat_positions.to_pyarray(py).reshape([positions.len(), 2])
     }
 
-    /// ``(n, 3)`` float32 array of the particle x/y/z velocities.
+    /// ``(n, 3)`` float32 array of the particle x/y/z velocities. The
+    /// terrain-following model has no z component: there it is ``(n, 2)``, with
+    /// the velocity in the surface plane and the true speed as its norm.
     #[getter]
     fn get_particles_velocity<'py>(
         &mut self,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        if self.inner.settings.sim_model == SimModel::TerrainFollowing.as_int() {
+            return self.get_particles_velocity_xy(py);
+        }
         let velocities = self
             .inner
             .fetch_particles_velocity()

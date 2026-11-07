@@ -389,8 +389,8 @@ fn setting_attributes(name: &str) -> Attributes {
     }
     match name {
         "sim_model" => result.extend(flag_values(
-            &[0, 1, 2, 3],
-            "terrain_following curvilinear mpm_dac sliding_block",
+            &[0, 1, 2, 3, 4],
+            "terrain_following curvilinear mpm_dac sliding_block three_d",
         )),
         "friction_model" => result.extend(flag_values(
             &[0, 1, 2, 3, 5],

@@ -63,7 +63,13 @@ def jacobian(dem, cell_size):
     return np.sqrt(1.0 + zx * zx + zy * zy)
 
 
-def fields_from_grid(sim, shape, cell_size, density, jac):
+# sim models whose velocity is the surface velocity rotated into the horizontal
+# plane: its components already measure surface distance, unlike the horizontal
+# dx/dt of the other models
+SURFACE_VELOCITY_MODELS = ("terrain-following", "terrain", "t")
+
+
+def fields_from_grid(sim, shape, cell_size, density, jac, surface_velocity=False):
     """Decode the sim's grid mass/momentum getters into thickness + velocity.
 
     These are exactly the fields the grid physics pass consumed this step.
@@ -82,8 +88,10 @@ def fields_from_grid(sim, shape, cell_size, density, jac):
     mass = mass.reshape(shape)
     vel_u = vel_u.reshape(shape)
     vel_v = vel_v.reshape(shape)
-    # The reference uses surface distance along its x-aligned plane.
-    vel_u = vel_u * jac
+    # The reference uses surface distance along its x-aligned plane, which a
+    # horizontal dx/dt only measures with the metric.
+    if not surface_velocity:
+        vel_u = vel_u * jac
     thickness = mass / (density * cell_size * cell_size * jac)
     return thickness, vel_u, vel_v, mass
 

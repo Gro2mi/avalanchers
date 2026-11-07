@@ -11,6 +11,9 @@ VERIFICATION = pathlib.Path(__file__).resolve().parents[2] / "verification"
 sys.path.insert(0, str(VERIFICATION))
 
 
+GRID_FLOW_MODELS = ["curvilinear", "terrain-following", "3d"]
+
+
 def gather_grid(values, positions):
     q = positions / 5.0 - 0.5
     base = np.floor(q - 0.5).astype(int)
@@ -54,6 +57,21 @@ def plane_simulation(angle, friction=0.0, **overrides):
     sim.set_release_areas(release)
     sim.prepare()
     return sim, slope, direction
+
+
+@pytest.mark.parametrize("angle", [0.0, 30.0, 45.0, 60.0, 90.0, 135.0, 225.0])
+@pytest.mark.parametrize("friction", [0.0, 0.3])
+def test_terrain_following_velocity_magnitude_is_the_true_speed(angle, friction):
+    sim, _, direction = plane_simulation(angle, friction, sim_model="terrain-following")
+    before = np.asarray(sim.particles_position_xy, dtype=np.float64)
+    central = ((before > 100.0) & (before < 220.0)).all(axis=1)
+    sim.run_n_steps(1)
+    velocity = np.asarray(sim.particles_velocity, dtype=np.float64)
+    assert velocity.shape[1] == 2
+    dt = math.sqrt(2.0 * 0.05 * 5.0 / (9.81 * 0.866))
+    acceleration = 9.81 * (math.sin(math.radians(35.0)) - friction * math.cos(math.radians(35.0)))
+    # no cos(35 deg) as in the horizontal projection of the curvilinear test below
+    np.testing.assert_allclose(velocity[central].mean(axis=0), dt * acceleration * direction, atol=0.004)
 
 
 @pytest.mark.parametrize("angle", [0.0, 30.0, 45.0, 60.0, 90.0, 135.0, 225.0])
@@ -208,9 +226,10 @@ def run_until_stopped(sim, max_batches=30):
 
 
 @pytest.mark.slow
+@pytest.mark.parametrize("sim_model", GRID_FLOW_MODELS)
 @pytest.mark.parametrize("threshold", [0.0, 0.1])
-def test_frictionless_flat_heap_keeps_spreading_with_resting(threshold):
-    sim, _, _ = plane_simulation(0.0, velocity_threshold=threshold)
+def test_frictionless_flat_heap_keeps_spreading_with_resting(threshold, sim_model):
+    sim, _, _ = plane_simulation(0.0, velocity_threshold=threshold, sim_model=sim_model)
     y, x = np.mgrid[:64, :64]
     x, y = (x + 0.5) * 5.0, (y + 0.5) * 5.0
     release = np.ascontiguousarray(
@@ -232,12 +251,13 @@ def test_frictionless_flat_heap_keeps_spreading_with_resting(threshold):
 @pytest.mark.slow
 @pytest.mark.parametrize("cfl", [0.05, 0.2])
 @pytest.mark.parametrize("angle, slides", [(15.0, False), (30.0, True)])
-def test_coulomb_static_friction_holds_block_below_yield(angle, slides, cfl):
+@pytest.mark.parametrize("sim_model", GRID_FLOW_MODELS)
+def test_coulomb_static_friction_holds_block_below_yield(angle, slides, cfl, sim_model):
     x = (np.mgrid[:64, :64][1] + 0.5) * 5.0
     release = np.zeros((64, 64))
     release[24:40, 24:40] = 1.0
     sim = rest_simulation(1000.0 - math.tan(math.radians(angle)) * x, release,
-                          cfl=cfl, enable_particle_interaction=False)
+                          cfl=cfl, enable_particle_interaction=False, sim_model=sim_model)
     before = np.asarray(sim.particles_position_xy, dtype=np.float64)
     info = sim.run_n_steps(50)
     displacement = np.linalg.norm(np.asarray(sim.particles_position_xy) - before, axis=1)
@@ -252,11 +272,12 @@ def test_coulomb_static_friction_holds_block_below_yield(angle, slides, cfl):
 
 
 @pytest.mark.slow
-def test_coulomb_heap_comes_to_rest():
+@pytest.mark.parametrize("sim_model", GRID_FLOW_MODELS)
+def test_coulomb_heap_comes_to_rest(sim_model):
     y, x = np.mgrid[:64, :64]
     x, y = (x + 0.5) * 5.0, (y + 0.5) * 5.0
     release = np.maximum(20.0 * (1.0 - ((x - 160.0) / 30.0)**2 - ((y - 160.0) / 30.0)**2), 0.0)
-    sim = rest_simulation(np.zeros((64, 64)), release, cfl=0.3)
+    sim = rest_simulation(np.zeros((64, 64)), release, cfl=0.3, sim_model=sim_model)
     before = np.asarray(sim.particles_position_xy, dtype=np.float64)
     initial_radius = np.sqrt(np.mean(np.sum((before - 160.0)**2, axis=1)))
     info = run_until_stopped(sim)
@@ -269,13 +290,14 @@ def test_coulomb_heap_comes_to_rest():
 
 
 @pytest.mark.slow
-def test_resting_deposit_is_remobilised_by_incoming_flow():
+@pytest.mark.parametrize("sim_model", GRID_FLOW_MODELS)
+def test_resting_deposit_is_remobilised_by_incoming_flow(sim_model):
     x = (np.mgrid[:64, :64][1] + 0.5) * 5.0
     dem = np.where(x < 150.0, (150.0 - x) * math.tan(math.radians(35.0)), 0.0)
     release = np.zeros((64, 64))
     release[24:40, 4:14] = 3.0
     release[24:40, 36:44] = 0.5
-    sim = rest_simulation(dem, release, cfl=0.2)
+    sim = rest_simulation(dem, release, cfl=0.2, sim_model=sim_model)
     before = np.asarray(sim.particles_position_xy, dtype=np.float64)
     deposit = before[:, 0] > 175.0
     sim.run_n_steps(100)

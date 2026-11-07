@@ -8,11 +8,12 @@ use crate::camera::OrbitCamera;
 pub struct ParticleBuffers<'a> {
     /// `array<vec2<f32>>` of positions in the DEM plane, in metres.
     pub position: &'a wgpu::Buffer,
-    /// `array<vec2<f32>>` of horizontal velocities, used for colouring.
+    /// `array<vec2<f32>>` of velocities, used for colouring.
     pub velocity: &'a wgpu::Buffer,
     /// `array<f32>` of vertical velocities, used for colouring. Models without one
-    /// (MPM) can pass a zero-filled buffer to colour by horizontal speed only.
-    pub velocity_z: &'a wgpu::Buffer,
+    /// pass `None`: terrain-following velocities already have the true speed as
+    /// their magnitude, MPMDAC colours by horizontal speed.
+    pub velocity_z: Option<&'a wgpu::Buffer>,
     /// `array<u32>` where a non-zero entry marks a stopped particle.
     pub stopped: &'a wgpu::Buffer,
     /// `array<f32>` of particle elevations above sea level, in metres.
@@ -176,6 +177,8 @@ impl ParticleRenderer {
     /// Attaches simulation buffers. Passing `None` stops drawing particles.
     pub fn set_buffers(&mut self, device: &wgpu::Device, buffers: Option<ParticleBuffers<'_>>) {
         self.has_grid_mass = buffers.is_some_and(|buffers| buffers.grid_mass.is_some());
+        let has_velocity_z = buffers.is_some_and(|buffers| buffers.velocity_z.is_some());
+        self.uniforms.jitter[3] = if has_velocity_z { 1.0 } else { 0.0 };
         self.bind_group = buffers.map(|buffers| {
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Particle Bind Group"),
@@ -203,7 +206,12 @@ impl ParticleRenderer {
                     },
                     wgpu::BindGroupEntry {
                         binding: 5,
-                        resource: buffers.velocity_z.as_entire_binding(),
+                        // without a z velocity the shader skips this binding,
+                        // so any storage buffer satisfies it
+                        resource: buffers
+                            .velocity_z
+                            .unwrap_or(buffers.elevation)
+                            .as_entire_binding(),
                     },
                     // without a grid mass buffer the jitter stays off, so any
                     // storage buffer satisfies the binding

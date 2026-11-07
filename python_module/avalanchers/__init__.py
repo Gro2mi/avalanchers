@@ -91,6 +91,7 @@ _ENUM_ALIASES = {
         "sliding-block": "sliding-block",
         "block": "sliding-block",
         "b": "sliding-block",
+        "3d": "3d",
     },
     "friction_model": {
         "coulomb": "coulomb",
