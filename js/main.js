@@ -43,7 +43,8 @@ const zarrScenarioDropdown = document.getElementById('zarrScenarioDropdown');
 const simModelDropdown = document.getElementById('simModelDropdown');
 const frictionModelDropdown = document.getElementById('frictionModelDropdown');
 const densitySlider = document.getElementById('densitySlider');
-const slabThicknessSlider = document.getElementById('slabThicknessSlider');
+const releaseThicknessOverride = document.getElementById('releaseThicknessOverride');
+const releaseThicknessSlider = document.getElementById('releaseThicknessSlider');
 const minSlopeAngleSlider = document.getElementById('minSlopeAngleSlider');
 const maxSlopeAngleSlider = document.getElementById('maxSlopeAngleSlider');
 const releaseMinElevationSlider = document.getElementById('releaseMinElevationSlider');
@@ -271,7 +272,13 @@ function bindSlider(slider, valueId, format) {
 }
 
 bindSlider(densitySlider, 'densitySliderValue');
-bindSlider(slabThicknessSlider, 'slabThicknessSliderValue', v => parseFloat(v).toFixed(2));
+bindSlider(releaseThicknessSlider, 'releaseThicknessSliderValue', v => parseFloat(v).toFixed(2));
+const updateReleaseThicknessControls = () => {
+    releaseThicknessSlider.disabled = !releaseThicknessOverride.checked;
+    document.getElementById('releaseThicknessSliderValue').disabled = !releaseThicknessOverride.checked;
+};
+releaseThicknessOverride.addEventListener('change', updateReleaseThicknessControls);
+updateReleaseThicknessControls();
 bindSlider(minSlopeAngleSlider, 'minSlopeAngleSliderValue', v => parseFloat(v).toFixed(1));
 bindSlider(maxSlopeAngleSlider, 'maxSlopeAngleSliderValue', v => parseFloat(v).toFixed(1));
 bindSlider(releaseMinElevationSlider, 'releaseMinElevationSliderValue');
@@ -311,7 +318,6 @@ function getSettings() {
         sim_model: simModelDropdown.value,
         friction_model: frictionModelDropdown.selectedIndex,
         density: parseFloat(densitySlider.value),
-        slab_thickness_factor: parseFloat(slabThicknessSlider.value),
         min_slope_angle: parseFloat(minSlopeAngleSlider.value),
         max_slope_angle: parseFloat(maxSlopeAngleSlider.value),
         release_min_elevation: parseFloat(releaseMinElevationSlider.value),
@@ -327,6 +333,9 @@ function getSettings() {
         enable_earth_pressure_coefficient: document.getElementById('enable_earth_pressure_coefficient').checked,
         internal_friction_angle: parseFloat(internalFrictionAngleSlider.value),
     };
+    if (releaseThicknessOverride.checked) {
+        simSettings.release_thickness = parseFloat(releaseThicknessSlider.value);
+    }
     return simSettings;
 }
 
@@ -542,17 +551,18 @@ async function selectZarrSite(site) {
     }, demStatus);
 }
 
-/** Derives cell size and bounds from the Zarr coordinate arrays. */
+/** Derives cell size and bounds from the Zarr coordinate arrays, which hold cell centers. */
 function deriveGeoreference({ width, height, x, y }) {
     const spacing = coords => (coords && coords.length > 1)
         ? Math.abs(coords[1] - coords[0])
         : null;
     const cellSize = spacing(x) ?? spacing(y) ?? 1.0;
 
-    const xmin = x ? Math.min(x[0], x[x.length - 1]) : 0;
-    const xmax = x ? Math.max(x[0], x[x.length - 1]) : width * cellSize;
-    const ymin = y ? Math.min(y[0], y[y.length - 1]) : 0;
-    const ymax = y ? Math.max(y[0], y[y.length - 1]) : height * cellSize;
+    const half = cellSize / 2;
+    const xmin = x ? Math.min(x[0], x[x.length - 1]) - half : 0;
+    const xmax = x ? Math.max(x[0], x[x.length - 1]) + half : width * cellSize;
+    const ymin = y ? Math.min(y[0], y[y.length - 1]) - half : 0;
+    const ymax = y ? Math.max(y[0], y[y.length - 1]) + half : height * cellSize;
 
     return { cellSize, bounds: { xmin, xmax, ymin, ymax } };
 }
@@ -908,22 +918,80 @@ function moveViewerCardTo(host) {
     });
 }
 
+/** Scroll distance, as a fraction of the viewport height, over which the
+ * docked viewer widens from the side column to the full layout width. */
+const VIEWER_EXPAND_FRACTION = 0.3;
+/** Scroll travel, as a fraction of the viewport height, needed after starting
+ * or reversing direction before the viewer starts widening or shrinking. */
+const VIEWER_EXPAND_THRESHOLD_FRACTION = 0.15;
+/** Hysteresis state of the expansion; null while expansion is disabled. */
+let viewerExpandAnchor = null;
+
+/**
+ * Scrubs the docked viewer's width with the scroll position: once the end of
+ * the workflow cards approaches, its left edge slides over the settings until
+ * it spans the whole layout, after which it scrolls away with the page and the
+ * result plots follow. Scrolling back up reverses it.
+ */
+function updateViewerExpansion(enabled) {
+    const card = document.getElementById('viewerCard');
+    const layout = viewerColumn.parentElement;
+    if (!card || !layout) return;
+
+    enabled = enabled && card.parentElement === viewerColumn;
+    layout.classList.toggle('viewer-expandable', enabled);
+    if (!enabled) {
+        viewerExpandAnchor = null;
+        layout.style.removeProperty('--viewer-expand-distance');
+        card.style.marginLeft = '';
+        card.style.width = '';
+        card.classList.remove('is-expanding');
+        return;
+    }
+
+    const distance = Math.round(window.innerHeight * VIEWER_EXPAND_FRACTION);
+    const threshold = Math.round(window.innerHeight * VIEWER_EXPAND_THRESHOLD_FRACTION);
+    const halfBand = threshold / 2;
+    // The controls get bottom padding covering the expansion plus the dead
+    // band, so the sticky card stays pinned throughout and the run card is
+    // fully visible before anything moves.
+    layout.style.setProperty('--viewer-expand-distance', `${distance + threshold}px`);
+
+    const layoutRect = layout.getBoundingClientRect();
+    const stickyTop = parseFloat(getComputedStyle(card).top) || 0;
+    // Distance left until the sticky card hits the bottom of its column.
+    const remaining = layoutRect.bottom - (stickyTop + card.offsetHeight);
+
+    // Hysteresis (backlash): the anchor trails `remaining` by up to half the
+    // band, so after starting or reversing direction the edge only moves once
+    // the scroll has travelled `threshold`. Scrolling down the anchor sits
+    // above `remaining`, which guarantees full width by the time the card
+    // unpins (remaining = 0); scrolling up it keeps full width until
+    // `remaining` reaches `threshold`.
+    if (viewerExpandAnchor === null) viewerExpandAnchor = remaining + halfBand;
+    viewerExpandAnchor = Math.min(remaining + halfBand,
+        Math.max(remaining - halfBand, viewerExpandAnchor));
+    const progress = Math.min(1, Math.max(0, 1 - (viewerExpandAnchor - halfBand) / distance));
+    const maxShift = viewerColumn.getBoundingClientRect().left - layoutRect.left;
+    const shift = Math.round(maxShift * progress);
+
+    card.style.marginLeft = shift > 0 ? `-${shift}px` : '';
+    card.style.width = shift > 0 ? `calc(100% + ${shift}px)` : '';
+    card.classList.toggle('is-expanding', shift > 0);
+}
+
 /**
  * Keeps the 3D view within reach, like the plotly terrain preview before it:
- * sticky in the side column while the workflow cards are on screen, then full
- * width below the run card once the result plots scroll into view.
+ * on wide screens it stays sticky in the side column and, once results exist,
+ * widens over the settings on scroll; on narrow screens it moves full width
+ * below the run card once results exist.
  */
 function updateViewerPlacement() {
     if (!viewerColumn || !viewerFlowHost) return;
 
-    if (!state.hasResults) {
-        moveViewerCardTo(viewerColumn);
-        return;
-    }
-
-    const resultsReached = viewerFlowHost.getBoundingClientRect().top < window.innerHeight;
-    const fullScreen = !desktopLayout.matches || resultsReached;
-    moveViewerCardTo(fullScreen ? viewerFlowHost : viewerColumn);
+    const docked = !state.hasResults || desktopLayout.matches;
+    moveViewerCardTo(docked ? viewerColumn : viewerFlowHost);
+    updateViewerExpansion(state.hasResults && desktopLayout.matches);
 }
 
 let viewerPlacementFrame = null;
@@ -938,6 +1006,10 @@ function scheduleViewerPlacement() {
 window.addEventListener('scroll', scheduleViewerPlacement, { passive: true });
 window.addEventListener('resize', scheduleViewerPlacement);
 desktopLayout.addEventListener('change', updateViewerPlacement);
+// Collapsing or expanding workflow cards changes where the expansion starts.
+if (viewerColumn?.parentElement) {
+    new ResizeObserver(scheduleViewerPlacement).observe(viewerColumn.parentElement);
+}
 updateViewerPlacement();
 
 async function loadExampleCase(run) {

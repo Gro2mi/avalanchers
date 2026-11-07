@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Avalanche Simulation with WebGPU</title>
+    <title>Avalanchers | GPU powered avalanche simulation</title>
     <link rel="apple-touch-icon" sizes="180x180" href="icons/apple-touch-icon.png">
     <link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32x32.png">
     <link rel="icon" type="image/png" sizes="16x16" href="icons/favicon-16x16.png">
@@ -475,8 +475,21 @@
             .viewer-column .viewer-sticky {
                 position: sticky;
                 top: 1rem;
+                z-index: 10;
                 height: calc(100vh - 2rem);
                 min-height: 0;
+                border-radius: 0.75rem;
+            }
+
+            /* Scroll room for the viewer to widen over the settings (set from JS). */
+            .workflow-layout.viewer-expandable .workflow-controls {
+                padding-bottom: var(--viewer-expand-distance, 60vh);
+            }
+
+            /* While overlaying the settings, the controls row needs an opaque backdrop. */
+            .viewer-column .viewer-sticky.is-expanding {
+                background: var(--bg-0);
+                box-shadow: -18px 0 36px var(--shadow);
             }
 
             .viewer-column .viewer-shell {
@@ -675,12 +688,14 @@
                                             value="200" class="form-control slider-value-input">
                                     </div>
                                     <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
-                                        <label for="slabThicknessSlider" class="control-label mb-0">Slab thickness
-                                            factor:</label>
-                                        <input type="range" id="slabThicknessSlider" min="0.1" max="5" value="1"
-                                            step="0.05" class="form-range w-auto" style="max-width:200px;">
-                                        <input type="number" id="slabThicknessSliderValue" min="0.1" max="5" step="0.05"
-                                            value="1" class="form-control slider-value-input">
+                                        <label for="releaseThicknessOverride" class="control-label mb-0">Override release
+                                            thickness (m):</label>
+                                        <input type="checkbox" id="releaseThicknessOverride"
+                                            class="form-check-input mt-0">
+                                        <input type="range" id="releaseThicknessSlider" min="0.1" max="5" value="1"
+                                            step="0.05" class="form-range w-auto" style="max-width:200px;" disabled>
+                                        <input type="number" id="releaseThicknessSliderValue" min="0.1" max="5" step="0.05"
+                                            value="1" class="form-control slider-value-input" disabled>
                                     </div>
                                     <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
                                         <label for="minSlopeAngleSlider" class="control-label mb-0">Min slope angle
@@ -778,8 +793,10 @@
                             <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
                                 <label for="simModelDropdown" class="control-label mb-0">Simulation model:</label>
                                 <select id="simModelDropdown" class="form-select w-auto">
-                                    <option value="terrain-following">Terrain-following</option>
-                                    <option value="curvilinear" selected>Curvilinear</option>
+                                    <option value="terrain-following" selected>Terrain-following</option>
+                                    <option value="3d">3D</option>
+                                    <option value="curvilinear">Curvilinear</option>
+                                    <option value="sliding-block">Sliding block (legacy)</option>
                                 </select>
                             </div>
                             <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
@@ -803,7 +820,7 @@
                                     Earth pressure coefficient:
                                 </label>
                                 <input type="checkbox" id="enable_earth_pressure_coefficient"
-                                    class="form-check-input mt-0" checked>
+                                    class="form-check-input mt-0">
                             </div>
                             <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
                                 <label for="frictionModelDropdown" class="control-label mb-0">Friction model:</label>
@@ -823,9 +840,9 @@
                             </div>
                             <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
                                 <label for="cflSlider" class="control-label mb-0">CFL:</label>
-                                <input type="range" id="cflSlider" min="0.1" max="1" value="0.5" step="0.05"
+                                <input type="range" id="cflSlider" min="0.1" max="1" value="0.9" step="0.05"
                                     class="form-range w-auto" style="max-width:200px;">
-                                <input type="number" id="cflSliderValue" min="0.1" max="1" step="0.05" value="0.5"
+                                <input type="number" id="cflSliderValue" min="0.1" max="1" step="0.05" value="0.9"
                                     class="form-control slider-value-input">
                             </div>
                             <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
