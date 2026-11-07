@@ -45,6 +45,9 @@ macro_rules! define_shaders {
         }
 
         impl ShaderName {
+            /// Every shader, including import fragments and test shaders.
+            pub const ALL: &'static [ShaderName] = &[$(ShaderName::$variant),*];
+
             /// The shader's canonical name: the declared entry point if any,
             /// else the source file stem. Unique per variant; used for string
             /// parsing, labels, and as the dispatched WGSL entry point.
@@ -168,6 +171,17 @@ use std::sync::OnceLock;
 static STRIP_RE: OnceLock<Regex> = OnceLock::new();
 static IMPORT_RE: OnceLock<Regex> = OnceLock::new();
 
+/// `source` (LF) with the line endings of `original`, so that the debug
+/// write-back of expanded imports only ever changes the inlined content.
+#[cfg(any(test, all(not(target_arch = "wasm32"), debug_assertions)))]
+fn restore_line_endings(source: &str, original: &str) -> String {
+    if original.contains("\r\n") {
+        source.replace('\n', "\r\n")
+    } else {
+        source.to_string()
+    }
+}
+
 fn load_shader_source_string(name_str: &str, atomic_float_support: bool) -> &'static str {
     // Get the enum variant from the string
     let shader_enum: ShaderName = name_str
@@ -175,7 +189,9 @@ fn load_shader_source_string(name_str: &str, atomic_float_support: bool) -> &'st
         .unwrap_or_else(|_| panic!("Unknown shader name: {}", name_str));
 
     // Step 0: Get the raw source (from Disk or Binary)
-    let shader_source = shader_enum.read_source();
+    let raw_source = shader_enum.read_source();
+    // CRLF working copies must not count as a change or leak into the imports
+    let shader_source = raw_source.replace("\r\n", "\n");
 
     let strip_re = STRIP_RE.get_or_init(|| {
         Regex::new(r#"(?m)\s*// BEGIN [a-zA-Z0-9_./-]+\.wgsl[\s\S]*?// END [a-zA-Z0-9_./-]+\.wgsl"#)
@@ -194,7 +210,9 @@ fn load_shader_source_string(name_str: &str, atomic_float_support: bool) -> &'st
             let import_name = &caps[1];
             let import_line = &caps[0];
 
-            let imported_content = load_shader_source_string(import_name, atomic_float_support);
+            // unfiltered, the variant filter below covers the imports as well
+            // and the debug write-back must keep both variants on disk
+            let imported_content = load_shader_source_string(import_name, false);
 
             format!(
                 "{}\n// BEGIN {}.wgsl\n{}\n// END {}.wgsl",
@@ -210,7 +228,11 @@ fn load_shader_source_string(name_str: &str, atomic_float_support: bool) -> &'st
                 .join("src")
                 .join("shaders")
                 .join(format!("{}.wgsl", shader_enum.source_file()));
-            std::fs::write(path, &source_with_imports).ok();
+            std::fs::write(
+                path,
+                restore_line_endings(&source_with_imports, &raw_source),
+            )
+            .ok();
         }
     }
     if atomic_float_support {
@@ -3138,6 +3160,12 @@ mod tests {
             std::panic!("{shader} (float atomics {has_float32_atomic}): {error:?}")
         });
         source
+    }
+
+    #[test]
+    fn restore_line_endings_keeps_the_endings_of_the_original() {
+        assert_eq!(restore_line_endings("a\nb\n", "x\ny\n"), "a\nb\n");
+        assert_eq!(restore_line_endings("a\nb\n", "x\r\ny\r\n"), "a\r\nb\r\n");
     }
 
     #[test]

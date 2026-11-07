@@ -5,6 +5,10 @@ All notable changes to this project might be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- The simulation runs in Chrome again. The center of mass shader failed WGSL uniformity validation
+  there, which Firefox does not enforce.
+- The biggest-blob center of mass no longer risks reading stale blob labels or masses. Its phases
+  only synchronized workgroup memory, not the storage buffers they hand over.
 - GPUs with float atomics no longer produce NaN velocities on empty grid nodes in the curvilinear,
   MPMDAC and sliding block models, and show the particle height jitter again.
 - The curvilinear model no longer produces NaN when the flow reaches the outermost grid nodes on
@@ -92,7 +96,8 @@ All notable changes to this project might be documented in this file.
 
 ### Added
 - `Simulation::release_area_terrain` and the Python getters `release_mean_slope_angle`,
-  `release_mean_aspect` and `release_mean_elevation` give the mean terrain of the release cells.
+  `release_max_slope_angle`, `release_mean_aspect` and `release_mean_elevation` give the mean
+  terrain and the largest slope angle of the release cells.
   The aspect is a circular mean.
 - `release_swe` (`--release-swe` in the CLI) sets the release by snow water equivalent in kg/m²
   instead of `release_thickness`; setting both is an error. It is the mass per horizontal area, so

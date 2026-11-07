@@ -284,12 +284,14 @@ pub struct Simulation {
     output: Option<data_processor::output::Output>,
 }
 
-/// Mean terrain of the release area, see [`Simulation::release_area_terrain`].
+/// Terrain of the release area, see [`Simulation::release_area_terrain`].
 /// A value is NaN if no release cell contributes to it.
 #[derive(Clone, Copy, Debug)]
 pub struct ReleaseAreaTerrain {
     /// Mean slope angle in degrees.
     pub slope_angle: f32,
+    /// Largest slope angle of a release cell in degrees.
+    pub max_slope_angle: f32,
     /// Circular mean of the slope aspect in degrees, see
     /// [`Simulation::fetch_slope_aspect`]. NaN if the aspects cancel out.
     pub slope_aspect: f32,
@@ -297,8 +299,8 @@ pub struct ReleaseAreaTerrain {
     pub elevation: f32,
 }
 
-/// Averages the terrain over the release cells. The outermost cells are left
-/// out, because not every terrain kernel writes them, and flat cells (aspect
+/// Averages the terrain over the release cells and takes their largest slope
+/// angle. The outermost cells are left out, because not every terrain kernel writes them, and flat cells (aspect
 /// -1) have no aspect to contribute.
 fn mean_release_terrain(
     release_areas: &[f32],
@@ -309,6 +311,7 @@ fn mean_release_terrain(
     height: usize,
 ) -> ReleaseAreaTerrain {
     let (mut slope_sum, mut slope_count) = (0.0f64, 0u32);
+    let mut max_slope = f32::NEG_INFINITY;
     let (mut elevation_sum, mut elevation_count) = (0.0f64, 0u32);
     let (mut east, mut north, mut aspect_count) = (0.0f64, 0.0f64, 0u32);
     for y in 1..height.saturating_sub(1) {
@@ -321,6 +324,7 @@ fn mean_release_terrain(
             if slope_angle[idx].is_finite() {
                 slope_sum += slope_angle[idx] as f64;
                 slope_count += 1;
+                max_slope = max_slope.max(slope_angle[idx]);
             }
             if elevation[idx].is_finite() {
                 elevation_sum += elevation[idx] as f64;
@@ -348,6 +352,11 @@ fn mean_release_terrain(
     };
     ReleaseAreaTerrain {
         slope_angle: mean(slope_sum, slope_count),
+        max_slope_angle: if slope_count == 0 {
+            f32::NAN
+        } else {
+            max_slope
+        },
         slope_aspect,
         elevation: mean(elevation_sum, elevation_count),
     }
@@ -2123,8 +2132,8 @@ impl Simulation {
         Ok(self.gpu_cache.release_areas.as_deref().unwrap())
     }
 
-    /// Mean slope angle, aspect and elevation of the release cells in effect
-    /// for this run; requires [`SimulationState::ReleaseAreasComputed`].
+    /// Mean slope angle, maximum slope angle, mean aspect and mean elevation of
+    /// the release cells in effect for this run; requires [`SimulationState::ReleaseAreasComputed`].
     pub async fn release_area_terrain(&mut self) -> Result<ReleaseAreaTerrain> {
         let release_areas = self.fetch_release_areas().await?.to_vec();
         let slope_angle = self.fetch_slope_angle().await?.to_vec();
@@ -4432,6 +4441,8 @@ mod tests {
 
         let mean = mean_release_terrain(&release, &slope, &aspect, &elevation, N, N);
         assert!((mean.slope_angle - 30.0).abs() < 1e-4);
+        // the steeper cells outside the release and the NaN cell do not count
+        assert_eq!(mean.max_slope_angle, 40.0);
         assert!((mean.elevation - 2000.0).abs() < 1e-2);
         // a circular mean: 350 and 10 degrees average to north, not south
         assert!(mean.slope_aspect.min(360.0 - mean.slope_aspect) < 1e-3);
@@ -4443,6 +4454,7 @@ mod tests {
         let zeros = [0.0f32; N * N];
         let empty = mean_release_terrain(&zeros, &zeros, &zeros, &zeros, N, N);
         assert!(empty.slope_angle.is_nan());
+        assert!(empty.max_slope_angle.is_nan());
         assert!(empty.slope_aspect.is_nan());
         assert!(empty.elevation.is_nan());
 
@@ -4491,6 +4503,8 @@ mod tests {
             let expected_aspect = 90.0 - (-rise_y).atan2(-rise_x).to_degrees();
             assert!((terrain.elevation - expected_elevation).abs() < 1e-2);
             assert!((terrain.slope_angle - expected_angle).abs() < 0.1);
+            // a plane has one slope angle everywhere
+            assert!((terrain.max_slope_angle - expected_angle).abs() < 0.1);
             assert!((terrain.slope_aspect - expected_aspect).abs() < 0.1);
         }
     }

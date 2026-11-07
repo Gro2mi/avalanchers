@@ -31,8 +31,9 @@
 // verifies convergence and guarantees exactness.
 //
 // The reduction runs as a single workgroup with a strided loop over all
-// cells, so the workgroup barriers provide full global synchronization and no
-// atomics on f32 are needed.
+// cells, so barriers provide full global synchronization and no atomics on f32
+// are needed. workgroupBarrier only orders workgroup memory, so every hand-off
+// of blob_labels or blob_mass between invocations needs a storageBarrier.
 //
 // Output: total_mass in the same unit as the decoded grid mass,
 // com in world coordinates (same units as sim_settings.cell_size);
@@ -64,6 +65,10 @@ var<workgroup> wg_mass: array<f32, WG_SIZE>;
 var<workgroup> wg_moment: array<vec2f, WG_SIZE>;
 var<workgroup> wg_best: array<vec2u, WG_SIZE>;
 var<workgroup> wg_changed: atomic<u32>;
+// Barriers need uniform control flow, and reads of read_write storage or atomics
+// count as non-uniform (Tint rejects them, naga does not check). Branches ahead
+// of a barrier therefore stage their value here for workgroupUniformLoad.
+var<workgroup> wg_uniform_flag: u32;
 
 fn min_neighbor_label(cell: vec2i, label: u32, grid_shape: vec2i) -> u32 {
     var best = label;
@@ -133,7 +138,10 @@ fn center_of_mass_propagate(@builtin(global_invocation_id) id: vec3u) {
 
 @compute @workgroup_size(WG_SIZE, 1, 1)
 fn compute_center_of_mass(@builtin(local_invocation_index) li: u32) {
-    if (sim_info.flags & SIM_INFO_STOPPED) != 0u {
+    if li == 0u {
+        wg_uniform_flag = sim_info.flags & SIM_INFO_STOPPED;
+    }
+    if workgroupUniformLoad(&wg_uniform_flag) != 0u {
         return;
     }
     let num_cells = sim_settings.grid_shape.x * sim_settings.grid_shape.y;
@@ -166,10 +174,14 @@ fn compute_center_of_mass(@builtin(local_invocation_index) li: u32) {
                 }
             }
             workgroupBarrier();
-            if atomicLoad(&wg_changed) == 0u {
+            storageBarrier();
+            if li == 0u {
+                wg_uniform_flag = atomicLoad(&wg_changed);
+            }
+            // also keeps the next pass from resetting wg_changed before it was read
+            if workgroupUniformLoad(&wg_uniform_flag) == 0u {
                 break;
             }
-            workgroupBarrier();
             iterations = iterations + 1u;
             if iterations > sim_settings.grid_shape.x + sim_settings.grid_shape.y {
                 break; // a blob cannot be longer than the grid perimeter
@@ -181,13 +193,13 @@ fn compute_center_of_mass(@builtin(local_invocation_index) li: u32) {
             atomicStore(&blob_mass[i], 0u); // no_atomic_float
             // atomic_float atomicStore(&blob_mass[i], 0.0);
         }
-        workgroupBarrier();
+        storageBarrier();
         for (var i = li; i < num_cells; i = i + WG_SIZE) {
             if blob_labels[i] != NO_BLOB {
                 atomicAdd(&blob_mass[blob_labels[i]], mass_buffer[i]);
             }
         }
-        workgroupBarrier();
+        storageBarrier();
 
         // 3. find the biggest blob (ties keep the lower label)
         var best_mass = 0u; // no_atomic_float

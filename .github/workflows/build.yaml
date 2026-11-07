@@ -94,8 +94,17 @@ jobs:
       - name: Build CLI Binary
         run: cargo build -p cli --release
 
+      # Tint is the WGSL compiler of Chrome and enforces rules naga does not,
+      # so shaders that run natively and in Firefox can still fail in Chrome.
+      - name: Validate Shaders with Tint
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cargo run -q -p compute_core --release --example dump_shaders -- target/browser_shaders
+          npm ci --prefix .github/tint
+          node .github/tint/check_shaders.mjs target/browser_shaders crates/render_core/src/shaders
+
       - name: Test Linux
-        if: matrix.os == 'ubuntu-latest' 
+        if: matrix.os == 'ubuntu-latest'
         env:
             # This forces wgpu to use the software adapter
             WGPU_BACKEND: vulkan 

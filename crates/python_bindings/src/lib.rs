@@ -1133,6 +1133,17 @@ impl PySimulation {
             .slope_angle)
     }
 
+    /// Largest slope angle of a release cell in degrees, NaN if there are none.
+    #[getter]
+    pub fn get_release_max_slope_angle(&mut self) -> PyResult<f32> {
+        Ok(self
+            .inner
+            .release_area_terrain()
+            .block_on()
+            .map_runtime_err()?
+            .max_slope_angle)
+    }
+
     /// Circular mean of the release cells' slope aspect: the direction they
     /// face (downhill) in degrees clockwise from north. NaN if there are no
     /// release cells with an aspect or their aspects cancel out.

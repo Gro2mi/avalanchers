@@ -155,6 +155,7 @@ def test_release_mean_terrain_on_a_plane(angle):
     # the release covers cells 12..52, centred at 160 m in x and y
     assert sim.release_mean_elevation == pytest.approx(1000.0 + 160.0 * slope.sum(), abs=0.01)
     assert sim.release_mean_slope_angle == pytest.approx(35.0, abs=0.01)
+    assert sim.release_max_slope_angle == pytest.approx(35.0, abs=0.01)
     # the plane falls along direction, which is the way it faces
     facing = (90.0 - math.degrees(math.atan2(direction[1], direction[0]))) % 360.0
     difference = (sim.release_mean_aspect - facing + 180.0) % 360.0 - 180.0
