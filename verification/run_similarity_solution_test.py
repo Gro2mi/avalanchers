@@ -8,9 +8,9 @@ in this script, no output files are generated first.
 
 The parabolic release heap (thickness relTh at the center, 0 at the edges
 of the ellipse with main axes L_x, L_y) is built in memory and handed to
-the simulation with ``set_release_areas``; the flow fields are decoded
-DIRECTLY from the simulation's quantized ``grid_mass`` /
-``grid_momentum`` buffers at every save time and compared to the analytic
+the simulation with ``set_release_areas``; the flow fields are derived
+DIRECTLY from the simulation's ``grid_mass`` /
+``grid_momentum`` fields at every save time and compared to the analytic
 solution (relative L2/LMax errors of flow thickness and momentum). The
 same plots as the AvaFrame simiSol module are produced (see
 ``similarity_solution_test.py``): the 2x6 summary figure (twin-axis
@@ -150,8 +150,12 @@ def run_simulation(settings, cfg):
     release, _, _ = build_release(header, cfg)
     sim.set_release_areas(np.ascontiguousarray(release.astype(np.float32)))
 
-    sim_name = "%s_coulomb_delta%g" % (pathlib.Path(settings["dem_path"]).stem,
-                                       cfg["delta"])
+    sim_name = "%s_%s_%s_delta%g" % (pathlib.Path(settings["dem_path"]).stem,
+                                     settings["sim_model"],
+                                     settings["friction_model"],
+                                     cfg["delta"])
+    if cfg["flag_earth"]:
+        sim_name += "_earth"
     print(f"=== Similarity solution test (Hutter et al. 1993) - {sim_name} ===")
     print(f"DEM: {settings['dem_path']}")
     print(f"plane {cfg['zeta']:.2f} deg, bed friction {cfg['delta']:.2f} deg "
@@ -163,7 +167,8 @@ def run_simulation(settings, cfg):
     pos = np.asarray(sim.particles_position_xy, dtype=np.float64)
     pos = pos[np.isfinite(pos).all(axis=1)]
     print(f"particles: {len(pos)}, heap centroid on map: "
-          f"({pos[:, 0].mean():+.1f}, {pos[:, 1].mean():+.1f}) m - expected (+0.0, +0.0)")
+          f"({pos[:, 0].mean() + xmin:+.1f}, {pos[:, 1].mean() + ymin:+.1f}) m "
+          f"- expected (+0.0, +0.0)")
 
     sol = sst.similarity_solution(cfg["zeta"], cfg["delta"], cfg["phi"],
                                   cfg["flag_earth"], cfg["l_x"], cfg["l_y"],
@@ -178,6 +183,7 @@ def run_simulation(settings, cfg):
     x1_grid = (x_map - cfg["center"][0]) / cos_z
     y1_grid = y_map - cfg["center"][1]
     jac = sst.jacobian(dem, cs)
+    surface_velocity = settings["sim_model"].lower() in sst.SURFACE_VELOCITY_MODELS
 
     samples = {"t": [], "h": [], "u": [], "v": []}
     errors = {k: [] for k in ("h_l2", "h_l2rel", "h_lmax", "h_lmaxrel",
@@ -187,8 +193,9 @@ def run_simulation(settings, cfg):
 
     def record(info):
         """Sample the grid fields, compare to the analytic solution."""
-        t = info.elapsed_time
-        h, u, v, mass = sst.fields_from_grid(sim, dem.shape, cs, density, jac)
+        t = info.grid_elapsed_time
+        h, u, v, mass = sst.fields_from_grid(sim, dem.shape, cs, density, jac,
+                                             surface_velocity)
         samples["t"].append(t)
         samples["h"].append(h)
         samples["u"].append(u)
@@ -215,9 +222,9 @@ def run_simulation(settings, cfg):
 
     info = sim.run_n_steps(1)
     first_h, _, _, first_mass = sst.fields_from_grid(sim, dem.shape, cs,
-                                                     density, jac)
+                                                     density, jac, surface_velocity)
     sst.check_grid_mass_consistency(
-        sim, first_h, np.asarray(sim.particles_mass, dtype=np.float64))
+        sim, first_mass, np.asarray(sim.particles_mass, dtype=np.float64))
     last_step = -1
     idx_time = 0
 
@@ -226,7 +233,7 @@ def run_simulation(settings, cfg):
           f"{'huL2rel':>10} {'huLMaxrel':>10} {'xCom sim/ana [m]':>20}")
     while idx_time < len(save_times) and info.timestep != last_step:
         last_step = info.timestep
-        while idx_time < len(save_times) and info.elapsed_time >= save_times[idx_time] - 1e-6:
+        while idx_time < len(save_times) and info.grid_elapsed_time >= save_times[idx_time] - 1e-6:
             t, h_l2r, h_lmaxr, vh_l2r, vh_lmaxr, x_com_sim, x_com_ana = record(info)
             print(f"{t:6.2f} {info.timestep:6d} {h_l2r:10.4f} {h_lmaxr:10.4f} "
                   f"{vh_l2r:10.4f} {vh_lmaxr:10.4f} {x_com_sim:9.1f}/{x_com_ana:<9.1f}")
@@ -258,6 +265,9 @@ def main():
     parser.add_argument("--delta", type=float, default=None,
                         help="bed friction angle in degrees")
     parser.add_argument("--max-steps", type=int, default=None)
+    parser.add_argument("--earth-pressure", action="store_true",
+                        help="Savage-Hutter earth pressure coefficients in the "
+                             "analytic solution and the simulation")
     parser.add_argument("--out-dir", default=str(OUTPUT_DIR))
     parser.add_argument("--gpu", default=None, help="GPU name substring to select")
     parser.add_argument("--plot-sequence", action="store_true",
@@ -281,7 +291,12 @@ def main():
         cfg["delta"] = args.delta
     if args.max_steps is not None:
         settings["max_steps"] = args.max_steps
+    cfg["flag_earth"] = cfg["flag_earth"] or args.earth_pressure
     settings["friction_coefficient"] = math.tan(math.radians(cfg["delta"]))
+    # earth pressure as in the analytic solution (Savage-Hutter K from phi, delta)
+    settings["enable_earth_pressure_coefficient"] = cfg["flag_earth"]
+    settings["internal_friction_angle"] = cfg["phi"]
+    settings["basal_friction_angle"] = cfg["delta"]
     cfg["plot_sequence"] = cfg["plot_sequence"] or args.plot_sequence
 
     import similarity_solution_test as sst
@@ -341,8 +356,6 @@ def main():
         sst.assemble_gif(contour_pngs, out_dir / (sim_name + "_contours.gif"))
         sst.assemble_gif(profile_pngs, out_dir / (sim_name + "_profiles.gif"))
 
-    sst.plot_error_time(samples["t"], err_h, err_h_max, err_vh, err_vh_max,
-                        relative, cfg["t_save"], sim_name, out_dir)
     sst.plot_simi_sol_summary(header, field, h_ana, limits,
                               {"h_l2": err_h, "h_lmax": err_h_max,
                                "vh_l2": err_vh, "vh_lmax": err_vh_max},

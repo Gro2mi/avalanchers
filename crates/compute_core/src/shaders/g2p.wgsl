@@ -35,6 +35,7 @@ struct TimestepData {
 
 @group(0) @binding(12) var dem_texture: texture_2d<f32>;
 @group(0) @binding(13) var<storage, read_write> particles_elevation: array<f32>;
+@group(0) @binding(14) var<storage, read_write> particles_velocity_z: array<f32>;
 
 const density: f32 = 200.0;
 override WG_SIZE_1D: u32 = 1u;
@@ -52,7 +53,8 @@ fn g2p(
     if (sim_info.flags & SIM_INFO_STOPPED) != 0u {
         return;
     }
-    if (particles_state[particleId] & PARTICLE_STOPPED) != 0u {
+    let previous_state = particles_state[particleId];
+    if (previous_state & PARTICLE_STOPPED) != 0u {
         return;
     }
     var position = particles_position[particleId];
@@ -66,6 +68,7 @@ fn g2p(
     let terrain_data = textureSampleLevel(terrain_metrics, tex_sampler, uv, 0);
     let l_x = terrain_data.x;
     let l_y = terrain_data.y;
+    let slope = terrain_slope_at_uv(uv);
 
     if is_nan(l_x) {
         var state = sim_info.timestep;
@@ -75,39 +78,40 @@ fn g2p(
         sim_info.flags |= SIM_INFO_PARTICLE_OUT_OF_DEM_DATA;
         return;
     }
-    let interpolated_velocity = transfer_g2p(particleId);
-    // affine transfer
-    // let update = transfer_g2p(particleId);
-    // let interpolated_velocity = update.velocity;
-    // let new_affine_matrix = update.affine_matrix;
-
-    // var dt = sim_settings.cfl * sim_settings.cell_size / (sim_info.max_velocity + sim_settings.velocity_threshold);
+    let update = transfer_g2p(particleId);
+    let interpolated_velocity = update.velocity;
     var dt = sim_info.dt;
 
-    // pseudo FLIP, take diff of particle velocity instead of grid velocity
-    // let old_velocity = particles_velocity[particleId];
-    // let flip_velocity = old_velocity + (interpolated_velocity - old_velocity); // simple delta approximation
+    let speed = surface_speed(slope, interpolated_velocity);
+    let new_state = next_rest_state(previous_state, speed, sim_info.timestep);
+    particles_state[particleId] = new_state;
+    let resting = (new_state & PARTICLE_RESTING) != 0u;
+    if resting {
+        particles_velocity[particleId] = vec2f(0.0);
+        particles_velocity_z[particleId] = 0.0;
+        particles_affine_matrix[particleId] = mat2x2<f32>(vec2f(0.0), vec2f(0.0));
+        atomicAdd(&atomic_values.resting_particles, 1u);
+        return;
+    }
 
-    // let new_velocity = mix(interpolated_velocity, old_velocity, 0.5);
-
-    // TODO PIC is very diffusive, try APIC or FLIP
     let new_velocity = interpolated_velocity;
-    var velocity_contravariant = vec2f(new_velocity.x / l_x, new_velocity.y / l_y);
-    position = position + velocity_contravariant * dt;
+    position = position + new_velocity * dt;
 
     particles_position[particleId] = position;
     particles_velocity[particleId] = new_velocity;
     let uv_new = position_to_uv(position);
     let elevation = get_elevation(uv_new);
     particles_elevation[particleId] = elevation;
+    let slope_new = terrain_slope_at_uv(uv_new);
+    particles_velocity_z[particleId] = dot(slope_new, new_velocity);
 
-    // affine transfer
-    // particles_affine_matrix[particleId] = new_affine_matrix;
+    // The shared gather uses particle-minus-node offsets; C uses node-minus-particle.
+    particles_affine_matrix[particleId] = update.affine_matrix * -1.0;
 
     if particleId == sim_info.number_particles / 2u {
         var current: TimestepData;
         current.position = vec3f(position, elevation);
-        current.velocity = vec3f(new_velocity, 0.0);
+        current.velocity = surface_velocity(slope_new, new_velocity);
         current.uv = uv;
         current.dt = dt;
         current.acceleration_tangential = vec3f(0.0);
@@ -136,14 +140,6 @@ fn g2p(
         out_debug[10] = f32(sim_settings.world_size.x);
         out_debug[11] = f32(sim_settings.world_size.y);
         out_debug[12] = f32(sim_settings.friction_coefficient);
-    }
-
-    if dot(interpolated_velocity, interpolated_velocity) < sim_settings.velocity_threshold * sim_settings.velocity_threshold {
-        var state = sim_info.timestep;
-        state |= PARTICLE_STOPPED;
-        particles_state[particleId] = state;
-        atomicAdd(&atomic_values.stopped_particles, 1u);
-        return;
     }
 
     if is_nan(position.x) {
@@ -270,13 +266,41 @@ fn update_output_data(trajectory: u32, timestep: u32, timestep_data: TimestepDat
 //     return acceleration_magnitude;
 // }
 
-// import transfer_g2p.wgsl;
-// BEGIN transfer_g2p.wgsl
-fn transfer_g2p(p_idx: u32) -> vec2f {
+// import curvilinear_geometry.wgsl;
+// BEGIN curvilinear_geometry.wgsl
+// Velocities are horizontal contravariant components q = (dx/dt, dy/dt).
+// For z = B(x,y), G = I + grad(B) grad(B)^T.
+fn surface_inverse_metric(slope: vec2f, covector: vec2f) -> vec2f {
+    return covector - slope * dot(slope, covector) / (1.0 + dot(slope, slope));
+}
+
+fn surface_velocity(slope: vec2f, velocity: vec2f) -> vec3f {
+    return vec3f(velocity, dot(slope, velocity));
+}
+
+fn surface_speed(slope: vec2f, velocity: vec2f) -> f32 {
+    return length(surface_velocity(slope, velocity));
+}
+
+fn terrain_slope_at_uv(uv: vec2f) -> vec2f {
+    let offset = 1.0 / vec2f(sim_settings.grid_shape);
+    return vec2f(
+        textureSampleLevel(dem_texture, tex_sampler, uv + vec2f(offset.x, 0.0), 0).x
+            - textureSampleLevel(dem_texture, tex_sampler, uv - vec2f(offset.x, 0.0), 0).x,
+        textureSampleLevel(dem_texture, tex_sampler, uv + vec2f(0.0, offset.y), 0).x
+            - textureSampleLevel(dem_texture, tex_sampler, uv - vec2f(0.0, offset.y), 0).x
+    ) / (2.0 * sim_settings.cell_size);
+}
+
+// END curvilinear_geometry.wgsl
+// import transfer_g2p_affine.wgsl;
+// BEGIN transfer_g2p_affine.wgsl
+fn transfer_g2p(p_idx: u32) -> G2PUpdate {
     let grid_pos = particles_position[p_idx] / sim_settings.cell_size - vec2f(0.5);
     let base_node = vec2u(floor(grid_pos - vec2f(0.5)));
     
     var interpolated_velocity = vec2f(0.0);
+    var new_affine_matrix = mat2x2<f32>(vec2<f32>(0.0), vec2<f32>(0.0));
 
     for (var i: u32 = 0; i < 3; i++) {
         for (var j: u32 = 0; j < 3; j++) {
@@ -284,14 +308,18 @@ fn transfer_g2p(p_idx: u32) -> vec2f {
             let distance = calculate_distance_to_node(grid_pos, node_coords);
             let weight = calculate_weight(distance);
             let idx = xy_to_idx(node_coords);
-            
-            interpolated_velocity += weight * grid_velocity[idx];
+            let grid_vel = grid_velocity[idx];
+            interpolated_velocity += weight * grid_vel;
+            new_affine_matrix += 4.0 * weight * mat2x2<f32>(
+                grid_vel * distance.x,
+                grid_vel * distance.y
+            );
         }
     }
-    return interpolated_velocity;
+    return G2PUpdate(interpolated_velocity, new_affine_matrix);
 }
 
-// END transfer_g2p.wgsl
+// END transfer_g2p_affine.wgsl
 
 // import utils.wgsl;
 // BEGIN utils.wgsl
@@ -318,6 +346,11 @@ const INV_MOMENTUM_FACTOR: f32 = 1 / MOMENTUM_FACTOR;
 // depth-integrated internal force (h * sigma * grad_w * area, ~1e4..1e5 N per node contribution)
 const FORCE_FACTOR: f32 = 1e-3; // i32 limit is 2.1e6 N per node
 const INV_FORCE_FACTOR: f32 = 1 / FORCE_FACTOR;
+// weak-form pressure sum m_p h_p / 2 grad_w (kg) of the curvilinear model,
+// node sum = node_mass * |grad h|: 0.001 kg resolves thin front nodes
+//   (rho*cell^2*h*J ~ 6e4 kg * 1 * 1e3 = 6e7 < 2.1e9)
+const PRESSURE_FACTOR: f32 = 1e3;
+const INV_PRESSURE_FACTOR: f32 = 1 / PRESSURE_FACTOR;
 
 // TODO precompute often used values on the cpu and pass them as uniforms to avoid redundant calculations on the gpu
 
@@ -330,6 +363,7 @@ struct SimInfo {
     max_velocity: f32,
     max_flow_thickness: f32,
     flags: u32,
+    grid_elapsed_time: f32,
 };
 
 const SIM_INFO_OUT_OF_BOUNDS: u32 = 1u << 0u;
@@ -339,7 +373,16 @@ const SIM_INFO_PARTICLE_OUT_OF_DEM_DATA: u32 = 1u << 3u;
 const SIM_INFO_STOPPED: u32 = 1u << 31u;
 const SIM_INFO_ALL_PARTICLES_STOPPED: u32 = 1u << 30u;
 const SIM_INFO_NO_NEW_CELLS: u32 = 1u << 29u;
+// almost all particles are resting or terminally stopped
+const SIM_INFO_AT_REST: u32 = 1u << 28u;
+// total momentum fell below momentum_stop_fraction of its peak
+const SIM_INFO_LOW_MOMENTUM: u32 = 1u << 27u;
 
+// reversible low-speed state; the low bits hold the rest start step while resting
+// and the consecutive slow-step count while moving
+const PARTICLE_RESTING: u32 = 1u << 26u;
+// consecutive slow steps before a particle rests
+const REST_STEPS: u32 = 20u;
 const PARTICLE_FLYING: u32 = 1u << 27u;
 const PARTICLE_OUT_OF_BOUNDS: u32 = 1u << 28u;
 const PARTICLE_IS_NAN: u32 = 1u << 29u;
@@ -354,7 +397,7 @@ struct SimSettings {
     grid_shape: vec2u,
     world_size: vec2f,
     snow_density: f32,
-    slab_thickness: f32,
+    release_thickness: f32,
     friction_coefficient: f32,
     drag_coefficient: f32,
     n0: f32,
@@ -381,6 +424,14 @@ struct SimSettings {
     // MPMDAC compressibility; bulk_modulus 0 = incompressible
     bulk_modulus: f32,
     compaction_pressure: f32,
+    // stop once total momentum < fraction * its peak; 0 disables (curvilinear)
+    momentum_stop_fraction: f32,
+    // front travel in cells covered by the no-new-cells stop window
+    no_new_cells_travel: f32,
+    // Gaussian width (m) of the curvilinear reference surface; 0 disables it
+    reference_surface_length: f32,
+    // snow water equivalent (kg/m2) of the release cells; NaN if unset
+    release_swe: f32,
 };
 
 struct AtomicValues {
@@ -392,7 +443,42 @@ struct AtomicValues {
     number_release_cells: atomic<u32>,
     number_release_particles: atomic<u32>,
     stopped_particles: atomic<u32>,
+    // resting particles counted during the current step, reset by update_sim_info
+    resting_particles: atomic<u32>,
+    // total grid momentum (kg m/s) of the current step as a 64-bit sum, reset by update_sim_info
+    momentum_lo: atomic<u32>,
+    momentum_hi: atomic<u32>,
+    // f32 bits of the largest total momentum so far
+    peak_momentum: atomic<u32>,
 };
+
+// Reversible resting: a particle rests after REST_STEPS consecutive slow steps
+// and wakes once the gathered grid speed exceeds twice the threshold. Resting
+// particles keep depositing mass but no momentum and do not move, which removes
+// sub-threshold creep inside deposits. Returns the new state: its low bits hold
+// the slow-step counter while moving and the rest start step while resting.
+fn next_rest_state(previous_state: u32, speed: f32, timestep: u32) -> u32 {
+    let low_mask = PARTICLE_RESTING - 1u;
+    var resting = (previous_state & PARTICLE_RESTING) != 0u;
+    var low_bits = previous_state & low_mask;
+    if resting {
+        if speed > 2.0 * sim_settings.velocity_threshold {
+            resting = false;
+            low_bits = 0u;
+        }
+    } else if speed < sim_settings.velocity_threshold {
+        low_bits = min(low_bits + 1u, REST_STEPS);
+        if low_bits >= REST_STEPS {
+            resting = true;
+            low_bits = timestep & low_mask;
+        }
+    } else {
+        low_bits = 0u;
+    }
+    return (previous_state & ~(PARTICLE_RESTING | low_mask))
+        | select(0u, PARTICLE_RESTING, resting)
+        | low_bits;
+}
 
 struct G2PUpdate {
     velocity: vec2f,
@@ -400,6 +486,13 @@ struct G2PUpdate {
 };
 
 @group(0) @binding(0) var<uniform> sim_settings: SimSettings;
+
+// length in steps of the no-new-cells rolling window: the fastest material
+// moves at most cfl cells per step, so round(travel / cfl) steps cover the same
+// front travel at any cfl; at least 10 steps
+fn no_new_cells_window() -> u32 {
+    return max(10u, u32(round(sim_settings.no_new_cells_travel / sim_settings.cfl)));
+}
 
 fn is_nan(x: f32) -> bool {
     let bits: u32 = bitcast<u32>(x);

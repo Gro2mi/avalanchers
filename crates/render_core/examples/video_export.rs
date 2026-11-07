@@ -22,7 +22,6 @@ use compute_core::settings::Settings;
 use compute_core::{ComputeOrchestrator, SimInfo, buffers::BufferName};
 use render_core::{OverlayRange, ParticleBuffers, Renderer, TerrainData};
 use simulation::{Simulation, SimulationState};
-use wgpu::util::DeviceExt;
 
 const DEFAULT_SETTINGS: &str = "settings.json";
 const DEFAULT_OUTPUT: &str = "simulation.mp4";
@@ -122,7 +121,7 @@ impl Overlay {
             Self::GridMass => OverlayRange::new(0.0, 5_000.0)
                 .with_threshold(1.0)
                 .with_unit("kg"),
-            // Slab thickness in metres; release textures typically hold 1.0 m.
+            // Release thickness in metres; release textures typically hold 1.0 m.
             Self::ReleaseAreas => OverlayRange::new(0.0, 2.0)
                 .with_threshold(0.01)
                 .with_unit("m"),
@@ -156,8 +155,7 @@ impl Overlay {
 /// colouring falls back to horizontal speed.
 fn clone_particle_buffers(
     orchestrator: &ComputeOrchestrator,
-    particle_count: u32,
-) -> anyhow::Result<[wgpu::Buffer; 5]> {
+) -> anyhow::Result<([wgpu::Buffer; 4], Option<wgpu::Buffer>)> {
     let clone_buffer = |name: BufferName| -> anyhow::Result<wgpu::Buffer> {
         orchestrator
             .resources
@@ -166,23 +164,15 @@ fn clone_particle_buffers(
             .ok_or_else(|| anyhow::anyhow!("simulation buffer '{name}' is missing"))
     };
 
-    let velocity_z = clone_buffer(BufferName::ParticlesVelocityZ).unwrap_or_else(|_| {
-        orchestrator
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Zero Vertical Velocity"),
-                contents: bytemuck::cast_slice(&vec![0.0f32; particle_count as usize]),
-                usage: wgpu::BufferUsages::STORAGE,
-            })
-    });
-
-    Ok([
-        clone_buffer(BufferName::ParticlesPosition)?,
-        clone_buffer(BufferName::ParticlesVelocity)?,
-        velocity_z,
-        clone_buffer(BufferName::ParticlesState)?,
-        clone_buffer(BufferName::ParticlesElevation)?,
-    ])
+    Ok((
+        [
+            clone_buffer(BufferName::ParticlesPosition)?,
+            clone_buffer(BufferName::ParticlesVelocity)?,
+            clone_buffer(BufferName::ParticlesState)?,
+            clone_buffer(BufferName::ParticlesElevation)?,
+        ],
+        clone_buffer(BufferName::ParticlesVelocityZ).ok(),
+    ))
 }
 
 /// Spawns an ffmpeg process that encodes raw RGBA frames on stdin into an
@@ -229,7 +219,9 @@ struct HeadlessSimulation {
     queue: wgpu::Queue,
     terrain: TerrainData,
     grids: Vec<(BufferName, wgpu::Buffer)>,
-    particles: [wgpu::Buffer; 5],
+    particles: [wgpu::Buffer; 4],
+    /// Absent for models without a vertical velocity.
+    velocity_z: Option<wgpu::Buffer>,
     info: SimInfo,
 }
 
@@ -259,7 +251,7 @@ fn start_simulation(settings: Settings, exaggeration: f32) -> anyhow::Result<Hea
             Ok((name.clone(), buffer))
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
-    let particles = clone_particle_buffers(orchestrator, info.number_particles)?;
+    let (particles, velocity_z) = clone_particle_buffers(orchestrator)?;
 
     Ok(HeadlessSimulation {
         device: orchestrator.device.clone(),
@@ -267,12 +259,22 @@ fn start_simulation(settings: Settings, exaggeration: f32) -> anyhow::Result<Hea
         terrain,
         grids,
         particles,
+        velocity_z,
         info,
         simulation,
     })
 }
 
 fn main() -> anyhow::Result<()> {
+    // Network-backed loaders (reqwest/hyper) need a Tokio reactor even though the
+    // examples drive futures with pollster; a multi-thread runtime runs the IO driver
+    // on its worker threads so pollster::block_on can make progress.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("failed to build Tokio runtime");
+    let _runtime_guard = runtime.enter();
     let mut args = std::env::args().skip(1);
     let settings_path = args.next().unwrap_or_else(|| DEFAULT_SETTINGS.to_string());
     let output = args.next().unwrap_or_else(|| DEFAULT_OUTPUT.to_string());
@@ -330,15 +332,16 @@ fn main() -> anyhow::Result<()> {
         &sim.terrain,
     );
     renderer.set_grid_overlay(&sim.device, overlay_buffer, overlay.range());
-    let [position, velocity, velocity_z, stopped, elevation] = &sim.particles;
+    let [position, velocity, stopped, elevation] = &sim.particles;
     renderer.set_particles(
         &sim.device,
         Some(ParticleBuffers {
             position,
             velocity,
-            velocity_z,
+            velocity_z: sim.velocity_z.as_ref(),
             stopped,
             elevation,
+            grid_mass: None,
         }),
     );
     renderer

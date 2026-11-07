@@ -8,15 +8,19 @@ use crate::camera::OrbitCamera;
 pub struct ParticleBuffers<'a> {
     /// `array<vec2<f32>>` of positions in the DEM plane, in metres.
     pub position: &'a wgpu::Buffer,
-    /// `array<vec2<f32>>` of horizontal velocities, used for colouring.
+    /// `array<vec2<f32>>` of velocities, used for colouring.
     pub velocity: &'a wgpu::Buffer,
     /// `array<f32>` of vertical velocities, used for colouring. Models without one
-    /// (MPM) can pass a zero-filled buffer to colour by horizontal speed only.
-    pub velocity_z: &'a wgpu::Buffer,
+    /// pass `None`: terrain-following velocities already have the true speed as
+    /// their magnitude, MPMDAC colours by horizontal speed.
+    pub velocity_z: Option<&'a wgpu::Buffer>,
     /// `array<u32>` where a non-zero entry marks a stopped particle.
     pub stopped: &'a wgpu::Buffer,
     /// `array<f32>` of particle elevations above sea level, in metres.
     pub elevation: &'a wgpu::Buffer,
+    /// Grid mass per cell (`BufferName::GridMass`), read only for the optional
+    /// elevation jitter (see [`ParticleRenderer::set_elevation_jitter`]).
+    pub grid_mass: Option<&'a wgpu::Buffer>,
 }
 
 #[repr(C)]
@@ -29,8 +33,11 @@ struct ParticleUniforms {
     up: [f32; 4],
     /// particle count, velocity at the top of the colour ramp
     params: [f32; 4],
-    /// unused, unused, unused, height offset above the surface
+    /// grid width, grid height, cell size, height offset above the surface
     grid: [f32; 4],
+    /// jitter amplitude (0 = off), grid mass to flow thickness factor,
+    /// 1 if the grid mass is stored as f32 bits, unused
+    jitter: [f32; 4],
 }
 
 /// Draws particles as camera-facing discs, expanded on the GPU from the vertex index.
@@ -42,6 +49,8 @@ pub struct ParticleRenderer {
     uniform_buffer: wgpu::Buffer,
     uniforms: ParticleUniforms,
     count: u32,
+    jitter_amplitude: f32,
+    has_grid_mass: bool,
 }
 
 impl ParticleRenderer {
@@ -63,6 +72,7 @@ impl ParticleRenderer {
                 terrain.cell_size(),
                 radius * 0.5,
             ],
+            jitter: [0.0; 4],
         };
 
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -101,6 +111,7 @@ impl ParticleRenderer {
                 storage_entry(3),
                 storage_entry(4),
                 storage_entry(5),
+                storage_entry(6),
             ],
         });
 
@@ -158,11 +169,16 @@ impl ParticleRenderer {
             uniform_buffer,
             uniforms,
             count: 0,
+            jitter_amplitude: 0.0,
+            has_grid_mass: false,
         }
     }
 
     /// Attaches simulation buffers. Passing `None` stops drawing particles.
     pub fn set_buffers(&mut self, device: &wgpu::Device, buffers: Option<ParticleBuffers<'_>>) {
+        self.has_grid_mass = buffers.is_some_and(|buffers| buffers.grid_mass.is_some());
+        let has_velocity_z = buffers.is_some_and(|buffers| buffers.velocity_z.is_some());
+        self.uniforms.jitter[3] = if has_velocity_z { 1.0 } else { 0.0 };
         self.bind_group = buffers.map(|buffers| {
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Particle Bind Group"),
@@ -190,7 +206,21 @@ impl ParticleRenderer {
                     },
                     wgpu::BindGroupEntry {
                         binding: 5,
-                        resource: buffers.velocity_z.as_entire_binding(),
+                        // without a z velocity the shader skips this binding,
+                        // so any storage buffer satisfies it
+                        resource: buffers
+                            .velocity_z
+                            .unwrap_or(buffers.elevation)
+                            .as_entire_binding(),
+                    },
+                    // without a grid mass buffer the jitter stays off, so any
+                    // storage buffer satisfies the binding
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: buffers
+                            .grid_mass
+                            .unwrap_or(buffers.elevation)
+                            .as_entire_binding(),
                     },
                 ],
             })
@@ -213,7 +243,30 @@ impl ParticleRenderer {
         self.uniforms.params[1] = max_velocity.max(1e-6);
     }
 
+    /// Lifts each particle by a random share of the local flow thickness, so a
+    /// flowing layer reads as a volume instead of a sheet on the terrain. This is
+    /// a visual effect only; the simulation's particle elevations are untouched.
+    /// `mass_to_thickness` converts a raw grid mass value to metres of flow
+    /// (`1 / (MASS_FACTOR * density * cell_size^2)` for quantized masses);
+    /// `mass_is_f32` selects the float-atomic encoding. Needs a `grid_mass`
+    /// buffer; an `amplitude` of 0 disables it.
+    pub fn set_elevation_jitter(
+        &mut self,
+        amplitude: f32,
+        mass_to_thickness: f32,
+        mass_is_f32: bool,
+    ) {
+        self.jitter_amplitude = amplitude.max(0.0);
+        self.uniforms.jitter[1] = mass_to_thickness;
+        self.uniforms.jitter[2] = if mass_is_f32 { 1.0 } else { 0.0 };
+    }
+
     pub fn update_camera(&mut self, queue: &wgpu::Queue, camera: &OrbitCamera) {
+        self.uniforms.jitter[0] = if self.has_grid_mass {
+            self.jitter_amplitude
+        } else {
+            0.0
+        };
         let (right, up) = camera.billboard_axes();
         self.uniforms.view_proj = camera.view_projection();
         self.uniforms.right = [right.x, right.y, right.z, self.uniforms.right[3]];

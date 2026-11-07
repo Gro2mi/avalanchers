@@ -167,6 +167,19 @@ impl OrbitCamera {
         (right, right.cross(forward))
     }
 
+    /// World-space ray (origin, unit direction) through a point in normalized
+    /// device coordinates: `x` and `y` in `[-1, 1]`, `y` pointing up.
+    pub fn ray(&self, ndc_x: f32, ndc_y: f32) -> (Vec3, Vec3) {
+        let eye = self.eye();
+        let forward = (self.target - eye).normalize();
+        let right = forward.cross(Vec3::Y).normalize();
+        let up = right.cross(forward);
+        let half_height = (self.fov_y * 0.5).tan();
+        let direction =
+            forward + right * (ndc_x * half_height * self.aspect) + up * (ndc_y * half_height);
+        (eye, direction.normalize())
+    }
+
     /// Rotates the camera around the target. Inputs are in radians.
     pub fn orbit(&mut self, delta_yaw: f32, delta_pitch: f32) {
         self.yaw -= delta_yaw;
@@ -349,5 +362,61 @@ mod tests {
             camera.orbit(0.0, -1.0);
         }
         assert!(camera.pitch >= MIN_PITCH);
+    }
+
+    #[test]
+    fn center_ray_points_at_target_and_hits_terrain() {
+        let terrain = flat_terrain();
+        let camera = OrbitCamera::framing(&terrain, 16.0 / 9.0);
+        let (origin, direction) = camera.ray(0.0, 0.0);
+        assert_eq!(origin, camera.eye());
+        let to_target = (camera.target - origin).normalize();
+        assert!(direction.dot(to_target) > 0.9999);
+
+        let distance = terrain.raycast(origin, direction).expect("ray should hit");
+        let hit = origin + direction * distance;
+        assert!((hit.y - 1000.0).abs() < terrain.cell_size(), "hit {hit:?}");
+    }
+
+    #[test]
+    fn ray_projects_back_to_its_ndc_point() {
+        let terrain = flat_terrain();
+        let camera = OrbitCamera::framing(&terrain, 16.0 / 9.0);
+        let (origin, direction) = camera.ray(0.4, -0.3);
+        let ndc = transform_point(camera.view_projection(), origin + direction * 50.0);
+        assert!(
+            (ndc.x - 0.4).abs() < 1e-3 && (ndc.y + 0.3).abs() < 1e-3,
+            "ndc {ndc:?}"
+        );
+    }
+
+    #[test]
+    fn rays_past_the_terrain_miss() {
+        let terrain = flat_terrain();
+        let camera = OrbitCamera::framing(&terrain, 16.0 / 9.0);
+        // The top corner looks over the terrain at the horizon.
+        let (origin, direction) = camera.ray(0.0, 1.0);
+        assert!(terrain.raycast(origin, direction).is_none());
+        // Straight up never comes down.
+        assert!(terrain.raycast(origin, Vec3::Y).is_none());
+    }
+
+    #[test]
+    fn rays_miss_no_data_cells() {
+        let mut heights = vec![1000.0; 64 * 32];
+        heights.iter_mut().take(64 * 16).for_each(|h| *h = f32::NAN);
+        let terrain = TerrainData::new(64, 32, 10.0, heights).unwrap();
+        let down = Vec3::new(0.0, -1.0, 0.0);
+        // Rows 0..16 (no-data) sit at the max-z half of the world.
+        assert!(
+            terrain
+                .raycast(Vec3::new(300.0, 2000.0, 250.0), down)
+                .is_none()
+        );
+        assert!(
+            terrain
+                .raycast(Vec3::new(300.0, 2000.0, 50.0), down)
+                .is_some()
+        );
     }
 }

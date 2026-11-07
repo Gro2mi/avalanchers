@@ -10,6 +10,7 @@ use std::{fmt, fs};
 use tracing::{debug, error, info, trace, warn};
 
 use crate::dem::Dem;
+use crate::{DEFAULT_RELEASE_THICKNESS, RELEASE_THICKNESS_THRESHOLD};
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -24,6 +25,7 @@ impl SimFlags {
         earth_pressure_coefficient: bool,
         entrainment: bool,
         center_of_mass_biggest_blob: bool,
+        weak_pressure: bool,
     ) -> Self {
         let mut mask = 0u32;
         if curvature {
@@ -40,6 +42,9 @@ impl SimFlags {
         }
         if center_of_mass_biggest_blob {
             mask |= 1 << 4;
+        }
+        if weak_pressure {
+            mask |= 1 << 5;
         }
 
         SimFlags { mask }
@@ -64,6 +69,9 @@ impl SimFlags {
     pub fn is_center_of_mass_biggest_blob_enabled(&self) -> bool {
         (self.mask & (1 << 4)) != 0
     }
+    pub fn is_weak_pressure_enabled(&self) -> bool {
+        (self.mask & (1 << 5)) != 0
+    }
 }
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable, Serialize, Deserialize)]
@@ -79,7 +87,10 @@ pub struct SimSettings {
     pub world_size_x: f32,
     pub world_size_y: f32,
     pub density: f32,
-    pub slab_thickness_factor: f32,
+    /// Release thickness (m) replacing that of the release source, NaN if
+    /// unset; read it with [`Self::release_thickness_override`].
+    #[serde(deserialize_with = "deserialize_unset_as_nan")]
+    pub release_thickness: f32,
     pub friction_coefficient: f32,
     pub drag_coefficient: f32,
     pub n0: f32,
@@ -106,6 +117,23 @@ pub struct SimSettings {
     // MPMDAC compressibility; bulk_modulus 0 = incompressible
     pub bulk_modulus: f32,
     pub compaction_pressure: f32,
+    /// Grid flow models: stop once the total momentum falls below this fraction
+    /// of its peak; 0 disables the criterion.
+    pub momentum_stop_fraction: f32,
+    /// The no-new-cells stop window spans round(travel / cfl) steps, at least
+    /// 10: the steps the fastest material needs to travel this many cells.
+    pub no_new_cells_travel: f32,
+    /// Curvilinear: Gaussian width (m) of the reference surface that defines
+    /// gully wall inclinations for the confinement friction; 0 disables it.
+    pub reference_surface_length: f32,
+    /// Snow water equivalent (kg/m²) of every release cell, set instead of
+    /// `release_thickness`, NaN if unset; read it with
+    /// [`Self::release_swe_override`].
+    #[serde(
+        default = "unset_release_swe",
+        deserialize_with = "deserialize_unset_as_nan"
+    )]
+    pub release_swe: f32,
 }
 
 impl Hash for SimSettings {
@@ -121,7 +149,8 @@ impl Hash for SimSettings {
         self.world_size_x.to_bits().hash(state);
         self.world_size_y.to_bits().hash(state);
         self.density.to_bits().hash(state);
-        self.slab_thickness_factor.to_bits().hash(state);
+        self.release_thickness.to_bits().hash(state);
+        self.release_swe.to_bits().hash(state);
         self.friction_coefficient.to_bits().hash(state);
         self.drag_coefficient.to_bits().hash(state);
         self.n0.to_bits().hash(state);
@@ -146,9 +175,27 @@ impl Hash for SimSettings {
         // MPMDAC compressibility
         self.bulk_modulus.to_bits().hash(state);
         self.compaction_pressure.to_bits().hash(state);
+        self.momentum_stop_fraction.to_bits().hash(state);
+        self.no_new_cells_travel.to_bits().hash(state);
+        self.reference_surface_length.to_bits().hash(state);
         // Flags
         self.flags.hash(state);
     }
+}
+
+/// An unset `release_thickness` or `release_swe` is NaN, which JSON holds as
+/// null.
+fn deserialize_unset_as_nan<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f32, D::Error> {
+    Ok(Option::<f32>::deserialize(deserializer)?.unwrap_or(f32::NAN))
+}
+
+/// Settings files written before `release_swe` existed do not hold it.
+fn unset_release_swe() -> f32 {
+    f32::NAN
+}
+
+fn is_release_thickness(thickness: f32) -> bool {
+    thickness.is_finite() && thickness > RELEASE_THICKNESS_THRESHOLD
 }
 
 impl Default for SimSettings {
@@ -158,6 +205,105 @@ impl Default for SimSettings {
 }
 
 impl SimSettings {
+    /// Length in steps of the no-new-cells rolling window, see utils.wgsl.
+    pub fn no_new_cells_window(&self) -> u32 {
+        ((self.no_new_cells_travel / self.cfl).round() as u32).max(10)
+    }
+
+    /// Whether the mu(I) rheology is in use, either as the basal friction
+    /// model or as the constitutive law of the MPMDAC model.
+    pub fn uses_mu_i(&self) -> bool {
+        self.friction_model == FrictionModel::MuI.as_int()
+            || (self.sim_model == SimModel::MpmDaC.as_int()
+                && self.constitutive_model == ConstitutiveModel::MuI.as_int())
+    }
+
+    /// Sanity checks of the parameters the shaders cannot guard against
+    /// without producing NaN or meaningless friction. The mu(I) parameters
+    /// are only checked when the mu(I) rheology is in use.
+    pub fn validate(&self) -> Result<(), String> {
+        match (
+            self.release_swe_override(),
+            self.release_thickness_override(),
+        ) {
+            (Some(_), _) if !self.release_thickness.is_nan() => {
+                return Err(
+                    "`release_thickness` and `release_swe` exclude each other, set only one"
+                        .to_string(),
+                );
+            }
+            (Some(swe), _) if !(swe.is_finite() && swe > 0.0) => {
+                return Err(format!("`release_swe` must be positive, got {swe}"));
+            }
+            // thinner cells are not seeded, so nothing would release
+            (Some(swe), Some(thickness)) if !is_release_thickness(thickness) => {
+                return Err(format!(
+                    "`release_swe` of {swe} kg/m² at a `density` of {} kg/m³ is a thickness of \
+                     {thickness} m, which must be above {RELEASE_THICKNESS_THRESHOLD} m",
+                    self.density
+                ));
+            }
+            (None, Some(thickness)) if !is_release_thickness(thickness) => {
+                return Err(format!(
+                    "`release_thickness` must be above {RELEASE_THICKNESS_THRESHOLD} m, got {thickness}"
+                ));
+            }
+            _ => {}
+        }
+        if self.uses_mu_i() {
+            let finite = [
+                ("i0", self.i0),
+                ("mu0", self.mu0),
+                ("mu2", self.mu2),
+                ("grain_diameter", self.grain_diameter),
+            ];
+            if let Some((name, value)) = finite.iter().find(|(_, value)| !value.is_finite()) {
+                return Err(format!("mu(I): `{name}` must be finite, got {value}"));
+            }
+            if self.grain_diameter <= 0.0 {
+                return Err(format!(
+                    "mu(I): `grain_diameter` must be positive, got {}",
+                    self.grain_diameter
+                ));
+            }
+            if self.i0 <= 0.0 {
+                return Err(format!("mu(I): `i0` must be positive, got {}", self.i0));
+            }
+            if self.mu0 < 0.0 {
+                return Err(format!(
+                    "mu(I): `mu0` must not be negative, got {}",
+                    self.mu0
+                ));
+            }
+            if self.mu2 < self.mu0 {
+                return Err(format!(
+                    "mu(I): `mu2` ({}) must not be smaller than `mu0` ({})",
+                    self.mu2, self.mu0
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The `release_swe` setting, in kg/m².
+    pub fn release_swe_override(&self) -> Option<f32> {
+        (!self.release_swe.is_nan()).then_some(self.release_swe)
+    }
+
+    /// The `release_thickness` setting or the thickness `release_swe` gives
+    /// at `density`; `None` keeps the thickness of the release source.
+    pub fn release_thickness_override(&self) -> Option<f32> {
+        (!self.release_thickness.is_nan())
+            .then_some(self.release_thickness)
+            .or(self.release_swe_override().map(|swe| swe / self.density))
+    }
+
+    /// Thickness of release areas that hold none of their own.
+    pub fn release_thickness_or_default(&self) -> f32 {
+        self.release_thickness_override()
+            .unwrap_or(DEFAULT_RELEASE_THICKNESS)
+    }
+
     pub fn calculate_hash(&self) -> u64 {
         let mut s = DefaultHasher::new();
         self.hash(&mut s);
@@ -175,7 +321,7 @@ impl SimSettings {
             world_size_x: 1.0,
             world_size_y: 1.0,
             density: 200.0,
-            slab_thickness_factor: 1.0,
+            release_thickness: f32::NAN,
 
             friction_coefficient: 0.2,
             drag_coefficient: 2000.0,
@@ -187,11 +333,13 @@ impl SimSettings {
             internal_friction_angle: 40.0,
             basal_friction_angle: 25.0,
 
-            cfl: 0.5,
+            cfl: 0.9,
             cell_size: 1.0,
             velocity_threshold: 0.1,
             roughness_threshold: 0.01,
-            flags: SimFlags::new(true, true, true, true, false).mask,
+            // earth pressure coefficient off: Voellmy-type parameters are
+            // calibrated with hydrostatic lateral pressure (K = 1)
+            flags: SimFlags::new(true, true, false, true, false, false).mask,
 
             min_slope_angle: 28.0,
             max_slope_angle: 60.0,
@@ -206,6 +354,11 @@ impl SimSettings {
 
             bulk_modulus: 2.0e4,
             compaction_pressure: 2.0e3,
+
+            momentum_stop_fraction: 0.0,
+            no_new_cells_travel: 65.0,
+            reference_surface_length: 0.0,
+            release_swe: f32::NAN,
         }
     }
 
@@ -223,6 +376,14 @@ impl SimSettings {
 
     pub fn from_settings(patch: &Settings, dem: &Dem) -> Self {
         let mut settings = SimSettings::new();
+        settings.apply_patch(patch);
+        settings.set_dem(dem);
+        settings
+    }
+
+    /// Overwrites the fields set in `patch`; unset fields keep their value.
+    pub fn apply_patch(&mut self, patch: &Settings) {
+        let settings = self;
         if let Some(val) = patch.max_steps {
             settings.max_steps = val;
         }
@@ -238,8 +399,11 @@ impl SimSettings {
         if let Some(val) = patch.density {
             settings.density = val;
         }
-        if let Some(val) = patch.slab_thickness_factor {
-            settings.slab_thickness_factor = val;
+        // a patch cannot unset a field, so setting one of the two clears the
+        // other; a patch with both fails validation
+        if patch.release_thickness.is_some() || patch.release_swe.is_some() {
+            settings.release_thickness = patch.release_thickness.unwrap_or(f32::NAN);
+            settings.release_swe = patch.release_swe.unwrap_or(f32::NAN);
         }
         if let Some(val) = patch.friction_coefficient {
             settings.friction_coefficient = val;
@@ -307,6 +471,15 @@ impl SimSettings {
         if let Some(val) = patch.compaction_pressure {
             settings.compaction_pressure = val;
         }
+        if let Some(val) = patch.momentum_stop_fraction {
+            settings.momentum_stop_fraction = val;
+        }
+        if let Some(val) = patch.no_new_cells_travel {
+            settings.no_new_cells_travel = val;
+        }
+        if let Some(val) = patch.reference_surface_length {
+            settings.reference_surface_length = val;
+        }
         if let Some(val) = patch.enable_curvature {
             if val {
                 settings.flags |= 1 << 0;
@@ -342,8 +515,13 @@ impl SimSettings {
                 settings.flags &= !(1 << 4);
             }
         }
-        settings.set_dem(dem);
-        settings
+        if let Some(val) = patch.enable_weak_pressure {
+            if val {
+                settings.flags |= 1 << 5;
+            } else {
+                settings.flags &= !(1 << 5);
+            }
+        }
     }
 
     pub fn to_json(&self, path: &str) -> std::io::Result<()> {
@@ -361,6 +539,8 @@ pub enum FrictionModel {
     Voellmy,
     VoellmyMinShear,
     SamosAT,
+    /// rate-dependent mu(I) basal friction (model 5; model 4 is a stub)
+    MuI,
 }
 
 impl FrictionModel {
@@ -370,6 +550,7 @@ impl FrictionModel {
             1 => Some(FrictionModel::Voellmy),
             2 => Some(FrictionModel::VoellmyMinShear),
             3 => Some(FrictionModel::SamosAT),
+            5 => Some(FrictionModel::MuI),
             _ => None,
         }
     }
@@ -380,6 +561,7 @@ impl FrictionModel {
             FrictionModel::Voellmy => 1,
             FrictionModel::VoellmyMinShear => 2,
             FrictionModel::SamosAT => 3,
+            FrictionModel::MuI => 5,
         }
     }
 }
@@ -393,6 +575,7 @@ impl FromStr for FrictionModel {
             "voellmy" => Ok(Self::Voellmy),
             "voellmyminshear" | "voellmy-min-shear" => Ok(Self::VoellmyMinShear),
             "samosat" | "samos-at" => Ok(Self::SamosAT),
+            "mu-i" | "mui" | "mu(i)" => Ok(Self::MuI),
             _ => Err(format!("unknown friction model: {value}")),
         }
     }
@@ -405,6 +588,7 @@ impl fmt::Display for FrictionModel {
             Self::Voellmy => "voellmy",
             Self::VoellmyMinShear => "voellmy-min-shear",
             Self::SamosAT => "samos-at",
+            Self::MuI => "mu-i",
         })
     }
 }
@@ -520,6 +704,10 @@ pub enum SimModel {
     TerrainFollowing,
     Curvilinear,
     MpmDaC,
+    /// Legacy per-particle sliding-block model (former model 0).
+    SlidingBlock,
+    /// Terrain-following grid model that carries the full 3D Cartesian velocity.
+    ThreeD,
 }
 
 impl SimModel {
@@ -528,6 +716,8 @@ impl SimModel {
             0 => Some(Self::TerrainFollowing),
             1 => Some(Self::Curvilinear),
             2 => Some(Self::MpmDaC),
+            3 => Some(Self::SlidingBlock),
+            4 => Some(Self::ThreeD),
             _ => None,
         }
     }
@@ -537,6 +727,8 @@ impl SimModel {
             Self::TerrainFollowing => 0,
             Self::Curvilinear => 1,
             Self::MpmDaC => 2,
+            Self::SlidingBlock => 3,
+            Self::ThreeD => 4,
         }
     }
 }
@@ -549,6 +741,8 @@ impl FromStr for SimModel {
             "terrain-following" | "terrain" | "t" => Ok(Self::TerrainFollowing),
             "curvilinear" | "curvi" | "c" => Ok(Self::Curvilinear),
             "mpmdac" | "mpm-dac" | "mpm_depth_averaged_curvilinear" => Ok(Self::MpmDaC),
+            "sliding-block" | "block" | "b" => Ok(Self::SlidingBlock),
+            "3d" => Ok(Self::ThreeD),
             _ => Err(format!("unknown simulation model: {value}")),
         }
     }
@@ -560,6 +754,8 @@ impl fmt::Display for SimModel {
             Self::TerrainFollowing => "terrain-following",
             Self::Curvilinear => "curvilinear",
             Self::MpmDaC => "mpmdac",
+            Self::SlidingBlock => "sliding-block",
+            Self::ThreeD => "3d",
         })
     }
 }
@@ -598,6 +794,7 @@ impl<'de> Deserialize<'de> for SimModel {
 pub enum CrownLineMethod {
     FlowRouting,
     ParticleSimulation,
+    GradientStep,
 }
 
 impl FromStr for CrownLineMethod {
@@ -607,6 +804,7 @@ impl FromStr for CrownLineMethod {
         match value.to_lowercase().replace('_', "-").as_str() {
             "flow-routing" | "flow" | "d8" => Ok(Self::FlowRouting),
             "particle-simulation" | "particle" => Ok(Self::ParticleSimulation),
+            "gradient-step" | "gradient" => Ok(Self::GradientStep),
             _ => Err(format!("unknown crown line method: {value}")),
         }
     }
@@ -617,6 +815,7 @@ impl fmt::Display for CrownLineMethod {
         f.write_str(match self {
             Self::FlowRouting => "flow-routing",
             Self::ParticleSimulation => "particle-simulation",
+            Self::GradientStep => "gradient-step",
         })
     }
 }
@@ -641,6 +840,56 @@ impl<'de> Deserialize<'de> for CrownLineMethod {
     }
 }
 
+/// How the release estimation orders the potential release cells below the
+/// crown line: by geodesic distance alone, or by a geodesic distance whose
+/// steps through unfavourable release slopes count as longer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReleaseFillMethod {
+    Geodesic,
+    SlopeWeighted,
+}
+
+impl FromStr for ReleaseFillMethod {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_lowercase().replace('_', "-").as_str() {
+            "geodesic" | "distance" => Ok(Self::Geodesic),
+            "slope-weighted" | "slope" => Ok(Self::SlopeWeighted),
+            _ => Err(format!("unknown release fill method: {value}")),
+        }
+    }
+}
+
+impl fmt::Display for ReleaseFillMethod {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(match self {
+            Self::Geodesic => "geodesic",
+            Self::SlopeWeighted => "slope-weighted",
+        })
+    }
+}
+
+impl Serialize for ReleaseFillMethod {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for ReleaseFillMethod {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        String::deserialize(deserializer)?
+            .parse::<Self>()
+            .map_err(D::Error::custom)
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
@@ -652,10 +901,22 @@ pub struct Settings {
     pub max_steps: Option<u32>,
     pub sim_model: Option<SimModel>,
     pub batch_compute_steps: Option<u32>,
+    /// Steps between particle sorts for the tile-sorted P2G of the grid flow models (default 25);
+    /// 0 disables it.
+    pub particle_sort_interval: Option<u32>,
     pub friction_model: Option<FrictionModel>,
     pub released_particles_per_cell: Option<u32>,
     pub density: Option<f32>,
-    pub slab_thickness_factor: Option<f32>,
+    /// Release thickness (m), measured normal to the slope, of every release
+    /// cell. If unset, rasters, arrays, stores and shapefiles with thickness
+    /// attributes keep their own thickness and all other release areas get
+    /// [`DEFAULT_RELEASE_THICKNESS`]. Excludes `release_swe`.
+    pub release_thickness: Option<f32>,
+    /// Snow water equivalent (kg/m², the same as mm of water) of every release
+    /// cell, set instead of `release_thickness`. It is the mass per horizontal
+    /// area, so a cell holds `release_swe * cell_size²` whatever its slope, and
+    /// `release_swe / density` must be above [`RELEASE_THICKNESS_THRESHOLD`].
+    pub release_swe: Option<f32>,
     pub friction_coefficient: Option<f32>,
     pub drag_coefficient: Option<f32>,
     pub n0: Option<f32>,
@@ -667,19 +928,58 @@ pub struct Settings {
     pub basal_friction_angle: Option<f32>,
 
     pub cfl: Option<f32>,
+    /// Minimum slope angle (deg) of release terrain. Together with
+    /// `max_slope_angle`, `release_min_elevation`, `release_max_elevation` and
+    /// `roughness_threshold` it defines the potential release areas, from
+    /// which the `release_area_fraction` estimation selects its release cells.
     pub min_slope_angle: Option<f32>,
     pub max_slope_angle: Option<f32>,
     pub release_min_elevation: Option<f32>,
     pub release_max_elevation: Option<f32>,
     /// Target release area as a fraction of the outline area (0.2 - 0.3 is a
     /// common range). When set, release areas are estimated by detecting the
-    /// outline's crown line and filling this share below it, instead of the
-    /// terrain-threshold classification.
+    /// outline's crown line and selecting this share of the outline area from
+    /// the potential release areas (the terrain-threshold classification),
+    /// nearest to the crown line first.
     pub release_area_fraction: Option<f32>,
     /// How the crown line is detected for `release_area_fraction`: D8 flow
-    /// routing on the CPU (default) or a GPU particle simulation released
-    /// everywhere outside the outline.
+    /// routing on the CPU (default), a GPU particle simulation released
+    /// everywhere outside the outline, or a gradient step (outline cells whose
+    /// one-cell step uphill leaves the outline).
     pub crown_line_method: Option<CrownLineMethod>,
+    /// Exit distance threshold of the `gradient-step` crown line method as a
+    /// fraction of the cell size, in [0, 1) (defaults to 0.75). Outline cells
+    /// whose one-cell step uphill lands outside the outline and farther than
+    /// this from the nearest outline cell centre become crown line; lower
+    /// values also pick up spreading flanks (0.5 or less counts every exit).
+    pub crown_line_exit_distance: Option<f32>,
+    /// Crown candidate components whose mean elevation lies below this share
+    /// of the outline's elevation range are discarded as flank gullies, for
+    /// all crown line methods (defaults to 0, which keeps every component).
+    pub crown_elevation_band: Option<f32>,
+    /// Minimum number of entering particles for an outline cell to become a
+    /// crown candidate in the `particle-simulation` method (defaults to 2).
+    pub min_particles_per_crown_cell: Option<u32>,
+    /// How `release_area_fraction` orders the potential release cells below
+    /// the crown line: `geodesic` distance (default), or `slope-weighted`,
+    /// where steps through slopes outside the typical release range count
+    /// as longer, so the fill reaches further into favourable terrain.
+    pub release_fill_method: Option<ReleaseFillMethod>,
+    /// Blend weight w of the `slope-weighted` fill: a step costs its length
+    /// times 1 + w (1 - mu), with mu the release slope membership. 0 equals
+    /// the geodesic fill (defaults to 3).
+    pub release_slope_weight: Option<f32>,
+    /// Slope angle (deg) of maximum release slope membership of the
+    /// `slope-weighted` fill (defaults to 43, Veitinger et al. 2016).
+    pub release_slope_peak: Option<f32>,
+    /// Half width (deg) of the release slope membership of the
+    /// `slope-weighted` fill: mu is 0.5 at peak +- width (defaults to 11).
+    pub release_slope_width: Option<f32>,
+    /// Gaussian width (m) of the DEM smoothing before the slope of the
+    /// `slope-weighted` fill is computed, so the slope approaches the
+    /// starting-zone scale the release statistics were measured at
+    /// (defaults to 10; 0 uses the raw DEM cells).
+    pub release_slope_smoothing_length: Option<f32>,
     pub velocity_threshold: Option<f32>,
     pub roughness_threshold: Option<f32>,
     pub peak_flow_thickness_threshold: Option<f32>,
@@ -700,10 +1000,27 @@ pub struct Settings {
     /// Compaction pressure (Pa) above which the MPMDAC material densifies
     /// plastically (irreversibly); the volumetric pressure is capped there.
     pub compaction_pressure: Option<f32>,
+    /// Grid flow models: stop once the total grid momentum falls below this
+    /// fraction of its peak, e.g. 0.01; 0 or unset disables the criterion.
+    pub momentum_stop_fraction: Option<f32>,
+    /// The simulation stops when fewer than 4 cells were newly reached within
+    /// the steps the fastest material needs to travel this many cells,
+    /// round(travel / cfl) and at least 10 (default 65 cells, 72 steps at CFL 0.9).
+    pub no_new_cells_travel: Option<f32>,
+    /// Curvilinear: Gaussian width (m) of the smoothed reference surface.
+    /// Bed inclined by beta against it counts as a gully wall whose normal
+    /// load grows by 1 + K tan^2(beta) from the lateral pressure of the snow
+    /// beside it; 0 or unset disables it.
+    pub reference_surface_length: Option<f32>,
 
     pub enable_curvature: Option<bool>,
     pub enable_particle_interaction: Option<bool>,
     pub enable_earth_pressure_coefficient: Option<bool>,
+    /// Curvilinear: hydrostatic pressure gradient from the MPM weak form,
+    /// -sum_p m_p h_p / 2 grad N_i(x_p) per node, instead of the centred
+    /// difference of the nodal thickness. Thin front nodes are then pushed by
+    /// the full pressure of the particles behind them (defaults to false).
+    pub enable_weak_pressure: Option<bool>,
     pub enable_entrainment: Option<bool>,
     pub enable_center_of_mass: Option<bool>,
     /// Relax freshly initialized particles to the hexagonal packing spacing
@@ -711,7 +1028,7 @@ pub struct Settings {
     /// to true).
     pub enable_particle_relaxation: Option<bool>,
     /// Center the mass of the biggest connected mass blob instead of the
-    /// whole grid (defaults to true).
+    /// whole grid (defaults to false).
     pub center_of_mass_biggest_blob: Option<bool>,
 }
 
@@ -758,6 +1075,17 @@ mod tests {
     use std::io::Read;
     use tempfile::NamedTempFile;
 
+    #[test]
+    fn no_new_cells_window_covers_constant_front_travel() {
+        let mut settings = SimSettings::new();
+        assert_eq!(settings.no_new_cells_window(), 72);
+        settings.cfl = 0.05;
+        assert_eq!(settings.no_new_cells_window(), 1300);
+        settings.no_new_cells_travel = 1.0;
+        settings.cfl = 0.9;
+        assert_eq!(settings.no_new_cells_window(), 10);
+    }
+
     fn create_test_dem() -> Dem {
         let mut dem = Dem::default();
         dem.cell_size = 1.0;
@@ -778,10 +1106,10 @@ mod tests {
         assert_eq!(settings.world_size_x, 1.0);
         assert_eq!(settings.world_size_y, 1.0);
         assert_eq!(settings.density, 200.0);
-        assert_eq!(settings.slab_thickness_factor, 1.0);
+        assert_eq!(settings.release_thickness_override(), None);
         assert_eq!(settings.friction_coefficient, 0.2);
         assert_eq!(settings.drag_coefficient, 2000.0);
-        assert_eq!(settings.cfl, 0.5);
+        assert_eq!(settings.cfl, 0.9);
         assert_eq!(settings.cell_size, 1.0);
         assert_eq!(settings.min_slope_angle, 28.0);
         assert_eq!(settings.max_slope_angle, 60.0);
@@ -822,7 +1150,8 @@ mod tests {
             friction_model: Some(FrictionModel::VoellmyMinShear),
             released_particles_per_cell: Some(3),
             density: Some(123.4),
-            slab_thickness_factor: Some(5.6),
+            release_thickness: Some(5.6),
+            release_swe: None,
             friction_coefficient: Some(0.2),
             drag_coefficient: Some(999.0),
             n0: Some(1.0),
@@ -833,13 +1162,25 @@ mod tests {
             internal_friction_angle: Some(30.0),
             basal_friction_angle: Some(45.0),
             batch_compute_steps: Some(100),
+            particle_sort_interval: None,
+            momentum_stop_fraction: None,
+            no_new_cells_travel: None,
+            reference_surface_length: Some(12.5),
             cfl: Some(0.9),
             min_slope_angle: Some(10.0),
             max_slope_angle: Some(20.0),
             release_min_elevation: Some(100.0),
             release_max_elevation: Some(200.0),
             release_area_fraction: Some(0.25),
-            crown_line_method: Some(CrownLineMethod::ParticleSimulation),
+            crown_line_method: Some(CrownLineMethod::GradientStep),
+            crown_line_exit_distance: Some(0.7),
+            crown_elevation_band: Some(0.3),
+            min_particles_per_crown_cell: Some(3),
+            release_fill_method: Some(ReleaseFillMethod::SlopeWeighted),
+            release_slope_weight: Some(2.0),
+            release_slope_peak: Some(40.0),
+            release_slope_width: Some(10.0),
+            release_slope_smoothing_length: Some(5.0),
             velocity_threshold: Some(0.001),
             roughness_threshold: Some(0.002),
             peak_flow_thickness_threshold: Some(1.5),
@@ -856,6 +1197,7 @@ mod tests {
             enable_particle_relaxation: Some(false),
             enable_earth_pressure_coefficient: Some(false),
             enable_entrainment: Some(false),
+            enable_weak_pressure: Some(false),
             enable_center_of_mass: Some(true),
             center_of_mass_biggest_blob: Some(false),
         };
@@ -866,7 +1208,7 @@ mod tests {
         assert_eq!(sim_settings.friction_model, 2);
         assert_eq!(sim_settings.released_particles_per_cell, 3);
         assert_eq!(sim_settings.density, 123.4);
-        assert_eq!(sim_settings.slab_thickness_factor, 5.6);
+        assert_eq!(sim_settings.release_thickness_override(), Some(5.6));
         assert_eq!(sim_settings.friction_coefficient, 0.2);
         assert_eq!(sim_settings.drag_coefficient, 999.0);
         assert_eq!(sim_settings.cfl, 0.9);
@@ -896,7 +1238,7 @@ mod tests {
         assert_eq!(sim_settings.basal_friction_angle, 45.0);
         assert_eq!(
             sim_settings.flags,
-            SimFlags::new(false, false, false, false, false).mask
+            SimFlags::new(false, false, false, false, false, false).mask
         );
 
         // Test enabling flags one by one
@@ -904,36 +1246,162 @@ mod tests {
         sim_settings = SimSettings::from_settings(&patch, &dem);
         assert_eq!(
             sim_settings.flags,
-            SimFlags::new(true, false, false, false, false).mask
+            SimFlags::new(true, false, false, false, false, false).mask
         );
 
         patch.enable_particle_interaction = Some(true);
         sim_settings = SimSettings::from_settings(&patch, &dem);
         assert_eq!(
             sim_settings.flags,
-            SimFlags::new(true, true, false, false, false).mask
+            SimFlags::new(true, true, false, false, false, false).mask
         );
 
         patch.enable_earth_pressure_coefficient = Some(true);
         sim_settings = SimSettings::from_settings(&patch, &dem);
         assert_eq!(
             sim_settings.flags,
-            SimFlags::new(true, true, true, false, false).mask
+            SimFlags::new(true, true, true, false, false, false).mask
         );
 
         patch.enable_entrainment = Some(true);
         sim_settings = SimSettings::from_settings(&patch, &dem);
         assert_eq!(
             sim_settings.flags,
-            SimFlags::new(true, true, true, true, false).mask
+            SimFlags::new(true, true, true, true, false, false).mask
         );
 
         patch.center_of_mass_biggest_blob = Some(true);
         sim_settings = SimSettings::from_settings(&patch, &dem);
         assert_eq!(
             sim_settings.flags,
-            SimFlags::new(true, true, true, true, true).mask
+            SimFlags::new(true, true, true, true, true, false).mask
         );
+
+        patch.enable_weak_pressure = Some(true);
+        sim_settings = SimSettings::from_settings(&patch, &dem);
+        assert_eq!(
+            sim_settings.flags,
+            SimFlags::new(true, true, true, true, true, true).mask
+        );
+        assert!(SimFlags::from_u32(sim_settings.flags).is_weak_pressure_enabled());
+    }
+
+    #[test_log::test]
+    fn test_settings_reject_the_former_slab_thickness_factor() {
+        // an alias would turn a value rasters ignored into an override
+        let error = Settings::loads(r#"{"slab_thickness_factor": 1.0}"#).unwrap_err();
+        assert!(error.to_string().contains("slab_thickness_factor"));
+    }
+
+    #[test_log::test]
+    fn test_release_thickness_must_exceed_the_release_threshold() {
+        let mut settings = SimSettings::new();
+        assert!(settings.validate().is_ok(), "unset is valid");
+        assert_eq!(
+            settings.release_thickness_or_default(),
+            DEFAULT_RELEASE_THICKNESS
+        );
+
+        for invalid in [-1.0, 0.0, RELEASE_THICKNESS_THRESHOLD, f32::INFINITY] {
+            settings.release_thickness = invalid;
+            assert!(settings.validate().is_err(), "accepted {invalid}");
+        }
+
+        settings.release_thickness = 0.5;
+        assert!(settings.validate().is_ok());
+        assert_eq!(settings.release_thickness_or_default(), 0.5);
+    }
+
+    #[test_log::test]
+    fn test_release_swe_excludes_release_thickness() {
+        let mut settings = SimSettings::new();
+        settings.release_swe = 100.0;
+        assert!(settings.validate().is_ok());
+
+        settings.release_thickness = 0.5;
+        let error = settings.validate().unwrap_err();
+        assert!(error.contains("exclude each other"), "{error}");
+    }
+
+    #[test_log::test]
+    fn test_release_swe_must_be_positive() {
+        let mut settings = SimSettings::new();
+        for invalid in [-1.0, 0.0, f32::INFINITY] {
+            settings.release_swe = invalid;
+            let error = settings.validate().unwrap_err();
+            assert!(error.contains("must be positive"), "{error}");
+        }
+    }
+
+    #[test_log::test]
+    fn test_release_swe_must_give_a_seedable_thickness() {
+        let mut settings = SimSettings::new();
+        settings.density = 200.0;
+        settings.release_swe = 1.0;
+        let error = settings.validate().unwrap_err();
+        assert!(error.contains("`density`"), "{error}");
+
+        settings.release_swe = 3.0;
+        assert!(settings.validate().is_ok());
+    }
+
+    #[test_log::test]
+    fn test_release_swe_gives_the_thickness_at_the_density() {
+        let mut settings = SimSettings::new();
+        assert_eq!(settings.release_swe_override(), None);
+
+        settings.density = 250.0;
+        settings.release_swe = 100.0;
+        assert_eq!(settings.release_swe_override(), Some(100.0));
+        assert_eq!(settings.release_thickness_override(), Some(0.4));
+        assert_eq!(settings.release_thickness_or_default(), 0.4);
+    }
+
+    #[test_log::test]
+    fn test_patch_switches_between_release_thickness_and_swe() {
+        let mut settings = SimSettings::new();
+        settings.apply_patch(&Settings {
+            release_thickness: Some(1.5),
+            ..Default::default()
+        });
+        settings.apply_patch(&Settings {
+            release_swe: Some(100.0),
+            ..Default::default()
+        });
+        assert!(settings.release_thickness.is_nan());
+        assert_eq!(settings.release_swe_override(), Some(100.0));
+
+        settings.apply_patch(&Settings {
+            release_thickness: Some(1.5),
+            ..Default::default()
+        });
+        assert_eq!(settings.release_swe_override(), None);
+        assert_eq!(settings.release_thickness_override(), Some(1.5));
+
+        settings.apply_patch(&Settings {
+            density: Some(300.0),
+            ..Default::default()
+        });
+        assert_eq!(
+            settings.release_thickness_override(),
+            Some(1.5),
+            "unrelated patch"
+        );
+
+        settings.apply_patch(&Settings {
+            release_thickness: Some(1.5),
+            release_swe: Some(100.0),
+            ..Default::default()
+        });
+        assert!(settings.validate().is_err(), "a patch with both must fail");
+    }
+
+    #[test_log::test]
+    fn test_settings_json_without_release_swe_reads_as_unset() {
+        let mut json = serde_json::to_value(SimSettings::new()).unwrap();
+        json.as_object_mut().unwrap().remove("release_swe");
+        let settings: SimSettings = serde_json::from_value(json).unwrap();
+        assert_eq!(settings.release_swe_override(), None);
     }
 
     #[test_log::test]
@@ -959,8 +1427,12 @@ mod tests {
         assert_eq!(settings.world_size_y, deserialized.world_size_y);
         assert_eq!(settings.density, deserialized.density);
         assert_eq!(
-            settings.slab_thickness_factor,
-            deserialized.slab_thickness_factor
+            settings.release_thickness_override(),
+            deserialized.release_thickness_override()
+        );
+        assert_eq!(
+            settings.release_swe_override(),
+            deserialized.release_swe_override()
         );
         assert_eq!(
             settings.friction_coefficient,
@@ -1005,6 +1477,8 @@ mod tests {
             assert_eq!(FrictionModel::from_int(i as u32), Some(*variant));
             assert_eq!(variant.as_int(), i as u32);
         }
+        assert_eq!(FrictionModel::from_int(5), Some(FrictionModel::MuI));
+        assert_eq!(FrictionModel::MuI.as_int(), 5);
         assert_eq!(FrictionModel::from_int(99), None);
     }
 
@@ -1025,6 +1499,8 @@ mod tests {
             SimModel::TerrainFollowing,
             SimModel::Curvilinear,
             SimModel::MpmDaC,
+            SimModel::SlidingBlock,
+            SimModel::ThreeD,
         ];
 
         for model in models {
@@ -1041,7 +1517,10 @@ mod tests {
         assert_eq!(SimModel::from_int(1), Some(SimModel::Curvilinear));
         assert_eq!(SimModel::from_int(2), Some(SimModel::MpmDaC));
 
-        assert_eq!(SimModel::from_int(3), None);
+        assert_eq!(SimModel::from_int(3), Some(SimModel::SlidingBlock));
+
+        assert_eq!(SimModel::from_int(4), Some(SimModel::ThreeD));
+        assert_eq!(SimModel::from_int(5), None);
         assert_eq!(SimModel::from_int(u32::MAX), None);
     }
 
@@ -1051,6 +1530,7 @@ mod tests {
             (SimModel::TerrainFollowing, "terrain-following"),
             (SimModel::Curvilinear, "curvilinear"),
             (SimModel::MpmDaC, "mpmdac"),
+            (SimModel::SlidingBlock, "sliding-block"),
         ];
 
         for (model, string) in models {
@@ -1070,6 +1550,9 @@ mod tests {
         for value in ["mpmdac", "MPM-DAC", "mpm_depth_averaged_curvilinear"] {
             assert_eq!(SimModel::from_str(value), Ok(SimModel::MpmDaC));
         }
+        for value in ["sliding-block", "block", "b", "BLOCK"] {
+            assert_eq!(SimModel::from_str(value), Ok(SimModel::SlidingBlock));
+        }
     }
 
     #[test]
@@ -1085,6 +1568,7 @@ mod tests {
             FrictionModel::Voellmy,
             FrictionModel::VoellmyMinShear,
             FrictionModel::SamosAT,
+            FrictionModel::MuI,
         ];
 
         for model in models {
@@ -1104,6 +1588,7 @@ mod tests {
             Some(FrictionModel::VoellmyMinShear)
         );
         assert_eq!(FrictionModel::from_int(3), Some(FrictionModel::SamosAT));
+        assert_eq!(FrictionModel::from_int(5), Some(FrictionModel::MuI));
 
         assert_eq!(FrictionModel::from_int(4), None);
         assert_eq!(FrictionModel::from_int(u32::MAX), None);
@@ -1116,6 +1601,7 @@ mod tests {
             (FrictionModel::Voellmy, "voellmy"),
             (FrictionModel::VoellmyMinShear, "voellmy-min-shear"),
             (FrictionModel::SamosAT, "samos-at"),
+            (FrictionModel::MuI, "mu-i"),
         ];
 
         for (model, string) in models {
@@ -1173,6 +1659,63 @@ mod tests {
             FrictionModel::from_str("VOELLMY"),
             Ok(FrictionModel::Voellmy)
         );
+
+        assert_eq!(FrictionModel::from_str("mu(I)"), Ok(FrictionModel::MuI));
+    }
+
+    #[test]
+    fn mu_i_parameters_validated_only_when_selected() {
+        let invalid = SimSettings {
+            grain_diameter: 0.0,
+            i0: -1.0,
+            mu0: 0.5,
+            mu2: 0.2,
+            ..SimSettings::new()
+        };
+        // Voellmy basal friction with the Drucker-Prager law ignores them
+        assert!(invalid.validate().is_ok());
+        // the constitutive mu(I) law only runs in the MPMDAC model
+        let curvilinear_mu_i = SimSettings {
+            sim_model: SimModel::Curvilinear.as_int(),
+            constitutive_model: ConstitutiveModel::MuI.as_int(),
+            ..invalid
+        };
+        assert!(curvilinear_mu_i.validate().is_ok());
+        let mpmdac_mu_i = SimSettings {
+            sim_model: SimModel::MpmDaC.as_int(),
+            ..curvilinear_mu_i
+        };
+        assert!(mpmdac_mu_i.validate().is_err());
+
+        let basal_mu_i = SimSettings {
+            friction_model: FrictionModel::MuI.as_int(),
+            ..SimSettings::new()
+        };
+        assert!(basal_mu_i.validate().is_ok(), "defaults must be valid");
+        for broken in [
+            SimSettings {
+                grain_diameter: 0.0,
+                ..basal_mu_i
+            },
+            SimSettings {
+                i0: 0.0,
+                ..basal_mu_i
+            },
+            SimSettings {
+                mu0: -0.1,
+                ..basal_mu_i
+            },
+            SimSettings {
+                mu2: basal_mu_i.mu0 - 0.1,
+                ..basal_mu_i
+            },
+            SimSettings {
+                mu2: f32::NAN,
+                ..basal_mu_i
+            },
+        ] {
+            assert!(broken.validate().is_err(), "{broken:?}");
+        }
     }
 
     #[test]
@@ -1186,6 +1729,7 @@ mod tests {
         let methods = [
             (CrownLineMethod::FlowRouting, "flow-routing"),
             (CrownLineMethod::ParticleSimulation, "particle-simulation"),
+            (CrownLineMethod::GradientStep, "gradient-step"),
         ];
 
         for (method, string) in methods {
@@ -1208,12 +1752,55 @@ mod tests {
             CrownLineMethod::from_str("particle"),
             Ok(CrownLineMethod::ParticleSimulation)
         );
+        assert_eq!(
+            CrownLineMethod::from_str("Gradient_Step"),
+            Ok(CrownLineMethod::GradientStep)
+        );
+        assert_eq!(
+            CrownLineMethod::from_str("gradient"),
+            Ok(CrownLineMethod::GradientStep)
+        );
     }
 
     #[test]
     fn crown_line_method_invalid_string() {
         assert!(CrownLineMethod::from_str("invalid").is_err());
         assert!(CrownLineMethod::from_str("").is_err());
+    }
+
+    #[test]
+    fn release_fill_method_string_roundtrip() {
+        let methods = [
+            (ReleaseFillMethod::Geodesic, "geodesic"),
+            (ReleaseFillMethod::SlopeWeighted, "slope-weighted"),
+        ];
+
+        for (method, string) in methods {
+            assert_eq!(method.to_string(), string);
+            assert_eq!(ReleaseFillMethod::from_str(string), Ok(method));
+        }
+    }
+
+    #[test]
+    fn release_fill_method_string_aliases() {
+        assert_eq!(
+            ReleaseFillMethod::from_str("distance"),
+            Ok(ReleaseFillMethod::Geodesic)
+        );
+        assert_eq!(
+            ReleaseFillMethod::from_str("Slope_Weighted"),
+            Ok(ReleaseFillMethod::SlopeWeighted)
+        );
+        assert_eq!(
+            ReleaseFillMethod::from_str("slope"),
+            Ok(ReleaseFillMethod::SlopeWeighted)
+        );
+    }
+
+    #[test]
+    fn release_fill_method_invalid_string() {
+        assert!(ReleaseFillMethod::from_str("invalid").is_err());
+        assert!(ReleaseFillMethod::from_str("").is_err());
     }
 
     #[test]

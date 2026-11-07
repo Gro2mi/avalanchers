@@ -121,9 +121,11 @@ impl ApplicationHandler for Viewer {
                 .expect("failed to create window"),
         );
 
-        let instance = wgpu::Instance::new(
-            wgpu::InstanceDescriptor::new_with_display_handle_from_env(Box::new(window.clone())),
-        );
+        let mut descriptor =
+            wgpu::InstanceDescriptor::new_with_display_handle_from_env(Box::new(window.clone()));
+        // each OpenGL instance keeps 16 MB of GPU memory after it is dropped
+        descriptor.backends = wgpu::Backends::PRIMARY;
+        let instance = wgpu::Instance::new(descriptor);
         let surface = instance
             .create_surface(window.clone())
             .expect("failed to create surface");
@@ -246,6 +248,15 @@ impl ApplicationHandler for Viewer {
 }
 
 fn main() {
+    // Network-backed loaders (reqwest/hyper) need a Tokio reactor even though the
+    // examples drive futures with pollster; a multi-thread runtime runs the IO driver
+    // on its worker threads so pollster::block_on can make progress.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("failed to build Tokio runtime");
+    let _runtime_guard = runtime.enter();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

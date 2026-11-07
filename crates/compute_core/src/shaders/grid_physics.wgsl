@@ -22,7 +22,7 @@ fn grid_physics(@builtin(global_invocation_id) id: vec3u) {
 
     let use_particle_interaction: bool = (sim_settings.flags & (1u << 1u)) != 0u;
     if !use_particle_interaction {
-        new_cells_rolling_window[sim_info.timestep % 40u] = new_cells_rolling_window[sim_info.timestep % 40u] + 1u; // update new cell count for diagnostics
+        new_cells_rolling_window[sim_info.timestep % no_new_cells_window()] = new_cells_rolling_window[sim_info.timestep % no_new_cells_window()] + 1u; // update new cell count for diagnostics
         return;
     }
     let idx = xy_to_idx(id.xy);
@@ -37,14 +37,14 @@ fn grid_physics(@builtin(global_invocation_id) id: vec3u) {
     let u = f32(grid_momentum_atomic[idx * 2]) * INV_MOMENTUM_FACTOR / (mass + 1e-6); // no_atomic_float 
     let v = f32(grid_momentum_atomic[idx * 2 + 1]) * INV_MOMENTUM_FACTOR / (mass + 1e-6); // no_atomic_float 
     // atomic_float let mass = grid_mass_atomic[idx];
-    // atomic_float let u = grid_momentum_atomic[idx * 2] / mass;
-    // atomic_float let v = grid_momentum_atomic[idx * 2 + 1] / mass;
+    // atomic_float let u = grid_momentum_atomic[idx * 2] / (mass + 1e-6);
+    // atomic_float let v = grid_momentum_atomic[idx * 2 + 1] / (mass + 1e-6);
     velocity_buffer[idx] = vec2f(u, v);
     let h = mass / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size) * n.z;
     // new max value
     if h > sim_settings.peak_flow_thickness_threshold && h > peak_flow_thickness[idx] {
         // new cell reached
-        new_cells_rolling_window[sim_info.timestep % 40u] = new_cells_rolling_window[sim_info.timestep % 40u] + 1u; // update new cell count for diagnostics
+        new_cells_rolling_window[sim_info.timestep % no_new_cells_window()] = new_cells_rolling_window[sim_info.timestep % no_new_cells_window()] + 1u; // update new cell count for diagnostics
         
         peak_flow_thickness[idx] = h;
         if is_finite(h) {
@@ -63,7 +63,7 @@ fn grid_physics(@builtin(global_invocation_id) id: vec3u) {
 
     let use_earth_pressure_coefficient: bool = (sim_settings.flags & (1u << 2u)) != 0u;
     if use_earth_pressure_coefficient {
-        let div_u = div_u(id.x, id.y, mass);
+        let div_u = div_u(id.x, id.y);
         k = earth_pressure_coefficient(radians(sim_settings.internal_friction_angle), radians(sim_settings.basal_friction_angle), div_u);
     } else {
         k = 1.0;
@@ -81,7 +81,7 @@ fn grid_physics(@builtin(global_invocation_id) id: vec3u) {
     // ), vec2f(0.0, 0.0), h < 1e-5);
     if h > 1e-3 {
         if use_earth_pressure_coefficient {
-            let div_u = div_u(id.x, id.y, mass);
+            let div_u = div_u(id.x, id.y);
             k = earth_pressure_coefficient(radians(sim_settings.internal_friction_angle), radians(sim_settings.basal_friction_angle), div_u);
         } else {
             k = 1.0;
@@ -148,29 +148,46 @@ fn get_h(x: u32, y: u32) -> f32 {
     return f32(grid_mass_atomic[idx]) * INV_MASS_FACTOR / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size); // no_atomic_float 
 }
 
-fn get_velocity(x: u32, y: u32, mass: f32) -> vec2f {
+// Velocity of node (x, y) from the node's own mass and momentum; z = 1 when
+// the node holds mass, 0 below the p2g mass floor where it is meaningless.
+fn node_velocity(x: u32, y: u32) -> vec3f {
     let idx = x_y_to_idx(x, y);
-    return vec2f(
-        // atomic_float grid_momentum_atomic[idx * 2] / (mass + 1e-6),
-        // atomic_float grid_momentum_atomic[idx * 2 + 1] / (mass + 1e-6) 
-        f32(grid_momentum_atomic[idx * 2]) * INV_MOMENTUM_FACTOR / (mass + 1e-6), // no_atomic_float 
-        f32(grid_momentum_atomic[idx * 2 + 1]) * INV_MOMENTUM_FACTOR / (mass + 1e-6) // no_atomic_float 
-    );
+    let mass = f32(grid_mass_atomic[idx]) * INV_MASS_FACTOR; // no_atomic_float
+    // atomic_float let mass = grid_mass_atomic[idx];
+    if mass < 1e-2 {
+        return vec3f(0.0);
+    }
+    let q = vec2f(
+        f32(grid_momentum_atomic[idx * 2]) * INV_MOMENTUM_FACTOR, // no_atomic_float
+        f32(grid_momentum_atomic[idx * 2 + 1]) * INV_MOMENTUM_FACTOR // no_atomic_float
+        // atomic_float grid_momentum_atomic[idx * 2],
+        // atomic_float grid_momentum_atomic[idx * 2 + 1]
+    ) / mass;
+    return vec3f(q, 1.0);
 }
 
-fn div_u(x: u32, y: u32, mass: f32) -> f32 {
-
+// Derivative of one velocity component: central where both neighbours hold
+// mass, one-sided against the centre at the flow edge, zero for an isolated
+// node. Empty nodes carry no velocity, so a spreading front is not mistaken
+// for a compressed one.
+fn edge_aware_difference(low: vec3f, centre: f32, high: vec3f, component: u32) -> f32 {
     let dx = sim_settings.cell_size;
+    if low.z > 0.0 && high.z > 0.0 {
+        return (high[component] - low[component]) / (2.0 * dx);
+    }
+    if high.z > 0.0 {
+        return (high[component] - centre) / dx;
+    }
+    if low.z > 0.0 {
+        return (centre - low[component]) / dx;
+    }
+    return 0.0;
+}
 
-    let uL = get_velocity(x - 1u, y, mass).x;
-    let uR = get_velocity(x + 1u, y, mass).x;
-
-    let vD = get_velocity(x, y - 1u, mass).y;
-    let vU = get_velocity(x, y + 1u, mass).y;
-
-    let dudx = (uR - uL) / (2.0 * dx);
-    let dvdy = (vU - vD) / (2.0 * dx);
-
+fn div_u(x: u32, y: u32) -> f32 {
+    let centre = node_velocity(x, y);
+    let dudx = edge_aware_difference(node_velocity(x - 1u, y), centre.x, node_velocity(x + 1u, y), 0u);
+    let dvdy = edge_aware_difference(node_velocity(x, y - 1u), centre.y, node_velocity(x, y + 1u), 1u);
     return dudx + dvdy;
 }
 
@@ -226,6 +243,11 @@ const INV_MOMENTUM_FACTOR: f32 = 1 / MOMENTUM_FACTOR;
 // depth-integrated internal force (h * sigma * grad_w * area, ~1e4..1e5 N per node contribution)
 const FORCE_FACTOR: f32 = 1e-3; // i32 limit is 2.1e6 N per node
 const INV_FORCE_FACTOR: f32 = 1 / FORCE_FACTOR;
+// weak-form pressure sum m_p h_p / 2 grad_w (kg) of the curvilinear model,
+// node sum = node_mass * |grad h|: 0.001 kg resolves thin front nodes
+//   (rho*cell^2*h*J ~ 6e4 kg * 1 * 1e3 = 6e7 < 2.1e9)
+const PRESSURE_FACTOR: f32 = 1e3;
+const INV_PRESSURE_FACTOR: f32 = 1 / PRESSURE_FACTOR;
 
 // TODO precompute often used values on the cpu and pass them as uniforms to avoid redundant calculations on the gpu
 
@@ -238,6 +260,7 @@ struct SimInfo {
     max_velocity: f32,
     max_flow_thickness: f32,
     flags: u32,
+    grid_elapsed_time: f32,
 };
 
 const SIM_INFO_OUT_OF_BOUNDS: u32 = 1u << 0u;
@@ -247,7 +270,16 @@ const SIM_INFO_PARTICLE_OUT_OF_DEM_DATA: u32 = 1u << 3u;
 const SIM_INFO_STOPPED: u32 = 1u << 31u;
 const SIM_INFO_ALL_PARTICLES_STOPPED: u32 = 1u << 30u;
 const SIM_INFO_NO_NEW_CELLS: u32 = 1u << 29u;
+// almost all particles are resting or terminally stopped
+const SIM_INFO_AT_REST: u32 = 1u << 28u;
+// total momentum fell below momentum_stop_fraction of its peak
+const SIM_INFO_LOW_MOMENTUM: u32 = 1u << 27u;
 
+// reversible low-speed state; the low bits hold the rest start step while resting
+// and the consecutive slow-step count while moving
+const PARTICLE_RESTING: u32 = 1u << 26u;
+// consecutive slow steps before a particle rests
+const REST_STEPS: u32 = 20u;
 const PARTICLE_FLYING: u32 = 1u << 27u;
 const PARTICLE_OUT_OF_BOUNDS: u32 = 1u << 28u;
 const PARTICLE_IS_NAN: u32 = 1u << 29u;
@@ -262,7 +294,7 @@ struct SimSettings {
     grid_shape: vec2u,
     world_size: vec2f,
     snow_density: f32,
-    slab_thickness: f32,
+    release_thickness: f32,
     friction_coefficient: f32,
     drag_coefficient: f32,
     n0: f32,
@@ -289,6 +321,14 @@ struct SimSettings {
     // MPMDAC compressibility; bulk_modulus 0 = incompressible
     bulk_modulus: f32,
     compaction_pressure: f32,
+    // stop once total momentum < fraction * its peak; 0 disables (curvilinear)
+    momentum_stop_fraction: f32,
+    // front travel in cells covered by the no-new-cells stop window
+    no_new_cells_travel: f32,
+    // Gaussian width (m) of the curvilinear reference surface; 0 disables it
+    reference_surface_length: f32,
+    // snow water equivalent (kg/m2) of the release cells; NaN if unset
+    release_swe: f32,
 };
 
 struct AtomicValues {
@@ -300,7 +340,42 @@ struct AtomicValues {
     number_release_cells: atomic<u32>,
     number_release_particles: atomic<u32>,
     stopped_particles: atomic<u32>,
+    // resting particles counted during the current step, reset by update_sim_info
+    resting_particles: atomic<u32>,
+    // total grid momentum (kg m/s) of the current step as a 64-bit sum, reset by update_sim_info
+    momentum_lo: atomic<u32>,
+    momentum_hi: atomic<u32>,
+    // f32 bits of the largest total momentum so far
+    peak_momentum: atomic<u32>,
 };
+
+// Reversible resting: a particle rests after REST_STEPS consecutive slow steps
+// and wakes once the gathered grid speed exceeds twice the threshold. Resting
+// particles keep depositing mass but no momentum and do not move, which removes
+// sub-threshold creep inside deposits. Returns the new state: its low bits hold
+// the slow-step counter while moving and the rest start step while resting.
+fn next_rest_state(previous_state: u32, speed: f32, timestep: u32) -> u32 {
+    let low_mask = PARTICLE_RESTING - 1u;
+    var resting = (previous_state & PARTICLE_RESTING) != 0u;
+    var low_bits = previous_state & low_mask;
+    if resting {
+        if speed > 2.0 * sim_settings.velocity_threshold {
+            resting = false;
+            low_bits = 0u;
+        }
+    } else if speed < sim_settings.velocity_threshold {
+        low_bits = min(low_bits + 1u, REST_STEPS);
+        if low_bits >= REST_STEPS {
+            resting = true;
+            low_bits = timestep & low_mask;
+        }
+    } else {
+        low_bits = 0u;
+    }
+    return (previous_state & ~(PARTICLE_RESTING | low_mask))
+        | select(0u, PARTICLE_RESTING, resting)
+        | low_bits;
+}
 
 struct G2PUpdate {
     velocity: vec2f,
@@ -308,6 +383,13 @@ struct G2PUpdate {
 };
 
 @group(0) @binding(0) var<uniform> sim_settings: SimSettings;
+
+// length in steps of the no-new-cells rolling window: the fastest material
+// moves at most cfl cells per step, so round(travel / cfl) steps cover the same
+// front travel at any cfl; at least 10 steps
+fn no_new_cells_window() -> u32 {
+    return max(10u, u32(round(sim_settings.no_new_cells_travel / sim_settings.cfl)));
+}
 
 fn is_nan(x: f32) -> bool {
     let bits: u32 = bitcast<u32>(x);

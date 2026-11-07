@@ -117,9 +117,10 @@ fn transfer_p2g_mpmdac(p_idx: u32, cell: vec2u) {
         eps_v_e = eps_v_e + d_eps_v;
         p_vol = -sim_settings.bulk_modulus * eps_v_e;
         if p_vol > sim_settings.compaction_pressure {
-            let delta = eps_v_e + sim_settings.compaction_pressure / sim_settings.bulk_modulus;
-            eps_v_p = eps_v_p + delta;
-            eps_v_e = -sim_settings.compaction_pressure / sim_settings.bulk_modulus;
+            // eps_v_e is negative in compression, the compaction strain positive
+            let plateau = -sim_settings.compaction_pressure / sim_settings.bulk_modulus;
+            eps_v_p = eps_v_p + (plateau - eps_v_e);
+            eps_v_e = plateau;
             p_vol = sim_settings.compaction_pressure;
         }
         if eps_v_e > 0.5 {
@@ -135,7 +136,7 @@ fn transfer_p2g_mpmdac(p_idx: u32, cell: vec2u) {
 
     // plastic compaction densifies the material; the particle volume in the
     // force scatter shrinks accordingly
-    let density_ratio = max(1.0 + eps_v_p, 0.5);
+    let density_ratio = 1.0 + eps_v_p;
     let particle_volume = p_mass / (sim_settings.snow_density * density_ratio);
 
     // total mean pressure: lithostatic (from the grid depth) plus the elastic
@@ -153,15 +154,16 @@ fn transfer_p2g_mpmdac(p_idx: u32, cell: vec2u) {
     );
     let plastic_strain = stress_state[1][1];
     let tau_trial = tau_old + (2.0 * sim_settings.shear_modulus * sim_info.dt) * eps_dot_dev;
-    let tau_trial_magnitude = frobenius_norm(tau_trial);
+    // equivalent shear stress tau_eq = sqrt(1/2 tau:tau); in these measures
+    // the elastic response is tau_eq = G * gamma
+    let tau_trial_magnitude = equivalent_shear_stress(tau_trial);
 
-    // 2. yield stress: Drucker-Prager (pressure-dependent) or mu(I)
+    // 2. yield stress on tau_eq: Drucker-Prager (pressure-dependent) or mu(I)
     // (rate-dependent), both with linear isotropic hardening on the
-    // accumulated plastic strain
-    let strain_rate_magnitude = frobenius_norm(eps_dot_dev);
+    // accumulated plastic shear strain
     var yield_stress = 0.0;
     if sim_settings.constitutive_model == 1u {
-        let mu_i = mu_inertial(strain_rate_magnitude, pressure);
+        let mu_i = mu_inertial(equivalent_shear_rate(eps_dot_dev), pressure);
         yield_stress = sim_settings.n0 + mu_i * pressure + sim_settings.hardening_modulus * plastic_strain;
     } else {
         yield_stress = sim_settings.n0
@@ -175,7 +177,7 @@ fn transfer_p2g_mpmdac(p_idx: u32, cell: vec2u) {
     if tau_trial_magnitude > yield_stress {
         tau_new = tau_trial * (yield_stress / tau_trial_magnitude);
         delta_plastic_strain = (tau_trial_magnitude - yield_stress)
-            / (2.0 * sim_settings.shear_modulus + sim_settings.hardening_modulus);
+            / (sim_settings.shear_modulus + sim_settings.hardening_modulus);
     }
     if is_nan(tau_new[0][0]) || is_nan(tau_new[0][1]) || is_nan(tau_new[1][0]) {
         tau_new = mat2x2<f32>(vec2f(0.0), vec2f(0.0));
@@ -243,12 +245,23 @@ fn frobenius_norm(m: mat2x2<f32>) -> f32 {
     ));
 }
 
+// Equivalent shear measures of 2D deviatoric tensors (Jop et al. 2006),
+// which reduce to tau_xy and the shear rate gamma_dot in simple shear, so
+// literature friction coefficients and mu(I) parameters apply directly:
+//   tau_eq = sqrt(1/2 tau:tau),  gamma_dot = sqrt(2 eps_dot_dev:eps_dot_dev)
+fn equivalent_shear_stress(tau_dev: mat2x2<f32>) -> f32 {
+    return frobenius_norm(tau_dev) / sqrt(2.0);
+}
+
+fn equivalent_shear_rate(eps_dot_dev: mat2x2<f32>) -> f32 {
+    return sqrt(2.0) * frobenius_norm(eps_dot_dev);
+}
+
 // Rate-dependent mu(I) inertial rheology: the friction coefficient grows
 // from mu0 at rest towards mu2 with the inertial number
-//   I = |eps_dot_dev| * d / sqrt(P / rho)
-// (the norm convention absorbs the order-unity shear-rate factor into i0).
-fn mu_inertial(strain_rate_magnitude: f32, pressure: f32) -> f32 {
-    let inertial_number = strain_rate_magnitude * sim_settings.grain_diameter
+//   I = gamma_dot * d / sqrt(P / rho)
+fn mu_inertial(shear_rate: f32, pressure: f32) -> f32 {
+    let inertial_number = shear_rate * sim_settings.grain_diameter
         / sqrt(max(pressure / sim_settings.snow_density, 1e-6));
     return sim_settings.mu0
         + (sim_settings.mu2 - sim_settings.mu0)
@@ -281,6 +294,11 @@ const INV_MOMENTUM_FACTOR: f32 = 1 / MOMENTUM_FACTOR;
 // depth-integrated internal force (h * sigma * grad_w * area, ~1e4..1e5 N per node contribution)
 const FORCE_FACTOR: f32 = 1e-3; // i32 limit is 2.1e6 N per node
 const INV_FORCE_FACTOR: f32 = 1 / FORCE_FACTOR;
+// weak-form pressure sum m_p h_p / 2 grad_w (kg) of the curvilinear model,
+// node sum = node_mass * |grad h|: 0.001 kg resolves thin front nodes
+//   (rho*cell^2*h*J ~ 6e4 kg * 1 * 1e3 = 6e7 < 2.1e9)
+const PRESSURE_FACTOR: f32 = 1e3;
+const INV_PRESSURE_FACTOR: f32 = 1 / PRESSURE_FACTOR;
 
 // TODO precompute often used values on the cpu and pass them as uniforms to avoid redundant calculations on the gpu
 
@@ -293,6 +311,7 @@ struct SimInfo {
     max_velocity: f32,
     max_flow_thickness: f32,
     flags: u32,
+    grid_elapsed_time: f32,
 };
 
 const SIM_INFO_OUT_OF_BOUNDS: u32 = 1u << 0u;
@@ -302,7 +321,16 @@ const SIM_INFO_PARTICLE_OUT_OF_DEM_DATA: u32 = 1u << 3u;
 const SIM_INFO_STOPPED: u32 = 1u << 31u;
 const SIM_INFO_ALL_PARTICLES_STOPPED: u32 = 1u << 30u;
 const SIM_INFO_NO_NEW_CELLS: u32 = 1u << 29u;
+// almost all particles are resting or terminally stopped
+const SIM_INFO_AT_REST: u32 = 1u << 28u;
+// total momentum fell below momentum_stop_fraction of its peak
+const SIM_INFO_LOW_MOMENTUM: u32 = 1u << 27u;
 
+// reversible low-speed state; the low bits hold the rest start step while resting
+// and the consecutive slow-step count while moving
+const PARTICLE_RESTING: u32 = 1u << 26u;
+// consecutive slow steps before a particle rests
+const REST_STEPS: u32 = 20u;
 const PARTICLE_FLYING: u32 = 1u << 27u;
 const PARTICLE_OUT_OF_BOUNDS: u32 = 1u << 28u;
 const PARTICLE_IS_NAN: u32 = 1u << 29u;
@@ -317,7 +345,7 @@ struct SimSettings {
     grid_shape: vec2u,
     world_size: vec2f,
     snow_density: f32,
-    slab_thickness: f32,
+    release_thickness: f32,
     friction_coefficient: f32,
     drag_coefficient: f32,
     n0: f32,
@@ -344,6 +372,14 @@ struct SimSettings {
     // MPMDAC compressibility; bulk_modulus 0 = incompressible
     bulk_modulus: f32,
     compaction_pressure: f32,
+    // stop once total momentum < fraction * its peak; 0 disables (curvilinear)
+    momentum_stop_fraction: f32,
+    // front travel in cells covered by the no-new-cells stop window
+    no_new_cells_travel: f32,
+    // Gaussian width (m) of the curvilinear reference surface; 0 disables it
+    reference_surface_length: f32,
+    // snow water equivalent (kg/m2) of the release cells; NaN if unset
+    release_swe: f32,
 };
 
 struct AtomicValues {
@@ -355,7 +391,42 @@ struct AtomicValues {
     number_release_cells: atomic<u32>,
     number_release_particles: atomic<u32>,
     stopped_particles: atomic<u32>,
+    // resting particles counted during the current step, reset by update_sim_info
+    resting_particles: atomic<u32>,
+    // total grid momentum (kg m/s) of the current step as a 64-bit sum, reset by update_sim_info
+    momentum_lo: atomic<u32>,
+    momentum_hi: atomic<u32>,
+    // f32 bits of the largest total momentum so far
+    peak_momentum: atomic<u32>,
 };
+
+// Reversible resting: a particle rests after REST_STEPS consecutive slow steps
+// and wakes once the gathered grid speed exceeds twice the threshold. Resting
+// particles keep depositing mass but no momentum and do not move, which removes
+// sub-threshold creep inside deposits. Returns the new state: its low bits hold
+// the slow-step counter while moving and the rest start step while resting.
+fn next_rest_state(previous_state: u32, speed: f32, timestep: u32) -> u32 {
+    let low_mask = PARTICLE_RESTING - 1u;
+    var resting = (previous_state & PARTICLE_RESTING) != 0u;
+    var low_bits = previous_state & low_mask;
+    if resting {
+        if speed > 2.0 * sim_settings.velocity_threshold {
+            resting = false;
+            low_bits = 0u;
+        }
+    } else if speed < sim_settings.velocity_threshold {
+        low_bits = min(low_bits + 1u, REST_STEPS);
+        if low_bits >= REST_STEPS {
+            resting = true;
+            low_bits = timestep & low_mask;
+        }
+    } else {
+        low_bits = 0u;
+    }
+    return (previous_state & ~(PARTICLE_RESTING | low_mask))
+        | select(0u, PARTICLE_RESTING, resting)
+        | low_bits;
+}
 
 struct G2PUpdate {
     velocity: vec2f,
@@ -363,6 +434,13 @@ struct G2PUpdate {
 };
 
 @group(0) @binding(0) var<uniform> sim_settings: SimSettings;
+
+// length in steps of the no-new-cells rolling window: the fastest material
+// moves at most cfl cells per step, so round(travel / cfl) steps cover the same
+// front travel at any cfl; at least 10 steps
+fn no_new_cells_window() -> u32 {
+    return max(10u, u32(round(sim_settings.no_new_cells_travel / sim_settings.cfl)));
+}
 
 fn is_nan(x: f32) -> bool {
     let bits: u32 = bitcast<u32>(x);

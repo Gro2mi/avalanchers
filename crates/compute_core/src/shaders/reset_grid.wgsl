@@ -3,13 +3,19 @@
 @group(0) @binding(2) var<storage, read_write> atomic_values: AtomicValues;
 @group(0) @binding(3) var<storage, read_write> grid_momentum_atomic: array<i32>;
 @group(0) @binding(4) var<storage, read_write> grid_forces_atomic: array<i32>;
+@group(0) @binding(5) var<storage> sim_info: SimInfo;
+@group(0) @binding(6) var<storage, read_write> grid_momentum_z_atomic: array<i32>;
 
 @compute @workgroup_size(WG_SIZE_2D, WG_SIZE_2D, 1)
 fn reset_grid(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    if (sim_info.flags & SIM_INFO_STOPPED) != 0u {
+        return;
+    }
     if global_id.x < sim_settings.grid_shape.x && global_id.y < sim_settings.grid_shape.y {
         grid_mass_atomic[xy_to_idx(global_id.xy)] = 0u; // Reset grid masses for the new timestep
         grid_momentum_atomic[xy_to_idx(global_id.xy) * 2u] = 0; // Reset grid momentum (u) for the new timestep
         grid_momentum_atomic[xy_to_idx(global_id.xy) * 2u + 1u] = 0; // Reset grid momentum (v) for the new timestep
+        grid_momentum_z_atomic[xy_to_idx(global_id.xy)] = 0; // Reset grid momentum (w) of the terrain-following model
         grid_forces_atomic[xy_to_idx(global_id.xy) * 2u] = 0; // Reset grid forces (x) for the new timestep
         grid_forces_atomic[xy_to_idx(global_id.xy) * 2u + 1u] = 0; // Reset grid forces (y) for the new timestep
     }
@@ -44,6 +50,11 @@ const INV_MOMENTUM_FACTOR: f32 = 1 / MOMENTUM_FACTOR;
 // depth-integrated internal force (h * sigma * grad_w * area, ~1e4..1e5 N per node contribution)
 const FORCE_FACTOR: f32 = 1e-3; // i32 limit is 2.1e6 N per node
 const INV_FORCE_FACTOR: f32 = 1 / FORCE_FACTOR;
+// weak-form pressure sum m_p h_p / 2 grad_w (kg) of the curvilinear model,
+// node sum = node_mass * |grad h|: 0.001 kg resolves thin front nodes
+//   (rho*cell^2*h*J ~ 6e4 kg * 1 * 1e3 = 6e7 < 2.1e9)
+const PRESSURE_FACTOR: f32 = 1e3;
+const INV_PRESSURE_FACTOR: f32 = 1 / PRESSURE_FACTOR;
 
 // TODO precompute often used values on the cpu and pass them as uniforms to avoid redundant calculations on the gpu
 
@@ -56,6 +67,7 @@ struct SimInfo {
     max_velocity: f32,
     max_flow_thickness: f32,
     flags: u32,
+    grid_elapsed_time: f32,
 };
 
 const SIM_INFO_OUT_OF_BOUNDS: u32 = 1u << 0u;
@@ -65,7 +77,16 @@ const SIM_INFO_PARTICLE_OUT_OF_DEM_DATA: u32 = 1u << 3u;
 const SIM_INFO_STOPPED: u32 = 1u << 31u;
 const SIM_INFO_ALL_PARTICLES_STOPPED: u32 = 1u << 30u;
 const SIM_INFO_NO_NEW_CELLS: u32 = 1u << 29u;
+// almost all particles are resting or terminally stopped
+const SIM_INFO_AT_REST: u32 = 1u << 28u;
+// total momentum fell below momentum_stop_fraction of its peak
+const SIM_INFO_LOW_MOMENTUM: u32 = 1u << 27u;
 
+// reversible low-speed state; the low bits hold the rest start step while resting
+// and the consecutive slow-step count while moving
+const PARTICLE_RESTING: u32 = 1u << 26u;
+// consecutive slow steps before a particle rests
+const REST_STEPS: u32 = 20u;
 const PARTICLE_FLYING: u32 = 1u << 27u;
 const PARTICLE_OUT_OF_BOUNDS: u32 = 1u << 28u;
 const PARTICLE_IS_NAN: u32 = 1u << 29u;
@@ -80,7 +101,7 @@ struct SimSettings {
     grid_shape: vec2u,
     world_size: vec2f,
     snow_density: f32,
-    slab_thickness: f32,
+    release_thickness: f32,
     friction_coefficient: f32,
     drag_coefficient: f32,
     n0: f32,
@@ -107,6 +128,14 @@ struct SimSettings {
     // MPMDAC compressibility; bulk_modulus 0 = incompressible
     bulk_modulus: f32,
     compaction_pressure: f32,
+    // stop once total momentum < fraction * its peak; 0 disables (curvilinear)
+    momentum_stop_fraction: f32,
+    // front travel in cells covered by the no-new-cells stop window
+    no_new_cells_travel: f32,
+    // Gaussian width (m) of the curvilinear reference surface; 0 disables it
+    reference_surface_length: f32,
+    // snow water equivalent (kg/m2) of the release cells; NaN if unset
+    release_swe: f32,
 };
 
 struct AtomicValues {
@@ -118,7 +147,42 @@ struct AtomicValues {
     number_release_cells: atomic<u32>,
     number_release_particles: atomic<u32>,
     stopped_particles: atomic<u32>,
+    // resting particles counted during the current step, reset by update_sim_info
+    resting_particles: atomic<u32>,
+    // total grid momentum (kg m/s) of the current step as a 64-bit sum, reset by update_sim_info
+    momentum_lo: atomic<u32>,
+    momentum_hi: atomic<u32>,
+    // f32 bits of the largest total momentum so far
+    peak_momentum: atomic<u32>,
 };
+
+// Reversible resting: a particle rests after REST_STEPS consecutive slow steps
+// and wakes once the gathered grid speed exceeds twice the threshold. Resting
+// particles keep depositing mass but no momentum and do not move, which removes
+// sub-threshold creep inside deposits. Returns the new state: its low bits hold
+// the slow-step counter while moving and the rest start step while resting.
+fn next_rest_state(previous_state: u32, speed: f32, timestep: u32) -> u32 {
+    let low_mask = PARTICLE_RESTING - 1u;
+    var resting = (previous_state & PARTICLE_RESTING) != 0u;
+    var low_bits = previous_state & low_mask;
+    if resting {
+        if speed > 2.0 * sim_settings.velocity_threshold {
+            resting = false;
+            low_bits = 0u;
+        }
+    } else if speed < sim_settings.velocity_threshold {
+        low_bits = min(low_bits + 1u, REST_STEPS);
+        if low_bits >= REST_STEPS {
+            resting = true;
+            low_bits = timestep & low_mask;
+        }
+    } else {
+        low_bits = 0u;
+    }
+    return (previous_state & ~(PARTICLE_RESTING | low_mask))
+        | select(0u, PARTICLE_RESTING, resting)
+        | low_bits;
+}
 
 struct G2PUpdate {
     velocity: vec2f,
@@ -126,6 +190,13 @@ struct G2PUpdate {
 };
 
 @group(0) @binding(0) var<uniform> sim_settings: SimSettings;
+
+// length in steps of the no-new-cells rolling window: the fastest material
+// moves at most cfl cells per step, so round(travel / cfl) steps cover the same
+// front travel at any cfl; at least 10 steps
+fn no_new_cells_window() -> u32 {
+    return max(10u, u32(round(sim_settings.no_new_cells_travel / sim_settings.cfl)));
+}
 
 fn is_nan(x: f32) -> bool {
     let bits: u32 = bitcast<u32>(x);

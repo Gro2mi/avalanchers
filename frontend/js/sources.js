@@ -9,6 +9,8 @@
 const DEM_FILE_EXTENSIONS = ['gpx', 'tif', 'tiff', 'asc'];
 const RELEASE_FILE_EXTENSIONS = ['gpx', 'tif', 'tiff', 'asc'];
 
+/** Keep in sync with FORMAT_VERSION in crates/data_processor/src/store_schema.rs. */
+const ZARR_STORE_FORMAT = '0.2.0';
 /** Name of the DEM array stored at the site level of a Zarr store. */
 const ZARR_DEM_ARRAY = 'dem';
 /** Name of the release area array stored inside a Zarr scenario. */
@@ -271,6 +273,10 @@ class ZarrStore {
 
         const store = new ZarrStore(rootSegments[rootSegments.length - 1] || 'zarr store', files);
         await store.#indexNodes();
+        const format = store.nodes.get('')?.attributes?.avalanchers_format;
+        if (format !== ZARR_STORE_FORMAT) {
+            throw new Error(`This Zarr store has format ${format}, expected ${ZARR_STORE_FORMAT}.`);
+        }
         return store;
     }
 

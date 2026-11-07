@@ -25,9 +25,14 @@ web-time = { workspace = true }
 
 [dev-dependencies]
 pollster = { workspace = true }
+shapefile = { workspace = true }
 criterion = { workspace = true, features = ["html_reports"] }
 tokio = { workspace = true }
 
 [[bench]]
 name = "sim_benchmark"
+harness = false
+
+[[bench]]
+name = "model_benchmark"
 harness = false

@@ -45,6 +45,9 @@ macro_rules! define_shaders {
         }
 
         impl ShaderName {
+            /// Every shader, including import fragments and test shaders.
+            pub const ALL: &'static [ShaderName] = &[$(ShaderName::$variant),*];
+
             /// The shader's canonical name: the declared entry point if any,
             /// else the source file stem. Unique per variant; used for string
             /// parsing, labels, and as the dispatched WGSL entry point.
@@ -114,20 +117,38 @@ define_shaders! {
     ComputeBeelineDistance => "compute_beeline_distance",
     EvaluateMassMovement => "evaluate_mass_movement",
     InitializeParticles => "initialize_particles",
-    // the three relaxation kernels share one source file; each entry point
+    // the four relaxation kernels share one source file; each entry point
     // dispatches one kernel from relax_particles.wgsl
     RelaxParticles => "relax_particles",
     RelaxClearGrid => "relax_particles" entry_point "relax_clear_grid",
     RelaxBuildGrid => "relax_particles" entry_point "relax_build_grid",
+    RelaxSampleElevation => "relax_particles" entry_point "relax_sample_elevation",
     ComputeParticles => "compute_particles",
     G2P => "g2p",
     G2PMPMDAC => "g2p_mpmdac",
     P2G => "p2g",
+    P2G2D => "p2g" entry_point "p2g_2d",
+    P2G2DSorted => "p2g_sorted" entry_point "p2g_2d_sorted",
+    P2GWeakPressure => "p2g_weak_pressure",
+    // the four particle sort kernels share one source file
+    SortClearBins => "sort_particles" entry_point "sort_clear_bins",
+    SortCountParticles => "sort_particles" entry_point "sort_count_particles",
+    SortScanBins => "sort_particles" entry_point "sort_scan_bins",
+    SortScatterParticles => "sort_particles" entry_point "sort_scatter_particles",
     P2GMPMDAC => "p2g_mpmdac",
     GridPhysicsCurvilinear => "grid_physics_curvilinear",
     GridPhysicsMPMDAC => "grid_physics_mpmdac",
     GridPhysics => "grid_physics",
+    GridPhysicsTerrainFollowing => "grid_physics_terrain_following",
+    G2PTerrainFollowing => "g2p_terrain_following",
+    // the 3D model shares its physics with the terrain-following sources
+    P2G3D => "p2g" entry_point "p2g_3d",
+    P2G3DSorted => "p2g_sorted" entry_point "p2g_3d_sorted",
+    GridPhysics3D => "grid_physics_terrain_following" entry_point "grid_physics_3d",
+    G2P3D => "g2p_terrain_following" entry_point "g2p_3d",
     Friction => "friction",
+    CurvilinearGeometry => "curvilinear_geometry",
+    CartesianGeometry => "cartesian_geometry",
     Constitutive => "constitutive",
     Utils => "utils",
     Random => "random",
@@ -136,6 +157,7 @@ define_shaders! {
     TransferG2P => "transfer_g2p",
     TransferG2PAffine => "transfer_g2p_affine",
     TransferP2G => "transfer_p2g",
+    TransferP2GZ => "transfer_p2g_z",
     TestTransforms => "test_transforms",
     TestSampling => "test_sampling",
     TestFriction => "test_friction",
@@ -154,6 +176,17 @@ use std::sync::OnceLock;
 static STRIP_RE: OnceLock<Regex> = OnceLock::new();
 static IMPORT_RE: OnceLock<Regex> = OnceLock::new();
 
+/// `source` (LF) with the line endings of `original`, so that the debug
+/// write-back of expanded imports only ever changes the inlined content.
+#[cfg(any(test, all(not(target_arch = "wasm32"), debug_assertions)))]
+fn restore_line_endings(source: &str, original: &str) -> String {
+    if original.contains("\r\n") {
+        source.replace('\n', "\r\n")
+    } else {
+        source.to_string()
+    }
+}
+
 fn load_shader_source_string(name_str: &str, atomic_float_support: bool) -> &'static str {
     // Get the enum variant from the string
     let shader_enum: ShaderName = name_str
@@ -161,7 +194,9 @@ fn load_shader_source_string(name_str: &str, atomic_float_support: bool) -> &'st
         .unwrap_or_else(|_| panic!("Unknown shader name: {}", name_str));
 
     // Step 0: Get the raw source (from Disk or Binary)
-    let shader_source = shader_enum.read_source();
+    let raw_source = shader_enum.read_source();
+    // CRLF working copies must not count as a change or leak into the imports
+    let shader_source = raw_source.replace("\r\n", "\n");
 
     let strip_re = STRIP_RE.get_or_init(|| {
         Regex::new(r#"(?m)\s*// BEGIN [a-zA-Z0-9_./-]+\.wgsl[\s\S]*?// END [a-zA-Z0-9_./-]+\.wgsl"#)
@@ -180,7 +215,9 @@ fn load_shader_source_string(name_str: &str, atomic_float_support: bool) -> &'st
             let import_name = &caps[1];
             let import_line = &caps[0];
 
-            let imported_content = load_shader_source_string(import_name, atomic_float_support);
+            // unfiltered, the variant filter below covers the imports as well
+            // and the debug write-back must keep both variants on disk
+            let imported_content = load_shader_source_string(import_name, false);
 
             format!(
                 "{}\n// BEGIN {}.wgsl\n{}\n// END {}.wgsl",
@@ -196,7 +233,11 @@ fn load_shader_source_string(name_str: &str, atomic_float_support: bool) -> &'st
                 .join("src")
                 .join("shaders")
                 .join(format!("{}.wgsl", shader_enum.source_file()));
-            std::fs::write(path, &source_with_imports).ok();
+            std::fs::write(
+                path,
+                restore_line_endings(&source_with_imports, &raw_source),
+            )
+            .ok();
         }
     }
     if atomic_float_support {
@@ -538,6 +579,26 @@ pub fn create_shader_configs(
                         min_binding_size: None,
                     },
                 ),
+                // Binding 7:
+                (
+                    TextureName::DemReference.to_string(),
+                    BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float {
+                            filterable: has_float32_filterable,
+                        },
+                    },
+                ),
+                // Binding 8:
+                (
+                    TextureName::BasalTopography.to_string(),
+                    BindingType::StorageTexture {
+                        access: StorageTextureAccess::WriteOnly,
+                        format: TextureFormat::Rgba32Float,
+                        view_dimension: TextureViewDimension::D2,
+                    },
+                ),
             ],
         )?,
     );
@@ -559,9 +620,10 @@ pub fn create_shader_configs(
                         min_binding_size: None,
                     },
                 ),
-                // Binding 1:
+                // Binding 1: DEM; normals are derived here because the terrain
+                // geometry texture layout depends on the simulation model
                 (
-                    TextureName::TerrainGeometry.to_string(),
+                    TextureName::Dem.to_string(),
                     BindingType::Texture {
                         multisampled: false,
                         view_dimension: wgpu::TextureViewDimension::D2,
@@ -619,6 +681,15 @@ pub fn create_shader_configs(
             BufferName::EvaluationResult.to_string(),
             BindingType::Buffer {
                 ty: BufferBindingType::Storage { read_only: false },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+        ),
+        // Binding 4: release cells are excluded from the counts
+        (
+            BufferName::ReleaseAreas.to_string(),
+            BindingType::Buffer {
+                ty: BufferBindingType::Storage { read_only: true },
                 has_dynamic_offset: false,
                 min_binding_size: None,
             },
@@ -877,6 +948,15 @@ pub fn create_shader_configs(
                 min_binding_size: None,
             },
         ),
+        // Binding 9: release cells are excluded from the reduced sums
+        (
+            BufferName::ReleaseAreas.to_string(),
+            BindingType::Buffer {
+                ty: BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+        ),
     ];
     shader_configs.insert(
         ShaderName::ChamferPrepare,
@@ -1101,8 +1181,8 @@ pub fn create_shader_configs(
             ],
         )?,
     );
-    // all three relaxation kernels share one bind group layout; the clear and
-    // build kernels only use a subset of the bindings
+    // all four relaxation kernels share one bind group layout; each kernel
+    // only uses a subset of the bindings
     let relax_bindings = vec![
         // Binding 0:
         (
@@ -1176,6 +1256,31 @@ pub fn create_shader_configs(
                 min_binding_size: None,
             },
         ),
+        // Binding 8:
+        (
+            TextureName::Dem.to_string(),
+            BindingType::Texture {
+                multisampled: false,
+                view_dimension: wgpu::TextureViewDimension::D2,
+                sample_type: wgpu::TextureSampleType::Float {
+                    filterable: has_float32_filterable,
+                },
+            },
+        ),
+        // Binding 9:
+        (
+            "Sampler".to_string(),
+            wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+        ),
+        // Binding 10:
+        (
+            BufferName::ParticlesElevation.to_string(),
+            BindingType::Buffer {
+                ty: BufferBindingType::Storage { read_only: false },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+        ),
     ];
     shader_configs.insert(
         ShaderName::RelaxParticles,
@@ -1202,6 +1307,16 @@ pub fn create_shader_configs(
             device,
             ShaderName::RelaxBuildGrid,
             load_shader_source(ShaderName::RelaxBuildGrid, has_float32_atomic),
+            &relax_bindings,
+            &[("WG_SIZE_1D", max_compute_invocations_per_workgroup as f64)],
+        )?,
+    );
+    shader_configs.insert(
+        ShaderName::RelaxSampleElevation,
+        ComputeShaderConfig::new_with_constants(
+            device,
+            ShaderName::RelaxSampleElevation,
+            load_shader_source(ShaderName::RelaxSampleElevation, has_float32_atomic),
             &relax_bindings,
             &[("WG_SIZE_1D", max_compute_invocations_per_workgroup as f64)],
         )?,
@@ -1333,6 +1448,14 @@ pub fn create_shader_configs(
                 // Binding 13:
                 (
                     BufferName::ParticlesElevation.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                (
+                    BufferName::ParticlesVelocityZ.to_string(),
                     BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: false },
                         has_dynamic_offset: false,
@@ -1716,6 +1839,22 @@ pub fn create_shader_configs(
                         min_binding_size: None,
                     },
                 ),
+                (
+                    BufferName::SimInfo.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                (
+                    BufferName::GridMomentumZ.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
             ],
         )?,
     );
@@ -1837,6 +1976,155 @@ pub fn create_shader_configs(
                 ),
             ],
             &[("WG_SIZE_1D", max_compute_invocations_per_workgroup as f64)],
+        )?,
+    );
+    let p2g = shader_configs
+        .get(&ShaderName::P2G)
+        .expect("P2G shader config was just inserted");
+    let mut curvilinear_p2g_bindings: Vec<_> = p2g
+        .binding_names
+        .iter()
+        .cloned()
+        .zip(p2g.binding_types.iter().copied())
+        .collect();
+    curvilinear_p2g_bindings.push((
+        BufferName::ParticlesAffineMatrix.to_string(),
+        BindingType::Buffer {
+            ty: BufferBindingType::Storage { read_only: true },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+    ));
+    shader_configs.insert(
+        ShaderName::P2G2D,
+        ComputeShaderConfig::new_with_constants(
+            device,
+            ShaderName::P2G2D,
+            load_shader_source(ShaderName::P2G2D, has_float32_atomic),
+            &curvilinear_p2g_bindings,
+            &[("WG_SIZE_1D", max_compute_invocations_per_workgroup as f64)],
+        )?,
+    );
+    // the tile-sorted P2G sums quantized integer contributions in workgroup
+    // memory and flushes them to the integer or float grid
+    let storage_buffer = |read_only: bool| BindingType::Buffer {
+        ty: BufferBindingType::Storage { read_only },
+        has_dynamic_offset: false,
+        min_binding_size: None,
+    };
+    let mut sorted_p2g_bindings = curvilinear_p2g_bindings.clone();
+    // Binding 8:
+    sorted_p2g_bindings.push((
+        BufferName::SortedParticleIndex.to_string(),
+        storage_buffer(true),
+    ));
+    shader_configs.insert(
+        ShaderName::P2G2DSorted,
+        ComputeShaderConfig::new(
+            device,
+            ShaderName::P2G2DSorted,
+            load_shader_source(ShaderName::P2G2DSorted, has_float32_atomic),
+            &sorted_p2g_bindings,
+        )?,
+    );
+    // curvilinear weak-form pressure, a particle pass after either P2G
+    shader_configs.insert(
+        ShaderName::P2GWeakPressure,
+        ComputeShaderConfig::new_with_constants(
+            device,
+            ShaderName::P2GWeakPressure,
+            load_shader_source(ShaderName::P2GWeakPressure, has_float32_atomic),
+            &[
+                // Binding 0:
+                (
+                    BufferName::SimSettings.to_string(),
+                    BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                // Binding 1:
+                (BufferName::SimInfo.to_string(), storage_buffer(false)),
+                // Binding 2:
+                (
+                    BufferName::ParticlesPosition.to_string(),
+                    storage_buffer(true),
+                ),
+                // Binding 3:
+                (BufferName::ParticlesMass.to_string(), storage_buffer(true)),
+                // Binding 4:
+                (BufferName::GridMass.to_string(), storage_buffer(true)),
+                // Binding 5:
+                (
+                    TextureName::TerrainGeometry.to_string(),
+                    BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float {
+                            filterable: has_float32_filterable,
+                        },
+                    },
+                ),
+                // Binding 6:
+                (BufferName::GridForces.to_string(), storage_buffer(false)),
+            ],
+            &[("WG_SIZE_1D", max_compute_invocations_per_workgroup as f64)],
+        )?,
+    );
+    let sort_bindings = [
+        // Binding 0:
+        (
+            BufferName::SimSettings.to_string(),
+            BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+        ),
+        // Binding 1:
+        (BufferName::SimInfo.to_string(), storage_buffer(false)),
+        // Binding 2:
+        (
+            BufferName::ParticlesPosition.to_string(),
+            storage_buffer(true),
+        ),
+        // Binding 3:
+        (BufferName::SortBins.to_string(), storage_buffer(false)),
+        // Binding 4:
+        (
+            BufferName::ParticleBinRank.to_string(),
+            storage_buffer(false),
+        ),
+        // Binding 5:
+        (
+            BufferName::SortedParticleIndex.to_string(),
+            storage_buffer(false),
+        ),
+    ];
+    for shader in [
+        ShaderName::SortClearBins,
+        ShaderName::SortCountParticles,
+        ShaderName::SortScatterParticles,
+    ] {
+        shader_configs.insert(
+            shader,
+            ComputeShaderConfig::new_with_constants(
+                device,
+                shader,
+                load_shader_source(shader, has_float32_atomic),
+                &sort_bindings,
+                &[("WG_SIZE_1D", max_compute_invocations_per_workgroup as f64)],
+            )?,
+        );
+    }
+    shader_configs.insert(
+        ShaderName::SortScanBins,
+        ComputeShaderConfig::new(
+            device,
+            ShaderName::SortScanBins,
+            load_shader_source(ShaderName::SortScanBins, has_float32_atomic),
+            &sort_bindings,
         )?,
     );
     shader_configs.insert(
@@ -2062,7 +2350,175 @@ pub fn create_shader_configs(
                         min_binding_size: None,
                     },
                 ),
+                // Binding 11:
+                (
+                    TextureName::BasalTopography.to_string(),
+                    BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float {
+                            filterable: has_float32_filterable,
+                        },
+                    },
+                ),
+                // Binding 12: weak-form pressure sums of p2g_weak_pressure
+                (
+                    BufferName::GridForces.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
             ],
+        )?,
+    );
+    // the terrain-following model reuses the curvilinear binding layouts; the 3D
+    // model appends its z-component buffers, so its z-only bindings come last in
+    // the sources the two models share
+    let existing_bindings = |shader: ShaderName| -> Vec<(String, BindingType)> {
+        let config = shader_configs
+            .get(&shader)
+            .expect("base shader config is inserted before the terrain-following configs");
+        config
+            .binding_names
+            .iter()
+            .cloned()
+            .zip(config.binding_types.iter().copied())
+            .collect()
+    };
+    let storage_buffer = |read_only: bool| BindingType::Buffer {
+        ty: BufferBindingType::Storage { read_only },
+        has_dynamic_offset: false,
+        min_binding_size: None,
+    };
+    let mut three_d_p2g_bindings = existing_bindings(ShaderName::P2G2D);
+    three_d_p2g_bindings.extend([
+        // Binding 8:
+        (
+            BufferName::ParticlesVelocityZ.to_string(),
+            storage_buffer(true),
+        ),
+        // Binding 9:
+        (BufferName::GridMomentumZ.to_string(), storage_buffer(false)),
+        // Binding 10:
+        (
+            BufferName::ParticlesAffineZ.to_string(),
+            storage_buffer(true),
+        ),
+    ]);
+    let mut three_d_sorted_p2g_bindings = existing_bindings(ShaderName::P2G2DSorted);
+    three_d_sorted_p2g_bindings.extend([
+        // Binding 9:
+        (
+            BufferName::ParticlesVelocityZ.to_string(),
+            storage_buffer(true),
+        ),
+        // Binding 10:
+        (BufferName::GridMomentumZ.to_string(), storage_buffer(false)),
+        // Binding 11:
+        (
+            BufferName::ParticlesAffineZ.to_string(),
+            storage_buffer(true),
+        ),
+    ]);
+    let mut terrain_following_grid_physics_bindings =
+        existing_bindings(ShaderName::GridPhysicsCurvilinear);
+    // binding 12 (weak-form pressure) is curvilinear only
+    terrain_following_grid_physics_bindings
+        .retain(|(name, _)| *name != BufferName::GridForces.to_string());
+    let mut three_d_grid_physics_bindings = terrain_following_grid_physics_bindings.clone();
+    three_d_grid_physics_bindings.extend([
+        // Binding 12:
+        (BufferName::GridMomentumZ.to_string(), storage_buffer(true)),
+        // Binding 13:
+        (BufferName::GridVelocityZ.to_string(), storage_buffer(false)),
+    ]);
+    let mut terrain_following_g2p_bindings = existing_bindings(ShaderName::G2P);
+    // the curvilinear binding 14 is the z velocity, which this model does not have
+    terrain_following_g2p_bindings
+        .retain(|(name, _)| *name != BufferName::ParticlesVelocityZ.to_string());
+    // Binding 14:
+    terrain_following_g2p_bindings.push((
+        TextureName::Curvature.to_string(),
+        BindingType::Texture {
+            multisampled: false,
+            view_dimension: wgpu::TextureViewDimension::D2,
+            sample_type: wgpu::TextureSampleType::Float {
+                filterable: has_float32_filterable,
+            },
+        },
+    ));
+    let mut three_d_g2p_bindings = terrain_following_g2p_bindings.clone();
+    three_d_g2p_bindings.extend([
+        // Binding 15:
+        (
+            BufferName::ParticlesVelocityZ.to_string(),
+            storage_buffer(false),
+        ),
+        // Binding 16:
+        (BufferName::GridVelocityZ.to_string(), storage_buffer(true)),
+        // Binding 17:
+        (
+            BufferName::ParticlesAffineZ.to_string(),
+            storage_buffer(false),
+        ),
+    ]);
+    shader_configs.insert(
+        ShaderName::GridPhysicsTerrainFollowing,
+        ComputeShaderConfig::new(
+            device,
+            ShaderName::GridPhysicsTerrainFollowing,
+            load_shader_source(ShaderName::GridPhysicsTerrainFollowing, has_float32_atomic),
+            &terrain_following_grid_physics_bindings,
+        )?,
+    );
+    shader_configs.insert(
+        ShaderName::G2PTerrainFollowing,
+        ComputeShaderConfig::new_with_constants(
+            device,
+            ShaderName::G2PTerrainFollowing,
+            load_shader_source(ShaderName::G2PTerrainFollowing, has_float32_atomic),
+            &terrain_following_g2p_bindings,
+            &[("WG_SIZE_1D", max_compute_invocations_per_workgroup as f64)],
+        )?,
+    );
+    shader_configs.insert(
+        ShaderName::P2G3D,
+        ComputeShaderConfig::new_with_constants(
+            device,
+            ShaderName::P2G3D,
+            load_shader_source(ShaderName::P2G3D, has_float32_atomic),
+            &three_d_p2g_bindings,
+            &[("WG_SIZE_1D", max_compute_invocations_per_workgroup as f64)],
+        )?,
+    );
+    shader_configs.insert(
+        ShaderName::P2G3DSorted,
+        ComputeShaderConfig::new(
+            device,
+            ShaderName::P2G3DSorted,
+            load_shader_source(ShaderName::P2G3DSorted, has_float32_atomic),
+            &three_d_sorted_p2g_bindings,
+        )?,
+    );
+    shader_configs.insert(
+        ShaderName::GridPhysics3D,
+        ComputeShaderConfig::new(
+            device,
+            ShaderName::GridPhysics3D,
+            load_shader_source(ShaderName::GridPhysics3D, has_float32_atomic),
+            &three_d_grid_physics_bindings,
+        )?,
+    );
+    shader_configs.insert(
+        ShaderName::G2P3D,
+        ComputeShaderConfig::new_with_constants(
+            device,
+            ShaderName::G2P3D,
+            load_shader_source(ShaderName::G2P3D, has_float32_atomic),
+            &three_d_g2p_bindings,
+            &[("WG_SIZE_1D", max_compute_invocations_per_workgroup as f64)],
         )?,
     );
     shader_configs.insert(
@@ -2738,4 +3194,121 @@ pub fn generate_shader_report(
     std::fs::write(filename.unwrap_or("shader_report.html"), &html)
         .expect("Unable to write shader report to file.");
     html
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The float-atomic variants cannot run on GPUs without float atomics, so
+    // at least validate the WGSL that would be compiled there.
+    fn validate_wgsl(shader: ShaderName, has_float32_atomic: bool) -> &'static str {
+        let source = load_shader_source(shader, has_float32_atomic);
+        let module = naga::front::wgsl::parse_str(source).unwrap_or_else(|error| {
+            std::panic!(
+                "{shader} (float atomics {has_float32_atomic}): {}",
+                error.emit_to_string(source)
+            )
+        });
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|error| {
+            std::panic!("{shader} (float atomics {has_float32_atomic}): {error:?}")
+        });
+        source
+    }
+
+    /// Bytes of workgroup memory each entry point of a shader statically uses.
+    fn workgroup_memory(shader: ShaderName) -> Vec<(String, u32)> {
+        let source = load_shader_source(shader, false);
+        let module = naga::front::wgsl::parse_str(source).expect("shader must parse");
+        let info = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .expect("shader must validate");
+        module
+            .entry_points
+            .iter()
+            .enumerate()
+            .map(|(index, entry_point)| {
+                let bytes = module
+                    .global_variables
+                    .iter()
+                    .filter(|(handle, variable)| {
+                        variable.space == naga::AddressSpace::WorkGroup
+                            && !info.get_entry_point(index)[*handle].is_empty()
+                    })
+                    .map(|(_, variable)| module.types[variable.ty].inner.size(module.to_ctx()))
+                    .sum();
+                (entry_point.name.clone(), bytes)
+            })
+            .collect()
+    }
+
+    // browsers only guarantee this much, and only pipeline creation checks it
+    #[test]
+    fn workgroup_memory_stays_within_the_webgpu_default() {
+        const WEBGPU_DEFAULT: u32 = 16384;
+        for &shader in ShaderName::ALL {
+            let source = load_shader_source(shader, false);
+            if !source.contains("@compute") || shader.source_file().starts_with("test_") {
+                continue;
+            }
+            for (entry_point, bytes) in workgroup_memory(shader) {
+                assert!(
+                    bytes <= WEBGPU_DEFAULT,
+                    "{entry_point} uses {bytes} bytes of workgroup memory"
+                );
+            }
+        }
+        // four 31 x 31 tiles of 4 bytes plus the box variables
+        let sorted = workgroup_memory(ShaderName::P2G3DSorted);
+        let bytes = sorted.iter().find(|(name, _)| name == "p2g_3d_sorted");
+        assert_eq!(bytes.map(|(_, bytes)| *bytes), Some(4 * 31 * 31 * 4 + 32));
+    }
+
+    #[test]
+    fn restore_line_endings_keeps_the_endings_of_the_original() {
+        assert_eq!(restore_line_endings("a\nb\n", "x\ny\n"), "a\nb\n");
+        assert_eq!(restore_line_endings("a\nb\n", "x\r\ny\r\n"), "a\r\nb\r\n");
+    }
+
+    #[test]
+    fn p2g_shaders_validate_with_integer_and_float_atomics() {
+        for shader in [
+            ShaderName::P2G2D,
+            ShaderName::P2G2DSorted,
+            ShaderName::P2G3D,
+            ShaderName::P2G3DSorted,
+            ShaderName::P2GWeakPressure,
+        ] {
+            for has_float32_atomic in [false, true] {
+                let source = validate_wgsl(shader, has_float32_atomic);
+                let float_binding = source.lines().any(|line| {
+                    line.trim_start().starts_with("@group") && line.contains("atomic<f32>")
+                });
+                assert_eq!(float_binding, has_float32_atomic);
+            }
+        }
+    }
+
+    #[test]
+    fn grid_physics_shaders_validate_with_integer_and_float_atomics() {
+        for shader in [
+            ShaderName::AnalyzeTerrainCurvilinear,
+            ShaderName::GridPhysicsCurvilinear,
+            ShaderName::GridPhysicsTerrainFollowing,
+            ShaderName::GridPhysics3D,
+            ShaderName::GridPhysics,
+        ] {
+            for has_float32_atomic in [false, true] {
+                validate_wgsl(shader, has_float32_atomic);
+            }
+        }
+    }
 }

@@ -8,11 +8,9 @@ dam-break plots of ``avaframe/out3Plot/outAna1Plots.py`` - so it runs on the
 in-memory results of an avalanchers simulation (see the companion script
 ``run_dam_break_test.py``). No avaframe imports, no output files.
 
-The numerical flow thickness and velocity fields are decoded DIRECTLY from
-the simulation's quantized ``grid_mass`` / ``grid_momentum`` buffers (the
-same fields the grid physics pass consumed this step), not re-scattered from
-particles. The mass/momentum quantization factors MUST match
-``crates/compute_core/src/shaders/utils.wgsl``.
+The numerical flow thickness and velocity fields are derived DIRECTLY from
+the simulation's ``grid_mass`` / ``grid_momentum`` fields (the same fields
+the grid physics pass consumed this step), not re-scattered from particles.
 
 Conventions: DEM arrays are (nrows, ncols) with row 0 = south; the flow
 frame is a plane fit of the DEM (descent direction + slope angle); all
@@ -27,11 +25,6 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap, Normalize
 from matplotlib.transforms import blended_transform_factory
 from matplotlib.patches import Rectangle
-
-# p2g quantization constants - MUST match crates/compute_core/src/shaders/utils.wgsl.
-# fields_from_grid cross-checks them against the particle total mass.
-MASS_FACTOR = 1e1       # p2g stores round(mass * MASS_FACTOR) as u32
-MOMENTUM_FACTOR = 1e2   # p2g stores round(mass * velocity * MOMENTUM_FACTOR) as i32
 
 # plot constants mirroring avaframe/out3Plot/plotUtilsCfg.ini
 FIG_W = 6
@@ -100,18 +93,19 @@ def flow_coordinates(header, frame):
     return x_map * ex + y_map * ey, -x_map * ey + y_map * ex
 
 
-def fields_from_grid(sim, shape, cell_size, density, jac, frame=None):
+def fields_from_grid(sim, shape, cell_size, density, jac, frame=None,
+                     surface_velocity=False):
     """Decode the sim's grid mass/momentum getters into thickness + velocity.
 
     These are exactly the fields the grid physics pass consumed this step
     (including p2g quantization and its boundary guards), not a python
     re-scattering of the particles. Returns flow thickness (normal to the
     surface, m), velocity along the flow direction and across it, and the
-    dequantized grid mass, all as (nrows, ncols) arrays, row 0 = south.
+    grid mass, all as (nrows, ncols) arrays, row 0 = south.
     """
     nrows, ncols = shape
-    mass = np.asarray(sim.grid_mass, dtype=np.float64) * (1.0 / MASS_FACTOR)
-    mom = np.asarray(sim.grid_momentum, dtype=np.float64) * (1.0 / MOMENTUM_FACTOR)
+    mass = np.asarray(sim.grid_mass, dtype=np.float64)
+    mom = np.asarray(sim.grid_momentum, dtype=np.float64)
     mom = mom.reshape((nrows * ncols, 2))
 
     # mirror the shader's decode: nodes below the mass quantization floor are
@@ -124,16 +118,20 @@ def fields_from_grid(sim, shape, cell_size, density, jac, frame=None):
     vel_v = vel_v.reshape(shape)
     thickness = mass / (density * cell_size * cell_size * jac)
     if frame is not None:
-        # rotate the grid velocity into the flow frame (flow / cross-flow)
+        # rotate the grid velocity into the flow frame (flow / cross-flow); a
+        # horizontal dx/dt needs the metric to measure surface distance, a
+        # surface velocity (see SURFACE_VELOCITY_MODELS) already does
         ex, ey = frame["e_down"]
         u_flow = vel_u * ex + vel_v * ey
+        if not surface_velocity:
+            u_flow = u_flow / frame["cos_phi"]
         v_cross = -vel_u * ey + vel_v * ex
         return thickness, u_flow, v_cross, mass
     return thickness, vel_u, vel_v, mass
 
 
 def check_grid_mass_consistency(sim, grid_mass, particle_mass):
-    """The dequantized grid mass must match the particle total mass."""
+    """The grid mass must match the particle total mass."""
     grid_total = float(grid_mass.sum())
     particle_total = float(np.nansum(particle_mass))
     if particle_total <= 0:
@@ -141,8 +139,7 @@ def check_grid_mass_consistency(sim, grid_mass, particle_mass):
     rel = abs(grid_total - particle_total) / particle_total
     if rel > 0.01:
         print(f"WARNING: grid mass ({grid_total:.1f} kg) differs from particle mass "
-              f"({particle_total:.1f} kg) by {100.0 * rel:.2f}% - MASS_FACTOR/"
-              f"MOMENTUM_FACTOR no longer match crates/compute_core/src/shaders/utils.wgsl")
+              f"({particle_total:.1f} kg) by {100.0 * rel:.2f}%")
 
 
 # ---------------------------------------------------------------------------
@@ -211,6 +208,36 @@ def dam_break_solution(phi_deg, delta_deg, h_l, times, s_rel, g=9.81, x_back_rel
     return h, u, x_mid
 
 
+FRONT_THRESHOLDS = (1e-3, 1e-2, 5e-2)
+
+
+def front_position(s_rel, h, threshold):
+    """Most downstream along-slope position where h reaches `threshold`,
+    interpolated linearly toward the next thinner sample; nan if none."""
+    order = np.argsort(s_rel)
+    s_rel = np.asarray(s_rel, dtype=float)[order]
+    h = np.asarray(h, dtype=float)[order]
+    above = np.nonzero(h >= threshold)[0]
+    if len(above) == 0:
+        return math.nan
+    i = above[-1]
+    if i + 1 >= len(h):
+        return float(s_rel[i])
+    return float(s_rel[i] + (s_rel[i + 1] - s_rel[i]) * (h[i] - threshold) / (h[i] - h[i + 1]))
+
+
+def front_lags(frame, dam, cfg, h, t, thresholds=FRONT_THRESHOLDS):
+    """Numerical minus analytic front position (along-slope m) on the profile
+    row for each thickness contour; negative = the numerical front lags."""
+    s_row = frame["s_rel_profile"]
+    s_fine = np.arange(np.min(s_row), np.max(s_row), 0.05)
+    h_ana = dam_break_solution(frame["phi_deg"], cfg["delta"], dam["h_l"], [t], s_fine,
+                               cfg["grav_acc"], x_back_rel=dam["x_back_rel"])[0][0]
+    h_row = h[frame["row_index"]]
+    return {thr: front_position(s_row, h_row, thr) - front_position(s_fine, h_ana, thr)
+            for thr in thresholds}
+
+
 def dam_break_rear_edge(phi_deg, delta_deg, h_l, t, g, x_back_rel):
     """Along-slope position of the physical rear edge of the material.
 
@@ -252,27 +279,6 @@ def _plot_dam_profile(ax, f, y_initial, data_initial, data_num, f_ana, y_ana,
     ax.axvspan(f_mid, f_end, color="grey", alpha=0.3, lw=0,
                label="error computation \n domain")
     return ax
-
-
-def plot_dam_ana_results(sol, t_save, out_dir, x_lim=None):
-    """Plots of the analytic solution alone (port of plotDamAnaResults):
-    flow thickness and flow velocity at t = 0 and t = t_save."""
-    out_dir = _ensure_dir(out_dir)
-    dt_ind = min(int(np.searchsorted(sol["t"], t_save)), len(sol["t"]) - 1)
-    for var, name, unit, file_name in (
-            (sol["h"], NAME_FT, UNIT_FT, "dam_break_flow_thickness"),
-            (sol["u"], NAME_FV, UNIT_FV, "dam_break_flow_velocity")):
-        # var is (nt, nx): row 0 = t = 0, row dt_ind = t_save
-        fig = plt.figure(figsize=(FIG_W, FIG_H))
-        plt.title("Dry-Bed")
-        plt.plot(sol["s"], var[0], "k--", label="t = 0s")
-        plt.plot(sol["s"], var[dt_ind], label="t = %.1fs" % sol["t"][dt_ind])
-        plt.xlabel("s [m]")
-        plt.ylabel("%s [%s]" % (name, unit))
-        if x_lim is not None:
-            plt.xlim(x_lim)
-        plt.legend()
-        _save_fig(fig, out_dir, file_name)
 
 
 def plot_comparison_dam(sample0, sample_t, frame, dam, t, cfg, sim_name, out_dir):
@@ -355,17 +361,6 @@ def add_error_time(ax1, times, h_err_l2, h_err_lmax, vh_err_l2, vh_err_lmax,
     ax1.text(t_save, 0.03, "%.2f s" % t_save, transform=trans, va="bottom",
              ha="center", color="grey", fontsize=FS - 2)
     return ax1, ax2
-
-
-def plot_error_time(times, h_err_l2, h_err_lmax, vh_err_l2, vh_err_lmax,
-                    relative, t_save, sim_name, out_dir):
-    """Standalone error-vs-time figure (port of plotErrorTime)."""
-    fig1, ax1 = plt.subplots(figsize=(2 * FIG_W, 2 * FIG_H))
-    title = " between dam break solution and avalanchers \n(simulation %s)" % sim_name
-    ax1.set_title(("Relative error difference" if relative else "Error difference") + title)
-    add_error_time(ax1, times, h_err_l2, h_err_lmax, vh_err_l2, vh_err_lmax,
-                   relative, t_save)
-    _save_fig(fig1, out_dir, "error_time_" + sim_name)
 
 
 def plot_dam_break_summary(dem, header, frame, dam, samples, errors, t_save,
@@ -520,14 +515,15 @@ def _save_fig(fig, out_dir, name):
     return path
 
 
-def assemble_gif(png_paths, out_path, duration_ms=500, max_width=1500):
+def assemble_gif(png_paths, out_path, duration_ms=500, max_width=1500,
+                 cleanup=False):
     """Stitch per-time-step figures (sorted by time) into a looping GIF.
 
     The frames are the comparison cross-cut figures of all saved time steps
     (AvaFrame's animated plotSequence figure). Frames are downscaled to
-    `max_width` pixels to keep the GIF a reasonable size; the individual
-    full-resolution PNGs are kept next to it. Returns the GIF path, or None
-    if pillow is unavailable.
+    `max_width` pixels to keep the GIF a reasonable size; with `cleanup` the
+    individual frame PNGs are deleted once the GIF is written. Returns the
+    GIF path, or None if pillow is unavailable.
     """
     try:
         from PIL import Image
@@ -546,5 +542,8 @@ def assemble_gif(png_paths, out_path, duration_ms=500, max_width=1500):
         frames.append(frame)
     frames[0].save(out_path, save_all=True, append_images=frames[1:],
                    duration=duration_ms, loop=0)
+    if cleanup:
+        for path in png_paths:
+            pathlib.Path(path).unlink(missing_ok=True)
     print("animation saved to %s (%d frames)" % (out_path, len(frames)))
     return out_path

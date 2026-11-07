@@ -27,6 +27,13 @@ pub struct AtomicValues {
     pub number_release_cells: u32,
     pub number_release_particles: u32,
     pub stopped_particles: u32,
+    /// Particles resting during the last step; reset by update_sim_info.
+    pub resting_particles: u32,
+    /// Total grid momentum of the last step in kg m/s, as low and high 32 bits.
+    pub momentum_lo: u32,
+    pub momentum_hi: u32,
+    /// Largest total momentum so far in kg m/s.
+    pub peak_momentum: f32,
 }
 
 /// GPU layout mirror of the CenterOfMassResult struct in center_of_mass.wgsl
@@ -37,6 +44,9 @@ pub struct CenterOfMassResult {
     pub com_y: f32,
     pub elevation: f32,
     pub total_mass: f32,
+    /// Simulated time at the end of the step.
+    pub time: f32,
+    pub _pad: [f32; 3],
 }
 
 impl Default for CenterOfMassResult {
@@ -46,6 +56,8 @@ impl Default for CenterOfMassResult {
             com_y: f32::NAN,
             elevation: f32::NAN,
             total_mass: f32::NAN,
+            time: f32::NAN,
+            _pad: [0.0; 3],
         }
     }
 }
@@ -93,13 +105,17 @@ pub struct EvaluationResult {
     pub count_sim: f32,
     pub sum_roi_to_sim: f32,
     pub count_roi: f32,
+    /// 1 if the region of interest / simulation has any cell, release cells
+    /// included (those are left out of the counts above)
+    pub roi_seeded: u32,
+    pub sim_seeded: u32,
     // beeline distance between the highest and lowest avalanche point
     pub beeline_distance: f32,
     pub beeline_min_elevation: f32,
     pub beeline_max_elevation: f32,
     pub beeline_min_cell: u32,
     pub beeline_max_cell: u32,
-    pub _padding: [u32; 3],
+    pub _padding: u32,
 }
 
 #[derive(Eq, Hash, PartialEq, Clone)]
@@ -116,7 +132,12 @@ pub enum BufferName {
     /// model to derive a smooth clump-aware particle depth
     GridMassPrevious,
     GridMomentum,
+    /// z component of the grid momentum (terrain-following model), kept
+    /// separate so GridMomentum stays interleaved (u, v)
+    GridMomentumZ,
     GridVelocity,
+    /// z component of the grid velocity (terrain-following model)
+    GridVelocityZ,
     GridForces,
     // settings/initialization dependent buffers
     SimSettings,
@@ -131,6 +152,8 @@ pub enum BufferName {
     ParticlesMass,
     ParticlesState,
     ParticlesAffineMatrix,
+    /// z row of the affine velocity gradient (terrain-following model)
+    ParticlesAffineZ,
     /// per-particle stress state of the MPMDAC model: deviatoric stress
     /// (symmetric mat2x2: tau_xx, tau_xy, tau_yy) in [0][0], [0][1], [1][0]
     /// and the cumulative plastic strain in [1][1]
@@ -164,6 +187,7 @@ pub enum BufferName {
 
     // chamfer distance between simulated cells and the region of interest
     ChamferParams,
+    ChamferSteps,
     ChamferNearestRoi,
     ChamferNearestRoiSnapshot,
     ChamferNearestSim,
@@ -176,6 +200,12 @@ pub enum BufferName {
     RelaxGridHead,
     /// linked list tails of RelaxGridHead (one u32 per particle)
     ParticleNext,
+    /// per 8x8-cell tile particle counts, then exclusive offsets (particle sort)
+    SortBins,
+    /// rank of each particle within its sort bin
+    ParticleBinRank,
+    /// particle indices ordered by sort bin
+    SortedParticleIndex,
 
     TestOutput,
 }
@@ -195,6 +225,7 @@ impl BufferName {
             BufferName::ParticlesState => "particles_state",
             BufferName::ParticlesElevation => "particles_elevation",
             BufferName::ParticlesAffineMatrix => "particles_affine_matrix",
+            BufferName::ParticlesAffineZ => "particles_affine_z",
             BufferName::ParticlesStress => "particles_stress",
             BufferName::ParticlesVolumetricStrain => "particles_volumetric_strain",
             BufferName::ParticlesVelocityZ => "particles_velocity_z",
@@ -202,7 +233,9 @@ impl BufferName {
             BufferName::GridMass => "grid_mass",
             BufferName::GridMassPrevious => "grid_mass_previous",
             BufferName::GridMomentum => "grid_momentum",
+            BufferName::GridMomentumZ => "grid_momentum_z",
             BufferName::GridVelocity => "grid_velocity",
+            BufferName::GridVelocityZ => "grid_velocity_z",
             BufferName::GridPeakFlowThickness => "grid_peak_flow_thickness",
             BufferName::AtomicValues => "atomic_values",
             BufferName::NewCellsRollingWindow => "new_cells_rolling_window",
@@ -218,6 +251,7 @@ impl BufferName {
             BufferName::CenterOfMassLabels => "center_of_mass_labels",
             BufferName::CenterOfMassBlobMass => "center_of_mass_blob_mass",
             BufferName::ChamferParams => "chamfer_params",
+            BufferName::ChamferSteps => "chamfer_steps",
             BufferName::ChamferNearestRoi => "chamfer_nearest_roi",
             BufferName::ChamferNearestRoiSnapshot => "chamfer_nearest_roi_snapshot",
             BufferName::ChamferNearestSim => "chamfer_nearest_sim",
@@ -225,6 +259,9 @@ impl BufferName {
             BufferName::RelaxParams => "relax_params",
             BufferName::RelaxGridHead => "relax_grid_head",
             BufferName::ParticleNext => "particle_next",
+            BufferName::SortBins => "sort_bins",
+            BufferName::ParticleBinRank => "particle_bin_rank",
+            BufferName::SortedParticleIndex => "sorted_particle_index",
             BufferName::ParticlesPositionRelax => "particles_position_relax",
         }
     }
@@ -254,13 +291,16 @@ impl std::str::FromStr for BufferName {
             "particles_elevation" => Ok(BufferName::ParticlesElevation),
             "particles_velocity_z" => Ok(BufferName::ParticlesVelocityZ),
             "particles_affine_matrix" => Ok(BufferName::ParticlesAffineMatrix),
+            "particles_affine_z" => Ok(BufferName::ParticlesAffineZ),
             "particles_stress" => Ok(BufferName::ParticlesStress),
             "particles_volumetric_strain" => Ok(BufferName::ParticlesVolumetricStrain),
             "timestep_data" => Ok(BufferName::TimestepData),
             "grid_mass" => Ok(BufferName::GridMass),
             "grid_mass_previous" => Ok(BufferName::GridMassPrevious),
             "grid_momentum" => Ok(BufferName::GridMomentum),
+            "grid_momentum_z" => Ok(BufferName::GridMomentumZ),
             "grid_velocity" => Ok(BufferName::GridVelocity),
+            "grid_velocity_z" => Ok(BufferName::GridVelocityZ),
             "grid_peak_flow_thickness" => Ok(BufferName::GridPeakFlowThickness),
             "atomic_values" => Ok(BufferName::AtomicValues),
             "new_cells_rolling_window" => Ok(BufferName::NewCellsRollingWindow),
@@ -276,6 +316,7 @@ impl std::str::FromStr for BufferName {
             "center_of_mass_labels" => Ok(BufferName::CenterOfMassLabels),
             "center_of_mass_blob_mass" => Ok(BufferName::CenterOfMassBlobMass),
             "chamfer_params" => Ok(BufferName::ChamferParams),
+            "chamfer_steps" => Ok(BufferName::ChamferSteps),
             "chamfer_nearest_roi" => Ok(BufferName::ChamferNearestRoi),
             "chamfer_nearest_roi_snapshot" => Ok(BufferName::ChamferNearestRoiSnapshot),
             "chamfer_nearest_sim" => Ok(BufferName::ChamferNearestSim),
@@ -283,6 +324,9 @@ impl std::str::FromStr for BufferName {
             "relax_params" => Ok(BufferName::RelaxParams),
             "relax_grid_head" => Ok(BufferName::RelaxGridHead),
             "particle_next" => Ok(BufferName::ParticleNext),
+            "sort_bins" => Ok(BufferName::SortBins),
+            "particle_bin_rank" => Ok(BufferName::ParticleBinRank),
+            "sorted_particle_index" => Ok(BufferName::SortedParticleIndex),
             "particles_position_relax" => Ok(BufferName::ParticlesPositionRelax),
             _ => Err(format!("Unknown buffer name: {}", name)),
         }
@@ -296,6 +340,11 @@ pub enum TextureName {
     TerrainGeometry,
     // x = K_xx, y = K_yy, z = K_xy, w = g_x
     Curvature,
+    /// Gaussian-smoothed DEM the curvilinear flow follows
+    DemReference,
+    /// x = b / J_ref (basal topography normal to the reference surface),
+    /// y = cos(beta) between bed and reference surface normals
+    BasalTopography,
 }
 
 impl TextureName {
@@ -304,6 +353,8 @@ impl TextureName {
             TextureName::Dem => "dem",
             TextureName::TerrainGeometry => "terrain_geometry",
             TextureName::Curvature => "curvature",
+            TextureName::DemReference => "dem_reference",
+            TextureName::BasalTopography => "basal_topography",
         }
     }
 }
@@ -321,6 +372,8 @@ impl std::str::FromStr for TextureName {
             "dem" => Ok(TextureName::Dem),
             "terrain_geometry" => Ok(TextureName::TerrainGeometry),
             "curvature" => Ok(TextureName::Curvature),
+            "dem_reference" => Ok(TextureName::DemReference),
+            "basal_topography" => Ok(TextureName::BasalTopography),
             _ => Err(format!("Unknown texture name: {}", name)),
         }
     }
@@ -869,6 +922,13 @@ pub fn create_buffers_and_texture_descriptions(
         TextureFormat::Rgba32Float,
         texture_usage_default,
     );
+    gpu_resources.add_texture(
+        device,
+        TextureName::BasalTopography,
+        texture_size,
+        TextureFormat::Rgba32Float,
+        texture_usage_default,
+    );
     gpu_resources.add_buffer(
         device,
         BufferName::SimSettings,
@@ -949,6 +1009,20 @@ pub fn create_buffers_and_texture_descriptions(
         grid_bytes_size * 2,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
     );
+    // z components of the terrain-following model's 3D grid momentum and
+    // velocity; GridMomentumZ is zeroed by reset_grid for every model
+    gpu_resources.add_buffer(
+        device,
+        BufferName::GridMomentumZ,
+        grid_bytes_size,
+        BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+    );
+    gpu_resources.add_buffer(
+        device,
+        BufferName::GridVelocityZ,
+        grid_bytes_size,
+        BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+    );
     // per-cell force vector: written by grid_physics for the terrain-following
     // model, atomically accumulated by p2g_mpmdac for the MPMDAC model,
     // zeroed by reset_grid for every model
@@ -1019,7 +1093,9 @@ mod tests {
             (BufferName::GridPeakVelocity, "grid_peak_velocity"),
             (BufferName::GridMass, "grid_mass"),
             (BufferName::GridMomentum, "grid_momentum"),
+            (BufferName::GridMomentumZ, "grid_momentum_z"),
             (BufferName::GridVelocity, "grid_velocity"),
+            (BufferName::GridVelocityZ, "grid_velocity_z"),
             (
                 BufferName::GridPeakFlowThickness,
                 "grid_peak_flow_thickness",
@@ -1032,6 +1108,7 @@ mod tests {
             (BufferName::ParticlesState, "particles_state"),
             (BufferName::ParticlesElevation, "particles_elevation"),
             (BufferName::ParticlesAffineMatrix, "particles_affine_matrix"),
+            (BufferName::ParticlesAffineZ, "particles_affine_z"),
             (BufferName::TimestepData, "timestep_data"),
             (
                 BufferName::NewCellsRollingWindow,
@@ -1047,6 +1124,7 @@ mod tests {
             (BufferName::CenterOfMassLabels, "center_of_mass_labels"),
             (BufferName::CenterOfMassBlobMass, "center_of_mass_blob_mass"),
             (BufferName::ChamferParams, "chamfer_params"),
+            (BufferName::ChamferSteps, "chamfer_steps"),
             (BufferName::ChamferNearestRoi, "chamfer_nearest_roi"),
             (
                 BufferName::ChamferNearestRoiSnapshot,
@@ -1072,6 +1150,8 @@ mod tests {
             (TextureName::Dem, "dem"),
             (TextureName::TerrainGeometry, "terrain_geometry"),
             (TextureName::Curvature, "curvature"),
+            (TextureName::DemReference, "dem_reference"),
+            (TextureName::BasalTopography, "basal_topography"),
         ];
 
         for (name, expected) in cases {

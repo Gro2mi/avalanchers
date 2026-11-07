@@ -121,6 +121,94 @@ impl TerrainData {
         )
     }
 
+    /// Exaggerated surface height at a world-space `(x, z)` position, bilinearly
+    /// interpolated; `None` outside the grid or where a corner is no-data (the
+    /// mesh draws nothing there).
+    pub fn surface_height(&self, x: f32, z: f32) -> Option<f32> {
+        let col = x / self.cell_size;
+        // World z runs against DEM rows: row 0 sits at the far (max z) edge.
+        let row = (self.height - 1) as f32 - z / self.cell_size;
+        let max_col = (self.width - 1) as f32;
+        let max_row = (self.height - 1) as f32;
+        if !(0.0..=max_col).contains(&col) || !(0.0..=max_row).contains(&row) {
+            return None;
+        }
+
+        let c0 = (col.floor() as u32).min(self.width - 2);
+        let r0 = (row.floor() as u32).min(self.height - 2);
+        let fx = col - c0 as f32;
+        let fy = row - r0 as f32;
+        let index = |c: u32, r: u32| (r * self.width + c) as usize;
+        let corners = [
+            index(c0, r0),
+            index(c0 + 1, r0),
+            index(c0, r0 + 1),
+            index(c0 + 1, r0 + 1),
+        ];
+        if corners.iter().any(|&i| self.valid[i] < 0.5) {
+            return None;
+        }
+        let [h00, h10, h01, h11] = corners.map(|i| self.heights[i]);
+        let top = h00 + (h10 - h00) * fx;
+        let bottom = h01 + (h11 - h01) * fx;
+        Some((top + (bottom - top) * fy) * self.vertical_exaggeration)
+    }
+
+    /// Distance along the unit `direction` at which a ray from `origin` first
+    /// meets the surface, or `None` if it misses the terrain.
+    ///
+    /// Marches the ray through the terrain's bounding box in half-cell steps,
+    /// which is plenty for pointer picking.
+    pub fn raycast(&self, origin: Vec3, direction: Vec3) -> Option<f32> {
+        if !self.min_elevation.is_finite() {
+            return None; // no valid samples at all
+        }
+        let (size_x, size_z) = self.extent();
+        // Pad the vertical slab so perfectly flat terrain still has thickness.
+        let pad = self.cell_size * 0.01;
+        let slabs = [
+            (origin.x, direction.x, 0.0, size_x),
+            (
+                origin.y,
+                direction.y,
+                self.min_elevation * self.vertical_exaggeration - pad,
+                self.max_elevation * self.vertical_exaggeration + pad,
+            ),
+            (origin.z, direction.z, 0.0, size_z),
+        ];
+
+        let (mut t_enter, mut t_exit) = (0.0f32, f32::INFINITY);
+        for (o, d, lo, hi) in slabs {
+            if d.abs() < 1e-12 {
+                if o < lo || o > hi {
+                    return None;
+                }
+                continue;
+            }
+            let (a, b) = ((lo - o) / d, (hi - o) / d);
+            t_enter = t_enter.max(a.min(b));
+            t_exit = t_exit.min(a.max(b));
+            if t_enter > t_exit {
+                return None;
+            }
+        }
+
+        const MAX_STEPS: u32 = 200_000;
+        let step = self.cell_size * 0.5;
+        let mut t = t_enter;
+        for _ in 0..MAX_STEPS {
+            let p = origin + direction * t;
+            if self.surface_height(p.x, p.z).is_some_and(|h| p.y <= h) {
+                return Some(t);
+            }
+            if t >= t_exit {
+                break;
+            }
+            t = (t + step).min(t_exit);
+        }
+        None
+    }
+
     /// A coarse sample of surface points, used to frame the camera on the terrain itself
     /// rather than on its bounding box, which the surface never fully fills.
     pub fn fit_samples(&self) -> Vec<Vec3> {

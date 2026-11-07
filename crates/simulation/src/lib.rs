@@ -39,17 +39,18 @@ use anyhow::{Result, bail};
 use compute_core::{
     ComputeOrchestrator, GpuCache, ParticleState, SimInfo, SimInfoFlags, TextureRgba, TimestepData,
     buffers::{AtomicValues, BufferName, CenterOfMassResult, TextureName},
-    dem::{Bounds, Dem},
+    dem::{Bounds, Dem, StableHasher},
     evaluation::MassMovementEvaluation,
     post_processing::*,
-    settings::{CrownLineMethod, Settings, SimModel, SimSettings},
+    settings::{CrownLineMethod, ReleaseFillMethod, Settings, SimModel, SimSettings},
     utils::*,
 };
+use data_processor::store_schema::{RunRecord, store_path_stem};
 #[cfg(target_arch = "wasm32")]
-use data_processor::zarr_writer::{ResultGrids, ZarrEntry};
+use data_processor::zarr_writer::ZarrEntry;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Once;
-use web_time::Instant;
+use web_time::{Instant, SystemTime, UNIX_EPOCH};
 
 /// Release-area and crown-line estimation from a DEM and avalanche outline.
 pub mod release_estimation;
@@ -113,6 +114,53 @@ pub enum SimulationState {
     Evaluated,
 }
 
+/// Inputs of the release stage besides the [`SimSettings`]; a change between
+/// [`Simulation::store_initial_state`] and
+/// [`Simulation::restore_initial_state`] re-runs the release areas and the
+/// particle initialization.
+#[derive(Debug, Clone, PartialEq)]
+struct ReleaseConfig {
+    release_areas_path: Option<String>,
+    release_hash: u64,
+    roi_hash: u64,
+    release_area_fraction: Option<f32>,
+    crown_line_method: CrownLineMethod,
+    crown_line_exit_distance: Option<f32>,
+    crown_elevation_band: Option<f32>,
+    min_particles_per_crown_cell: Option<u32>,
+    release_fill_method: ReleaseFillMethod,
+    release_slope_weight: Option<f32>,
+    release_slope_peak: Option<f32>,
+    release_slope_width: Option<f32>,
+    release_slope_smoothing_length: Option<f32>,
+    enable_particle_relaxation: bool,
+}
+
+/// Settings the stored initial particles were prepared with.
+struct InitialState {
+    settings: SimSettings,
+    release: ReleaseConfig,
+    /// Release thickness per cell as prepared, rescaled on the GPU together
+    /// with the particle masses when the release thickness changes.
+    release_areas: Vec<f32>,
+    /// Factor the GPU release areas currently carry relative to
+    /// `release_areas`.
+    release_areas_scale: f32,
+}
+
+/// Earliest preparation stage a settings change invalidates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum PreparationStage {
+    /// Only loop parameters changed: restore the stored particles.
+    None,
+    /// Density or release thickness changed: restore with rescaled masses.
+    ParticleMass,
+    /// The release cells may change: release areas and particle seeding.
+    Release,
+    /// The terrain analysis changes: full preparation.
+    Terrain,
+}
+
 /// Data produced by [`Simulation::load_data`] and consumed by
 /// [`Simulation::apply_data`]; splitting the two lets callers load data
 /// concurrently with GPU initialization.
@@ -138,8 +186,31 @@ pub struct SimulationLoadResult {
     /// Method used to estimate the crown line when `release_area_fraction`
     /// is set; `None` falls back to flow routing.
     pub crown_line_method: Option<CrownLineMethod>,
+    /// Exit distance threshold (fraction of the cell size) of the
+    /// gradient-step crown line method; `None` keeps the default.
+    pub crown_line_exit_distance: Option<f32>,
+    /// Elevation-band filter share of the crown components; `None` keeps the
+    /// default.
+    pub crown_elevation_band: Option<f32>,
+    /// Entry count threshold of the particle-simulation crown line method;
+    /// `None` keeps the default.
+    pub min_particles_per_crown_cell: Option<u32>,
+    /// How the release cells below the crown line are ordered; `None` falls
+    /// back to the geodesic fill.
+    pub release_fill_method: Option<ReleaseFillMethod>,
+    /// Blend weight of the slope-weighted fill; `None` keeps the default.
+    pub release_slope_weight: Option<f32>,
+    /// Peak (deg) of the release slope membership; `None` keeps the default.
+    pub release_slope_peak: Option<f32>,
+    /// Half width (deg) of the release slope membership; `None` keeps the
+    /// default.
+    pub release_slope_width: Option<f32>,
+    /// DEM smoothing width (m) for the release slope; `None` keeps the
+    /// default.
+    pub release_slope_smoothing_length: Option<f32>,
     /// Number of compute steps dispatched per GPU submission. The OS might reset the GPU or interrupt the submission, if computing a batch takes too long.
     pub batch_compute_steps: Option<u32>,
+    pub particle_sort_interval: Option<u32>,
     /// Destination for results written by [`Simulation::save`].
     pub output_path: Option<String>,
 }
@@ -174,12 +245,31 @@ pub struct Simulation {
     /// Destination of [`Simulation::save`] (Zarr store path or prefix).
     pub output_path: String,
     release_areas_path: Option<String>,
+    /// Whether the file at `release_areas_path` held the release thickness;
+    /// set when it is loaded.
+    release_thickness_in_file: bool,
     release_area_fraction: Option<f32>,
     crown_line_method: CrownLineMethod,
+    crown_line_exit_distance: Option<f32>,
+    crown_elevation_band: Option<f32>,
+    min_particles_per_crown_cell: Option<u32>,
+    release_fill_method: ReleaseFillMethod,
+    release_slope_weight: Option<f32>,
+    release_slope_peak: Option<f32>,
+    release_slope_width: Option<f32>,
+    release_slope_smoothing_length: Option<f32>,
     release_areas_array: Option<Vec<f32>>,
     /// Crown line detected by release area estimation; empty unless
     /// `release_area_fraction` was set.
     pub crown_line: Vec<bool>,
+    /// Crown candidates before component filtering (size and elevation
+    /// band); empty unless `release_area_fraction` was set.
+    pub crown_candidates: Vec<bool>,
+    /// Potential release areas inside the outline (slope, elevation and
+    /// roughness thresholds, computed on the GPU) from which the crown-line
+    /// estimation selects the release cells; empty unless
+    /// `release_area_fraction` was set.
+    pub potential_release_areas: Vec<bool>,
     sim_info: SimInfo,
     number_particles: u32,
     state: SimulationState,
@@ -188,8 +278,88 @@ pub struct Simulation {
     pub gpu_cache: GpuCache,
     /// Avalanche deposit mask extracted by [`Simulation::post_process`].
     pub ava_mask: Vec<bool>,
+    /// Settings of the particles kept by [`Simulation::store_initial_state`].
+    initial_state: Option<InitialState>,
     #[cfg(not(target_arch = "wasm32"))]
     output: Option<data_processor::output::Output>,
+}
+
+/// Terrain of the release area, see [`Simulation::release_area_terrain`].
+/// A value is NaN if no release cell contributes to it.
+#[derive(Clone, Copy, Debug)]
+pub struct ReleaseAreaTerrain {
+    /// Mean slope angle in degrees.
+    pub slope_angle: f32,
+    /// Largest slope angle of a release cell in degrees.
+    pub max_slope_angle: f32,
+    /// Circular mean of the slope aspect in degrees, see
+    /// [`Simulation::fetch_slope_aspect`]. NaN if the aspects cancel out.
+    pub slope_aspect: f32,
+    /// Mean DEM elevation in metres.
+    pub elevation: f32,
+}
+
+/// Averages the terrain over the release cells and takes their largest slope
+/// angle. The outermost cells are left out, because not every terrain kernel writes them, and flat cells (aspect
+/// -1) have no aspect to contribute.
+fn mean_release_terrain(
+    release_areas: &[f32],
+    slope_angle: &[f32],
+    slope_aspect: &[f32],
+    elevation: &[f32],
+    width: usize,
+    height: usize,
+) -> ReleaseAreaTerrain {
+    let (mut slope_sum, mut slope_count) = (0.0f64, 0u32);
+    let mut max_slope = f32::NEG_INFINITY;
+    let (mut elevation_sum, mut elevation_count) = (0.0f64, 0u32);
+    let (mut east, mut north, mut aspect_count) = (0.0f64, 0.0f64, 0u32);
+    for y in 1..height.saturating_sub(1) {
+        for x in 1..width.saturating_sub(1) {
+            let idx = y * width + x;
+            let in_release = release_areas[idx] > compute_core::RELEASE_THICKNESS_THRESHOLD;
+            if !in_release {
+                continue;
+            }
+            if slope_angle[idx].is_finite() {
+                slope_sum += slope_angle[idx] as f64;
+                slope_count += 1;
+                max_slope = max_slope.max(slope_angle[idx]);
+            }
+            if elevation[idx].is_finite() {
+                elevation_sum += elevation[idx] as f64;
+                elevation_count += 1;
+            }
+            if slope_aspect[idx].is_finite() && slope_aspect[idx] >= 0.0 {
+                let aspect = (slope_aspect[idx] as f64).to_radians();
+                east += aspect.sin();
+                north += aspect.cos();
+                aspect_count += 1;
+            }
+        }
+    }
+    let mean = |sum: f64, count: u32| {
+        if count == 0 {
+            f32::NAN
+        } else {
+            (sum / count as f64) as f32
+        }
+    };
+    let slope_aspect = if east.hypot(north) <= 1e-6 * aspect_count as f64 {
+        f32::NAN
+    } else {
+        east.atan2(north).to_degrees().rem_euclid(360.0) as f32
+    };
+    ReleaseAreaTerrain {
+        slope_angle: mean(slope_sum, slope_count),
+        max_slope_angle: if slope_count == 0 {
+            f32::NAN
+        } else {
+            max_slope
+        },
+        slope_aspect,
+        elevation: mean(elevation_sum, elevation_count),
+    }
 }
 
 impl Simulation {
@@ -218,11 +388,23 @@ impl Simulation {
             gpu_cache: GpuCache::default(),
             sim_info: SimInfo::default(),
             release_areas_path: None,
+            release_thickness_in_file: false,
             release_area_fraction: None,
             crown_line_method: CrownLineMethod::FlowRouting,
+            crown_line_exit_distance: None,
+            crown_elevation_band: None,
+            min_particles_per_crown_cell: None,
+            release_fill_method: ReleaseFillMethod::Geodesic,
+            release_slope_weight: None,
+            release_slope_peak: None,
+            release_slope_width: None,
+            release_slope_smoothing_length: None,
             release_areas_array: None,
             crown_line: Vec::new(),
+            crown_candidates: Vec::new(),
+            potential_release_areas: Vec::new(),
             ava_mask: Vec::new(),
+            initial_state: None,
             #[cfg(not(target_arch = "wasm32"))]
             output: None,
         })
@@ -251,6 +433,9 @@ impl Simulation {
         self.gpu_cache.reset_all();
         self.sim_info = SimInfo::default();
         self.crown_line = Vec::new();
+        self.crown_candidates = Vec::new();
+        self.potential_release_areas = Vec::new();
+        self.initial_state = None;
         self.state = if self.dem.data1d.is_empty() {
             SimulationState::DemMissing
         } else {
@@ -273,13 +458,7 @@ impl Simulation {
     /// Stable hash of the release-area array; part of [`Self::scenario_name`]
     /// so different release masks end up in different scenarios.
     pub fn release_hash(&self) -> u64 {
-        let mut s = DefaultHasher::new();
-        if let Some(release_areas_array) = &self.release_areas_array {
-            for val in release_areas_array.iter() {
-                val.to_bits().hash(&mut s);
-            }
-        }
-        s.finish()
+        hash_release_areas(self.release_areas_array.as_deref().unwrap_or_default())
     }
 
     /// Number of GPU→CPU readbacks issued so far; exposed so tests can verify
@@ -299,8 +478,17 @@ impl Simulation {
     /// instance; pair the result with [`Self::apply_data`].
     pub async fn load_data(settings: &Settings) -> Result<SimulationLoadResult> {
         timer_checkpoint("Start create");
+        #[cfg(not(target_arch = "wasm32"))]
+        let (dem_path, release_areas_path) = data_processor::store_reader::resolve_paths(settings)?;
+        #[cfg(target_arch = "wasm32")]
+        let (dem_path, release_areas_path) = (
+            settings.dem_path.clone(),
+            settings.release_areas_path.clone(),
+        );
+
         let (settings_result, dem_result, outline) =
             data_processor::create_sim_settings_and_dem(settings).await?;
+        settings_result.validate().map_err(anyhow::Error::msg)?;
 
         timer_checkpoint("Load settings");
 
@@ -311,10 +499,19 @@ impl Simulation {
             dem: dem_result,
             roi: outline,
             batch_compute_steps: settings.batch_compute_steps,
-            dem_path: settings.dem_path.clone().unwrap_or_default(),
-            release_areas_path: settings.release_areas_path.clone(),
+            particle_sort_interval: settings.particle_sort_interval,
+            dem_path: dem_path.unwrap_or_default(),
+            release_areas_path,
             release_area_fraction: settings.release_area_fraction,
             crown_line_method: settings.crown_line_method,
+            crown_line_exit_distance: settings.crown_line_exit_distance,
+            crown_elevation_band: settings.crown_elevation_band,
+            min_particles_per_crown_cell: settings.min_particles_per_crown_cell,
+            release_fill_method: settings.release_fill_method,
+            release_slope_weight: settings.release_slope_weight,
+            release_slope_peak: settings.release_slope_peak,
+            release_slope_width: settings.release_slope_width,
+            release_slope_smoothing_length: settings.release_slope_smoothing_length,
             output_path: settings.output_path.clone(),
         })
     }
@@ -330,6 +527,9 @@ impl Simulation {
             .set_enable_center_of_mass(self.enable_center_of_mass);
         if let Some(batch_steps) = data.batch_compute_steps {
             self.orchestrator.batch_compute_steps = batch_steps;
+        }
+        if let Some(interval) = data.particle_sort_interval {
+            self.orchestrator.particle_sort_interval = interval;
         }
 
         self.dem = data.dem;
@@ -348,7 +548,20 @@ impl Simulation {
         self.crown_line_method = data
             .crown_line_method
             .unwrap_or(CrownLineMethod::FlowRouting);
+        self.crown_line_exit_distance = data.crown_line_exit_distance;
+        self.crown_elevation_band = data.crown_elevation_band;
+        self.min_particles_per_crown_cell = data.min_particles_per_crown_cell;
+        self.release_fill_method = data
+            .release_fill_method
+            .unwrap_or(ReleaseFillMethod::Geodesic);
+        self.release_slope_weight = data.release_slope_weight;
+        self.release_slope_peak = data.release_slope_peak;
+        self.release_slope_width = data.release_slope_width;
+        self.release_slope_smoothing_length = data.release_slope_smoothing_length;
         self.crown_line = Vec::new();
+        self.crown_candidates = Vec::new();
+        self.potential_release_areas = Vec::new();
+        self.initial_state = None;
 
         self.gpu_cache.reset_all();
 
@@ -557,12 +770,13 @@ impl Simulation {
                 ymin: bounds_ymin,
                 ymax: bounds_ymax,
             },
-            x: linspace(bounds_xmin, bounds_xmax, width),
-            y: linspace(bounds_ymin, bounds_ymax, height),
+            x: cell_centers(bounds_xmin, bounds_xmax, width),
+            y: cell_centers(bounds_ymin, bounds_ymax, height),
             source: String::new(),
             projection: String::new(),
         };
         self.settings.set_dem(&self.dem);
+        self.initial_state = None;
 
         self.state = SimulationState::DemLoaded;
         info!(
@@ -641,6 +855,262 @@ impl Simulation {
         Ok(())
     }
 
+    /// Changes settings of a loaded simulation without reloading its data;
+    /// unset fields keep their value. The change takes effect with the next
+    /// [`Self::restore_initial_state`] or preparation. Input data (DEM,
+    /// release area and outline files, output path) can only be changed with
+    /// [`Self::create`].
+    pub fn update_settings(&mut self, patch: &Settings) -> Result<()> {
+        let data_keys = [
+            ("dem_path", patch.dem_path.is_some()),
+            ("release_areas_path", patch.release_areas_path.is_some()),
+            ("outlines_path", patch.outlines_path.is_some()),
+            ("outlines_padding", patch.outlines_padding.is_some()),
+            ("output_path", patch.output_path.is_some()),
+        ];
+        if let Some((key, _)) = data_keys.iter().find(|(_, is_set)| *is_set) {
+            bail!("`{key}` changes the input data; load it with create instead");
+        }
+        let mut settings = self.settings;
+        settings.apply_patch(patch);
+        settings.validate().map_err(anyhow::Error::msg)?;
+        self.settings = settings;
+        if let Some(steps) = patch.batch_compute_steps {
+            self.orchestrator.batch_compute_steps = steps;
+        }
+        if let Some(interval) = patch.particle_sort_interval {
+            self.orchestrator.particle_sort_interval = interval;
+        }
+        if let Some(enable) = patch.enable_center_of_mass {
+            self.enable_center_of_mass = enable;
+            self.orchestrator.set_enable_center_of_mass(enable);
+        }
+        if let Some(enable) = patch.enable_particle_relaxation {
+            self.enable_particle_relaxation = enable;
+        }
+        if let Some(fraction) = patch.release_area_fraction {
+            self.release_area_fraction = Some(fraction);
+        }
+        if let Some(method) = patch.crown_line_method {
+            self.crown_line_method = method;
+        }
+        if let Some(distance) = patch.crown_line_exit_distance {
+            self.crown_line_exit_distance = Some(distance);
+        }
+        if let Some(band) = patch.crown_elevation_band {
+            self.crown_elevation_band = Some(band);
+        }
+        if let Some(count) = patch.min_particles_per_crown_cell {
+            self.min_particles_per_crown_cell = Some(count);
+        }
+        if let Some(method) = patch.release_fill_method {
+            self.release_fill_method = method;
+        }
+        if let Some(weight) = patch.release_slope_weight {
+            self.release_slope_weight = Some(weight);
+        }
+        if let Some(peak) = patch.release_slope_peak {
+            self.release_slope_peak = Some(peak);
+        }
+        if let Some(width) = patch.release_slope_width {
+            self.release_slope_width = Some(width);
+        }
+        if let Some(length) = patch.release_slope_smoothing_length {
+            self.release_slope_smoothing_length = Some(length);
+        }
+        Ok(())
+    }
+
+    fn release_config(&self) -> ReleaseConfig {
+        let mut roi_hasher = DefaultHasher::new();
+        self.roi.hash(&mut roi_hasher);
+        ReleaseConfig {
+            release_areas_path: self.release_areas_path.clone(),
+            release_hash: self.release_hash(),
+            roi_hash: roi_hasher.finish(),
+            release_area_fraction: self.release_area_fraction,
+            crown_line_method: self.crown_line_method,
+            crown_line_exit_distance: self.crown_line_exit_distance,
+            crown_elevation_band: self.crown_elevation_band,
+            min_particles_per_crown_cell: self.min_particles_per_crown_cell,
+            release_fill_method: self.release_fill_method,
+            release_slope_weight: self.release_slope_weight,
+            release_slope_peak: self.release_slope_peak,
+            release_slope_width: self.release_slope_width,
+            release_slope_smoothing_length: self.release_slope_smoothing_length,
+            enable_particle_relaxation: self.enable_particle_relaxation,
+        }
+    }
+
+    /// Whether the release source holds a thickness per cell (a file or
+    /// array) rather than only release cells (computed or estimated release
+    /// areas, shapefiles without thickness attributes).
+    fn release_source_has_thickness(&self) -> bool {
+        match &self.release_areas_path {
+            Some(_) => self.release_thickness_in_file,
+            None => self.release_areas_array.is_some(),
+        }
+    }
+
+    /// The thickness all release cells have under `settings`; `None` if the
+    /// release source sets it per cell.
+    fn uniform_release_thickness(&self, settings: &SimSettings) -> Option<f32> {
+        settings
+            .release_thickness_override()
+            .or((!self.release_source_has_thickness())
+                .then_some(compute_core::DEFAULT_RELEASE_THICKNESS))
+    }
+
+    fn preparation_stage(&self, initial: &InitialState) -> PreparationStage {
+        let (old, new) = (&initial.settings, &self.settings);
+        let (old_thickness, new_thickness) = (
+            self.uniform_release_thickness(old),
+            self.uniform_release_thickness(new),
+        );
+        if old.sim_model != new.sim_model
+            || old.grid_shape_x != new.grid_shape_x
+            || old.grid_shape_y != new.grid_shape_y
+            || old.cell_size != new.cell_size
+            || old.world_size_x != new.world_size_x
+            || old.world_size_y != new.world_size_y
+            || old.reference_surface_length != new.reference_surface_length
+        {
+            return PreparationStage::Terrain;
+        }
+        if old.min_slope_angle != new.min_slope_angle
+            || old.max_slope_angle != new.max_slope_angle
+            || old.release_min_elevation != new.release_min_elevation
+            || old.release_max_elevation != new.release_max_elevation
+            || old.roughness_threshold != new.roughness_threshold
+            || old.released_particles_per_cell != new.released_particles_per_cell
+            || initial.release != self.release_config()
+            // a thickness per cell cannot be rescaled to a uniform one
+            || old_thickness.is_some() != new_thickness.is_some()
+            // the slope factor of the masses differs per cell
+            || old.release_swe_override().is_some() != new.release_swe_override().is_some()
+        {
+            return PreparationStage::Release;
+        }
+        if old.density != new.density || old_thickness != new_thickness {
+            return PreparationStage::ParticleMass;
+        }
+        PreparationStage::None
+    }
+
+    /// Prepares the simulation if needed and keeps its initial particles on
+    /// the GPU, so that [`Self::restore_initial_state`] can start further
+    /// runs (e.g. a back calibration with changed friction parameters)
+    /// without repeating terrain analysis, release areas and particle
+    /// seeding. Only the particle positions and masses are kept; everything
+    /// else a run changes is reset on restore.
+    pub async fn store_initial_state(&mut self) -> Result<()> {
+        if self.state < SimulationState::ParticlesInitialized {
+            self.prepare().await?;
+        }
+        if self.state != SimulationState::ParticlesInitialized {
+            bail!(
+                "The initial state must be stored before the simulation runs; call prepare or restore_initial_state first"
+            );
+        }
+        self.orchestrator
+            .store_initial_particles(self.settings.sim_model, self.number_particles)
+            .await?;
+        let release_areas = self
+            .orchestrator
+            .read_buffer::<f32>(BufferName::ReleaseAreas)
+            .await?;
+        self.initial_state = Some(InitialState {
+            settings: self.settings,
+            release: self.release_config(),
+            release_areas,
+            release_areas_scale: 1.0,
+        });
+        Ok(())
+    }
+
+    /// Resets the simulation to the state kept by
+    /// [`Self::store_initial_state`], ready for the next [`Self::run`].
+    /// Settings changed since then (see [`Self::update_settings`]) take
+    /// effect; only the preparation stages they affect run again:
+    ///
+    /// - model, grid or reference surface: full preparation,
+    /// - release thresholds, particles per cell, release configuration,
+    ///   a `release_thickness` set on a release with its own thickness or
+    ///   a switch between `release_thickness` and `release_swe`: release
+    ///   areas and particle seeding,
+    /// - density or a changed uniform release thickness: the particle masses
+    ///   are rescaled,
+    /// - anything else: the stored particles are restored as they are.
+    pub async fn restore_initial_state(&mut self) -> Result<()> {
+        let Some(initial) = &self.initial_state else {
+            bail!("No initial state stored; call store_initial_state first");
+        };
+        let stage = self.preparation_stage(initial);
+        match stage {
+            PreparationStage::Terrain => {
+                info!("Settings change the terrain analysis; preparing again");
+                self.state = SimulationState::DemLoaded;
+                self.store_initial_state().await?;
+            }
+            PreparationStage::Release => {
+                info!("Settings change the release; seeding the particles again");
+                self.state = SimulationState::TerrainAnalyzed;
+                // the release shaders count with atomicAdd
+                self.orchestrator
+                    .write_buffer(BufferName::AtomicValues, &[AtomicValues::default()])
+                    .await?;
+                self.load_release_areas().await?;
+                self.initialize_particles().await?;
+                self.store_initial_state().await?;
+            }
+            PreparationStage::ParticleMass | PreparationStage::None => {}
+        }
+
+        let Some(stored_settings) = self.initial_state.as_ref().map(|initial| initial.settings)
+        else {
+            bail!("No initial state stored; call store_initial_state first");
+        };
+        // the ratios are taken against the stored settings, so repeated
+        // restores do not drift
+        let thickness_scale = match (
+            self.uniform_release_thickness(&stored_settings),
+            self.uniform_release_thickness(&self.settings),
+        ) {
+            (Some(stored), Some(current)) => current / stored,
+            _ => 1.0,
+        };
+        let Some(initial) = &mut self.initial_state else {
+            bail!("No initial state stored; call store_initial_state first");
+        };
+        let mass_scale = self.settings.density / initial.settings.density * thickness_scale;
+        if thickness_scale != initial.release_areas_scale {
+            let release_areas: Vec<f32> = initial
+                .release_areas
+                .iter()
+                .map(|thickness| thickness * thickness_scale)
+                .collect();
+            self.orchestrator
+                .write_buffer(BufferName::ReleaseAreas, &release_areas)
+                .await?;
+            initial.release_areas_scale = thickness_scale;
+        }
+        self.orchestrator
+            .restore_initial_particles(mass_scale, thickness_scale)
+            .await?;
+
+        self.gpu_cache.reset_simulation_result();
+        self.gpu_cache.release_areas = None;
+        self.sim_info = SimInfo::default();
+        self.ava_mask = Vec::new();
+        self.state = SimulationState::ParticlesInitialized;
+        Ok(())
+    }
+
+    /// Whether [`Self::store_initial_state`] holds particles to restore.
+    pub fn has_initial_state(&self) -> bool {
+        self.initial_state.is_some()
+    }
+
     /// Advances the simulation by up to `steps` steps, automatically running
     /// [`Self::prepare`] and setting up the GPU pipeline for the configured
     /// [`SimModel`] on first call. Returns the updated [`SimInfo`].
@@ -659,7 +1129,11 @@ impl Simulation {
 
         if self.state != SimulationState::Running {
             match self.settings.sim_model {
-                model if model == SimModel::TerrainFollowing.as_int() => {
+                model
+                    if model == SimModel::TerrainFollowing.as_int()
+                        || model == SimModel::ThreeD.as_int()
+                        || model == SimModel::SlidingBlock.as_int() =>
+                {
                     self.orchestrator
                         .prepare_compute_particles(
                             &self.settings,
@@ -710,11 +1184,15 @@ impl Simulation {
             model if model == SimModel::TerrainFollowing.as_int() => {
                 self.orchestrator.step_terrain_following(steps).await?
             }
+            model if model == SimModel::ThreeD.as_int() => self.orchestrator.step_3d(steps).await?,
             model if model == SimModel::Curvilinear.as_int() => {
                 self.orchestrator.step_curvilinear(steps).await?
             }
             model if model == SimModel::MpmDaC.as_int() => {
                 self.orchestrator.step_mpmdac(steps).await?
+            }
+            model if model == SimModel::SlidingBlock.as_int() => {
+                self.orchestrator.step_sliding_block(steps).await?
             }
             _ => bail!("Unsupported simulation model: {}", self.settings.sim_model),
         };
@@ -736,23 +1214,26 @@ impl Simulation {
     /// in [`SimulationState::Finished`].
     ///
     /// Fails when the release areas contain no cells (nothing to simulate).
+    ///
+    /// Preparation is skipped when the particles are already initialized, by
+    /// [`Self::prepare`] or [`Self::restore_initial_state`].
     pub async fn run(&mut self) -> Result<()> {
-        self.analyze_terrain().await?;
-        timer_checkpoint("Terrain analyzed");
-        if !self.roi.is_empty() {
-            self.upload_roi().await?;
-        }
-        let _ = self.load_release_areas().await?;
-        timer_checkpoint("Release areas loaded");
-        if self.number_particles == 0 {
-            bail!("No particles to simulate! Check if release areas are correctly defined.");
-        } else {
+        if self.state != SimulationState::ParticlesInitialized {
+            self.analyze_terrain().await?;
+            timer_checkpoint("Terrain analyzed");
+            if !self.roi.is_empty() {
+                self.upload_roi().await?;
+            }
+            let _ = self.load_release_areas().await?;
+            timer_checkpoint("Release areas loaded");
+            if self.number_particles == 0 {
+                bail!("No particles to simulate! Check if release areas are correctly defined.");
+            }
             self.initialize_particles().await?;
             timer_checkpoint("Particles initialized");
-            self.compute_particles().await?;
-
-            self.sim_info = self.fetch_sim_info().await?;
         }
+        self.compute_particles().await?;
+        self.sim_info = self.fetch_sim_info().await?;
         self.state = SimulationState::Finished;
 
         timer_checkpoint("Simulation finished");
@@ -793,13 +1274,25 @@ impl Simulation {
     ///
     /// Returns the CPU-derived overlap, runout, and peak velocity metrics.
     /// GPU-derived chamfer metrics can be added with [`Self::evaluate_gpu`].
+    /// Release cells are left out of the overlap, as in the GPU evaluation.
     pub async fn evaluate(&mut self) -> Result<MassMovementEvaluation> {
         if self.state < SimulationState::PostProcessed {
             bail!("Simulation must be post-processed before evaluation");
         }
-        let overlap =
-            compute_core::evaluation::evaluate_mass_movement_area(&self.ava_mask, &self.roi)
-                .map_err(|e| anyhow::anyhow!("Mass movement area evaluation failed: {e:?}"))?;
+        let release_areas = self.fetch_release_areas().await?.to_vec();
+        let outside_release = |mask: &[bool]| -> Vec<bool> {
+            mask.iter()
+                .zip(&release_areas)
+                .map(|(&set, &thickness)| {
+                    set && thickness <= compute_core::RELEASE_THICKNESS_THRESHOLD
+                })
+                .collect()
+        };
+        let overlap = compute_core::evaluation::evaluate_mass_movement_area(
+            &outside_release(&self.roi),
+            &outside_release(&self.ava_mask),
+        )
+        .map_err(|e| anyhow::anyhow!("Mass movement area evaluation failed: {e:?}"))?;
         let (horizontal_distance, vertical_drop) = self
             .dem
             .get_elevation_extrema_distance_and_drop(&self.ava_mask)
@@ -856,26 +1349,25 @@ impl Simulation {
 
     /// Name of the site this simulation writes to, derived from the DEM.
     pub fn site_name(&self) -> String {
-        let source = if !self.dem.source.is_empty() {
-            self.dem.source.as_str()
-        } else {
+        let source = if !self.dem_path.is_empty() {
             self.dem_path.as_str()
+        } else {
+            self.dem.source.as_str()
         };
-        let stem = std::path::Path::new(source)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .filter(|s| !s.is_empty())
+        // The source of fetched tiles is a multi-line attribution, not a path.
+        let stem = store_path_stem(source)
+            .or_else(|| std::path::Path::new(source).file_stem()?.to_str())
+            .filter(|s| !s.is_empty() && !s.contains('\n'))
             .unwrap_or("default-site")
             .replace("_", "-");
         format!("{}_{:x}", stem, self.dem.calculate_hash())
     }
 
-    /// Name of the scenario, derived from the release areas.
-    pub fn scenario_name(&self) -> String {
+    /// Name of the scenario, derived from the release areas it was run with.
+    pub fn scenario_name(&self, release_areas: &[f32]) -> String {
         let base = match &self.release_areas_path {
-            Some(path) => std::path::Path::new(path)
-                .file_stem()
-                .and_then(|s| s.to_str())
+            Some(path) => store_path_stem(path)
+                .or_else(|| std::path::Path::new(path).file_stem()?.to_str())
                 .unwrap_or(path)
                 .to_string()
                 .replace("_", "-"),
@@ -887,7 +1379,46 @@ impl Simulation {
                 self.settings.roughness_threshold,
             ),
         };
-        format!("{}_{:x}", base, self.release_hash())
+        format!("{}_{:x}", base, hash_release_areas(release_areas))
+    }
+
+    /// Gathers everything the result stores keep of the finished run.
+    async fn collect_run(&mut self) -> Result<RunRecord> {
+        if self.state < SimulationState::Finished {
+            bail!("Run the simulation before saving results");
+        }
+        let sim_info = self.fetch_sim_info().await?;
+        let release_volume_m3 = self.get_total_volume().await?;
+        let peak_flow_velocity = self.fetch_peak_velocity().await?.clone();
+        let peak_flow_thickness = self.fetch_peak_flow_thickness().await?.to_vec();
+
+        let origin_x = self.dem.bounds.xmin;
+        let origin_y = self.dem.bounds.ymin;
+        let center_of_mass = self.fetch_center_of_mass().await?;
+        let time = center_of_mass.iter().map(|result| result.time).collect();
+        let (center_of_mass_x, center_of_mass_y, travel_length, travel_angle) =
+            trajectory_summary(center_of_mass, origin_x, origin_y);
+
+        let created_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(f64::NAN, |elapsed| elapsed.as_secs_f64());
+
+        Ok(RunRecord {
+            peak_flow_velocity,
+            peak_flow_thickness,
+            center_of_mass_x,
+            center_of_mass_y,
+            time,
+            release_volume_m3,
+            travel_length,
+            travel_angle,
+            final_timestep: sim_info.timestep,
+            simulated_time: sim_info.elapsed_time,
+            number_particles: sim_info.number_particles,
+            stop_flags: sim_info.flags,
+            created_at,
+            settings: self.settings,
+        })
     }
 
     /// Builds an in-memory Zarr store of the current results.
@@ -896,123 +1427,53 @@ impl Simulation {
     /// responsible for persisting the returned entries.
     #[cfg(target_arch = "wasm32")]
     pub async fn export_zarr_entries(&mut self) -> Result<Vec<ZarrEntry>> {
-        if self.state < SimulationState::Finished {
-            bail!("Run the simulation before saving results");
-        }
-
-        let site_name = self.site_name();
-        let scenario_name = self.scenario_name();
-
+        let run = self.collect_run().await?;
         let release_areas = self.fetch_release_areas().await?.to_vec();
-        self.fetch_peak_velocity().await?;
-        self.fetch_peak_flow_thickness().await?;
-
-        let peak_velocity = self
-            .gpu_cache
-            .peak_velocity
-            .clone()
-            .unwrap_or_else(|| vec![0.0; release_areas.len()]);
-        let peak_flow_thickness = self
-            .gpu_cache
-            .peak_flow_thickness
-            .clone()
-            .unwrap_or_else(|| vec![0.0; release_areas.len()]);
-
-        let settings = serde_json::to_value(self.settings).unwrap_or(serde_json::Value::Null);
-
         Ok(data_processor::zarr_writer::build_result_store(
-            &site_name,
-            &scenario_name,
+            &self.site_name(),
+            &self.scenario_name(&release_areas),
             &self.dem,
-            &ResultGrids {
-                release_areas: &release_areas,
-                peak_velocity: &peak_velocity,
-                peak_flow_thickness: &peak_flow_thickness,
-            },
-            settings,
+            &release_areas,
+            &run,
         ))
     }
 
     /// Native only: appends this run to the Zarr store at
     /// [`Self::output_path`], creating the site (derived from the DEM, see
     /// [`Self::site_name`]) and scenario (derived from the release areas, see
-    /// [`Self::scenario_name`]) entries as needed. Each run stores peak
-    /// velocity, peak flow thickness, release volume and the center-of-mass
-    /// trajectory.
+    /// [`Self::scenario_name`]) entries as needed.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn save(&mut self) -> Result<()> {
-        let mut site_name = std::path::Path::new(&self.dem_path)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("default_site")
-            .to_string()
-            .replace("_", "-");
-        site_name += &format!("_{:x}", self.dem.calculate_hash());
-        let release_areas_str = match &self.release_areas_path {
-            Some(path) => std::path::Path::new(path)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or(path)
-                .to_string()
-                .replace("_", "-"),
-            None => format!(
-                "calculated-elev{}-minslope{}-maxslope{}-rough{}",
-                // TODO save release relevant parameters to zarr store
-                self.settings.release_min_elevation,
-                self.settings.min_slope_angle,
-                self.settings.max_slope_angle,
-                self.settings.roughness_threshold,
-            ),
-        };
+        let run = self.collect_run().await?;
+        let release_areas = self.fetch_release_areas().await?.to_vec();
+        timer_checkpoint("Peak data fetched");
 
-        let scenario_name = format!("{}_{:x}", release_areas_str, self.release_hash());
+        let site_name = self.site_name();
+        let scenario_name = self.scenario_name(&release_areas);
         if self.output.is_none() {
             self.output = Some(data_processor::output::Output::new(&self.output_path)?);
         }
-        let release_areas = self.fetch_release_areas().await?.to_vec();
-
-        self.fetch_peak_velocity().await?;
-        self.fetch_peak_flow_thickness().await?;
-        let release_volume = self.get_total_volume().await?;
-        let origin_x = self.dem.bounds.xmin;
-        let origin_y = self.dem.bounds.ymin;
-        let center_of_mass = self.fetch_center_of_mass().await?;
-        let (center_of_mass_x, center_of_mass_y, travel_length, travel_angle) =
-            trajectory_summary(center_of_mass, origin_x, origin_y);
-        timer_checkpoint("Peak data fetched");
-
-        let output = self.output.as_mut().unwrap();
-        if !output.site_exists(&site_name) {
-            output.add_new_site(&site_name, &self.dem)?;
-        }
-
-        if output.scenario_exists(&site_name, &scenario_name) {
-            output.connect_scenario(&site_name, &scenario_name)?;
-        } else {
-            output.add_new_scenario(
-                &site_name,
-                &scenario_name,
-                10000, // number runs
-                self.settings.max_steps as u64,
-                &release_areas,
-                f32::NAN, // Release aspect is not currently calculated.
-                release_volume,
-                self.dem.y.clone(),
-                &self.dem.x,
-            )?;
-        }
-        output.add_new_run(
-            &site_name,
-            &scenario_name,
-            self.gpu_cache.peak_velocity.as_ref().unwrap(),
-            self.gpu_cache.peak_flow_thickness.as_ref().unwrap(),
-            &center_of_mass_x,
-            &center_of_mass_y,
-            travel_length,
-            travel_angle,
-            &self.settings,
-        )?;
+        let output = self.output.as_ref().unwrap();
+        output.add_run(&site_name, &scenario_name, &self.dem, &release_areas, &run)?;
         Ok(())
+    }
+
+    /// Native only: writes the grid `layer` (`peak_velocity`,
+    /// `peak_flow_thickness` or `release_areas`) to `path` as an ESRI ASCII grid
+    /// georeferenced by the DEM.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn write_asc(&mut self, layer: &str, path: &str) -> Result<()> {
+        let data = match layer {
+            "peak_velocity" => self.fetch_peak_velocity().await?.clone(),
+            "peak_flow_thickness" => self.fetch_peak_flow_thickness().await?.to_vec(),
+            "release_areas" => self.fetch_release_areas().await?.to_vec(),
+            _ => bail!(
+                "Unknown layer \"{layer}\", expected peak_velocity, peak_flow_thickness or release_areas"
+            ),
+        };
+        data_processor::EsriGrid::from_dem_layer(&self.dem, &data)?
+            .to_file(path)
+            .map_err(anyhow::Error::msg)
     }
 
     /// Reads the run info (timestep, dt, stop flags, ...) from the GPU and
@@ -1073,6 +1534,7 @@ impl Simulation {
     async fn detect_crown_line_by_particle_simulation(
         &self,
         config: &release_estimation::ReleaseEstimationConfig,
+        terrain_metrics: &release_estimation::TerrainMetrics<'_>,
     ) -> Result<release_estimation::CrownDetection> {
         /// Particles per release cell for the detection simulation. Four
         /// entries per crown cell on planar inflow keep the entry counts well
@@ -1107,7 +1569,8 @@ impl Simulation {
         }
 
         let mut settings = Settings::default();
-        settings.sim_model = Some(SimModel::TerrainFollowing);
+        // independent sliding blocks without grid coupling trace the flow paths
+        settings.sim_model = Some(SimModel::SlidingBlock);
         settings.max_steps = Some(self.settings.max_steps);
         settings.released_particles_per_cell = Some(DETECTION_PARTICLES_PER_CELL);
         settings.enable_curvature = Some(false);
@@ -1131,10 +1594,11 @@ impl Simulation {
         detection_sim.run().await?;
 
         let sim_info = detection_sim.fetch_sim_info().await?;
-        if !sim_info
-            .parsed_flags()
-            .contains(SimInfoFlags::ALL_PARTICLES_STOPPED)
-        {
+        if !sim_info.parsed_flags().intersects(
+            SimInfoFlags::ALL_PARTICLES_STOPPED
+                | SimInfoFlags::AT_REST
+                | SimInfoFlags::LOW_MOMENTUM,
+        ) {
             warn!(
                 "crown detection simulation stopped at max_steps; entry counts may be incomplete"
             );
@@ -1151,9 +1615,28 @@ impl Simulation {
             if !state.out_of_dem_data {
                 continue;
             }
+            // the NaN normals reach past the unreleased ring, so particles
+            // spawned next to it stop before they move; they would have
+            // started downslope
+            let mut direction = *velocity;
+            if direction == [0.0, 0.0] {
+                let cell_x = (position[0] / self.dem.cell_size).floor();
+                let cell_y = (position[1] / self.dem.cell_size).floor();
+                if cell_x >= 0.0
+                    && cell_y >= 0.0
+                    && (cell_x as usize) < self.dem.width
+                    && (cell_y as usize) < self.dem.height
+                {
+                    let idx = cell_y as usize * self.dem.width + cell_x as usize;
+                    direction = [
+                        -terrain_metrics.gradient_x[idx],
+                        -terrain_metrics.gradient_y[idx],
+                    ];
+                }
+            }
             if let Some(idx) = release_estimation::entry_cell(
                 *position,
-                *velocity,
+                direction,
                 &self.roi,
                 self.dem.width,
                 self.dem.height,
@@ -1171,16 +1654,27 @@ impl Simulation {
             positions.len()
         );
 
-        release_estimation::crown_line_from_particle_counts(&counts, &self.dem, &self.roi, config)
+        release_estimation::crown_line_from_particle_counts_with_terrain_metrics(
+            &counts,
+            &self.dem,
+            &self.roi,
+            config,
+            terrain_metrics,
+        )
     }
 
     /// Determines the release areas and returns the number of release cells.
     ///
     /// Sources are tried in priority order: a release-area file
-    /// (`release_areas_path`), a directly set array
+    /// (`release_areas_path`; shapefiles are rasterized onto the DEM), a
+    /// directly set array
     /// ([`Self::set_release_areas`]), crown-line estimation from the outline
     /// (`release_area_fraction`, also fills [`Self::crown_line`]), and finally
     /// automatic computation from roughness and slope thresholds on the GPU.
+    /// `release_thickness` or `release_swe / density` replaces the thickness
+    /// of every release cell; if neither is set, sources without a thickness
+    /// of their own get
+    /// [`compute_core::DEFAULT_RELEASE_THICKNESS`].
     /// Fixes [`Self::number_particles`] and moves the state to
     /// [`SimulationState::ReleaseAreasComputed`].
     async fn load_release_areas(&mut self) -> Result<u32> {
@@ -1196,56 +1690,146 @@ impl Simulation {
         let number_release_cells = match &self.release_areas_path {
             Some(path) => {
                 info!("Loading release areas from path: {}", path);
-                let data = data_processor::load_release_areas(path)
-                    .await
-                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                let release_areas = data_processor::load_release_areas(
+                    path,
+                    &self.dem,
+                    self.settings.release_thickness_or_default(),
+                )
+                .await
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                self.release_thickness_in_file = release_areas.thickness_from_file;
+                let data = if release_areas.thickness_from_file {
+                    self.override_release_thickness(&release_areas.thickness)
+                } else {
+                    release_areas.thickness
+                };
                 self.validate_release_areas_len(&data)?;
                 self.orchestrator
                     .write_buffer(BufferName::ReleaseAreas, &data)
                     .await?;
-                data.iter().filter(|&&x| x > 1e-3).count() as u32
+                data.iter()
+                    .filter(|&&x| x > compute_core::RELEASE_THICKNESS_THRESHOLD)
+                    .count() as u32
             }
             None => match &self.release_areas_array {
                 Some(data) => {
                     info!("Loading release areas from provided array");
                     self.validate_release_areas_len(data)?;
+                    let data = self.override_release_thickness(data);
                     self.orchestrator
-                        .write_buffer(BufferName::ReleaseAreas, data)
+                        .write_buffer(BufferName::ReleaseAreas, &data)
                         .await?;
-                    data.iter().filter(|&&x| x > 1e-3).count() as u32
+                    data.iter()
+                        .filter(|&&x| x > compute_core::RELEASE_THICKNESS_THRESHOLD)
+                        .count() as u32
                 }
                 None => match self.release_area_fraction {
                     Some(fraction) => {
                         info!(
-                            "Estimating release areas from crown line (fraction {fraction:.2}, method {})",
-                            self.crown_line_method
+                            "Estimating release areas from crown line (fraction {fraction:.2}, method {}, fill {})",
+                            self.crown_line_method, self.release_fill_method
                         );
+                        let defaults = release_estimation::ReleaseEstimationConfig::default();
                         let config = release_estimation::ReleaseEstimationConfig {
                             fraction,
-                            slab_thickness: self.settings.slab_thickness_factor,
+                            release_thickness: self.settings.release_thickness_or_default(),
+                            crown_exit_distance: self
+                                .crown_line_exit_distance
+                                .unwrap_or(defaults.crown_exit_distance),
+                            crown_elevation_band: self
+                                .crown_elevation_band
+                                .unwrap_or(defaults.crown_elevation_band),
+                            min_particles_per_crown_cell: self
+                                .min_particles_per_crown_cell
+                                .unwrap_or(defaults.min_particles_per_crown_cell),
                             expected_crown_slope_range: (
                                 self.settings.min_slope_angle,
                                 self.settings.max_slope_angle,
                             ),
-                            ..Default::default()
+                            min_crown_slope_deg: self.settings.min_slope_angle,
+                            fill_method: self.release_fill_method,
+                            slope_weight: self
+                                .release_slope_weight
+                                .unwrap_or(defaults.slope_weight),
+                            slope_peak_deg: self
+                                .release_slope_peak
+                                .unwrap_or(defaults.slope_peak_deg),
+                            slope_width_deg: self
+                                .release_slope_width
+                                .unwrap_or(defaults.slope_width_deg),
+                            slope_smoothing_length: self
+                                .release_slope_smoothing_length
+                                .unwrap_or(defaults.slope_smoothing_length),
+                            ..defaults
                         };
+                        // the threshold classification on the GPU marks every
+                        // outline cell that could release; the crown line then
+                        // picks the cells that actually did
+                        self.orchestrator
+                            .run_compute_roughness(&self.settings)
+                            .await?;
+                        let number_potential = self
+                            .orchestrator
+                            .run_compute_release_areas(&self.settings, &self.roi)
+                            .await?;
+                        let potential: Vec<bool> = self
+                            .orchestrator
+                            .read_buffer::<f32>(BufferName::ReleaseAreas)
+                            .await?
+                            .iter()
+                            .map(|&thickness| thickness > compute_core::RELEASE_THICKNESS_THRESHOLD)
+                            .collect();
+                        let slope_angles = self.fetch_slope_angle().await?.to_vec();
+                        let (gradient_x, gradient_y) = self.terrain_gradient().await?;
+                        let terrain_metrics = release_estimation::TerrainMetrics {
+                            slope_angles: &slope_angles,
+                            gradient_x: &gradient_x,
+                            gradient_y: &gradient_y,
+                        };
+                        info!(
+                            "Potential release areas: {number_potential} of {} outline cells",
+                            self.roi.iter().filter(|&&inside| inside).count()
+                        );
                         let detection = match self.crown_line_method {
-                            CrownLineMethod::FlowRouting => release_estimation::detect_crown_line(
-                                &self.dem, &self.roi, &config,
-                            )?,
+                            CrownLineMethod::FlowRouting => {
+                                release_estimation::detect_crown_line_with_terrain_metrics(
+                                    &self.dem,
+                                    &self.roi,
+                                    &config,
+                                    &terrain_metrics,
+                                )?
+                            }
                             CrownLineMethod::ParticleSimulation => {
                                 // Box::pin breaks the future type recursion:
                                 // run() -> load_release_areas() -> here -> run()
                                 // (the nested simulation is a separate instance,
                                 // so the indirection is purely a type-level fix)
-                                Box::pin(self.detect_crown_line_by_particle_simulation(&config))
-                                    .await?
+                                Box::pin(self.detect_crown_line_by_particle_simulation(
+                                    &config,
+                                    &terrain_metrics,
+                                ))
+                                .await?
+                            }
+                            CrownLineMethod::GradientStep => {
+                                release_estimation::detect_crown_line_by_gradient_step_with_terrain_metrics(
+                                    &self.dem,
+                                    &self.roi,
+                                    &config,
+                                    &terrain_metrics,
+                                )?
                             }
                         };
-                        let estimate = release_estimation::estimate_release_areas_with_crown(
-                            &self.dem, &self.roi, &detection, &config,
+                        let estimate = release_estimation::estimate_release_areas_with_crown_and_terrain_metrics(
+                            &self.dem,
+                            &self.roi,
+                            Some(&potential),
+                            &detection,
+                            &config,
+                            &terrain_metrics,
                         )?;
                         self.crown_line = estimate.crown_line;
+                        self.crown_candidates = estimate.crown_candidates;
+                        self.potential_release_areas = potential;
                         self.orchestrator
                             .write_buffer(BufferName::ReleaseAreas, &estimate.release_areas)
                             .await?;
@@ -1275,6 +1859,25 @@ impl Simulation {
             (number_release_cells as f64 / (self.dem.width * self.dem.height) as f64 * 100.0)
         );
         Ok(number_release_cells)
+    }
+
+    /// The release cells of a file or array with the thickness of the
+    /// settings, if set.
+    fn override_release_thickness(&self, release_areas: &[f32]) -> Vec<f32> {
+        let Some(thickness) = self.settings.release_thickness_override() else {
+            return release_areas.to_vec();
+        };
+        warn!("A release thickness of {thickness} m replaces the thickness of the release source");
+        release_areas
+            .iter()
+            .map(|&cell| {
+                if cell > compute_core::RELEASE_THICKNESS_THRESHOLD {
+                    thickness
+                } else {
+                    cell
+                }
+            })
+            .collect()
     }
 
     fn validate_release_areas_len(&self, release_areas: &[f32]) -> Result<()> {
@@ -1396,7 +1999,8 @@ impl Simulation {
         Ok(self.gpu_cache.slope_angle.as_deref().unwrap())
     }
 
-    /// Per-cell slope aspect in degrees from terrain analysis.
+    /// Per-cell slope aspect from terrain analysis: the direction the slope
+    /// faces (downhill) in degrees clockwise from north, -1 on flat cells.
     pub async fn fetch_slope_aspect(&mut self) -> Result<&[f32]> {
         if self.state < SimulationState::TerrainAnalyzed {
             bail!("Terrain metrics must be computed before reading slope aspect texture");
@@ -1454,6 +2058,46 @@ impl Simulation {
         Ok((k_x, k_y, k_xy))
     }
 
+    /// Elevation gradient `(dz/dx, dz/dy)` per meter, recovered from the
+    /// terrain analysis textures.
+    async fn terrain_gradient(&mut self) -> Result<(Vec<f32>, Vec<f32>)> {
+        const GRAVITY: f32 = 9.81;
+        if self.settings.sim_model == SimModel::Curvilinear.as_int() {
+            // metric terms l = sqrt(1 + dz^2) lose the sign; the slope-parallel
+            // gravity g = -GRAVITY * dz / l restores it
+            let g_x = self.fetch_terrain_curvature().await?.a.clone();
+            let geometry = self.fetch_terrain_geometry_texture().await?;
+            let gradient_x = geometry
+                .r
+                .iter()
+                .zip(&g_x)
+                .map(|(l_x, g_x)| -g_x * l_x / GRAVITY)
+                .collect();
+            let gradient_y = geometry
+                .g
+                .iter()
+                .zip(&geometry.a)
+                .map(|(l_y, g_y)| -g_y * l_y / GRAVITY)
+                .collect();
+            return Ok((gradient_x, gradient_y));
+        }
+        // surface normal n = (-dz/dx, -dz/dy, 1) / |...|
+        let geometry = self.fetch_terrain_geometry_texture().await?;
+        let gradient_x = geometry
+            .r
+            .iter()
+            .zip(&geometry.b)
+            .map(|(n_x, n_z)| -n_x / n_z)
+            .collect();
+        let gradient_y = geometry
+            .g
+            .iter()
+            .zip(&geometry.b)
+            .map(|(n_y, n_z)| -n_y / n_z)
+            .collect();
+        Ok((gradient_x, gradient_y))
+    }
+
     /// First channel of the terrain geometry texture: surface normal x
     /// component (curvilinear metric term `l_x`).
     pub async fn get_terrain_geometry_x(&mut self) -> Result<Vec<f32>> {
@@ -1488,6 +2132,22 @@ impl Simulation {
             );
         }
         Ok(self.gpu_cache.release_areas.as_deref().unwrap())
+    }
+
+    /// Mean slope angle, maximum slope angle, mean aspect and mean elevation of
+    /// the release cells in effect for this run; requires [`SimulationState::ReleaseAreasComputed`].
+    pub async fn release_area_terrain(&mut self) -> Result<ReleaseAreaTerrain> {
+        let release_areas = self.fetch_release_areas().await?.to_vec();
+        let slope_angle = self.fetch_slope_angle().await?.to_vec();
+        let slope_aspect = self.fetch_slope_aspect().await?.to_vec();
+        Ok(mean_release_terrain(
+            &release_areas,
+            &slope_angle,
+            &slope_aspect,
+            &self.dem.data1d,
+            self.dem.width,
+            self.dem.height,
+        ))
     }
 
     /// Per-cell maximum flow velocity over the whole run; requires
@@ -1548,7 +2208,7 @@ impl Simulation {
         Ok(self.gpu_cache.particles_position.as_ref().unwrap())
     }
 
-    /// Particle xy velocities, flattened as `[vx0, vy0, vx1, vy1, ...]`.
+    /// Particle horizontal velocities, stored as `[vx, vy]` pairs.
     pub async fn fetch_particles_velocity(&mut self) -> Result<&Vec<[f32; 2]>> {
         if self.state < SimulationState::ParticlesInitialized {
             bail!("Simulation must be initialized before reading particles");
@@ -1564,15 +2224,22 @@ impl Simulation {
         Ok(self.gpu_cache.particles_velocity.as_ref().unwrap())
     }
 
-    /// Particle vertical velocities; identically zero for the MPM model,
-    /// which does not track a separate vertical component.
+    /// Particle vertical velocities. Curvilinear velocities are reconstructed
+    /// tangent to the bed; MPMDAC still returns a synthetic zero component. The
+    /// terrain-following model has no vertical velocity, asking for it is an error.
     pub async fn fetch_particles_velocity_z(&mut self) -> Result<&Vec<f32>> {
         if self.state < SimulationState::ParticlesInitialized {
             bail!("Simulation must be initialized before reading particles");
         }
+        if self.settings.sim_model == SimModel::TerrainFollowing.as_int() {
+            bail!(
+                "The terrain-following model has no vertical velocity: particle velocities \
+                 are 2D vectors in the surface plane, use the 3d model for a z component"
+            );
+        }
         if self.gpu_cache.particles_velocity_z.is_none() {
             self.gpu_cache.read_count += 1;
-            if self.settings.sim_model != SimModel::TerrainFollowing.as_int() {
+            if self.settings.sim_model == SimModel::MpmDaC.as_int() {
                 self.gpu_cache.particles_velocity_z =
                     Some(vec![0.0; self.number_particles as usize]);
             } else {
@@ -1602,38 +2269,56 @@ impl Simulation {
         Ok(self.gpu_cache.particles_mass.as_ref().unwrap())
     }
 
-    /// Raw per-cell deposited mass, as quantized by p2g (u32, scaled by
-    /// `MASS_FACTOR` in the shader utils). The buffers reflect the p2g deposit
-    /// of the most recently completed step, i.e. the mass field the grid
-    /// physics pass consumed.
-    pub async fn fetch_grid_mass(&mut self) -> Result<&Vec<u32>> {
+    /// Per-cell deposited mass in kg. The buffers reflect the
+    /// p2g deposit of the most recently completed step, i.e. the mass field
+    /// the grid physics pass consumed.
+    pub async fn fetch_grid_mass(&mut self) -> Result<&Vec<f32>> {
         if self.state < SimulationState::ParticlesInitialized {
             bail!("Simulation must be initialized before reading grid buffers");
         }
         if self.gpu_cache.grid_mass.is_none() {
             self.gpu_cache.read_count += 1;
-            self.gpu_cache.grid_mass = Some(
+            // MASS_FACTOR of utils.wgsl
+            const MASS_FACTOR: f32 = 1e1;
+            let mass = if self.orchestrator.has_float32_atomic() {
+                self.orchestrator
+                    .read_buffer::<f32>(BufferName::GridMass)
+                    .await?
+            } else {
                 self.orchestrator
                     .read_buffer::<u32>(BufferName::GridMass)
-                    .await?,
-            );
+                    .await?
+                    .iter()
+                    .map(|mass| *mass as f32 / MASS_FACTOR)
+                    .collect()
+            };
+            self.gpu_cache.grid_mass = Some(mass);
         }
         Ok(self.gpu_cache.grid_mass.as_ref().unwrap())
     }
 
-    /// Raw per-cell deposited momentum as quantized by p2g (i32 pairs
-    /// `u, v` per cell, scaled by `MOMENTUM_FACTOR` in the shader utils).
-    pub async fn fetch_grid_momentum(&mut self) -> Result<&Vec<i32>> {
+    /// Per-cell deposited momentum in kg m/s on every GPU, as `u, v` pairs.
+    pub async fn fetch_grid_momentum(&mut self) -> Result<&Vec<f32>> {
         if self.state < SimulationState::ParticlesInitialized {
             bail!("Simulation must be initialized before reading grid buffers");
         }
         if self.gpu_cache.grid_momentum.is_none() {
             self.gpu_cache.read_count += 1;
-            self.gpu_cache.grid_momentum = Some(
+            // MOMENTUM_FACTOR of utils.wgsl
+            const MOMENTUM_FACTOR: f32 = 1e2;
+            let momentum = if self.orchestrator.has_float32_atomic() {
+                self.orchestrator
+                    .read_buffer::<f32>(BufferName::GridMomentum)
+                    .await?
+            } else {
                 self.orchestrator
                     .read_buffer::<i32>(BufferName::GridMomentum)
-                    .await?,
-            );
+                    .await?
+                    .iter()
+                    .map(|momentum| *momentum as f32 / MOMENTUM_FACTOR)
+                    .collect()
+            };
+            self.gpu_cache.grid_momentum = Some(momentum);
         }
         Ok(self.gpu_cache.grid_momentum.as_ref().unwrap())
     }
@@ -1833,20 +2518,47 @@ fn checked_particle_count(release_cells: u32, particles_per_cell: u32) -> Result
 /// Converts center-of-mass records into absolute world coordinates (adding
 /// the DEM origin) and derives the total travel length and average travel
 /// angle in degrees.
+fn hash_release_areas(release_areas: &[f32]) -> u64 {
+    let mut hasher = StableHasher::default();
+    for value in release_areas {
+        value.to_bits().hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
 fn trajectory_summary(
     center_of_mass: &[CenterOfMassResult],
     origin_x: f32,
     origin_y: f32,
 ) -> (Vec<f32>, Vec<f32>, f32, f32) {
-    let center_of_mass_x: Vec<_> = center_of_mass
-        .iter()
-        .map(|result| origin_x + result.com_x)
-        .collect();
-    let center_of_mass_y: Vec<_> = center_of_mass
-        .iter()
-        .map(|result| origin_y + result.com_y)
-        .collect();
-    let travel_length = center_of_mass
+    // Slots of steps that did not run are NaN and the shader reports (0, 0, 0)
+    // for steps without mass, neither of which is a position.
+    let is_record = |result: &&CenterOfMassResult| {
+        result.total_mass > 0.0
+            && result.com_x.is_finite()
+            && result.com_y.is_finite()
+            && result.elevation.is_finite()
+    };
+    let positions = |origin: f32, coordinate: fn(&CenterOfMassResult) -> f32| {
+        center_of_mass
+            .iter()
+            .map(|result| {
+                if is_record(&result) {
+                    origin + coordinate(result)
+                } else {
+                    f32::NAN
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    let center_of_mass_x = positions(origin_x, |result| result.com_x);
+    let center_of_mass_y = positions(origin_y, |result| result.com_y);
+
+    let records: Vec<_> = center_of_mass.iter().filter(is_record).collect();
+    let (Some(first), Some(last)) = (records.first(), records.last()) else {
+        return (center_of_mass_x, center_of_mass_y, f32::NAN, f32::NAN);
+    };
+    let travel_length = records
         .windows(2)
         .map(|results| {
             let dx = results[1].com_x - results[0].com_x;
@@ -1854,10 +2566,7 @@ fn trajectory_summary(
             dx.hypot(dy)
         })
         .sum::<f32>();
-    let vertical_drop = center_of_mass
-        .first()
-        .zip(center_of_mass.last())
-        .map_or(0.0, |(first, last)| first.elevation - last.elevation);
+    let vertical_drop = first.elevation - last.elevation;
     let travel_angle = if travel_length > 0.0 {
         vertical_drop.atan2(travel_length).to_degrees()
     } else {
@@ -1904,12 +2613,14 @@ mod tests {
                 com_y: 0.0,
                 elevation: 10.0,
                 total_mass: 1.0,
+                ..Default::default()
             },
             CenterOfMassResult {
                 com_x: 3.0,
                 com_y: 4.0,
                 elevation: 5.0,
                 total_mass: 1.0,
+                ..Default::default()
             },
         ];
         let (x, y, length, angle) = trajectory_summary(&center_of_mass, 100.0, 300.0);
@@ -1918,6 +2629,41 @@ mod tests {
         assert_eq!(y, vec![300.0, 304.0]);
         assert!((length - 5.0).abs() < f32::EPSILON);
         assert!((angle - 45.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_trajectory_summary_skips_slots_without_a_record() {
+        let record = |com_x, com_y, elevation, total_mass| CenterOfMassResult {
+            com_x,
+            com_y,
+            elevation,
+            total_mass,
+            ..Default::default()
+        };
+        let center_of_mass = vec![
+            CenterOfMassResult::default(), // slot 0 is never written
+            record(0.0, 0.0, 10.0, 1.0),
+            record(3.0, 4.0, 5.0, 1.0),
+            record(0.0, 0.0, 0.0, 0.0),    // all mass has left
+            CenterOfMassResult::default(), // the run ended
+        ];
+        let (x, y, length, angle) = trajectory_summary(&center_of_mass, 100.0, 300.0);
+
+        assert!(x[0].is_nan() && y[0].is_nan());
+        assert_eq!(x[1..3], [100.0, 103.0]);
+        assert_eq!(y[1..3], [300.0, 304.0]);
+        assert!(x[3].is_nan() && x[4].is_nan());
+        assert!((length - 5.0).abs() < f32::EPSILON);
+        assert!((angle - 45.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_trajectory_summary_without_records_is_nan() {
+        let center_of_mass = vec![CenterOfMassResult::default(); 3];
+        let (x, _, length, angle) = trajectory_summary(&center_of_mass, 100.0, 300.0);
+
+        assert!(x.iter().all(|value| value.is_nan()));
+        assert!(length.is_nan() && angle.is_nan());
     }
 
     #[test_log::test]
@@ -2245,16 +2991,9 @@ mod tests {
         assert_eq!(sim.dem.bounds.xmin, 0.0);
         assert_eq!(sim.dem.bounds.ymax, 13.0);
 
-        // Verify coordinate generation (linspace)
-        // x: 0.0 to 2.0 with width 2 -> [0.0, 2.0]
-        assert_eq!(sim.dem.x.len(), 2);
-        assert_eq!(sim.dem.x[0], 0.0);
-        assert_eq!(sim.dem.x[1], 2.0);
-
-        // y: 10.0 to 13.0 with height 3 -> [10.0, 11.5, 13.0]
-        assert_eq!(sim.dem.y.len(), 3);
-        assert_eq!(sim.dem.y[0], 10.0);
-        assert_eq!(sim.dem.y[2], 13.0);
+        // Coordinates are the cell centers
+        assert_eq!(sim.dem.x, vec![0.5, 1.5]);
+        assert_eq!(sim.dem.y, vec![10.5, 11.5, 12.5]);
         assert_eq!(sim.dem.bounds.xmin, 0.0);
         assert_eq!(sim.dem.bounds.ymin, 10.0);
         assert_eq!(sim.dem.bounds.xmax, 2.0);
@@ -2347,13 +3086,119 @@ mod tests {
     }
 
     #[test_log::test]
+    fn test_release_max_elevation_excludes_higher_cells() {
+        let (width, height, cell_size) = (24, 24, 5.0);
+        // 31 degrees, steep enough for the default release slope window
+        let dem: Vec<f32> = (0..width * height)
+            .map(|idx| 2000.0 + (idx / width) as f32 * 3.0)
+            .collect();
+        let max_elevation = 2030.0;
+
+        let mut sim: Simulation = block_on(Simulation::new()).expect("Failed to create Simulation");
+        let settings = Settings {
+            release_max_elevation: Some(max_elevation),
+            ..Default::default()
+        };
+        block_on(sim.create(settings)).expect("Failed to create simulation");
+        sim.set_dem(&dem, width, height, cell_size)
+            .expect("Failed to set DEM");
+        sim.set_roi(&vec![true; width * height])
+            .expect("Failed to set ROI");
+        block_on(sim.prepare()).expect("Failed to prepare simulation");
+
+        let release = block_on(sim.fetch_release_areas()).expect("Failed to fetch release areas");
+        let released = |above: bool| {
+            (0..dem.len())
+                .filter(|&idx| release[idx] > 0.0 && (dem[idx] > max_elevation) == above)
+                .count()
+        };
+        assert!(released(false) > 0, "no release below the limit");
+        assert_eq!(released(true), 0, "cells above the limit released");
+    }
+
+    #[test_log::test]
+    fn test_roughness_is_model_independent_vector_ruggedness() {
+        if std::env::var("GITHUB_ACTIONS").is_ok() {
+            println!("Skipping slow test on CI");
+            return;
+        }
+        let width = 24;
+        let height = 24;
+        let cell_size = 5.0;
+        let plane: Vec<f32> = (0..width * height)
+            .map(|idx| 2000.0 + (idx / width) as f32 * 3.0)
+            .collect();
+        // irregular bumps of up to 4 m (a checkerboard would cancel out in the
+        // central differences)
+        let bumpy: Vec<f32> = plane
+            .iter()
+            .enumerate()
+            .map(|(idx, &z)| z + ((idx % width * 7 + idx / width * 13) % 5) as f32)
+            .collect();
+        let interior = |idx: usize| {
+            let (x, y) = (idx % width, idx / width);
+            x > 0 && y > 0 && x + 1 < width && y + 1 < height
+        };
+
+        for model in [
+            SimModel::TerrainFollowing,
+            SimModel::Curvilinear,
+            SimModel::MpmDaC,
+            SimModel::SlidingBlock,
+        ] {
+            for (name, dem) in [("plane", &plane), ("bumpy", &bumpy)] {
+                let mut sim: Simulation =
+                    block_on(Simulation::new()).expect("Failed to create Simulation");
+                // thresholds wide open so every cell releases and prepare()
+                // succeeds on the rough surface too
+                let settings = Settings {
+                    sim_model: Some(model),
+                    min_slope_angle: Some(0.0),
+                    max_slope_angle: Some(90.0),
+                    roughness_threshold: Some(1.0),
+                    ..Default::default()
+                };
+                block_on(sim.create(settings)).expect("Failed to create simulation");
+                sim.set_dem(dem, width, height, cell_size)
+                    .expect("Failed to set DEM");
+                sim.set_roi(&vec![true; width * height])
+                    .expect("Failed to set ROI");
+                block_on(sim.prepare()).expect("Failed to prepare simulation");
+                let roughness = block_on(sim.fetch_roughness())
+                    .expect("Failed to fetch roughness")
+                    .clone();
+                for (idx, &r) in roughness.iter().enumerate() {
+                    assert!(
+                        (0.0..=1.0).contains(&r),
+                        "{model:?} {name}: roughness {r} outside [0, 1] at {idx}"
+                    );
+                    if !interior(idx) {
+                        continue;
+                    }
+                    if name == "plane" {
+                        assert!(r < 1e-5, "{model:?} plane: roughness {r} at {idx}");
+                    }
+                }
+                if name == "bumpy" {
+                    let interior_values: Vec<f32> = (0..roughness.len())
+                        .filter(|&idx| interior(idx))
+                        .map(|idx| roughness[idx])
+                        .collect();
+                    let mean = interior_values.iter().sum::<f32>() / interior_values.len() as f32;
+                    assert!(mean > 1e-3, "{model:?} bumpy: mean roughness {mean}");
+                }
+            }
+        }
+    }
+
+    #[test_log::test]
     fn test_release_estimation_crown_line_end_to_end() {
         let width = 24;
         let height = 24;
         let cell_size = 5.0;
         // inclined plane draining towards decreasing y
         let dem_data: Vec<f32> = (0..width * height)
-            .map(|idx| 100.0 + (idx / width) as f32 * 5.0)
+            .map(|idx| 2000.0 + (idx / width) as f32 * 5.0)
             .collect();
         let mut sim: Simulation = block_on(Simulation::new()).expect("Failed to create Simulation");
         block_on(sim.create(Settings::default())).expect("Failed to create simulation");
@@ -2386,13 +3231,85 @@ mod tests {
     }
 
     #[test_log::test]
+    fn test_release_estimation_gradient_crown_line_end_to_end() {
+        let width = 24;
+        let height = 24;
+        let cell_size = 5.0;
+        // inclined plane draining towards decreasing y
+        let dem_data: Vec<f32> = (0..width * height)
+            .map(|idx| 2000.0 + (idx / width) as f32 * 5.0)
+            .collect();
+        let mut sim: Simulation = block_on(Simulation::new()).expect("Failed to create Simulation");
+        block_on(sim.create(Settings::default())).expect("Failed to create simulation");
+        sim.set_dem(&dem_data, width, height, cell_size)
+            .expect("Failed to set DEM");
+        // outline rectangle, upstream edge at y = 19
+        let roi: Vec<bool> = (0..width * height)
+            .map(|idx| {
+                let (x, y) = (idx % width, idx / width);
+                (4..20).contains(&x) && (4..20).contains(&y)
+            })
+            .collect();
+        sim.set_roi(&roi).expect("Failed to set ROI");
+        sim.release_area_fraction = Some(0.25);
+        sim.crown_line_method = CrownLineMethod::GradientStep;
+
+        block_on(sim.run()).expect("Failed to run simulation");
+        assert_eq!(sim.state, SimulationState::Finished);
+
+        for (idx, &is_crown) in sim.crown_line.iter().enumerate() {
+            let (x, y) = (idx % width, idx / width);
+            let expected = y == 19 && (4..20).contains(&x);
+            assert_eq!(is_crown, expected, "at ({x},{y})");
+        }
+        // 256 outline cells -> 25% -> 64 release cells on the upstream rows
+        assert_eq!(sim.number_particles(), 64 * 8);
+        let release_areas =
+            block_on(sim.fetch_release_areas()).expect("Failed to fetch release areas");
+        assert_eq!(release_areas.iter().filter(|&&t| t > 0.0).count(), 64);
+    }
+
+    #[test_log::test]
+    fn test_release_estimation_slope_weighted_fill_end_to_end() {
+        let width = 24;
+        let height = 24;
+        let cell_size = 5.0;
+        // inclined plane draining towards decreasing y
+        let dem_data: Vec<f32> = (0..width * height)
+            .map(|idx| 2000.0 + (idx / width) as f32 * 5.0)
+            .collect();
+        let mut sim: Simulation = block_on(Simulation::new()).expect("Failed to create Simulation");
+        block_on(sim.create(Settings::default())).expect("Failed to create simulation");
+        sim.set_dem(&dem_data, width, height, cell_size)
+            .expect("Failed to set DEM");
+        let roi: Vec<bool> = (0..width * height)
+            .map(|idx| {
+                let (x, y) = (idx % width, idx / width);
+                (4..20).contains(&x) && (4..20).contains(&y)
+            })
+            .collect();
+        sim.set_roi(&roi).expect("Failed to set ROI");
+        sim.release_area_fraction = Some(0.25);
+        sim.release_fill_method = ReleaseFillMethod::SlopeWeighted;
+
+        block_on(sim.run()).expect("Failed to run simulation");
+        assert_eq!(sim.state, SimulationState::Finished);
+        // the uniform 45° plane weights every step alike: 256 outline cells
+        // -> 25% -> 64 release cells
+        assert_eq!(sim.number_particles(), 64 * 8);
+        let release_areas =
+            block_on(sim.fetch_release_areas()).expect("Failed to fetch release areas");
+        assert_eq!(release_areas.iter().filter(|&&t| t > 0.0).count(), 64);
+    }
+
+    #[test_log::test]
     fn test_release_estimation_particle_crown_line_end_to_end() {
         let width = 24;
         let height = 24;
         let cell_size = 5.0;
         // inclined plane draining towards decreasing y
         let dem_data: Vec<f32> = (0..width * height)
-            .map(|idx| 100.0 + (idx / width) as f32 * 5.0)
+            .map(|idx| 2000.0 + (idx / width) as f32 * 5.0)
             .collect();
         let mut sim: Simulation = block_on(Simulation::new()).expect("Failed to create Simulation");
         block_on(sim.create(Settings::default())).expect("Failed to create simulation");
@@ -2459,7 +3376,14 @@ mod tests {
 
     fn setup_simple_sim(slope_angle: f32, cell_size: f32) -> Simulation {
         let mut sim: Simulation = block_on(Simulation::new()).expect("Failed to create Simulation");
-        let settings = Settings::default();
+        // a 6x6 DEM is smaller than the grid models' 3-cell p2g boundary, so
+        // the fixture runs independent sliding blocks; tests override the model
+        // the step counts asserted by the fixture's users assume CFL 0.5
+        let settings = Settings {
+            sim_model: Some(SimModel::SlidingBlock),
+            cfl: Some(0.5),
+            ..Default::default()
+        };
         block_on(sim.create(settings)).expect("Failed to create simulation");
         sim.set_dem(
             &create_slope(6, 6, cell_size, slope_angle), // dem_data
@@ -2590,7 +3514,7 @@ mod tests {
             "Particles stopped at step 0: {}",
             state.iter().filter(|state| state.timestep == 0).count()
         );
-        assert_eq!(state.iter().filter(|state| state.timestep > 2).count(), 0);
+        assert_eq!(state.iter().filter(|state| state.timestep > 4).count(), 0);
         assert_eq!(state.iter().filter(|state| state.stopped).count(), 16);
         assert_eq!(state.iter().filter(|state| state.out_of_bounds).count(), 16);
         for p in state.iter() {
@@ -2629,6 +3553,13 @@ mod tests {
             ),
             cfl: Some(0.5),
             max_steps: Some(6000),
+            sim_model: Some(SimModel::SlidingBlock),
+            // the velocity bounds below were tuned for these Voellmy parameters
+            // (the defaults before c121632); the steady speed on the 34 deg plane
+            // is sqrt(xi h (sin - mu cos)), ~38 m/s here and ~26 m/s with the
+            // current defaults
+            friction_coefficient: Some(0.155),
+            drag_coefficient: Some(4000.0),
             ..Default::default()
         };
         block_on(sim.create(settings)).expect("Failed to create simulation");
@@ -2687,6 +3618,10 @@ mod tests {
             state.iter().filter(|state| state.timestep == 0).count()
         );
         assert!(state.iter().filter(|state| state.timestep == 0).count() < 20);
+        // the timestep data follows the middle particle until it falls off the DEM
+        let tracked = &state[state.len() / 2];
+        assert!(tracked.out_of_bounds);
+        let tracked_steps = tracked.timestep as usize;
 
         let max_velocity = block_on(sim.fetch_peak_velocity()).expect("Failed to get max velocity");
 
@@ -2709,7 +3644,7 @@ mod tests {
         );
 
         // velocity X should be above 30.0 after step 500
-        for i in 500..timesteps {
+        for i in 500..tracked_steps {
             let vel_x = timestep_data.velocity[i][0];
             assert!(
                 vel_x > 30.0,
@@ -2792,8 +3727,8 @@ mod tests {
             0.0, 0.0, 65.90516, 63.43495, 65.90516, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         ];
         let expected_slope_aspect: &[f32] = &[
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 206.56505, 180.0, 153.43495, 0.0, 0.0, 270.0, -1.0, 90.0,
-            0.0, 0.0, 333.43494, 0.0, 26.565048, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 26.565048, 0.0, 333.43494, 0.0, 0.0, 90.0, -1.0, 270.0,
+            0.0, 0.0, 153.43495, 180.0, 206.56505, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         ];
         let expected_terrain_l_x: &[f32] = &[
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.4142135, 1.0, 1.4142135, 0.0, 0.0, 1.4142135, 1.0,
@@ -2895,10 +3830,9 @@ mod tests {
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 65.90516, 63.43495, 65.90516, 0.0, 0.0, 45.0, 0.0, 45.0,
             0.0, 0.0, 65.90516, 63.43495, 65.90516, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         ];
-        // TODO one calculates slope aspect wrong
         let expected_slope_aspect: &[f32] = &[
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 206.56505, 180.0, 153.43495, 0.0, 0.0, 270.0, -1.0, 90.0,
-            0.0, 0.0, 333.43494, 0.0, 26.565048, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 26.565048, 0.0, 333.43494, 0.0, 0.0, 90.0, -1.0, 270.0,
+            0.0, 0.0, 153.43495, 180.0, 206.56505, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
         ];
         let expected_normals_x: &[f32] = &[
             0.0,
@@ -3035,6 +3969,129 @@ mod tests {
         );
         info!("Read number_release_cells: {:?}", number_release_cells);
     }
+    /// Writes a shapefile covering the west half of `dem` and returns its path.
+    fn write_release_shapefile(
+        dir: &tempfile::TempDir,
+        dem: &Dem,
+        thickness: Option<f64>,
+    ) -> String {
+        use shapefile::dbase::{FieldValue, Record, TableWriterBuilder};
+        use shapefile::{Point, Polygon, PolygonRing, Writer};
+
+        let bounds = &dem.bounds;
+        let (xmin, ymin) = (bounds.xmin as f64, bounds.ymin as f64);
+        let (xmid, ymax) = (
+            (bounds.xmin as f64 + bounds.xmax as f64) / 2.0,
+            bounds.ymax as f64,
+        );
+        let path = dir.path().join("release.shp");
+        let table =
+            TableWriterBuilder::new().add_numeric_field("thickness".try_into().unwrap(), 10, 3);
+        let mut writer = Writer::from_path(&path, table).unwrap();
+        let mut record = Record::default();
+        record.insert("thickness".to_string(), FieldValue::Numeric(thickness));
+        let ring = vec![
+            Point::new(xmin, ymin),
+            Point::new(xmin, ymax),
+            Point::new(xmid, ymax),
+            Point::new(xmid, ymin),
+            Point::new(xmin, ymin),
+        ];
+        writer
+            .write_shape_and_record(
+                &Polygon::with_rings(vec![PolygonRing::Outer(ring)]),
+                &record,
+            )
+            .unwrap();
+        path.to_str().unwrap().to_string()
+    }
+
+    #[test_log::test]
+    fn test_shapefile_release_thickness_prefers_setting_then_attributes() {
+        if std::env::var("GITHUB_ACTIONS").is_ok() {
+            println!("Skipping slow test on CI");
+            return;
+        }
+        let tmp_dir = tempfile::tempdir().unwrap();
+        for (attribute, setting, expected, has_thickness) in [
+            (Some(2.5), f32::NAN, 2.5, true),
+            (
+                None,
+                f32::NAN,
+                compute_core::DEFAULT_RELEASE_THICKNESS,
+                false,
+            ),
+            (Some(2.5), 1.75, 1.75, true),
+            (None, 1.75, 1.75, false),
+        ] {
+            let mut sim = block_on(Simulation::new()).expect("Failed to create Simulation");
+            block_on(sim.create_example(INCLINED_PLANE_PATH)).unwrap();
+            sim.settings.release_thickness = setting;
+            sim.release_areas_path = Some(write_release_shapefile(&tmp_dir, &sim.dem, attribute));
+
+            block_on(sim.prepare()).expect("Failed to prepare simulation");
+
+            let release_thickness = block_on(sim.fetch_release_areas()).unwrap();
+            let released: Vec<f32> = release_thickness
+                .iter()
+                .copied()
+                .filter(|&x| x > 0.0)
+                .collect();
+            assert!(!released.is_empty());
+            assert!(released.iter().all(|&x| x == expected));
+            assert_eq!(sim.release_source_has_thickness(), has_thickness);
+        }
+    }
+
+    #[test_log::test]
+    fn test_arrays_hold_their_own_release_thickness() {
+        let mut sim = block_on(Simulation::new()).expect("Failed to create Simulation");
+        assert!(!sim.release_source_has_thickness());
+        sim.release_areas_array = Some(vec![1.0]);
+        assert!(sim.release_source_has_thickness());
+    }
+
+    #[test_log::test]
+    fn test_computed_release_thickness_defaults_and_can_be_set() {
+        if std::env::var("GITHUB_ACTIONS").is_ok() {
+            println!("Skipping slow test on CI");
+            return;
+        }
+        for (setting, expected) in [
+            (f32::NAN, compute_core::DEFAULT_RELEASE_THICKNESS),
+            (1.75, 1.75),
+        ] {
+            let mut sim = block_on(Simulation::new()).expect("Failed to create Simulation");
+            block_on(sim.create_example(INCLINED_PLANE_PATH)).unwrap();
+            sim.release_areas_path = None;
+            sim.settings.release_thickness = setting;
+            sim.settings.release_min_elevation = 0.0;
+            block_on(sim.prepare()).expect("Failed to prepare simulation");
+
+            let release_thickness = block_on(sim.fetch_release_areas()).unwrap();
+            let released: Vec<f32> = release_thickness
+                .iter()
+                .copied()
+                .filter(|&x| x > 0.0)
+                .collect();
+            assert!(!released.is_empty());
+            assert!(released.iter().all(|&x| x == expected));
+        }
+    }
+
+    #[test_log::test]
+    fn test_release_thickness_replaces_the_thickness_of_release_cells() {
+        let mut sim = setup_varying_release_sim();
+        sim.settings.release_thickness = 1.5;
+        block_on(sim.prepare()).expect("Failed to prepare simulation");
+
+        let release_thickness = block_on(sim.fetch_release_areas()).unwrap();
+        let released = release_thickness.iter().filter(|&&x| x == 1.5).count();
+        let free = release_thickness.iter().filter(|&&x| x == 0.0).count();
+        assert_eq!(released, 64);
+        assert_eq!(free, 40 * 40 - 64);
+    }
+
     #[test_log::test]
     fn test_load_release_areas_gar() {
         let mut sim = block_on(Simulation::new()).expect("Failed to create Simulation");
@@ -3062,6 +4119,76 @@ mod tests {
         info!("Read number_release_cells: {:?}", number_release_cells);
     }
 
+    /// Seeded and relaxed particles must lie in release cells under the
+    /// floor(position / cell_size) convention of the simulation kernels.
+    /// The L-shaped release has concave and convex edges on all four
+    /// sides, and one cell below RELEASE_THICKNESS_THRESHOLD that must
+    /// neither be seeded nor counted when sizing the particle buffer.
+    #[test_log::test]
+    fn test_particles_stay_in_release_cells() {
+        const WIDTH: usize = 12;
+        const HEIGHT: usize = 10;
+        const CELL_SIZE: f32 = 5.0;
+        const PARTICLES_PER_CELL: u32 = 8;
+        let is_release_cell = |x: usize, y: usize| {
+            (2..=8).contains(&x) && (2..=6).contains(&y) && !(x >= 5 && y >= 5)
+        };
+        let dem: Vec<f32> = (0..WIDTH * HEIGHT)
+            .map(|idx| 1000.0 - 3.0 * (idx / WIDTH) as f32 * CELL_SIZE)
+            .collect();
+        let mut release: Vec<f32> = (0..WIDTH * HEIGHT)
+            .map(|idx| f32::from(is_release_cell(idx % WIDTH, idx / WIDTH)))
+            .collect();
+        release[8 * WIDTH + 10] = 0.5 * compute_core::RELEASE_THICKNESS_THRESHOLD;
+        let release_cells = release
+            .iter()
+            .filter(|&&thickness| thickness == 1.0)
+            .count();
+        assert_eq!(release_cells, 27);
+
+        for relax in [false, true] {
+            let mut sim = block_on(Simulation::new()).expect("Failed to create Simulation");
+            sim.set_dem(&dem, WIDTH, HEIGHT, CELL_SIZE)
+                .expect("Failed to set DEM");
+            sim.set_release_areas(&release)
+                .expect("Failed to set release areas");
+            sim.settings.released_particles_per_cell = PARTICLES_PER_CELL;
+            sim.enable_particle_relaxation = relax;
+            block_on(sim.prepare()).expect("Failed to prepare simulation");
+            assert_eq!(
+                sim.number_particles as usize,
+                release_cells * PARTICLES_PER_CELL as usize
+            );
+
+            let positions = block_on(sim.fetch_particles_position())
+                .expect("Failed to fetch particle positions")
+                .clone();
+            assert_eq!(positions.len(), sim.number_particles as usize);
+            let mut particles_per_cell = vec![0u32; WIDTH * HEIGHT];
+            for &[x, y] in &positions {
+                let cell_x = (x / CELL_SIZE).floor();
+                let cell_y = (y / CELL_SIZE).floor();
+                assert!(
+                    cell_x >= 0.0
+                        && cell_y >= 0.0
+                        && is_release_cell(cell_x as usize, cell_y as usize),
+                    "particle ({x}, {y}) outside the release cells (relax: {relax})"
+                );
+                particles_per_cell[cell_y as usize * WIDTH + cell_x as usize] += 1;
+            }
+            if !relax {
+                for (idx, &count) in particles_per_cell.iter().enumerate() {
+                    let expected = if is_release_cell(idx % WIDTH, idx / WIDTH) {
+                        PARTICLES_PER_CELL
+                    } else {
+                        0
+                    };
+                    assert_eq!(count, expected, "seeded particles in cell {idx}");
+                }
+            }
+        }
+    }
+
     #[test_log::test]
     fn test_initialize_particles() {
         let mut sim = block_on(Simulation::new()).expect("Failed to create Simulation");
@@ -3069,8 +4196,13 @@ mod tests {
         sim.settings.released_particles_per_cell = 10;
         info!("Sim settings: {:?}", sim.settings);
         block_on(sim.analyze_terrain()).expect("Failed to analyze terrain");
-        let data = block_on(data_processor::load_release_areas(RELEASE_TEXTURE_PATH))
-            .expect("Failed to read release areas");
+        let data = block_on(data_processor::load_release_areas(
+            RELEASE_TEXTURE_PATH,
+            &sim.dem,
+            sim.settings.release_thickness_or_default(),
+        ))
+        .expect("Failed to read release areas")
+        .thickness;
         let number_release_cells: u32 =
             block_on(sim.load_release_areas()).expect("Failed to load_release_areas");
         let estimated_release_volume = block_on(sim.orchestrator.run_initialize_particles(
@@ -3163,8 +4295,12 @@ mod tests {
         assert_eq!(advanced.timestep, 1);
         assert_eq!(sim.state, SimulationState::Running);
 
+        // the particles leave the 6x6 DEM during the fourth step
+        let resumed = block_on(sim.run_n_steps(3)).expect("Failed to resume simulation");
+        assert_eq!(resumed.timestep, 4);
+
         let finished = block_on(sim.run_n_steps(1)).expect("Failed to resume simulation");
-        assert_eq!(finished.timestep, advanced.timestep);
+        assert_eq!(finished.timestep, resumed.timestep);
         assert_eq!(sim.state, SimulationState::Finished);
 
         let atomics = block_on(sim.fetch_atomic_values()).expect("Failed to fetch atomic values");
@@ -3174,7 +4310,8 @@ mod tests {
     #[test_log::test]
     fn test_run_n_steps_clamps_to_max_steps() {
         let mut sim = setup_simple_sim(40.0, 3.0);
-        sim.settings.max_steps = 2;
+        // the particles would need four steps to leave the DEM
+        sim.settings.max_steps = 1;
 
         let result = block_on(sim.run_n_steps(u32::MAX)).expect("Failed to advance simulation");
 
@@ -3183,9 +4320,19 @@ mod tests {
     }
 
     #[test_log::test]
-    fn test_mpm_velocity_z_is_synthetic_zero() {
+    fn test_curvilinear_velocity_z_is_tangent_to_bed() {
         let mut sim = setup_simple_sim(40.0, 3.0);
         sim.settings.sim_model = SimModel::Curvilinear.as_int();
+        sim.set_dem(&create_slope(16, 16, 3.0, 40.0), 16, 16, 3.0)
+            .expect("Failed to set interior test DEM");
+        let mut release = vec![0.0; 16 * 16];
+        for y in 6..10 {
+            for x in 6..10 {
+                release[y * 16 + x] = 1.0;
+            }
+        }
+        sim.set_release_areas(&release)
+            .expect("Failed to set interior release");
         block_on(sim.prepare()).expect("Failed to prepare MPM simulation");
         let number_particles = sim.number_particles as usize;
 
@@ -3194,6 +4341,1016 @@ mod tests {
 
         assert_eq!(velocity_z.len(), number_particles);
         assert!(velocity_z.iter().all(|velocity| *velocity == 0.0));
+
+        block_on(sim.run_n_steps(1)).expect("Failed to advance curvilinear simulation");
+        let velocity_z = block_on(sim.fetch_particles_velocity_z())
+            .expect("Failed to fetch vertical velocity")
+            .clone();
+        let velocity_xy =
+            block_on(sim.fetch_particles_velocity()).expect("Failed to fetch horizontal velocity");
+        assert!(velocity_z.iter().any(|velocity| velocity.abs() > 1e-3));
+        for (horizontal, vertical) in velocity_xy.iter().zip(velocity_z) {
+            assert!(vertical.is_finite());
+            assert!(vertical.abs() <= horizontal[0].hypot(horizontal[1]) * 2.0);
+        }
+    }
+
+    #[test_log::test]
+    fn test_sorted_p2g_matches_direct_p2g() {
+        // integer grid sums do not depend on the deposit order, so the
+        // tile-sorted P2G must reproduce the direct P2G exactly; float atomics
+        // do, and the sorted path quantizes per tile, so they only agree closely
+        for model in [
+            SimModel::Curvilinear,
+            SimModel::TerrainFollowing,
+            SimModel::ThreeD,
+        ] {
+            check_sorted_p2g_matches_direct_p2g(model);
+        }
+    }
+
+    fn check_sorted_p2g_matches_direct_p2g(model: SimModel) {
+        let run = |sort_interval: u32| {
+            let mut sim = setup_simple_sim(30.0, 5.0);
+            sim.settings.sim_model = model.as_int();
+            sim.enable_particle_relaxation = false;
+            sim.orchestrator.particle_sort_interval = sort_interval;
+            sim.set_dem(&create_slope(40, 40, 5.0, 30.0), 40, 40, 5.0)
+                .expect("Failed to set DEM");
+            let mut release = vec![0.0; 40 * 40];
+            for y in 12..28 {
+                for x in 22..34 {
+                    release[y * 40 + x] = 1.0;
+                }
+            }
+            sim.set_release_areas(&release)
+                .expect("Failed to set release");
+            block_on(sim.run_n_steps(40)).expect("Failed to run");
+            assert_eq!(sim.orchestrator.particle_sort_enabled(), sort_interval > 0);
+            let mut positions = block_on(sim.fetch_particles_position())
+                .expect("Failed to fetch positions")
+                .clone();
+            positions.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let grid_mass: Vec<u32> = block_on(sim.orchestrator.read_buffer(BufferName::GridMass))
+                .expect("Failed to read grid mass");
+            (positions, grid_mass, sim.orchestrator.has_float32_atomic())
+        };
+        let (direct_positions, direct_mass, float_atomics) = run(0);
+        let (sorted_positions, sorted_mass, _) = run(3);
+        assert!(direct_mass.iter().any(|mass| *mass > 0));
+        if !float_atomics {
+            assert_eq!(direct_mass, sorted_mass);
+            assert_eq!(direct_positions, sorted_positions);
+            return;
+        }
+
+        let max_mass = direct_mass
+            .iter()
+            .map(|bits| f32::from_bits(*bits))
+            .fold(0.0, f32::max);
+        let mass_error = direct_mass
+            .iter()
+            .zip(&sorted_mass)
+            .map(|(a, b)| (f32::from_bits(*a) - f32::from_bits(*b)).abs())
+            .fold(0.0, f32::max);
+        let centroid = |positions: &[[f32; 2]]| {
+            let sum = positions.iter().fold([0.0f64; 2], |sum, p| {
+                [sum[0] + p[0] as f64, sum[1] + p[1] as f64]
+            });
+            [
+                sum[0] / positions.len() as f64,
+                sum[1] / positions.len() as f64,
+            ]
+        };
+        let (direct_centroid, sorted_centroid) =
+            (centroid(&direct_positions), centroid(&sorted_positions));
+        let centroid_error = (direct_centroid[0] - sorted_centroid[0])
+            .hypot(direct_centroid[1] - sorted_centroid[1]);
+        info!(
+            "sorted vs direct P2G: mass error {mass_error} of {max_mass}, centroid error {centroid_error}"
+        );
+        assert_eq!(direct_positions.len(), sorted_positions.len());
+        assert!(mass_error < 5e-3 * max_mass);
+        assert!(centroid_error < 1e-2);
+    }
+
+    /// Wall time of a full run per grid model on one scenario. Run with
+    /// `cargo test -p simulation --release model_timing -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "benchmark"]
+    fn model_timing() {
+        // 3 km x 1 km bed flattening into a runout, with cross-slope undulation
+        const COLS: usize = 600;
+        const ROWS: usize = 200;
+        const CELL: f32 = 5.0;
+        let mut dem = vec![0.0; COLS * ROWS];
+        for row in 0..ROWS {
+            for col in 0..COLS {
+                let x = col as f32 * CELL;
+                let y = row as f32 * CELL;
+                let length = COLS as f32 * CELL;
+                dem[row * COLS + col] =
+                    0.85 * x * x / (2.0 * length) + 4.0 * (y / 60.0).sin() * (x / 300.0).cos();
+            }
+        }
+        let release_block = |rows: std::ops::Range<usize>, cols: std::ops::Range<usize>| {
+            let mut release = vec![0.0; COLS * ROWS];
+            for row in rows {
+                for col in cols.clone() {
+                    release[row * COLS + col] = 1.0;
+                }
+            }
+            release
+        };
+        let releases = [
+            release_block(80..120, 480..520),
+            release_block(40..160, 450..550),
+        ];
+
+        for (release, model) in releases.iter().flat_map(|release| {
+            [
+                SimModel::Curvilinear,
+                SimModel::TerrainFollowing,
+                SimModel::ThreeD,
+            ]
+            .map(|model| (release, model))
+        }) {
+            let mut best = f64::INFINITY;
+            let mut steps = 0;
+            let mut flags = SimInfoFlags::empty();
+            let mut particles = 0;
+            for _ in 0..3 {
+                let mut sim = block_on(Simulation::new()).expect("Failed to create Simulation");
+                let settings = Settings {
+                    sim_model: Some(model),
+                    ..Default::default()
+                };
+                block_on(sim.create(settings)).expect("Failed to create simulation");
+                sim.enable_particle_relaxation = false;
+                sim.set_dem(&dem, COLS, ROWS, CELL)
+                    .expect("Failed to set DEM");
+                sim.set_release_areas(release)
+                    .expect("Failed to set release");
+                block_on(sim.prepare()).expect("Failed to prepare");
+                let start = Instant::now();
+                block_on(sim.run()).expect("Failed to run");
+                best = best.min(start.elapsed().as_secs_f64());
+                let info = block_on(sim.fetch_sim_info()).expect("Failed to read sim info");
+                steps = info.timestep;
+                flags = info.parsed_flags();
+                particles = info.number_particles;
+            }
+            println!(
+                "{model}: {best:.2} s, {steps} steps, {:.3} ms/step, {particles} particles, {flags:?}",
+                best * 1e3 / steps as f64
+            );
+        }
+    }
+
+    #[test]
+    fn test_mean_release_terrain_uses_only_valid_release_cells() {
+        const N: usize = 5;
+        let mut release = [0.0f32; N * N];
+        let mut slope = [50.0f32; N * N];
+        let mut aspect = [180.0f32; N * N];
+        let mut elevation = [9000.0f32; N * N];
+        for (idx, cell_slope, cell_aspect, cell_elevation) in [
+            (N + 1, 30.0, 350.0, 1000.0),
+            (N + 2, 40.0, 10.0, 2000.0),
+            // flat: no aspect, but slope and elevation still count
+            (N + 3, 20.0, -1.0, 3000.0),
+            // no data
+            (2 * N + 1, f32::NAN, f32::NAN, f32::NAN),
+        ] {
+            release[idx] = 1.0;
+            slope[idx] = cell_slope;
+            aspect[idx] = cell_aspect;
+            elevation[idx] = cell_elevation;
+        }
+        // the outermost cells and thin cells are not part of the mean
+        release[0] = 1.0;
+        release[2 * N + 2] = compute_core::RELEASE_THICKNESS_THRESHOLD;
+
+        let mean = mean_release_terrain(&release, &slope, &aspect, &elevation, N, N);
+        assert!((mean.slope_angle - 30.0).abs() < 1e-4);
+        // the steeper cells outside the release and the NaN cell do not count
+        assert_eq!(mean.max_slope_angle, 40.0);
+        assert!((mean.elevation - 2000.0).abs() < 1e-2);
+        // a circular mean: 350 and 10 degrees average to north, not south
+        assert!(mean.slope_aspect.min(360.0 - mean.slope_aspect) < 1e-3);
+    }
+
+    #[test]
+    fn test_mean_release_terrain_is_nan_without_a_mean() {
+        const N: usize = 4;
+        let zeros = [0.0f32; N * N];
+        let empty = mean_release_terrain(&zeros, &zeros, &zeros, &zeros, N, N);
+        assert!(empty.slope_angle.is_nan());
+        assert!(empty.max_slope_angle.is_nan());
+        assert!(empty.slope_aspect.is_nan());
+        assert!(empty.elevation.is_nan());
+
+        let mut release = [0.0f32; N * N];
+        let mut aspect = [0.0f32; N * N];
+        release[N + 1] = 1.0;
+        release[N + 2] = 1.0;
+        aspect[N + 2] = 180.0;
+        let opposed = mean_release_terrain(&release, &zeros, &aspect, &zeros, N, N);
+        assert!(opposed.slope_aspect.is_nan());
+        assert_eq!(opposed.slope_angle, 0.0);
+    }
+
+    #[test_log::test]
+    fn test_release_area_terrain_on_a_tilted_plane() {
+        // the plane rises to the east and north, and the release sits off centre
+        // in both directions, so a swapped layout gives another elevation
+        const N: usize = 24;
+        const CELL: f32 = 5.0;
+        let (rise_x, rise_y) = (0.3f32, 0.4f32);
+        let dem: Vec<f32> = (0..N * N)
+            .map(|idx| {
+                let (x, y) = ((idx % N) as f32, (idx / N) as f32);
+                1000.0 + (rise_x * x + rise_y * y) * CELL
+            })
+            .collect();
+        let mut release = vec![0.0; N * N];
+        for y in 4..10 {
+            for x in 12..20 {
+                release[y * N + x] = 1.0;
+            }
+        }
+        for model in [SimModel::Curvilinear, SimModel::SlidingBlock] {
+            let mut sim = setup_simple_sim(0.0, CELL);
+            sim.settings.sim_model = model.as_int();
+            sim.set_dem(&dem, N, N, CELL).expect("Failed to set DEM");
+            sim.set_release_areas(&release)
+                .expect("Failed to set release");
+            block_on(sim.prepare()).expect("Failed to prepare simulation");
+
+            let terrain =
+                block_on(sim.release_area_terrain()).expect("Failed to average the terrain");
+            let expected_elevation = 1000.0 + (rise_x * 15.5 + rise_y * 6.5) * CELL;
+            let expected_angle = rise_x.hypot(rise_y).atan().to_degrees();
+            // the plane rises to the north-east, so it faces south-west
+            let expected_aspect = 90.0 - (-rise_y).atan2(-rise_x).to_degrees();
+            assert!((terrain.elevation - expected_elevation).abs() < 1e-2);
+            assert!((terrain.slope_angle - expected_angle).abs() < 0.1);
+            // a plane has one slope angle everywhere
+            assert!((terrain.max_slope_angle - expected_angle).abs() < 0.1);
+            assert!((terrain.slope_aspect - expected_aspect).abs() < 0.1);
+        }
+    }
+
+    #[test_log::test]
+    fn test_grid_fetchers_match_the_particle_totals() {
+        // the fetched grid fields are in kg and kg m/s on every GPU
+        // the front reaches the outermost nodes, whose zero metrics must not give NaN
+        let mut sim = setup_simple_sim(30.0, 5.0);
+        sim.settings.sim_model = SimModel::Curvilinear.as_int();
+        sim.enable_particle_relaxation = false;
+        sim.set_dem(&create_slope(40, 40, 5.0, 30.0), 40, 40, 5.0)
+            .expect("Failed to set DEM");
+        let mut release = vec![0.0; 40 * 40];
+        for y in 12..28 {
+            for x in 16..28 {
+                release[y * 40 + x] = 1.0;
+            }
+        }
+        sim.set_release_areas(&release)
+            .expect("Failed to set release");
+        block_on(sim.run_n_steps(40)).expect("Failed to run");
+
+        let masses = block_on(sim.fetch_particles_mass())
+            .expect("Failed to fetch particle mass")
+            .clone();
+        let velocities = block_on(sim.fetch_particles_velocity())
+            .expect("Failed to fetch particle velocity")
+            .clone();
+        let particle_mass: f64 = masses.iter().map(|mass| *mass as f64).sum();
+        let particle_momentum =
+            masses
+                .iter()
+                .zip(&velocities)
+                .fold([0.0f64; 2], |sum, (mass, velocity)| {
+                    [
+                        sum[0] + (*mass * velocity[0]) as f64,
+                        sum[1] + (*mass * velocity[1]) as f64,
+                    ]
+                });
+
+        let grid_mass = block_on(sim.fetch_grid_mass()).expect("Failed to fetch grid mass");
+        let grid_mass: f64 = grid_mass.iter().map(|mass| *mass as f64).sum();
+        let grid_momentum =
+            block_on(sim.fetch_grid_momentum()).expect("Failed to fetch grid momentum");
+        let grid_momentum = grid_momentum
+            .chunks_exact(2)
+            .fold([0.0f64; 2], |sum, node| {
+                [sum[0] + node[0] as f64, sum[1] + node[1] as f64]
+            });
+
+        let momentum_error = (grid_momentum[0] - particle_momentum[0])
+            .hypot(grid_momentum[1] - particle_momentum[1]);
+        let momentum_scale = particle_momentum[0].hypot(particle_momentum[1]);
+        info!(
+            "grid vs particles: mass {grid_mass} / {particle_mass}, momentum {grid_momentum:?} / {particle_momentum:?}"
+        );
+        assert!((grid_mass - particle_mass).abs() < 1e-2 * particle_mass);
+        assert!(momentum_scale > 0.0);
+        assert!(momentum_error < 0.2 * momentum_scale);
+    }
+
+    #[test_log::test]
+    fn test_curvilinear_weak_pressure_gradient() {
+        // one step of a flat square release: the weak-form grad h of
+        // p2g_weak_pressure follows the centred difference at the release edge
+        // and nearly vanishes inside the uniform release
+        const N: usize = 40;
+        const CELL: f32 = 5.0;
+        let run = |weak_pressure: bool| {
+            let mut sim = setup_simple_sim(0.0, CELL);
+            sim.settings.sim_model = SimModel::Curvilinear.as_int();
+            if weak_pressure {
+                sim.settings.flags |=
+                    compute_core::settings::SimFlags::new(false, false, false, false, false, true)
+                        .mask;
+            }
+            sim.set_dem(&create_slope(N, N, CELL, 0.0), N, N, CELL)
+                .expect("Failed to set DEM");
+            let mut release = vec![0.0; N * N];
+            for y in 12..28 {
+                for x in 12..28 {
+                    release[y * N + x] = 1.0;
+                }
+            }
+            sim.set_release_areas(&release)
+                .expect("Failed to set release");
+            block_on(sim.run_n_steps(1)).expect("Failed to run");
+            // float atomics hold kg directly; otherwise dequantize with
+            // MASS_FACTOR = 1e1 and PRESSURE_FACTOR = 1e3 (utils.wgsl)
+            let (mass, sums): (Vec<f32>, Vec<f32>) = if sim.orchestrator.has_float32_atomic() {
+                (
+                    block_on(sim.orchestrator.read_buffer(BufferName::GridMass))
+                        .expect("Failed to read grid mass"),
+                    block_on(sim.orchestrator.read_buffer(BufferName::GridForces))
+                        .expect("Failed to read weak pressure sums"),
+                )
+            } else {
+                let mass: Vec<u32> = block_on(sim.orchestrator.read_buffer(BufferName::GridMass))
+                    .expect("Failed to read grid mass");
+                let sums: Vec<i32> = block_on(sim.orchestrator.read_buffer(BufferName::GridForces))
+                    .expect("Failed to read weak pressure sums");
+                (
+                    mass.iter().map(|mass| *mass as f32 * 0.1).collect(),
+                    sums.iter().map(|sum| *sum as f32 * 1e-3).collect(),
+                )
+            };
+            (mass, sums, sim.settings.density)
+        };
+
+        let (_, centred_sums, _) = run(false);
+        assert!(centred_sums.iter().all(|sum| *sum == 0.0));
+
+        let (mass, sums, density) = run(true);
+        let node_mass = |x: usize, y: usize| mass[y * N + x];
+        let thickness = |x: usize, y: usize| node_mass(x, y) / (density * CELL * CELL);
+        let mut interior = Vec::new();
+        let mut edge = Vec::new();
+        let mut edge_agrees = 0;
+        for y in 4..N - 4 {
+            for x in 4..N - 4 {
+                if node_mass(x, y) < 1.0 {
+                    continue;
+                }
+                let weak = [
+                    sums[(y * N + x) * 2] / node_mass(x, y),
+                    sums[(y * N + x) * 2 + 1] / node_mass(x, y),
+                ];
+                let centred = [
+                    (thickness(x + 1, y) - thickness(x - 1, y)) / (2.0 * CELL),
+                    (thickness(x, y + 1) - thickness(x, y - 1)) / (2.0 * CELL),
+                ];
+                if (16..24).contains(&x) && (16..24).contains(&y) {
+                    interior.push(weak[0].hypot(weak[1]));
+                } else if centred[0].hypot(centred[1]) > 0.05 {
+                    edge.push(weak[0].hypot(weak[1]));
+                    if weak[0] * centred[0] + weak[1] * centred[1] > 0.0 {
+                        edge_agrees += 1;
+                    }
+                }
+            }
+        }
+        let mean = |values: &[f32]| values.iter().sum::<f32>() / values.len() as f32;
+        info!(
+            "weak grad h: interior mean {:.4}, edge mean {:.4}, {}/{} edge nodes agree",
+            mean(&interior),
+            mean(&edge),
+            edge_agrees,
+            edge.len()
+        );
+        assert!(!interior.is_empty() && !edge.is_empty());
+        assert!(edge_agrees as f32 >= 0.9 * edge.len() as f32);
+        assert!(mean(&interior) < 0.25 * mean(&edge));
+    }
+
+    #[test_log::test]
+    fn test_momentum_stop_fraction_stops_decaying_flow() {
+        // a block spreading on flat ground gains and then loses momentum
+        for model in [
+            SimModel::Curvilinear,
+            SimModel::TerrainFollowing,
+            SimModel::ThreeD,
+        ] {
+            check_momentum_stop_fraction(model);
+        }
+    }
+
+    fn check_momentum_stop_fraction(model: SimModel) {
+        let run = |fraction: f32| {
+            let mut sim = setup_simple_sim(0.0, 5.0);
+            sim.settings.sim_model = model.as_int();
+            sim.settings.friction_coefficient = 0.05;
+            sim.settings.momentum_stop_fraction = fraction;
+            sim.settings.max_steps = 2000;
+            sim.enable_particle_relaxation = false;
+            sim.set_dem(&create_slope(40, 40, 5.0, 0.0), 40, 40, 5.0)
+                .expect("Failed to set DEM");
+            let mut release = vec![0.0; 40 * 40];
+            for y in 16..24 {
+                for x in 16..24 {
+                    release[y * 40 + x] = 1.0;
+                }
+            }
+            sim.set_release_areas(&release)
+                .expect("Failed to set release");
+            let mut info = block_on(sim.run_n_steps(50)).expect("Failed to run");
+            while !info.parsed_flags().contains(SimInfoFlags::SIM_STOPPED) && info.timestep < 2000 {
+                info = block_on(sim.run_n_steps(50)).expect("Failed to run");
+            }
+            info
+        };
+        let off = run(0.0);
+        let on = run(0.5);
+        assert!(!off.parsed_flags().contains(SimInfoFlags::LOW_MOMENTUM));
+        assert!(on.parsed_flags().contains(SimInfoFlags::LOW_MOMENTUM));
+        assert!(on.timestep < off.timestep);
+    }
+
+    /// Slab released on a 30 degree slope, with relaxed particles, for the
+    /// initial-state tests.
+    fn setup_restore_sim(sim_model: SimModel) -> Simulation {
+        let mut sim = setup_simple_sim(30.0, 5.0);
+        sim.settings.sim_model = sim_model.as_int();
+        sim.settings.max_steps = 150;
+        sim.set_dem(&create_slope(40, 40, 5.0, 30.0), 40, 40, 5.0)
+            .expect("Failed to set DEM");
+        let mut release = vec![0.0; 40 * 40];
+        for y in 16..24 {
+            for x in 16..24 {
+                release[y * 40 + x] = 1.0;
+            }
+        }
+        sim.set_release_areas(&release)
+            .expect("Failed to set release");
+        sim
+    }
+
+    /// [`setup_restore_sim`] with a thickness that differs between release cells.
+    fn setup_varying_release_sim() -> Simulation {
+        let mut sim = setup_restore_sim(SimModel::Curvilinear);
+        let mut release = sim.release_areas_array.clone().unwrap();
+        for (index, thickness) in release.iter_mut().enumerate() {
+            *thickness *= 1.0 + (index % 2) as f32;
+        }
+        sim.set_release_areas(&release)
+            .expect("Failed to set release");
+        sim
+    }
+
+    /// Step count, peak flow thickness and peak velocity of a full run.
+    fn run_and_collect(sim: &mut Simulation) -> (u32, Vec<f32>, Vec<f32>) {
+        block_on(sim.run()).expect("Failed to run");
+        let timestep = sim.sim_info.timestep;
+        let thickness = block_on(sim.fetch_peak_flow_thickness())
+            .expect("Failed to fetch peak flow thickness")
+            .to_vec();
+        let velocity = block_on(sim.fetch_peak_velocity())
+            .expect("Failed to fetch peak velocity")
+            .clone();
+        (timestep, thickness, velocity)
+    }
+
+    /// Integer grid sums are order-independent, so repeated runs from the
+    /// same particles match exactly; float atomics may round differently.
+    fn assert_same_run(sim: &Simulation, left: &[f32], right: &[f32]) {
+        assert_eq!(left.len(), right.len());
+        if sim.orchestrator.has_float32_atomic() {
+            let max = left.iter().fold(0.0f32, |acc, v| acc.max(v.abs()));
+            for (l, r) in left.iter().zip(right) {
+                assert!((l - r).abs() <= 1e-3 * max.max(1.0), "{l} != {r}");
+            }
+        } else {
+            assert_eq!(left, right);
+        }
+    }
+
+    #[test_log::test]
+    fn test_restore_initial_state_repeats_the_run() {
+        for model in [SimModel::Curvilinear, SimModel::SlidingBlock] {
+            let mut sim = setup_restore_sim(model);
+            block_on(sim.store_initial_state()).expect("Failed to store initial state");
+            assert!(sim.has_initial_state());
+            let (steps, thickness, velocity) = run_and_collect(&mut sim);
+            assert!(thickness.iter().any(|h| *h > 0.0));
+
+            block_on(sim.restore_initial_state()).expect("Failed to restore");
+            assert_eq!(sim.get_state(), SimulationState::ParticlesInitialized);
+            let (steps_again, thickness_again, velocity_again) = run_and_collect(&mut sim);
+            assert_eq!(steps, steps_again, "{model}");
+            assert_same_run(&sim, &thickness, &thickness_again);
+            assert_same_run(&sim, &velocity, &velocity_again);
+        }
+    }
+
+    #[test_log::test]
+    fn test_restore_initial_state_applies_loop_settings() {
+        let mut sim = setup_restore_sim(SimModel::Curvilinear);
+        block_on(sim.store_initial_state()).expect("Failed to store initial state");
+        let (_, thickness, _) = run_and_collect(&mut sim);
+
+        let patch = Settings {
+            friction_coefficient: Some(0.5),
+            ..Default::default()
+        };
+        sim.update_settings(&patch)
+            .expect("Failed to update settings");
+        block_on(sim.restore_initial_state()).expect("Failed to restore");
+        let (_, thickness_rough, _) = run_and_collect(&mut sim);
+        assert_ne!(thickness, thickness_rough);
+
+        // back to the stored friction: the first run again
+        let patch = Settings {
+            friction_coefficient: Some(0.2),
+            ..Default::default()
+        };
+        sim.update_settings(&patch)
+            .expect("Failed to update settings");
+        block_on(sim.restore_initial_state()).expect("Failed to restore");
+        let (_, thickness_again, _) = run_and_collect(&mut sim);
+        assert_same_run(&sim, &thickness, &thickness_again);
+    }
+
+    #[test_log::test]
+    fn test_restore_initial_state_rescales_mass_and_reseeds_release() {
+        let mut sim = setup_restore_sim(SimModel::Curvilinear);
+        block_on(sim.store_initial_state()).expect("Failed to store initial state");
+        let positions = block_on(sim.fetch_particles_position())
+            .expect("Failed to fetch positions")
+            .clone();
+        let mass = block_on(sim.fetch_particles_mass())
+            .expect("Failed to fetch mass")
+            .clone();
+        run_and_collect(&mut sim);
+
+        // density only rescales the stored particles
+        let patch = Settings {
+            density: Some(400.0),
+            ..Default::default()
+        };
+        sim.update_settings(&patch)
+            .expect("Failed to update settings");
+        block_on(sim.restore_initial_state()).expect("Failed to restore");
+        let restored_positions = block_on(sim.fetch_particles_position())
+            .expect("Failed to fetch positions")
+            .clone();
+        let restored_mass = block_on(sim.fetch_particles_mass())
+            .expect("Failed to fetch mass")
+            .clone();
+        assert_eq!(positions, restored_positions);
+        for (m, restored) in mass.iter().zip(&restored_mass) {
+            assert!((m * 2.0 - restored).abs() <= 1e-6 * restored.abs());
+        }
+
+        // particles per cell change the seeding
+        let number_particles = sim.number_particles();
+        let patch = Settings {
+            released_particles_per_cell: Some(4),
+            ..Default::default()
+        };
+        sim.update_settings(&patch)
+            .expect("Failed to update settings");
+        block_on(sim.restore_initial_state()).expect("Failed to restore");
+        assert_eq!(sim.number_particles(), number_particles / 2);
+        let (_, thickness, _) = run_and_collect(&mut sim);
+        assert!(thickness.iter().any(|h| *h > 0.0));
+    }
+
+    #[test_log::test]
+    fn test_restore_initial_state_applies_release_thickness() {
+        let mut sim = setup_varying_release_sim();
+        block_on(sim.store_initial_state()).expect("Failed to store initial state");
+
+        // a thickness per cell becomes uniform, which needs new particle masses
+        let patch = Settings {
+            release_thickness: Some(2.0),
+            ..Default::default()
+        };
+        sim.update_settings(&patch)
+            .expect("Failed to update settings");
+        block_on(sim.restore_initial_state()).expect("Failed to restore");
+        let release_thickness = block_on(sim.fetch_release_areas()).unwrap();
+        assert_eq!(release_thickness.iter().filter(|&&x| x == 2.0).count(), 64);
+        let positions = block_on(sim.fetch_particles_position())
+            .expect("Failed to fetch positions")
+            .clone();
+        let mass = block_on(sim.fetch_particles_mass())
+            .expect("Failed to fetch mass")
+            .clone();
+        assert!(mass.iter().all(|m| (m - mass[0]).abs() <= 1e-4 * mass[0]));
+
+        // a uniform thickness only rescales the stored particles
+        let patch = Settings {
+            release_thickness: Some(4.0),
+            ..Default::default()
+        };
+        sim.update_settings(&patch)
+            .expect("Failed to update settings");
+        block_on(sim.restore_initial_state()).expect("Failed to restore");
+        let release_thickness = block_on(sim.fetch_release_areas()).unwrap();
+        assert_eq!(release_thickness.iter().filter(|&&x| x == 4.0).count(), 64);
+        let restored_positions = block_on(sim.fetch_particles_position())
+            .expect("Failed to fetch positions")
+            .clone();
+        let restored_mass = block_on(sim.fetch_particles_mass())
+            .expect("Failed to fetch mass")
+            .clone();
+        assert_eq!(positions, restored_positions);
+        for (m, restored) in mass.iter().zip(&restored_mass) {
+            assert!((m * 2.0 - restored).abs() <= 1e-6 * restored.abs());
+        }
+    }
+
+    fn total_particle_mass(sim: &mut Simulation) -> f32 {
+        block_on(sim.fetch_particles_mass())
+            .expect("Failed to fetch mass")
+            .iter()
+            .sum()
+    }
+
+    fn assert_close(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() <= 1e-3 * expected,
+            "{actual} != {expected}"
+        );
+    }
+
+    #[test_log::test]
+    fn test_release_swe_sets_the_mass_per_horizontal_area() {
+        let mut sim = setup_restore_sim(SimModel::Curvilinear);
+        sim.settings.release_swe = 150.0;
+        block_on(sim.prepare()).expect("Failed to prepare");
+
+        // 64 cells of 5 m on a 30 degree slope: no slope factor
+        assert_close(total_particle_mass(&mut sim), 150.0 * 25.0 * 64.0);
+        let thickness = 150.0 / sim.settings.density;
+        let release_areas = block_on(sim.fetch_release_areas()).unwrap();
+        assert_eq!(
+            release_areas.iter().filter(|&&x| x == thickness).count(),
+            64
+        );
+    }
+
+    #[test_log::test]
+    fn test_restore_initial_state_applies_release_swe() {
+        let mut sim = setup_restore_sim(SimModel::Curvilinear);
+        sim.settings.density = 200.0;
+        sim.settings.release_thickness = 1.0;
+        block_on(sim.store_initial_state()).expect("Failed to store initial state");
+        let thickness_mass = total_particle_mass(&mut sim);
+        assert_close(
+            thickness_mass,
+            200.0 * 25.0 * 64.0 / 30f32.to_radians().cos(),
+        );
+
+        // the same thickness as before, but without the slope factor
+        let mut apply = |patch: Settings| {
+            sim.update_settings(&patch)
+                .expect("Failed to update settings");
+            block_on(sim.restore_initial_state()).expect("Failed to restore");
+            total_particle_mass(&mut sim)
+        };
+        let swe_mass = apply(Settings {
+            release_swe: Some(200.0),
+            ..Default::default()
+        });
+        assert_close(swe_mass, 200.0 * 25.0 * 64.0);
+
+        // SWE fixes the mass, so a denser snowpack is only thinner
+        let denser_mass = apply(Settings {
+            density: Some(400.0),
+            ..Default::default()
+        });
+        assert_close(denser_mass, swe_mass);
+
+        let doubled_mass = apply(Settings {
+            release_swe: Some(400.0),
+            ..Default::default()
+        });
+        assert_close(doubled_mass, 2.0 * swe_mass);
+
+        let restored_mass = apply(Settings {
+            density: Some(200.0),
+            release_thickness: Some(1.0),
+            ..Default::default()
+        });
+        assert_close(restored_mass, thickness_mass);
+    }
+
+    #[test_log::test]
+    fn test_update_settings_rejects_both_release_thickness_and_swe() {
+        let mut sim = setup_restore_sim(SimModel::Curvilinear);
+        let patch = Settings {
+            release_thickness: Some(1.0),
+            release_swe: Some(100.0),
+            ..Default::default()
+        };
+        assert!(sim.update_settings(&patch).is_err());
+        assert_eq!(sim.settings.release_swe_override(), None);
+        assert_eq!(sim.settings.release_thickness_override(), None);
+    }
+
+    #[test_log::test]
+    fn test_update_settings_rejects_release_thickness_below_threshold() {
+        let mut sim = setup_restore_sim(SimModel::Curvilinear);
+        let patch = Settings {
+            release_thickness: Some(0.0),
+            ..Default::default()
+        };
+        assert!(sim.update_settings(&patch).is_err());
+        assert_eq!(sim.settings.release_thickness_override(), None);
+    }
+
+    #[test_log::test]
+    fn test_update_settings_rejects_input_data() {
+        let mut sim = setup_restore_sim(SimModel::Curvilinear);
+        let patch = Settings {
+            dem_path: Some("other.tif".to_string()),
+            ..Default::default()
+        };
+        assert!(sim.update_settings(&patch).is_err());
+        assert!(block_on(sim.restore_initial_state()).is_err());
+    }
+
+    #[test_log::test]
+    fn test_terrain_following_has_no_vertical_velocity() {
+        let mut sim = setup_restore_sim(SimModel::TerrainFollowing);
+        block_on(sim.prepare()).expect("Failed to prepare");
+        block_on(sim.run_n_steps(2)).expect("Failed to run");
+        let error = block_on(sim.fetch_particles_velocity_z())
+            .expect_err("terrain-following has no vertical velocity");
+        assert!(error.to_string().contains("no vertical velocity"));
+        assert!(
+            sim.orchestrator
+                .resources
+                .get_buffer(&BufferName::ParticlesVelocityZ)
+                .is_none()
+        );
+    }
+
+    #[test_log::test]
+    fn test_nodes_outside_the_flow_keep_zero_velocity() {
+        const N: usize = 40;
+        for model in [SimModel::TerrainFollowing, SimModel::ThreeD] {
+            let mut sim = setup_restore_sim(model);
+            block_on(sim.prepare()).expect("Failed to prepare");
+            block_on(sim.run_n_steps(10)).expect("Failed to run");
+            let mass: Vec<u32> = block_on(sim.orchestrator.read_buffer(BufferName::GridMass))
+                .expect("Failed to read grid mass");
+            let velocity: Vec<[f32; 2]> =
+                block_on(sim.orchestrator.read_buffer(BufferName::GridVelocity))
+                    .expect("Failed to read grid velocity");
+            let mut flowing = 0;
+            for y in 1..N - 1 {
+                for x in 1..N - 1 {
+                    let empty =
+                        (y - 1..=y + 1).all(|ny| (x - 1..=x + 1).all(|nx| mass[ny * N + nx] == 0));
+                    let moving = velocity[y * N + x] != [0.0, 0.0];
+                    assert!(!(empty && moving), "{model}: node ({x}, {y}) has no flow");
+                    flowing += usize::from(moving);
+                }
+            }
+            assert!(flowing > 0, "{model}: the flow must move");
+        }
+    }
+
+    #[test_log::test]
+    fn test_3d_velocity_is_tangent_to_bed() {
+        let slope_angle: f32 = 40.0;
+        let mut sim = setup_simple_sim(slope_angle, 3.0);
+        sim.settings.sim_model = SimModel::ThreeD.as_int();
+        sim.set_dem(&create_slope(16, 16, 3.0, slope_angle), 16, 16, 3.0)
+            .expect("Failed to set interior test DEM");
+        let mut release = vec![0.0; 16 * 16];
+        for y in 6..10 {
+            for x in 6..10 {
+                release[y * 16 + x] = 1.0;
+            }
+        }
+        sim.set_release_areas(&release)
+            .expect("Failed to set interior release");
+        block_on(sim.prepare()).expect("Failed to prepare 3D simulation");
+        let start_x: Vec<f32> = block_on(sim.fetch_particles_position())
+            .expect("Failed to read positions")
+            .iter()
+            .map(|p| p[0])
+            .collect();
+
+        block_on(sim.run_n_steps(5)).expect("Failed to advance 3D simulation");
+        let velocity_z = block_on(sim.fetch_particles_velocity_z())
+            .expect("Failed to fetch vertical velocity")
+            .clone();
+        let velocity_xy = block_on(sim.fetch_particles_velocity())
+            .expect("Failed to fetch horizontal velocity")
+            .clone();
+        let positions = block_on(sim.fetch_particles_position())
+            .expect("Failed to read positions")
+            .clone();
+
+        // the bed rises along +x, so a tangent velocity has v_z = tan(slope) v_x
+        let tan_slope = slope_angle.to_radians().tan();
+        for (horizontal, vertical) in velocity_xy.iter().zip(&velocity_z) {
+            assert!(vertical.is_finite() && horizontal[0].is_finite());
+            let speed = horizontal[0].hypot(horizontal[1]).hypot(*vertical);
+            assert!(
+                (vertical - tan_slope * horizontal[0]).abs() <= 1e-3 * speed + 1e-4,
+                "velocity ({}, {}, {vertical}) leaves the bed",
+                horizontal[0],
+                horizontal[1]
+            );
+        }
+        let mean_vx = velocity_xy.iter().map(|v| v[0]).sum::<f32>() / velocity_xy.len() as f32;
+        assert!(
+            mean_vx < 0.0,
+            "mass must accelerate downslope, mean v_x {mean_vx}"
+        );
+        let mean_dx = positions
+            .iter()
+            .zip(&start_x)
+            .map(|(p, x0)| p[0] - x0)
+            .sum::<f32>()
+            / positions.len() as f32;
+        assert!(mean_dx < 0.0, "mass must move downslope, mean dx {mean_dx}");
+    }
+
+    #[test_log::test]
+    fn test_curvilinear_apic_preserves_affine_velocity() {
+        let mut sim = setup_simple_sim(0.0, 3.0);
+        sim.settings.sim_model = SimModel::Curvilinear.as_int();
+        sim.settings.flags = 0;
+        sim.settings.velocity_threshold = 0.0;
+        sim.settings.friction_model = 0;
+        sim.settings.friction_coefficient = 0.0;
+        sim.set_dem(&create_slope(24, 24, 3.0, 0.0), 24, 24, 3.0)
+            .expect("Failed to set flat DEM");
+        let mut release = vec![0.0; 24 * 24];
+        for y in 6..18 {
+            for x in 6..18 {
+                release[y * 24 + x] = 1.0;
+            }
+        }
+        sim.set_release_areas(&release)
+            .expect("Failed to set release");
+        block_on(sim.prepare()).expect("Failed to prepare APIC test");
+        let positions = block_on(sim.fetch_particles_position())
+            .expect("Failed to read positions")
+            .clone();
+        let velocities: Vec<[f32; 2]> = positions
+            .iter()
+            .map(|p| {
+                [
+                    0.5 + 0.02 * p[0] / 3.0 - 0.01 * p[1] / 3.0,
+                    0.4 + 0.01 * p[0] / 3.0 + 0.03 * p[1] / 3.0,
+                ]
+            })
+            .collect();
+        let affine = vec![[0.02f32, 0.01, -0.01, 0.03]; positions.len()];
+        block_on(
+            sim.orchestrator
+                .write_buffer(BufferName::ParticlesVelocity, &velocities),
+        )
+        .expect("Failed to seed affine velocities");
+        block_on(
+            sim.orchestrator
+                .write_buffer(BufferName::ParticlesAffineMatrix, &affine),
+        )
+        .expect("Failed to seed affine matrices");
+        block_on(sim.run_n_steps(1)).expect("Failed to advance APIC test");
+        let actual = block_on(sim.fetch_particles_velocity()).expect("Failed to read velocities");
+        for (p, (expected, actual)) in positions.iter().zip(velocities.iter().zip(actual)) {
+            if p.iter()
+                .all(|coordinate| *coordinate > 27.0 && *coordinate < 45.0)
+            {
+                for axis in 0..2 {
+                    assert!(
+                        (actual[axis] - expected[axis]).abs() < 3e-4,
+                        "affine velocity: expected {}, got {}",
+                        expected[axis],
+                        actual[axis]
+                    );
+                }
+            }
+        }
+        let matrices: Vec<[f32; 4]> = block_on(
+            sim.orchestrator
+                .read_buffer(BufferName::ParticlesAffineMatrix),
+        )
+        .expect("Failed to read affine matrices");
+        for (p, matrix) in positions.iter().zip(matrices) {
+            if p.iter()
+                .all(|coordinate| *coordinate > 27.0 && *coordinate < 45.0)
+            {
+                for (actual, expected) in matrix.iter().zip(affine[0]) {
+                    assert!((actual - expected).abs() < 5e-4);
+                }
+            }
+        }
+    }
+
+    /// Simulation on a 64x64 slope with a release block on its upper part.
+    fn setup_slope_sim(settings: Settings) -> Simulation {
+        let (size, cell_size) = (64, 5.0);
+        let mut sim: Simulation = block_on(Simulation::new()).expect("Failed to create Simulation");
+        block_on(sim.create(settings)).expect("Failed to create simulation");
+        sim.set_dem(
+            &create_slope(size, size, cell_size, 35.0),
+            size,
+            size,
+            cell_size,
+        )
+        .expect("Failed to set DEM");
+        let release: Vec<f32> = (0..size * size)
+            .map(|idx| {
+                let (x, y) = (idx % size, idx / size);
+                if (44..54).contains(&x) && (24..40).contains(&y) {
+                    2.0
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        sim.set_release_areas(&release)
+            .expect("Failed to set release areas");
+        sim
+    }
+
+    #[test_log::test]
+    fn test_sliding_block_timestep_keeps_the_cfl_bound() {
+        let cfl = 0.5;
+        let mut sim = setup_slope_sim(Settings {
+            sim_model: Some(SimModel::SlidingBlock),
+            friction_coefficient: Some(0.1),
+            cfl: Some(cfl),
+            ..Default::default()
+        });
+        let cell_size = 5.0;
+        let first = block_on(sim.run_n_steps(1)).expect("Failed to step");
+        let mut last_dt = first.dt;
+        for _ in 0..15 {
+            let info = block_on(sim.run_n_steps(1)).expect("Failed to step");
+            assert!(
+                info.max_velocity * info.dt <= cfl * cell_size * 1.0001,
+                "moved {} m in a step at speed {}",
+                info.max_velocity * info.dt,
+                info.max_velocity
+            );
+            last_dt = info.dt;
+        }
+        assert!(
+            last_dt < first.dt,
+            "dt {last_dt} did not follow the accelerating flow from {}",
+            first.dt
+        );
+    }
+
+    #[test_log::test]
+    fn test_mpmdac_compaction_densifies_the_material() {
+        let mut sim = setup_slope_sim(Settings {
+            sim_model: Some(SimModel::MpmDaC),
+            // any compression compacts
+            compaction_pressure: Some(1.0),
+            ..Default::default()
+        });
+        block_on(sim.run_n_steps(40)).expect("Failed to step");
+        let strain = block_on(
+            sim.orchestrator
+                .read_buffer::<[f32; 2]>(BufferName::ParticlesVolumetricStrain),
+        )
+        .expect("Failed to read the volumetric strain");
+        let compaction = || strain.iter().map(|state| state[1]);
+        assert!(compaction().any(|value| value > 0.0), "nothing compacted");
+        assert!(
+            compaction().all(|value| value >= 0.0),
+            "compaction strain must not be negative"
+        );
     }
 
     #[test_log::test]
@@ -3290,7 +5447,6 @@ mod tests {
                 "friction_model": "voellmy",
                 "max_steps": 40,
                 "released_particles_per_cell": 4,
-                "slab_thickness_factor": 1.0,
                 "friction_coefficient": 0.2,
                 "drag_coefficient": 2000.0,
                 "velocity_threshold": 0.1,
@@ -3444,12 +5600,12 @@ mod tests {
         let release_none_str = match &release_areas_none {
             Some(path) => path.replace('_', ""),
             None => format!(
-                "calculated-elev{}-minslope{}-maxslope{}-rough{}-slab{}",
+                "calculated-elev{}-minslope{}-maxslope{}-rough{}-thickness{}",
                 settings.release_min_elevation,
                 settings.min_slope_angle,
                 settings.max_slope_angle,
                 settings.roughness_threshold,
-                settings.slab_thickness_factor,
+                settings.release_thickness,
             ),
         };
         let scenario_name_none = format!(
@@ -3462,12 +5618,12 @@ mod tests {
         assert_eq!(
             scenario_name_none,
             format!(
-                "pathwithunderscores/demfile1.tif_calculated-elev{}-minslope{}-maxslope{}-rough{}-slab{}_{hash_hex}",
+                "pathwithunderscores/demfile1.tif_calculated-elev{}-minslope{}-maxslope{}-rough{}-thickness{}_{hash_hex}",
                 settings.release_min_elevation,
                 settings.min_slope_angle,
                 settings.max_slope_angle,
                 settings.roughness_threshold,
-                settings.slab_thickness_factor,
+                settings.release_thickness,
             )
         );
     }
@@ -3530,10 +5686,71 @@ mod tests {
             .expect("Failed to save simulation");
     }
 
+    /// A run started from a store continues the scenario it came from.
+    #[test_log::test]
+    fn test_runs_import_their_inputs_from_a_store() {
+        let mut sim = setup_simple_sim(40.0, 4.0);
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let path = tmp_dir.path().join("runs.zarr").display().to_string();
+        block_on(sim.run()).expect("Failed to run simulation");
+        block_on(sim.save_with_path(&path)).expect("Failed to save simulation");
+        let release = block_on(sim.fetch_release_areas()).unwrap().to_vec();
+        let site = sim.site_name();
+        let scenario = sim.scenario_name(&release);
+
+        let settings = Settings {
+            dem_path: Some(path.clone()),
+            output_path: Some(path.clone()),
+            sim_model: Some(SimModel::SlidingBlock),
+            ..Default::default()
+        };
+        let mut imported = block_on(Simulation::new()).expect("Failed to create Simulation");
+        block_on(imported.create(settings)).expect("Failed to create simulation");
+        assert_eq!(imported.dem.width, sim.dem.width);
+        assert_eq!(imported.dem.data1d, sim.dem.data1d);
+        assert_eq!(imported.site_name(), site);
+
+        block_on(imported.run()).expect("Failed to run imported simulation");
+        assert_eq!(block_on(imported.fetch_release_areas()).unwrap(), release);
+        assert_eq!(imported.scenario_name(&release), scenario);
+        block_on(imported.save()).expect("Failed to save imported simulation");
+
+        let metadata = std::fs::read(format!("{path}/{site}/{scenario}/zarr.json")).unwrap();
+        let metadata: serde_json::Value = serde_json::from_slice(&metadata).unwrap();
+        assert_eq!(metadata["attributes"]["number_of_runs"], 2);
+    }
+
+    #[test_log::test]
+    fn test_write_asc() {
+        let mut sim = setup_simple_sim(40.0, 4.0);
+        block_on(sim.run()).expect("Failed to run simulation");
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let file_path = tmp_dir.path().join("peak_velocity.asc");
+        let path = file_path.to_string_lossy();
+        block_on(sim.write_asc("peak_velocity", &path)).expect("Failed to write grid");
+
+        let bytes = std::fs::read(&file_path).unwrap();
+        let reloaded = data_processor::load_dem_from_bytes(&bytes, "asc", &path).unwrap();
+        let peak_velocity = block_on(sim.fetch_peak_velocity()).unwrap();
+        assert_eq!(&reloaded.data1d, peak_velocity);
+
+        assert!(block_on(sim.write_asc("no_such_layer", &path)).is_err());
+    }
+
+    #[test_log::test]
+    fn test_scenario_name_identifies_the_release() {
+        let sim = setup_simple_sim(40.0, 4.0);
+        let name = sim.scenario_name(&[0.0, 1.0]);
+
+        assert_eq!(name, sim.scenario_name(&[0.0, 1.0]));
+        assert_ne!(name, sim.scenario_name(&[0.0, 2.0]));
+    }
+
     #[test_log::test]
     fn test_release_hash() {
         let sim = setup_simple_sim(40.0, 4.0);
-        assert_eq!(sim.release_hash(), 8805650549818317918);
+        assert_eq!(sim.release_hash(), 13523635338801950485);
     }
 
     #[test_log::test]
@@ -3639,7 +5856,6 @@ mod avawog_diagnostics {
                 "friction_model": "voellmy",
                 "max_steps": 3000,
                 "released_particles_per_cell": 4,
-                "slab_thickness_factor": 1.0,
                 "friction_coefficient": 0.2,
                 "drag_coefficient": 2000.0,
                 "velocity_threshold": 0.1,
@@ -3689,7 +5905,10 @@ mod avawog_diagnostics {
                 "non-finite particle velocity at step {}",
                 info.timestep
             );
-            final_stopped = states.iter().filter(|state| state.stopped).count();
+            final_stopped = states
+                .iter()
+                .filter(|state| state.stopped || state.resting)
+                .count();
             final_max_speed = velocities
                 .iter()
                 .map(|v| (v[0] * v[0] + v[1] * v[1]).sqrt())

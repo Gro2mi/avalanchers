@@ -6,6 +6,11 @@
 // atomic_float @group(0) @binding(6) var<storage, read_write> grid_momentum_atomic: array<atomic<f32>>; 
 @group(0) @binding(5) var<storage, read_write> grid_mass_atomic: array<atomic<u32>>;  // no_atomic_float 
 @group(0) @binding(6) var<storage, read_write> grid_momentum_atomic: array<atomic<i32>>;  // no_atomic_float 
+@group(0) @binding(7) var<storage> particles_affine_matrix: array<mat2x2f>;
+@group(0) @binding(8) var<storage> particles_velocity_z: array<f32>;
+// atomic_float @group(0) @binding(9) var<storage, read_write> grid_momentum_z_atomic: array<atomic<f32>>;
+@group(0) @binding(9) var<storage, read_write> grid_momentum_z_atomic: array<atomic<i32>>;  // no_atomic_float 
+@group(0) @binding(10) var<storage> particles_affine_z: array<vec2f>;
 
 override WG_SIZE_1D: u32 = 1u;
 @compute @workgroup_size(WG_SIZE_1D, 1, 1)
@@ -28,6 +33,59 @@ fn p2g(@builtin(global_invocation_id) id: vec3u) {
     transfer_p2g(id.x);
 }
 
+@compute @workgroup_size(WG_SIZE_1D, 1, 1)
+fn p2g_2d(@builtin(global_invocation_id) id: vec3u) {
+    if id.x >= sim_info.number_particles || (sim_info.flags & SIM_INFO_STOPPED) != 0u {
+        return;
+    }
+    let cell = position_to_cell(particles_position[id.x]);
+    if cell.x < 3 || cell.x >= sim_settings.grid_shape.x - 3 || cell.y < 3 || cell.y >= sim_settings.grid_shape.y - 3 {
+        return;
+    }
+    transfer_p2g_with_affine(id.x, particles_affine_matrix[id.x]);
+}
+
+// 3D Cartesian APIC transfer: xy through the shared transfer, the z
+// component with the z row of the affine matrix on the same stencil
+@compute @workgroup_size(WG_SIZE_1D, 1, 1)
+fn p2g_3d(@builtin(global_invocation_id) id: vec3u) {
+    if id.x >= sim_info.number_particles || (sim_info.flags & SIM_INFO_STOPPED) != 0u {
+        return;
+    }
+    let cell = position_to_cell(particles_position[id.x]);
+    if cell.x < 3 || cell.x >= sim_settings.grid_shape.x - 3 || cell.y < 3 || cell.y >= sim_settings.grid_shape.y - 3 {
+        return;
+    }
+    transfer_p2g_with_affine(id.x, particles_affine_matrix[id.x]);
+    transfer_p2g_z(id.x);
+}
+
+// import transfer_p2g_z.wgsl;
+// BEGIN transfer_p2g_z.wgsl
+// z row of the 3D APIC transfer, on the stencil of transfer_p2g_with_affine.
+// Pure library module: the importing module provides particles_velocity_z,
+// particles_affine_z and grid_momentum_z_atomic.
+fn transfer_p2g_z(p_idx: u32) {
+    let grid_pos = particles_position[p_idx] / sim_settings.cell_size - vec2f(0.5);
+    let base_node = vec2u(floor(grid_pos - vec2f(0.5)));
+    let p_mass = particles_mass[p_idx];
+    let p_velocity_z = particles_velocity_z[p_idx];
+    let affine_z = particles_affine_z[p_idx];
+    for (var i: u32 = 0; i < 3; i++) {
+        for (var j: u32 = 0; j < 3; j++) {
+            let node_coords = base_node + vec2u(i, j);
+            let distance = calculate_distance_to_node(grid_pos, node_coords);
+            let weight = calculate_weight(distance);
+            let idx = xy_to_idx(node_coords);
+            let affine_velocity_z = p_velocity_z - dot(affine_z, distance);
+            // atomic_float atomicAdd(&grid_momentum_z_atomic[idx], p_mass * affine_velocity_z * weight);
+            let quantized_z = quantize_momentum_component(p_mass * affine_velocity_z * weight * MOMENTUM_FACTOR); // no_atomic_float
+            if quantized_z != 0 { atomicAdd(&grid_momentum_z_atomic[idx], quantized_z); } // no_atomic_float
+        }
+    }
+}
+
+// END transfer_p2g_z.wgsl
 // import transfer_p2g.wgsl;
 // BEGIN transfer_p2g.wgsl
 fn quantize_momentum_component(value: f32) -> i32 {
@@ -38,6 +96,10 @@ fn quantize_momentum_component(value: f32) -> i32 {
 }
 
 fn transfer_p2g(p_idx: u32) {
+    transfer_p2g_with_affine(p_idx, mat2x2f(vec2f(0.0), vec2f(0.0)));
+}
+
+fn transfer_p2g_with_affine(p_idx: u32, affine_matrix: mat2x2f) {
     // the stencil is offset by half a cell as it is in the middle of the cell
     let grid_pos = particles_position[p_idx] / sim_settings.cell_size - vec2f(0.5);
     let base_node = vec2u(floor(grid_pos - vec2f(0.5)));
@@ -52,22 +114,25 @@ fn transfer_p2g(p_idx: u32) {
             let distance = calculate_distance_to_node(grid_pos, node_coords);
             let weight = calculate_weight(distance);
             let idx = xy_to_idx(node_coords);
-            // let affine_velocity = p_velocity + (affine_matrix * distance);
+            let affine_velocity = p_velocity - affine_matrix * distance;
 
             
             
             // atomic_float atomicAdd(&grid_mass_atomic[idx], p_mass * weight);
-            // atomic_float atomicAdd(&grid_momentum_atomic[idx * 2u], p_mass * p_velocity.x * weight);
-            // atomic_float atomicAdd(&grid_momentum_atomic[idx * 2u + 1u], p_mass * p_velocity.y * weight);
+            // atomic_float atomicAdd(&grid_momentum_atomic[idx * 2u], p_mass * affine_velocity.x * weight);
+            // atomic_float atomicAdd(&grid_momentum_atomic[idx * 2u + 1u], p_mass * affine_velocity.y * weight);
             // for affine transfer
             // atomicAdd(&grid_momentum_atomic[idx * 2u], p_mass * affine_velocity.x * weight);
             // atomicAdd(&grid_momentum_atomic[idx * 2u + 1u], p_mass * affine_velocity.y * weight);
 
             atomicAdd(&grid_mass_atomic[idx], u32(round(p_mass * weight * MASS_FACTOR))); // no_atomic_float 
-            let momentum_x = p_mass * p_velocity.x * weight * MOMENTUM_FACTOR; // no_atomic_float 
-            let momentum_y = p_mass * p_velocity.y * weight * MOMENTUM_FACTOR; // no_atomic_float 
-            atomicAdd(&grid_momentum_atomic[idx * 2u], quantize_momentum_component(momentum_x)); // no_atomic_float 
-            atomicAdd(&grid_momentum_atomic[idx * 2u + 1u], quantize_momentum_component(momentum_y)); // no_atomic_float 
+            let momentum_x = p_mass * affine_velocity.x * weight * MOMENTUM_FACTOR; // no_atomic_float
+            let momentum_y = p_mass * affine_velocity.y * weight * MOMENTUM_FACTOR; // no_atomic_float
+            // resting particles carry no momentum; skipping zero adds saves most of their atomics
+            let quantized_x = quantize_momentum_component(momentum_x); // no_atomic_float
+            let quantized_y = quantize_momentum_component(momentum_y); // no_atomic_float
+            if quantized_x != 0 { atomicAdd(&grid_momentum_atomic[idx * 2u], quantized_x); } // no_atomic_float
+            if quantized_y != 0 { atomicAdd(&grid_momentum_atomic[idx * 2u + 1u], quantized_y); } // no_atomic_float
         }
     }
 }
@@ -98,6 +163,11 @@ const INV_MOMENTUM_FACTOR: f32 = 1 / MOMENTUM_FACTOR;
 // depth-integrated internal force (h * sigma * grad_w * area, ~1e4..1e5 N per node contribution)
 const FORCE_FACTOR: f32 = 1e-3; // i32 limit is 2.1e6 N per node
 const INV_FORCE_FACTOR: f32 = 1 / FORCE_FACTOR;
+// weak-form pressure sum m_p h_p / 2 grad_w (kg) of the curvilinear model,
+// node sum = node_mass * |grad h|: 0.001 kg resolves thin front nodes
+//   (rho*cell^2*h*J ~ 6e4 kg * 1 * 1e3 = 6e7 < 2.1e9)
+const PRESSURE_FACTOR: f32 = 1e3;
+const INV_PRESSURE_FACTOR: f32 = 1 / PRESSURE_FACTOR;
 
 // TODO precompute often used values on the cpu and pass them as uniforms to avoid redundant calculations on the gpu
 
@@ -110,6 +180,7 @@ struct SimInfo {
     max_velocity: f32,
     max_flow_thickness: f32,
     flags: u32,
+    grid_elapsed_time: f32,
 };
 
 const SIM_INFO_OUT_OF_BOUNDS: u32 = 1u << 0u;
@@ -119,7 +190,16 @@ const SIM_INFO_PARTICLE_OUT_OF_DEM_DATA: u32 = 1u << 3u;
 const SIM_INFO_STOPPED: u32 = 1u << 31u;
 const SIM_INFO_ALL_PARTICLES_STOPPED: u32 = 1u << 30u;
 const SIM_INFO_NO_NEW_CELLS: u32 = 1u << 29u;
+// almost all particles are resting or terminally stopped
+const SIM_INFO_AT_REST: u32 = 1u << 28u;
+// total momentum fell below momentum_stop_fraction of its peak
+const SIM_INFO_LOW_MOMENTUM: u32 = 1u << 27u;
 
+// reversible low-speed state; the low bits hold the rest start step while resting
+// and the consecutive slow-step count while moving
+const PARTICLE_RESTING: u32 = 1u << 26u;
+// consecutive slow steps before a particle rests
+const REST_STEPS: u32 = 20u;
 const PARTICLE_FLYING: u32 = 1u << 27u;
 const PARTICLE_OUT_OF_BOUNDS: u32 = 1u << 28u;
 const PARTICLE_IS_NAN: u32 = 1u << 29u;
@@ -134,7 +214,7 @@ struct SimSettings {
     grid_shape: vec2u,
     world_size: vec2f,
     snow_density: f32,
-    slab_thickness: f32,
+    release_thickness: f32,
     friction_coefficient: f32,
     drag_coefficient: f32,
     n0: f32,
@@ -161,6 +241,14 @@ struct SimSettings {
     // MPMDAC compressibility; bulk_modulus 0 = incompressible
     bulk_modulus: f32,
     compaction_pressure: f32,
+    // stop once total momentum < fraction * its peak; 0 disables (curvilinear)
+    momentum_stop_fraction: f32,
+    // front travel in cells covered by the no-new-cells stop window
+    no_new_cells_travel: f32,
+    // Gaussian width (m) of the curvilinear reference surface; 0 disables it
+    reference_surface_length: f32,
+    // snow water equivalent (kg/m2) of the release cells; NaN if unset
+    release_swe: f32,
 };
 
 struct AtomicValues {
@@ -172,7 +260,42 @@ struct AtomicValues {
     number_release_cells: atomic<u32>,
     number_release_particles: atomic<u32>,
     stopped_particles: atomic<u32>,
+    // resting particles counted during the current step, reset by update_sim_info
+    resting_particles: atomic<u32>,
+    // total grid momentum (kg m/s) of the current step as a 64-bit sum, reset by update_sim_info
+    momentum_lo: atomic<u32>,
+    momentum_hi: atomic<u32>,
+    // f32 bits of the largest total momentum so far
+    peak_momentum: atomic<u32>,
 };
+
+// Reversible resting: a particle rests after REST_STEPS consecutive slow steps
+// and wakes once the gathered grid speed exceeds twice the threshold. Resting
+// particles keep depositing mass but no momentum and do not move, which removes
+// sub-threshold creep inside deposits. Returns the new state: its low bits hold
+// the slow-step counter while moving and the rest start step while resting.
+fn next_rest_state(previous_state: u32, speed: f32, timestep: u32) -> u32 {
+    let low_mask = PARTICLE_RESTING - 1u;
+    var resting = (previous_state & PARTICLE_RESTING) != 0u;
+    var low_bits = previous_state & low_mask;
+    if resting {
+        if speed > 2.0 * sim_settings.velocity_threshold {
+            resting = false;
+            low_bits = 0u;
+        }
+    } else if speed < sim_settings.velocity_threshold {
+        low_bits = min(low_bits + 1u, REST_STEPS);
+        if low_bits >= REST_STEPS {
+            resting = true;
+            low_bits = timestep & low_mask;
+        }
+    } else {
+        low_bits = 0u;
+    }
+    return (previous_state & ~(PARTICLE_RESTING | low_mask))
+        | select(0u, PARTICLE_RESTING, resting)
+        | low_bits;
+}
 
 struct G2PUpdate {
     velocity: vec2f,
@@ -180,6 +303,13 @@ struct G2PUpdate {
 };
 
 @group(0) @binding(0) var<uniform> sim_settings: SimSettings;
+
+// length in steps of the no-new-cells rolling window: the fastest material
+// moves at most cfl cells per step, so round(travel / cfl) steps cover the same
+// front travel at any cfl; at least 10 steps
+fn no_new_cells_window() -> u32 {
+    return max(10u, u32(round(sim_settings.no_new_cells_travel / sim_settings.cfl)));
+}
 
 fn is_nan(x: f32) -> bool {
     let bits: u32 = bitcast<u32>(x);

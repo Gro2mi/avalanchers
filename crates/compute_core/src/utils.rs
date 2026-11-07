@@ -73,6 +73,21 @@ pub fn linspace(start: f32, end: f32, num: usize) -> Vec<f32> {
     (0..num).map(|i| start + i as f32 * step).collect()
 }
 
+/// Centers of `count` equal cells spanning `min..max`.
+pub fn cell_centers_f64(min: f32, max: f32, count: usize) -> Vec<f64> {
+    let (min, max) = (f64::from(min), f64::from(max));
+    let cell = (max - min) / count as f64;
+    (0..count).map(|i| min + (i as f64 + 0.5) * cell).collect()
+}
+
+/// [`cell_centers_f64`] at the precision of the simulation.
+pub fn cell_centers(min: f32, max: f32, count: usize) -> Vec<f32> {
+    cell_centers_f64(min, max, count)
+        .into_iter()
+        .map(|center| center as f32)
+        .collect()
+}
+
 pub fn to_2d<T: Clone>(data: &[T], width: usize, height: usize) -> Vec<Vec<T>> {
     assert_eq!(
         data.len(),
@@ -672,6 +687,13 @@ mod tests {
         assert_eq!(result, Some(3.5));
     }
     #[test_log::test]
+    fn test_cell_centers() {
+        assert_eq!(cell_centers(0.0, 10.0, 2), vec![2.5, 7.5]);
+        assert_eq!(cell_centers_f64(100.0, 103.0, 3), vec![100.5, 101.5, 102.5]);
+        assert!(cell_centers(0.0, 1.0, 0).is_empty());
+    }
+
+    #[test]
     fn test_linspace_basic() {
         let result = linspace(0.0, 1.0, 5);
         assert_eq!(result, vec![0.0, 0.25, 0.5, 0.75, 1.0]);

@@ -75,8 +75,10 @@ impl GpuContext {
 
     /// Creates a context for offscreen rendering, without a presentation surface.
     pub async fn headless() -> Result<Self> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        Self::new(instance, None).await
+        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+        // each OpenGL instance keeps 16 MB of GPU memory after it is dropped
+        descriptor.backends = wgpu::Backends::PRIMARY;
+        Self::new(wgpu::Instance::new(descriptor), None).await
     }
 }
 

@@ -37,6 +37,7 @@ data/avalanche_outlines_switzerland_2018/
 data/single_avalanche_outlines_switzerland_2018/
 test.zarr/
 avalanchers.zarr/
+*.zarr.lock
 prompts.md
 questions.md
 dev.ipynb
@@ -246,3 +247,8 @@ settings_stubai.json
 stubai_release_areas.png
 stubai.qgz
 frontend/data/
+
+# local project notes
+/PROJECT_CONTEXT.md
+/TODO.md
+/docs/release_area_estimation_section.tex

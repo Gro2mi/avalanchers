@@ -13,7 +13,7 @@ use compute_core::{
     SimInfo, TimestepData,
     evaluation::{ChamferDistance, MassMovementEvaluation},
     list_devices,
-    settings::Settings,
+    settings::{Settings, SimModel},
 };
 use data_processor::{settings_from_json_file, settings_to_json_file};
 use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray2, ToPyArray};
@@ -67,7 +67,7 @@ impl PySimInfo {
         self.inner.timestep
     }
 
-    /// Timestep length in seconds used for this step.
+    /// Length of the next simulation step in seconds.
     #[getter]
     fn dt(&self) -> f32 {
         self.inner.dt
@@ -77,6 +77,12 @@ impl PySimInfo {
     #[getter]
     fn elapsed_time(&self) -> f32 {
         self.inner.elapsed_time
+    }
+
+    /// Time of the deposited grid mass/momentum snapshot, before particle advection.
+    #[getter]
+    fn grid_elapsed_time(&self) -> f32 {
+        self.inner.grid_elapsed_time
     }
 
     /// Number of particles currently alive in the simulation.
@@ -115,6 +121,7 @@ impl PySimInfo {
             "timestep" => self.inner.timestep.into_py_any(py),
             "dt" => self.inner.dt.into_py_any(py),
             "elapsed_time" => self.inner.elapsed_time.into_py_any(py),
+            "grid_elapsed_time" => self.inner.grid_elapsed_time.into_py_any(py),
             "number_particles" => self.inner.number_particles.into_py_any(py),
             "elevation_threshold" => self.inner.elevation_threshold.into_py_any(py),
             "max_velocity" => self.inner.max_velocity.into_py_any(py),
@@ -679,6 +686,78 @@ impl PySimulation {
         self.inner.prepare().block_on().map_runtime_err()
     }
 
+    /// Prepare the simulation (if needed) and keep its initial particles.
+    ///
+    /// Terrain analysis, release areas (including crown line estimation)
+    /// and particle seeding with relaxation then run only once; every
+    /// :meth:`restore_initial_state` starts the next run from the same
+    /// particles. Intended for back calibration::
+    ///
+    ///     sim.create(settings)
+    ///     sim.store_initial_state()
+    ///     for params in parameter_sets:
+    ///         sim.update_settings(params)
+    ///         sim.restore_initial_state()
+    ///         sim.run()
+    ///         sim.post_process()
+    ///         result = sim.evaluate()
+    ///
+    /// Must be called before the simulation runs.
+    pub fn store_initial_state(&mut self) -> PyResult<()> {
+        self.inner
+            .store_initial_state()
+            .block_on()
+            .map_runtime_err()
+    }
+
+    /// Reset the simulation to the state kept by :meth:`store_initial_state`.
+    ///
+    /// Settings changed with :meth:`update_settings` take effect, and only
+    /// the preparation stages they affect run again:
+    ///
+    /// - ``sim_model`` or ``reference_surface_length``: full preparation,
+    /// - release thresholds (slope, elevation, roughness),
+    ///   ``released_particles_per_cell``, ``release_area_fraction``, the
+    ///   crown line and release fill settings or
+    ///   ``enable_particle_relaxation``: release areas and particle seeding,
+    /// - ``density`` or a changed ``release_thickness`` or ``release_swe``:
+    ///   particle masses are rescaled; setting either on a release with its
+    ///   own thickness or switching between them seeds the particles again,
+    /// - anything else (friction, drag, cfl, max_steps, flags, ...): the
+    ///   stored particles are restored as they are.
+    pub fn restore_initial_state(&mut self) -> PyResult<()> {
+        self.inner
+            .restore_initial_state()
+            .block_on()
+            .map_runtime_err()
+    }
+
+    /// Change settings without reloading the input data.
+    ///
+    /// Takes the same keys as :meth:`create`; keys that are not given keep
+    /// their value. The change applies to the next
+    /// :meth:`restore_initial_state` (or preparation). Input data keys
+    /// (``dem_path``, ``release_areas_path``, ``outlines_path``,
+    /// ``outlines_padding``, ``output_path``) raise an error; load new data
+    /// with :meth:`create`.
+    ///
+    /// Args:
+    ///     settings: Dictionary of settings, e.g.
+    ///         ``{"friction_coefficient": 0.3, "drag_coefficient": 3000.0}``.
+    pub fn update_settings(&mut self, settings: &Bound<'_, PyAny>) -> PyResult<()> {
+        let json_value: serde_json::Value =
+            depythonize(settings).map_err(|e| PyErr::new::<PyTypeError, _>(e.to_string()))?;
+        let json_str = serde_json::to_string(&json_value).map_runtime_err()?;
+        let patch = Settings::loads(&json_str).map_runtime_err()?;
+        self.inner.update_settings(&patch).map_runtime_err()
+    }
+
+    /// Whether :meth:`store_initial_state` holds particles to restore.
+    #[getter]
+    pub fn has_initial_state(&self) -> bool {
+        self.inner.has_initial_state()
+    }
+
     /// Save the current results to disk.
     ///
     /// Args:
@@ -693,6 +772,18 @@ impl PySimulation {
                 .map_runtime_err(),
             None => self.inner.save().block_on().map_runtime_err(),
         }
+    }
+
+    /// Write a grid to an ESRI ASCII file georeferenced by the DEM.
+    ///
+    /// Args:
+    ///     layer: ``peak_velocity``, ``peak_flow_thickness`` or ``release_areas``.
+    ///     path: Output file path.
+    pub fn write_asc(&mut self, layer: &str, path: &str) -> PyResult<()> {
+        self.inner
+            .write_asc(layer, path)
+            .block_on()
+            .map_runtime_err()
     }
 
     /// Current lifecycle state of the simulation (read-only).
@@ -764,6 +855,62 @@ impl PySimulation {
                     dims[0],
                     dims[1],
                     self.inner.crown_line.len()
+                ))
+            })
+    }
+
+    /// ``(height, width)`` bool array marking the crown candidates before the
+    /// component filtering (minimum size and ``crown_elevation_band``). Cells
+    /// set here but not in :attr:`crown_line` were removed by those filters.
+    /// Only available after :meth:`prepare` when the settings contained
+    /// ``release_area_fraction``.
+    #[getter]
+    pub fn crown_candidates<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<bool>>> {
+        if self.inner.crown_candidates.is_empty() {
+            return Err(PyErr::new::<PyValueError, _>(
+                "crown candidates not available: set 'release_area_fraction' in the settings and call prepare()",
+            ));
+        }
+        let dims = [self.inner.dem.height, self.inner.dem.width];
+        self.inner
+            .crown_candidates
+            .to_pyarray(py)
+            .reshape(dims)
+            .map_err(|_| {
+                PyErr::new::<PyValueError, _>(format!(
+                    "Dimension mismatch during texture conversion. Expected: {}x{}, got: {}",
+                    dims[0],
+                    dims[1],
+                    self.inner.crown_candidates.len()
+                ))
+            })
+    }
+
+    /// ``(height, width)`` bool array of the potential release areas inside
+    /// the outline (slope, elevation and roughness thresholds) from which the
+    /// release areas were selected. Only available after :meth:`prepare` when
+    /// the settings contained ``release_area_fraction``.
+    #[getter]
+    pub fn potential_release_areas<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyArray2<bool>>> {
+        if self.inner.potential_release_areas.is_empty() {
+            return Err(PyErr::new::<PyValueError, _>(
+                "potential release areas not available: set 'release_area_fraction' in the settings and call prepare()",
+            ));
+        }
+        let dims = [self.inner.dem.height, self.inner.dem.width];
+        self.inner
+            .potential_release_areas
+            .to_pyarray(py)
+            .reshape(dims)
+            .map_err(|_| {
+                PyErr::new::<PyValueError, _>(format!(
+                    "Dimension mismatch during texture conversion. Expected: {}x{}, got: {}",
+                    dims[0],
+                    dims[1],
+                    self.inner.potential_release_areas.len()
                 ))
             })
     }
@@ -894,6 +1041,44 @@ impl PySimulation {
         self.get_layer_f32(py, gravity_y.to_vec())
     }
 
+    /// ``(height, width)`` float32 array of the slope angle in degrees.
+    #[getter]
+    pub fn slope_angle<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        let data = self
+            .inner
+            .fetch_slope_angle()
+            .block_on()
+            .map_runtime_err()?
+            .to_vec();
+        self.get_layer_f32(py, data)
+    }
+
+    /// ``(height, width)`` float32 array of the slope aspect: the direction
+    /// the slope faces (downhill) in degrees clockwise from north, -1 on flat
+    /// cells.
+    #[getter]
+    pub fn slope_aspect<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        let data = self
+            .inner
+            .fetch_slope_aspect()
+            .block_on()
+            .map_runtime_err()?
+            .to_vec();
+        self.get_layer_f32(py, data)
+    }
+
+    /// ``(height, width)`` float32 array of the terrain roughness.
+    #[getter]
+    pub fn roughness<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        let data = self
+            .inner
+            .fetch_roughness()
+            .block_on()
+            .map_runtime_err()?
+            .to_vec();
+        self.get_layer_f32(py, data)
+    }
+
     /// ``(height, width)`` float32 array of the configured release areas.
     #[getter]
     pub fn get_release_areas<'py>(
@@ -935,6 +1120,52 @@ impl PySimulation {
         Ok(PyTimestepData {
             inner: data.clone(),
         })
+    }
+
+    /// Mean slope angle of the release cells in degrees, NaN if there are none.
+    #[getter]
+    pub fn get_release_mean_slope_angle(&mut self) -> PyResult<f32> {
+        Ok(self
+            .inner
+            .release_area_terrain()
+            .block_on()
+            .map_runtime_err()?
+            .slope_angle)
+    }
+
+    /// Largest slope angle of a release cell in degrees, NaN if there are none.
+    #[getter]
+    pub fn get_release_max_slope_angle(&mut self) -> PyResult<f32> {
+        Ok(self
+            .inner
+            .release_area_terrain()
+            .block_on()
+            .map_runtime_err()?
+            .max_slope_angle)
+    }
+
+    /// Circular mean of the release cells' slope aspect: the direction they
+    /// face (downhill) in degrees clockwise from north. NaN if there are no
+    /// release cells with an aspect or their aspects cancel out.
+    #[getter]
+    pub fn get_release_mean_aspect(&mut self) -> PyResult<f32> {
+        Ok(self
+            .inner
+            .release_area_terrain()
+            .block_on()
+            .map_runtime_err()?
+            .slope_aspect)
+    }
+
+    /// Mean DEM elevation of the release cells in metres, NaN if there are none.
+    #[getter]
+    pub fn get_release_mean_elevation(&mut self) -> PyResult<f32> {
+        Ok(self
+            .inner
+            .release_area_terrain()
+            .block_on()
+            .map_runtime_err()?
+            .elevation)
     }
 
     /// DEM elevation threshold below which no avalanche is simulated.
@@ -999,12 +1230,17 @@ impl PySimulation {
         flat_positions.to_pyarray(py).reshape([positions.len(), 2])
     }
 
-    /// ``(n, 3)`` float32 array of the particle x/y/z velocities.
+    /// ``(n, 3)`` float32 array of the particle x/y/z velocities. The
+    /// terrain-following model has no z component: there it is ``(n, 2)``, with
+    /// the velocity in the surface plane and the true speed as its norm.
     #[getter]
     fn get_particles_velocity<'py>(
         &mut self,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        if self.inner.settings.sim_model == SimModel::TerrainFollowing.as_int() {
+            return self.get_particles_velocity_xy(py);
+        }
         let velocities = self
             .inner
             .fetch_particles_velocity()
@@ -1078,19 +1314,17 @@ impl PySimulation {
         Ok(mass.to_pyarray(py))
     }
 
-    /// u32 array of the per-cell deposited mass as quantized by p2g
-    /// (scaled by ``MASS_FACTOR`` in the shader utils), ``height * width``.
+    /// f32 array of the per-cell deposited mass in kg, ``height * width``.
     #[getter]
-    fn get_grid_mass<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<u32>>> {
+    fn get_grid_mass<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<f32>>> {
         let data = self.inner.fetch_grid_mass().block_on().map_runtime_err()?;
         Ok(data.to_pyarray(py))
     }
 
-    /// i32 array of the per-cell deposited momentum as quantized by p2g
-    /// (``u, v`` interleaved, scaled by ``MOMENTUM_FACTOR`` in the shader
-    /// utils), ``height * width * 2``.
+    /// f32 array of the per-cell deposited momentum in kg m/s (``u, v``
+    /// interleaved), ``height * width * 2``.
     #[getter]
-    fn get_grid_momentum<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<i32>>> {
+    fn get_grid_momentum<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<f32>>> {
         let data = self
             .inner
             .fetch_grid_momentum()

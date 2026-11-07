@@ -82,7 +82,7 @@ impl Overlay {
             Self::GridMass => OverlayRange::new(0.0, 5_000.0)
                 .with_threshold(1.0)
                 .with_unit("kg"),
-            // Slab thickness in metres; release textures typically hold 1.0 m.
+            // Release thickness in metres; release textures typically hold 1.0 m.
             Self::ReleaseAreas => OverlayRange::new(0.0, 2.0)
                 .with_threshold(0.01)
                 .with_unit("m"),
@@ -127,32 +127,20 @@ fn clone_grid_buffers(orchestrator: &ComputeOrchestrator) -> Vec<(BufferName, wg
         .collect()
 }
 
-/// Clones the particle buffers the renderer binds, or `None` before the
-/// simulation initializes particles. MPM keeps no vertical velocity buffer, so it
-/// gets a zero-filled stand-in and colouring falls back to horizontal speed.
-fn clone_particle_buffers(
-    orchestrator: &ComputeOrchestrator,
-    particle_count: u32,
-) -> Option<[wgpu::Buffer; 5]> {
-    use wgpu::util::DeviceExt;
+/// Position, velocity, state and elevation buffers, plus the optional z velocity.
+type ParticleHandles = ([wgpu::Buffer; 4], Option<wgpu::Buffer>);
 
+/// Clones the particle buffers the renderer binds, or `None` before the
+/// simulation initializes particles. The z velocity is absent for models
+/// without one.
+fn clone_particle_buffers(orchestrator: &ComputeOrchestrator) -> Option<ParticleHandles> {
     let get = |name: BufferName| orchestrator.resources.get_buffer(&name).cloned();
     let position = get(BufferName::ParticlesPosition)?;
     let velocity = get(BufferName::ParticlesVelocity)?;
     let state = get(BufferName::ParticlesState)?;
     let elevation = get(BufferName::ParticlesElevation)?;
-    let velocity_z = get(BufferName::ParticlesVelocityZ).unwrap_or_else(|| {
-        tracing::debug!("no vertical velocity buffer; colouring by horizontal speed");
-        orchestrator
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Zero Vertical Velocity"),
-                contents: bytemuck::cast_slice(&vec![0.0f32; particle_count as usize]),
-                usage: wgpu::BufferUsages::STORAGE,
-            })
-    });
-
-    Some([position, velocity, velocity_z, state, elevation])
+    let velocity_z = get(BufferName::ParticlesVelocityZ);
+    Some(([position, velocity, state, elevation], velocity_z))
 }
 
 /// The canvas surface plus the renderer watching the simulation's GPU buffers.
@@ -167,7 +155,7 @@ pub struct RenderView {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     grids: Vec<(BufferName, wgpu::Buffer)>,
-    particles: Option<[wgpu::Buffer; 5]>,
+    particles: Option<ParticleHandles>,
     pub show_particles: bool,
     pub overlay: Overlay,
 }
@@ -218,7 +206,7 @@ impl RenderView {
             device,
             queue,
             grids: clone_grid_buffers(orchestrator),
-            particles: clone_particle_buffers(orchestrator, particle_count),
+            particles: clone_particle_buffers(orchestrator),
             show_particles: true,
             overlay: Overlay::PeakFlowVelocity,
         };
@@ -231,7 +219,7 @@ impl RenderView {
     /// switches change which buffers exist, so this must run after every rebuild.
     pub fn refresh_buffers(&mut self, orchestrator: &ComputeOrchestrator, particle_count: u32) {
         self.grids = clone_grid_buffers(orchestrator);
-        self.particles = clone_particle_buffers(orchestrator, particle_count);
+        self.particles = clone_particle_buffers(orchestrator);
         let bound_count = if self.particles.is_some() {
             particle_count
         } else {
@@ -255,17 +243,16 @@ impl RenderView {
     }
 
     pub fn apply_particles(&mut self) {
-        let buffers = self
-            .particles
-            .as_ref()
-            .filter(|_| self.show_particles)
-            .map(|particles| ParticleBuffers {
+        let buffers = self.particles.as_ref().filter(|_| self.show_particles).map(
+            |(particles, velocity_z)| ParticleBuffers {
                 position: &particles[0],
                 velocity: &particles[1],
-                velocity_z: &particles[2],
-                stopped: &particles[3],
-                elevation: &particles[4],
-            });
+                velocity_z: velocity_z.as_ref(),
+                stopped: &particles[2],
+                elevation: &particles[3],
+                grid_mass: None,
+            },
+        );
         self.renderer.set_particles(&self.device, buffers);
     }
 
@@ -309,6 +296,25 @@ impl RenderView {
     /// Moves towards or away from the target; positive `delta` zooms in.
     pub fn zoom(&mut self, delta: f32) {
         self.renderer.camera.zoom(delta * ZOOM_SPEED);
+    }
+
+    /// Whether the terrain is drawn at, or within `radius_x`/`radius_y` (NDC
+    /// units) of, the NDC point `(ndc_x, ndc_y)`. Probes the point itself and
+    /// eight points on the ellipse around it.
+    pub fn terrain_near(&self, ndc_x: f32, ndc_y: f32, radius_x: f32, radius_y: f32) -> bool {
+        let camera = &self.renderer.camera;
+        let hits = |x: f32, y: f32| {
+            let (origin, direction) = camera.ray(x, y);
+            self.terrain.raycast(origin, direction).is_some()
+        };
+        hits(ndc_x, ndc_y)
+            || (0..8).any(|i| {
+                let angle = i as f32 * std::f32::consts::FRAC_PI_4;
+                hits(
+                    ndc_x + radius_x * angle.cos(),
+                    ndc_y + radius_y * angle.sin(),
+                )
+            })
     }
 
     /// Resets the camera to the default terrain framing.

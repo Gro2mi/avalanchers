@@ -47,6 +47,9 @@ SETTINGS = {
     "released_particles_per_cell": 4,
     "max_steps": 6000,
     "velocity_threshold": 0.1,
+    # The alpha-line reference assumes N = m*g*cos(theta), without the
+    # velocity-dependent centripetal contribution to basal friction.
+    "enable_curvature": False,
 }
 
 # sample the center of mass path every N simulation steps
@@ -135,8 +138,10 @@ def run_simulation(settings, save_steps, t_end=None):
     sim.create(settings)
     dem = build_dem_dict(sim)
     mu = settings["friction_coefficient"]
-    sim_name = "%s_%s_mu%s" % (pathlib.Path(settings["dem_path"]).stem,
-                               settings["friction_model"], mu)
+    sim_name = "%s_%s_%s_mu%s" % (pathlib.Path(settings["dem_path"]).stem,
+                                  settings["sim_model"],
+                                  settings["friction_model"],
+                                  mu)
 
     print(f"=== Energy line test - {sim_name} ===")
     print(f"sampling every {save_steps} steps, max_steps={settings['max_steps']}")
@@ -204,7 +209,7 @@ def main():
     parser.add_argument("--mu", type=float, default=None,
                         help="Coulomb friction coefficient")
     parser.add_argument("--sim-model", default=None,
-                        help="terrain-following | curvilinear | mpmdac")
+                        help="terrain-following | 3d | curvilinear | mpmdac")
     parser.add_argument("--friction-model", default=None,
                         help="coulomb | voellmy | voellmy-min-shear | samosat")
     parser.add_argument("--max-steps", type=int, default=None)
@@ -249,7 +254,7 @@ def main():
     result, save_path = energy_line_test.generate_energy_plot(
         ava_profile_mass, dem, {"pfv": pfv}, ENERGY_LINE_TEST_CFG,
         g=9.81, mu=settings["friction_coefficient"], sim_name=sim_name,
-        out_dir=args.out_dir, show=args.show)
+        out_dir=pathlib.Path(args.out_dir) / "pics", show=args.show)
 
     print()
     print("Runout s      : %.2f m" % result["sEnd"])

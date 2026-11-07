@@ -2,7 +2,7 @@
 use anyhow::Result;
 use clap::Parser;
 use compute_core::settings::{
-    ConstitutiveModel, CrownLineMethod, FrictionModel, Settings, SimModel,
+    ConstitutiveModel, CrownLineMethod, FrictionModel, ReleaseFillMethod, Settings, SimModel,
 };
 #[allow(unused_imports)]
 use compute_core::utils::{MaxValue, timer_checkpoint, timer_get_summary, timer_new};
@@ -34,6 +34,11 @@ fn parse_friction_model(value: &str) -> Result<FrictionModel> {
 fn parse_crown_line_method(value: &str) -> Result<CrownLineMethod> {
     CrownLineMethod::from_str(value)
         .map_err(|err| anyhow::anyhow!("invalid crown line method '{value}': {err}"))
+}
+
+fn parse_release_fill_method(value: &str) -> Result<ReleaseFillMethod> {
+    ReleaseFillMethod::from_str(value)
+        .map_err(|err| anyhow::anyhow!("invalid release fill method '{value}': {err}"))
 }
 
 fn parse_constitutive_model(value: &str) -> Result<ConstitutiveModel> {
@@ -76,6 +81,14 @@ struct Args {
     sim_model: Option<SimModel>,
     #[arg(long)]
     batch_compute_steps: Option<u32>,
+    #[arg(long)]
+    particle_sort_interval: Option<u32>,
+    #[arg(long)]
+    momentum_stop_fraction: Option<f32>,
+    #[arg(long)]
+    no_new_cells_travel: Option<f32>,
+    #[arg(long)]
+    reference_surface_length: Option<f32>,
     #[arg(long, value_parser = parse_friction_model)]
     friction_model: Option<FrictionModel>,
     #[arg(long)]
@@ -83,7 +96,9 @@ struct Args {
     #[arg(long)]
     density: Option<f32>,
     #[arg(long)]
-    slab_thickness_factor: Option<f32>,
+    release_thickness: Option<f32>,
+    #[arg(long)]
+    release_swe: Option<f32>,
     #[arg(long)]
     friction_coefficient: Option<f32>,
     #[arg(long)]
@@ -121,9 +136,27 @@ struct Args {
     #[arg(long)]
     release_min_elevation: Option<f32>,
     #[arg(long)]
+    release_max_elevation: Option<f32>,
+    #[arg(long)]
     release_area_fraction: Option<f32>,
     #[arg(long, value_parser = parse_crown_line_method)]
     crown_line_method: Option<CrownLineMethod>,
+    #[arg(long)]
+    crown_line_exit_distance: Option<f32>,
+    #[arg(long)]
+    crown_elevation_band: Option<f32>,
+    #[arg(long)]
+    min_particles_per_crown_cell: Option<u32>,
+    #[arg(long, value_parser = parse_release_fill_method)]
+    release_fill_method: Option<ReleaseFillMethod>,
+    #[arg(long)]
+    release_slope_weight: Option<f32>,
+    #[arg(long)]
+    release_slope_peak: Option<f32>,
+    #[arg(long)]
+    release_slope_width: Option<f32>,
+    #[arg(long)]
+    release_slope_smoothing_length: Option<f32>,
     #[arg(long)]
     velocity_threshold: Option<f32>,
     #[arg(long)]
@@ -139,7 +172,11 @@ struct Args {
     #[arg(long, value_parser = parse_bool)]
     enable_entrainment: Option<bool>,
     #[arg(long, value_parser = parse_bool)]
+    enable_weak_pressure: Option<bool>,
+    #[arg(long, value_parser = parse_bool)]
     enable_center_of_mass: Option<bool>,
+    #[arg(long, value_parser = parse_bool)]
+    enable_particle_relaxation: Option<bool>,
     #[arg(long, value_parser = parse_bool)]
     center_of_mass_biggest_blob: Option<bool>,
 }
@@ -164,8 +201,35 @@ impl Args {
         if let Some(value) = self.crown_line_method {
             settings.crown_line_method = Some(value);
         }
+        if let Some(value) = self.crown_line_exit_distance {
+            settings.crown_line_exit_distance = Some(value);
+        }
+        if let Some(value) = self.crown_elevation_band {
+            settings.crown_elevation_band = Some(value);
+        }
+        if let Some(value) = self.min_particles_per_crown_cell {
+            settings.min_particles_per_crown_cell = Some(value);
+        }
+        if let Some(value) = self.release_fill_method {
+            settings.release_fill_method = Some(value);
+        }
+        if let Some(value) = self.release_slope_weight {
+            settings.release_slope_weight = Some(value);
+        }
+        if let Some(value) = self.release_slope_peak {
+            settings.release_slope_peak = Some(value);
+        }
+        if let Some(value) = self.release_slope_width {
+            settings.release_slope_width = Some(value);
+        }
+        if let Some(value) = self.release_slope_smoothing_length {
+            settings.release_slope_smoothing_length = Some(value);
+        }
         if let Some(value) = self.enable_center_of_mass {
             settings.enable_center_of_mass = Some(value);
+        }
+        if let Some(value) = self.enable_particle_relaxation {
+            settings.enable_particle_relaxation = Some(value);
         }
         if let Some(value) = self.output_path.clone() {
             settings.output_path = Some(value);
@@ -179,6 +243,18 @@ impl Args {
         if let Some(value) = self.batch_compute_steps {
             settings.batch_compute_steps = Some(value);
         }
+        if let Some(value) = self.particle_sort_interval {
+            settings.particle_sort_interval = Some(value);
+        }
+        if let Some(value) = self.momentum_stop_fraction {
+            settings.momentum_stop_fraction = Some(value);
+        }
+        if let Some(value) = self.no_new_cells_travel {
+            settings.no_new_cells_travel = Some(value);
+        }
+        if let Some(value) = self.reference_surface_length {
+            settings.reference_surface_length = Some(value);
+        }
         if let Some(value) = self.friction_model {
             settings.friction_model = Some(value);
         }
@@ -188,8 +264,11 @@ impl Args {
         if let Some(value) = self.density {
             settings.density = Some(value);
         }
-        if let Some(value) = self.slab_thickness_factor {
-            settings.slab_thickness_factor = Some(value);
+        if let Some(value) = self.release_thickness {
+            settings.release_thickness = Some(value);
+        }
+        if let Some(value) = self.release_swe {
+            settings.release_swe = Some(value);
         }
         if let Some(value) = self.friction_coefficient {
             settings.friction_coefficient = Some(value);
@@ -245,6 +324,9 @@ impl Args {
         if let Some(value) = self.release_min_elevation {
             settings.release_min_elevation = Some(value);
         }
+        if let Some(value) = self.release_max_elevation {
+            settings.release_max_elevation = Some(value);
+        }
         if let Some(value) = self.velocity_threshold {
             settings.velocity_threshold = Some(value);
         }
@@ -265,6 +347,9 @@ impl Args {
         }
         if let Some(value) = self.enable_entrainment {
             settings.enable_entrainment = Some(value);
+        }
+        if let Some(value) = self.enable_weak_pressure {
+            settings.enable_weak_pressure = Some(value);
         }
         if let Some(value) = self.center_of_mass_biggest_blob {
             settings.center_of_mass_biggest_blob = Some(value);
@@ -432,8 +517,13 @@ mod tests {
             release_areas_path: None,
             output_path: None,
             batch_compute_steps: None,
+            particle_sort_interval: None,
+            momentum_stop_fraction: None,
+            no_new_cells_travel: None,
+            reference_surface_length: None,
             released_particles_per_cell: None,
-            slab_thickness_factor: None,
+            release_thickness: None,
+            release_swe: None,
             friction_coefficient: None,
             drag_coefficient: None,
             n0: None,
@@ -452,16 +542,27 @@ mod tests {
             min_slope_angle: None,
             max_slope_angle: None,
             release_min_elevation: None,
+            release_max_elevation: Some(3000.0),
             velocity_threshold: None,
             roughness_threshold: None,
             peak_flow_thickness_threshold: None,
             enable_particle_interaction: None,
             enable_earth_pressure_coefficient: None,
             enable_entrainment: None,
+            enable_weak_pressure: None,
             center_of_mass_biggest_blob: None,
             release_area_fraction: None,
             crown_line_method: None,
+            crown_line_exit_distance: None,
+            crown_elevation_band: None,
+            min_particles_per_crown_cell: None,
+            release_fill_method: None,
+            release_slope_weight: None,
+            release_slope_peak: None,
+            release_slope_width: None,
+            release_slope_smoothing_length: None,
             enable_center_of_mass: None,
+            enable_particle_relaxation: Some(false),
         };
 
         args.apply_overrides(&mut settings)
@@ -472,5 +573,7 @@ mod tests {
         assert_eq!(settings.sim_model, Some(SimModel::TerrainFollowing));
         assert_eq!(settings.friction_model, Some(FrictionModel::Coulomb));
         assert_eq!(settings.enable_curvature, Some(true));
+        assert_eq!(settings.release_max_elevation, Some(3000.0));
+        assert_eq!(settings.enable_particle_relaxation, Some(false));
     }
 }

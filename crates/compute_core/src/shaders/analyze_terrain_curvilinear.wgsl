@@ -6,6 +6,14 @@
 @group(0) @binding(4) var<storage, read_write> slope_angle_buffer: array<f32>;
 @group(0) @binding(5) var<storage, read_write> slope_aspect_buffer: array<f32>;
 @group(0) @binding(6) var<storage, read_write> debug: array<f32>;
+// Gaussian-smoothed DEM (a copy of the DEM when reference_surface_length is 0)
+@group(0) @binding(7) var dem_reference_texture: texture_2d<f32>;
+// x = cos(beta) between the bed and reference surface normals
+@group(0) @binding(8) var basal_topography_texture: texture_storage_2d<rgba32float, write>;
+
+// Gully walls steeper than 70 degrees against the reference surface load
+// the flow like 70 degree walls (keeps 1 / cos(beta) bounded at cliffs)
+const MIN_COS_BETA: f32 = 0.34202014;
 
 @compute @workgroup_size(WG_SIZE_2D, WG_SIZE_2D, 1)
 fn analyze_terrain_curvilinear(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -67,25 +75,35 @@ fn analyze_terrain_curvilinear(@builtin(global_invocation_id) id: vec3<u32>) {
     // Safety check: prevent division/undefined states on perfectly flat terrain
     if slope_magnitude > 1e-5 {
         // atan2(y, x) returns the math angle counter-clockwise from East (+x)
-        let aspect_rad = atan2(dB_dy, dB_dx);
+        let aspect_rad = atan2(-dB_dy, -dB_dx);
 
-        // Convert counter-clockwise from East to clockwise from North
-        slope_aspect_deg = 90.0 - degrees(aspect_rad);
-        // Match the curvilinear shader convention: aspect is measured clockwise from north,
-        // using the terrain gradient direction, not the opposite-facing surface normal.
-        slope_aspect_deg = atan2(dy, dx);
-            slope_aspect_deg = ((90.0 - degrees(aspect_rad)) % 360.0 + 360.0) % 360.0;
+        // GIS aspect: the bearing the slope faces (downhill), clockwise from north
+        slope_aspect_deg = ((90.0 - degrees(aspect_rad)) % 360.0 + 360.0) % 360.0;
     } else {
         // GIS convention representation for flat terrain (Aspect = -1)
         slope_aspect_deg = -1.0;
     }
 
-    // 9. Write everything to WebGPU Storage Buffers
+    // 9. Inclination beta of the bed against the smoothed reference surface,
+    //    the gully wall angle (cos(beta) = 1 exactly when disabled)
+    var basal_topography = vec4f(1.0, 0.0, 0.0, 0.0);
+    if sim_settings.reference_surface_length > 0.0 {
+        let ref_dx = (textureLoad(dem_reference_texture, coords + vec2<i32>(1, 0), 0).r
+            - textureLoad(dem_reference_texture, coords + vec2<i32>(-1, 0), 0).r) / (2.0 * dx);
+        let ref_dy = (textureLoad(dem_reference_texture, coords + vec2<i32>(0, 1), 0).r
+            - textureLoad(dem_reference_texture, coords + vec2<i32>(0, -1), 0).r) / (2.0 * dy);
+        let ref_J = sqrt(1.0 + ref_dx * ref_dx + ref_dy * ref_dy);
+        let cos_beta = (dB_dx * ref_dx + dB_dy * ref_dy + 1.0) / (J * ref_J);
+        basal_topography.x = clamp(cos_beta, MIN_COS_BETA, 1.0);
+    }
+
+    // 10. Write everything to WebGPU Storage Buffers
     let index = xy_to_idx(id.xy);
 
     // Curvilinear physics buffer
     textureStore(curvature_texture, coords, vec4f(K_xx, K_yy, K_xy, g_x));
     textureStore(terrain_geometry_texture, coords, vec4f(l_x, l_y, J, g_y));
+    textureStore(basal_topography_texture, coords, basal_topography);
 
     // New analysis buffers
     slope_angle_buffer[index] = slope_angle_deg;
@@ -141,6 +159,11 @@ const INV_MOMENTUM_FACTOR: f32 = 1 / MOMENTUM_FACTOR;
 // depth-integrated internal force (h * sigma * grad_w * area, ~1e4..1e5 N per node contribution)
 const FORCE_FACTOR: f32 = 1e-3; // i32 limit is 2.1e6 N per node
 const INV_FORCE_FACTOR: f32 = 1 / FORCE_FACTOR;
+// weak-form pressure sum m_p h_p / 2 grad_w (kg) of the curvilinear model,
+// node sum = node_mass * |grad h|: 0.001 kg resolves thin front nodes
+//   (rho*cell^2*h*J ~ 6e4 kg * 1 * 1e3 = 6e7 < 2.1e9)
+const PRESSURE_FACTOR: f32 = 1e3;
+const INV_PRESSURE_FACTOR: f32 = 1 / PRESSURE_FACTOR;
 
 // TODO precompute often used values on the cpu and pass them as uniforms to avoid redundant calculations on the gpu
 
@@ -153,6 +176,7 @@ struct SimInfo {
     max_velocity: f32,
     max_flow_thickness: f32,
     flags: u32,
+    grid_elapsed_time: f32,
 };
 
 const SIM_INFO_OUT_OF_BOUNDS: u32 = 1u << 0u;
@@ -162,7 +186,16 @@ const SIM_INFO_PARTICLE_OUT_OF_DEM_DATA: u32 = 1u << 3u;
 const SIM_INFO_STOPPED: u32 = 1u << 31u;
 const SIM_INFO_ALL_PARTICLES_STOPPED: u32 = 1u << 30u;
 const SIM_INFO_NO_NEW_CELLS: u32 = 1u << 29u;
+// almost all particles are resting or terminally stopped
+const SIM_INFO_AT_REST: u32 = 1u << 28u;
+// total momentum fell below momentum_stop_fraction of its peak
+const SIM_INFO_LOW_MOMENTUM: u32 = 1u << 27u;
 
+// reversible low-speed state; the low bits hold the rest start step while resting
+// and the consecutive slow-step count while moving
+const PARTICLE_RESTING: u32 = 1u << 26u;
+// consecutive slow steps before a particle rests
+const REST_STEPS: u32 = 20u;
 const PARTICLE_FLYING: u32 = 1u << 27u;
 const PARTICLE_OUT_OF_BOUNDS: u32 = 1u << 28u;
 const PARTICLE_IS_NAN: u32 = 1u << 29u;
@@ -177,7 +210,7 @@ struct SimSettings {
     grid_shape: vec2u,
     world_size: vec2f,
     snow_density: f32,
-    slab_thickness: f32,
+    release_thickness: f32,
     friction_coefficient: f32,
     drag_coefficient: f32,
     n0: f32,
@@ -204,6 +237,14 @@ struct SimSettings {
     // MPMDAC compressibility; bulk_modulus 0 = incompressible
     bulk_modulus: f32,
     compaction_pressure: f32,
+    // stop once total momentum < fraction * its peak; 0 disables (curvilinear)
+    momentum_stop_fraction: f32,
+    // front travel in cells covered by the no-new-cells stop window
+    no_new_cells_travel: f32,
+    // Gaussian width (m) of the curvilinear reference surface; 0 disables it
+    reference_surface_length: f32,
+    // snow water equivalent (kg/m2) of the release cells; NaN if unset
+    release_swe: f32,
 };
 
 struct AtomicValues {
@@ -215,7 +256,42 @@ struct AtomicValues {
     number_release_cells: atomic<u32>,
     number_release_particles: atomic<u32>,
     stopped_particles: atomic<u32>,
+    // resting particles counted during the current step, reset by update_sim_info
+    resting_particles: atomic<u32>,
+    // total grid momentum (kg m/s) of the current step as a 64-bit sum, reset by update_sim_info
+    momentum_lo: atomic<u32>,
+    momentum_hi: atomic<u32>,
+    // f32 bits of the largest total momentum so far
+    peak_momentum: atomic<u32>,
 };
+
+// Reversible resting: a particle rests after REST_STEPS consecutive slow steps
+// and wakes once the gathered grid speed exceeds twice the threshold. Resting
+// particles keep depositing mass but no momentum and do not move, which removes
+// sub-threshold creep inside deposits. Returns the new state: its low bits hold
+// the slow-step counter while moving and the rest start step while resting.
+fn next_rest_state(previous_state: u32, speed: f32, timestep: u32) -> u32 {
+    let low_mask = PARTICLE_RESTING - 1u;
+    var resting = (previous_state & PARTICLE_RESTING) != 0u;
+    var low_bits = previous_state & low_mask;
+    if resting {
+        if speed > 2.0 * sim_settings.velocity_threshold {
+            resting = false;
+            low_bits = 0u;
+        }
+    } else if speed < sim_settings.velocity_threshold {
+        low_bits = min(low_bits + 1u, REST_STEPS);
+        if low_bits >= REST_STEPS {
+            resting = true;
+            low_bits = timestep & low_mask;
+        }
+    } else {
+        low_bits = 0u;
+    }
+    return (previous_state & ~(PARTICLE_RESTING | low_mask))
+        | select(0u, PARTICLE_RESTING, resting)
+        | low_bits;
+}
 
 struct G2PUpdate {
     velocity: vec2f,
@@ -223,6 +299,13 @@ struct G2PUpdate {
 };
 
 @group(0) @binding(0) var<uniform> sim_settings: SimSettings;
+
+// length in steps of the no-new-cells rolling window: the fastest material
+// moves at most cfl cells per step, so round(travel / cfl) steps cover the same
+// front travel at any cfl; at least 10 steps
+fn no_new_cells_window() -> u32 {
+    return max(10u, u32(round(sim_settings.no_new_cells_travel / sim_settings.cfl)));
+}
 
 fn is_nan(x: f32) -> bool {
     let bits: u32 = bitcast<u32>(x);

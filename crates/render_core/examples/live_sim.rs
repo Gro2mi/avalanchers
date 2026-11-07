@@ -8,7 +8,7 @@
 //! Controls: left drag orbits, right drag pans, scroll zooms, `R` restarts the
 //! simulation, `V` resets the view, `0` hides the overlay, `1` peak flow velocity, `2`
 //! peak flow thickness, `3` grid mass, `4` release areas, `5` slope angle, `6` slope
-//! aspect, `7` roughness, `8` grid momentum, `P` toggles particles. The egui panel
+//! aspect, `7` roughness, `8` grid momentum, `P` toggles particles, `J` the particle elevation jitter. The egui panel
 //! switches the testcase (the DEM pngs next to the configured one), the simulation
 //! model and the other simulation settings; sliders fine-tune with the arrow keys once
 //! focused (click the slider or its label, or `Tab` to it), and double-clicking a
@@ -23,7 +23,6 @@ use compute_core::settings::{FrictionModel, Settings, SimModel};
 use compute_core::{ComputeOrchestrator, SimInfo, buffers::BufferName};
 use render_core::{OrbitCamera, OverlayRange, ParticleBuffers, Renderer, TerrainData};
 use simulation::{Simulation, SimulationState};
-use wgpu::util::DeviceExt;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -71,10 +70,10 @@ fn window_icon() -> anyhow::Result<Icon> {
 /// They fill unset fields on load and are the double-click reset targets of the
 /// sliders.
 const DEFAULT_DENSITY: f32 = 200.0;
-const DEFAULT_SLAB_THICKNESS: f32 = 1.0;
+const DEFAULT_RELEASE_THICKNESS: f32 = 1.0;
 const DEFAULT_FRICTION_COEFFICIENT: f32 = 0.2;
 const DEFAULT_DRAG_COEFFICIENT: f32 = 2000.0;
-const DEFAULT_CFL: f32 = 0.5;
+const DEFAULT_CFL: f32 = 0.9;
 const DEFAULT_MIN_SLOPE_ANGLE: f32 = 28.0;
 const DEFAULT_MAX_SLOPE_ANGLE: f32 = 60.0;
 const DEFAULT_RELEASE_MIN_ELEVATION: f32 = 1500.0;
@@ -83,6 +82,8 @@ const DEFAULT_ROUGHNESS_THRESHOLD: f32 = 0.01;
 const DEFAULT_INTERNAL_FRICTION_ANGLE: f32 = 40.0;
 const DEFAULT_RELEASED_PARTICLES_PER_CELL: u32 = 8;
 const DEFAULT_MAX_STEPS: u32 = 6000;
+/// 0 disables the curvilinear reference-surface split (gully confinement)
+const DEFAULT_REFERENCE_SURFACE_LENGTH: f32 = 0.0;
 
 /// Fills in every field the settings panel edits with the engine defaults from
 /// `SimSettings::new`. `from_settings` already falls back to those values for unset
@@ -90,9 +91,6 @@ const DEFAULT_MAX_STEPS: u32 = 6000;
 /// showing concrete values and makes the draft-vs-applied comparison exact.
 fn apply_panel_defaults(settings: &mut Settings) {
     settings.density.get_or_insert(DEFAULT_DENSITY);
-    settings
-        .slab_thickness_factor
-        .get_or_insert(DEFAULT_SLAB_THICKNESS);
     settings
         .friction_coefficient
         .get_or_insert(DEFAULT_FRICTION_COEFFICIENT);
@@ -122,6 +120,9 @@ fn apply_panel_defaults(settings: &mut Settings) {
         .released_particles_per_cell
         .get_or_insert(DEFAULT_RELEASED_PARTICLES_PER_CELL);
     settings.max_steps.get_or_insert(DEFAULT_MAX_STEPS);
+    settings
+        .reference_surface_length
+        .get_or_insert(DEFAULT_REFERENCE_SURFACE_LENGTH);
     settings.sim_model.get_or_insert(SimModel::Curvilinear);
     settings
         .friction_model
@@ -131,7 +132,7 @@ fn apply_panel_defaults(settings: &mut Settings) {
     settings.enable_particle_relaxation.get_or_insert(true);
     settings
         .enable_earth_pressure_coefficient
-        .get_or_insert(true);
+        .get_or_insert(false);
 }
 
 /// Directory the testcase dropdown scans: the folder holding the configured DEM
@@ -240,7 +241,7 @@ impl Overlay {
             Overlay::GridMomentum => OverlayRange::new(0.0, 200_000.0)
                 .with_threshold(100.0)
                 .with_unit("kg·m/s"),
-            // Slab thickness in metres; release textures typically hold 1.0 m.
+            // Release thickness in metres; release textures typically hold 1.0 m.
             Overlay::ReleaseAreas => OverlayRange::new(0.0, 2.0)
                 .with_threshold(0.01)
                 .with_unit("m"),
@@ -292,8 +293,7 @@ fn attach_overlay(
 /// speed; every other particle buffer exists for both models.
 fn clone_particle_buffers(
     orchestrator: &ComputeOrchestrator,
-    particle_count: u32,
-) -> anyhow::Result<[wgpu::Buffer; 5]> {
+) -> anyhow::Result<([wgpu::Buffer; 4], Option<wgpu::Buffer>)> {
     let clone_buffer = |name: BufferName| -> anyhow::Result<wgpu::Buffer> {
         orchestrator
             .resources
@@ -302,24 +302,15 @@ fn clone_particle_buffers(
             .ok_or_else(|| anyhow::anyhow!("simulation buffer '{name}' is missing"))
     };
 
-    let velocity_z = clone_buffer(BufferName::ParticlesVelocityZ).unwrap_or_else(|_| {
-        tracing::debug!("no vertical velocity buffer; colouring by horizontal speed");
-        orchestrator
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Zero Vertical Velocity"),
-                contents: bytemuck::cast_slice(&vec![0.0f32; particle_count as usize]),
-                usage: wgpu::BufferUsages::STORAGE,
-            })
-    });
-
-    Ok([
-        clone_buffer(BufferName::ParticlesPosition)?,
-        clone_buffer(BufferName::ParticlesVelocity)?,
-        velocity_z,
-        clone_buffer(BufferName::ParticlesState)?,
-        clone_buffer(BufferName::ParticlesElevation)?,
-    ])
+    Ok((
+        [
+            clone_buffer(BufferName::ParticlesPosition)?,
+            clone_buffer(BufferName::ParticlesVelocity)?,
+            clone_buffer(BufferName::ParticlesState)?,
+            clone_buffer(BufferName::ParticlesElevation)?,
+        ],
+        clone_buffer(BufferName::ParticlesVelocityZ).ok(),
+    ))
 }
 
 /// The simulation and cloned handles to its GPU state. wgpu resources are reference
@@ -332,7 +323,9 @@ struct SimulationView {
     instance: wgpu::Instance,
     terrain: TerrainData,
     grids: Vec<(BufferName, wgpu::Buffer)>,
-    particles: [wgpu::Buffer; 5],
+    particles: [wgpu::Buffer; 4],
+    /// Absent for models without a vertical velocity.
+    velocity_z: Option<wgpu::Buffer>,
     particle_count: u32,
     info: SimInfo,
     exaggeration: f32,
@@ -344,6 +337,19 @@ struct SimulationView {
 }
 
 impl SimulationView {
+    /// Factor from a raw `GridMass` value to metres of flow, and whether the
+    /// mass is stored as f32 bits (float-atomic adapters) instead of a
+    /// quantized u32 (see `MASS_FACTOR` in utils.wgsl).
+    fn grid_mass_encoding(&self) -> (f32, bool) {
+        const MASS_FACTOR: f32 = 10.0;
+        let settings = &self.simulation.settings;
+        let is_f32 = self.simulation.orchestrator().has_float32_atomic();
+        let mass_factor = if is_f32 { 1.0 } else { MASS_FACTOR };
+        let thickness =
+            1.0 / (mass_factor * settings.density * settings.cell_size * settings.cell_size);
+        (thickness, is_f32)
+    }
+
     fn grid(&self, name: &BufferName) -> &wgpu::Buffer {
         &self
             .grids
@@ -408,7 +414,7 @@ impl SimulationView {
             .into_iter()
             .map(clone_grid)
             .collect::<anyhow::Result<Vec<_>>>()?;
-        self.particles = clone_particle_buffers(orchestrator, self.info.number_particles)?;
+        (self.particles, self.velocity_z) = clone_particle_buffers(orchestrator)?;
         self.particle_count = self.info.number_particles;
         self.failed = false;
         self.final_info_reported = false;
@@ -572,7 +578,7 @@ fn start_simulation(settings: Settings, exaggeration: f32) -> anyhow::Result<Sim
         .map(|name| Ok((name.clone(), clone_buffer(name)?)))
         .collect::<anyhow::Result<Vec<_>>>()?;
 
-    let particles = clone_particle_buffers(orchestrator, info.number_particles)?;
+    let (particles, velocity_z) = clone_particle_buffers(orchestrator)?;
 
     let device = orchestrator.device.clone();
     let queue = orchestrator.queue.clone();
@@ -588,6 +594,7 @@ fn start_simulation(settings: Settings, exaggeration: f32) -> anyhow::Result<Sim
         terrain,
         grids,
         particles,
+        velocity_z,
         particle_count: info.number_particles,
         info,
         exaggeration,
@@ -622,9 +629,10 @@ fn write_snapshot(sim: &SimulationView, overlay: Overlay, path: &str) -> anyhow:
         (std::env::var("LIVE_SIM_NO_PARTICLES").is_err()).then_some(ParticleBuffers {
             position: &sim.particles[0],
             velocity: &sim.particles[1],
-            velocity_z: &sim.particles[2],
-            stopped: &sim.particles[3],
-            elevation: &sim.particles[4],
+            velocity_z: sim.velocity_z.as_ref(),
+            stopped: &sim.particles[2],
+            elevation: &sim.particles[3],
+            grid_mass: None,
         }),
     );
     renderer.particles_mut().set_count(sim.particle_count);
@@ -738,6 +746,8 @@ struct Viewer {
     panning: bool,
     overlay: Overlay,
     show_particles: bool,
+    /// Lift particles by a random share of the local flow thickness (visual only).
+    particle_jitter: bool,
     /// Input or rebuild changed the view; the next redraw must render. Keeps an
     /// idle viewer at zero GPU work instead of redrawing identical frames.
     dirty: bool,
@@ -760,6 +770,7 @@ impl Viewer {
             panning: false,
             overlay: Overlay::PeakFlowVelocity,
             show_particles: true,
+            particle_jitter: true,
             dirty: true,
             pending_render: false,
             last_render_at: Instant::now(),
@@ -791,11 +802,19 @@ impl Viewer {
         let buffers = self.show_particles.then(|| ParticleBuffers {
             position: &self.sim.particles[0],
             velocity: &self.sim.particles[1],
-            velocity_z: &self.sim.particles[2],
-            stopped: &self.sim.particles[3],
-            elevation: &self.sim.particles[4],
+            velocity_z: self.sim.velocity_z.as_ref(),
+            stopped: &self.sim.particles[2],
+            elevation: &self.sim.particles[3],
+            grid_mass: Some(self.sim.grid(&BufferName::GridMass)),
         });
         view.renderer.set_particles(&self.sim.device, buffers);
+        let (mass_to_thickness, mass_is_f32) = self.sim.grid_mass_encoding();
+        let amplitude = if self.particle_jitter { 1.0 } else { 0.0 };
+        view.renderer.particles_mut().set_elevation_jitter(
+            amplitude,
+            mass_to_thickness,
+            mass_is_f32,
+        );
         self.dirty = true;
     }
 
@@ -1065,6 +1084,11 @@ impl ApplicationHandler for Viewer {
                         self.show_particles = !self.show_particles;
                         self.apply_particles();
                     }
+                    Key::Character("j" | "J") => {
+                        self.particle_jitter = !self.particle_jitter;
+                        self.apply_particles();
+                        tracing::info!("particle elevation jitter: {}", self.particle_jitter);
+                    }
                     Key::Character("+") => self.sim.adjust_speed(2.0),
                     Key::Character("-") => self.sim.adjust_speed(0.5),
                     Key::Character("r" | "R") => {
@@ -1202,12 +1226,18 @@ impl ApplicationHandler for Viewer {
                                             SimModel::TerrainFollowing,
                                             "Terrain-following",
                                         );
+                                        ui.selectable_value(&mut model, SimModel::ThreeD, "3D");
                                         ui.selectable_value(
                                             &mut model,
                                             SimModel::Curvilinear,
                                             "Curvilinear",
                                         );
                                         ui.selectable_value(&mut model, SimModel::MpmDaC, "MPMDAC");
+                                        ui.selectable_value(
+                                            &mut model,
+                                            SimModel::SlidingBlock,
+                                            "Sliding block",
+                                        );
                                     });
                                 draft.sim_model = Some(model);
                             });
@@ -1260,14 +1290,23 @@ impl ApplicationHandler for Viewer {
                                         50.0..=500.0,
                                         5.0,
                                     );
-                                    f32_slider(
-                                        ui,
-                                        "slab thickness",
-                                        DEFAULT_SLAB_THICKNESS,
-                                        &mut draft.slab_thickness_factor,
-                                        0.1..=5.0,
-                                        0.05,
+                                    let mut override_thickness = draft.release_thickness.is_some();
+                                    ui.checkbox(
+                                        &mut override_thickness,
+                                        "override release thickness",
                                     );
+                                    if override_thickness {
+                                        f32_slider(
+                                            ui,
+                                            "release thickness",
+                                            DEFAULT_RELEASE_THICKNESS,
+                                            &mut draft.release_thickness,
+                                            0.1..=5.0,
+                                            0.05,
+                                        );
+                                    } else {
+                                        draft.release_thickness = None;
+                                    }
                                     f32_slider(
                                         ui,
                                         "friction coefficient",
@@ -1364,6 +1403,26 @@ impl ApplicationHandler for Viewer {
                                     &mut draft.roughness_threshold,
                                     0.001..=1.0,
                                     0.001,
+                                );
+                                // curvilinear only; 0 disables the gully confinement
+                                ui.add_enabled_ui(
+                                    draft.sim_model == Some(SimModel::Curvilinear),
+                                    |ui| {
+                                        f32_slider(
+                                            ui,
+                                            "reference surface length (m)",
+                                            DEFAULT_REFERENCE_SURFACE_LENGTH,
+                                            &mut draft.reference_surface_length,
+                                            0.0..=100.0,
+                                            1.0,
+                                        )
+                                        .0
+                                        .on_hover_text(
+                                            "Gully confinement: terrain narrower than this \
+                                             Gaussian width counts as gully walls with \
+                                             extra friction. 0 = off",
+                                        );
+                                    },
                                 );
                             });
 
@@ -1508,6 +1567,15 @@ impl ApplicationHandler for Viewer {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Network-backed loaders (reqwest/hyper) need a Tokio reactor even though the
+    // examples drive futures with pollster; a multi-thread runtime runs the IO driver
+    // on its worker threads so pollster::block_on can make progress.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("failed to build Tokio runtime");
+    let _runtime_guard = runtime.enter();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

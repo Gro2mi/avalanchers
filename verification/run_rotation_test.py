@@ -59,6 +59,8 @@ SETTINGS = {
     "velocity_threshold": 0.1,
     "enable_particle_interaction": True,
     "enable_particle_relaxation": True,
+    # Match the alpha-line reference used for each rotated run.
+    "enable_curvature": False,
 }
 
 SAVE_STEPS = 25
@@ -183,7 +185,9 @@ def main():
     h0 = float(np.median(release[release > 0]))
     out_dir = pathlib.Path(args.out_dir)
     pics = out_dir / "pics"
-    sim_name = "%s_coulomb_mu%g" % (pathlib.Path(args.dem).stem, mu)
+    sim_name = "%s_%s_%s_mu%g" % (pathlib.Path(args.dem).stem,
+                                  SETTINGS["sim_model"],
+                                  SETTINGS["friction_model"], mu)
 
     print(f"=== Rotation test - {sim_name} ===")
     print(f"base DEM: {args.dem}")

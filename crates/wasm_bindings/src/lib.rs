@@ -560,6 +560,16 @@ impl WasmSimulation {
         Ok(())
     }
 
+    /// Whether the rendered terrain lies under, or within `radius_x`/`radius_y`
+    /// of, a canvas point; all values in normalized device coordinates (`x` and
+    /// `y` in `[-1, 1]`, `y` up). False while no renderer is attached. Lets the
+    /// page decide whether a wheel event zooms the view or scrolls the page.
+    pub fn terrain_near(&self, ndc_x: f32, ndc_y: f32, radius_x: f32, radius_y: f32) -> bool {
+        self.view
+            .as_ref()
+            .is_some_and(|view| view.terrain_near(ndc_x, ndc_y, radius_x, radius_y))
+    }
+
     /// Resets the camera to the default terrain framing.
     pub fn reset_view(&mut self) -> Result<(), JsValue> {
         self.view_mut()?.reset_view();

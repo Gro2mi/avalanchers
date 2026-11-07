@@ -4,10 +4,11 @@
   "sim_model": "curvilinear",
   "friction_model": "voellmy",
   "max_steps": 6000,
+  "cfl": 0.9,
   "released_particles_per_cell": 4,
-  "slab_thickness_factor": 1.0,
   "friction_coefficient": 0.2,
   "drag_coefficient": 2000.0,
   "velocity_threshold": 0.1,
-  "enable_center_of_mass": false
+  "enable_center_of_mass": false,
+  "reference_surface_length": 20.0
 }

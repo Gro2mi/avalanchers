@@ -5,7 +5,7 @@
     "sim_model": 0,
     "friction_model": 1,
     "density": 200.0,
-    "slab_thickness": 0.50,
+    "release_thickness": 0.50,
     "friction_coefficient": 0.155,
     "drag_coefficient": 4000.0,
     "cfl": 0.5,

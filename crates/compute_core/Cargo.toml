@@ -24,3 +24,4 @@ bitflags = { workspace = true }
 
 [dev-dependencies]
 pollster = { workspace = true }
+naga = { version = "30.0.1", features = ["wgsl-in"] }

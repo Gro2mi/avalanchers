@@ -3,3 +3,4 @@
 *.ags linguist-vendored
 *.rp linguist-vendored
 *.aabb linguist-vendored
+*.wgsl text eol=lf

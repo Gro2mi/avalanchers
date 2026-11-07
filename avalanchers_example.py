@@ -31,7 +31,8 @@ settings = {
     "released_particles_per_cell": 4,
     "friction_model": "voellmy",
     "density": 200.0,
-    "slab_thickness_factor": 1.5,
+    # optional, replaces the thickness of the release areas
+    # "release_thickness": 1.5,
     "friction_coefficient": 0.2,
     "drag_coefficient": 2000.0,
     "cfl": 0.5,

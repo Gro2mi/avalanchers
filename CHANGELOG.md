@@ -2,6 +2,167 @@
 
 All notable changes to this project might be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- The simulation runs in Chrome again. The center of mass shader failed WGSL uniformity validation
+  there, which Firefox does not enforce.
+- The biggest-blob center of mass no longer risks reading stale blob labels or masses. Its phases
+  only synchronized workgroup memory, not the storage buffers they hand over.
+- GPUs with float atomics no longer produce NaN velocities on empty grid nodes in the curvilinear,
+  MPMDAC and sliding block models, and show the particle height jitter again.
+- The curvilinear model no longer produces NaN when the flow reaches the outermost grid nodes on
+  GPUs that evaluate 0/0 strictly.
+- Repeated GPU evaluations no longer grow GPU memory until the driver reports `Out of Memory`.
+  `evaluate` records its passes into one command encoder instead of about 30 submissions, and the
+  chamfer buffers are allocated once per grid instead of on every call. The particle relaxation
+  records its 30 iterations the same way and reuses its buffers while the grid and particle count
+  stay the same.
+- Creating a simulation or a headless render context no longer leaves 16 MB of GPU memory behind
+  after it is dropped. Only the primary backends (Vulkan, Metal, DX12, WebGPU) are used; the unused
+  OpenGL backend caused this.
+
+### Changed
+- **Breaking:** `slope_aspect` is now the direction the slope faces (downhill), as in GIS and
+  avalanche bulletins: a north-facing slope is 0 degrees. It used to be the uphill bearing, 180
+  degrees off. Flat cells stay -1.
+- **Breaking:** `grid_mass` and `grid_momentum` now return f32 in kg and kg m/s on every GPU instead
+  of raw quantized integers, so callers no longer divide by `MASS_FACTOR` and `MOMENTUM_FACTOR`.
+- **Breaking:** `slab_thickness_factor` is now `release_thickness` in metres
+  (`--release-thickness` in the CLI) and the old key is rejected. It is unset by default: rasters,
+  arrays, stores and shapefile attributes keep their thickness, all other release areas get 1 m.
+  If set, it replaces the thickness of every release cell, with a warning for sources that have
+  their own; rasters and arrays used to ignore it. It must be above 0.01 m. Result stores keep it
+  as `release_thickness`, NaN if unset.
+- **Breaking:** `terrain-following` (model 0) is now a depth-averaged grid MPM like the
+  curvilinear model, with gravity, hydrostatic pressure and basal friction on the grid and the
+  curvature-corrected arc step on the particles, which snap onto the DEM. Velocities stay in the
+  surface plane and are transferred as 2D vectors: the tangent velocity rotated into the horizontal
+  plane, so their magnitude is the true speed but their components are not `dx/dt`. There is no z
+  velocity: `fetch_particles_velocity_z` returns an error and Python `particles_velocity` is
+  `(n, 2)` for this model. It runs about as fast as the curvilinear model.
+- The particle arc step no longer adds the displacement twice per step.
+- Curvilinear, terrain-following, 3D: basal friction now also acts below `velocity_threshold`, so
+  Coulomb friction holds material at rest while the driving force is below yield, independent of
+  the timestep.
+- Curvilinear, terrain-following, 3D: slow particles no longer freeze permanently. They rest after
+  20 consecutive steps below `velocity_threshold` and are reactivated once the grid speed exceeds
+  twice the threshold. Resting particles keep depositing mass but do not move.
+- Curvilinear, terrain-following, 3D: the simulation also stops (`AT_REST` flag) once 99% of the
+  particles rest or are stopped. The 40-step no-new-cells criterion is unchanged.
+- Curvilinear, terrain-following, 3D: the CFL timestep follows the current maximum of
+  `v + sqrt(g h)` instead of the run's all-time maximum, so dt grows again once the flow slows down.
+- Curvilinear, terrain-following, 3D: the CFL wave speed uses the bed-normal gravity `g cos(theta)`
+  instead of `g`.
+- Curvilinear, terrain-following, 3D: grid nodes whose 3x3 neighbourhood holds no mass skip the
+  grid update.
+- Terrain-following, 3D: particles stopped for good no longer deposit their last velocity.
+- P2G skips atomic adds of zero momentum, which removes most atomics of resting particles.
+- Default `batch_compute_steps` is 50 (was 200).
+- Default `cfl` is 0.9 (was 0.5).
+- The no-new-cells stop window spans the steps the fastest material needs to travel
+  `no_new_cells_travel` cells (CLI `--no-new-cells-travel`, default 65), i.e. round(65 / cfl)
+  and at least 10 steps: 72 at CFL 0.9 instead of a fixed 40.
+- Zarr store format 0.2.0, older stores are rejected on open. The native and browser writers
+  now share one layout (`data_processor::store_schema`), so browser exports open everywhere.
+  - `y` ascends with the rows. It was reversed against the data, so label based selection and
+    plots in xarray were mirrored north-south. Row 0 of every grid is the south edge.
+  - `x`/`y` (and `Dem::x`/`y`) are cell centers in float64. They spanned edge to edge, up to
+    half a cell off.
+  - Every setting is stored per run, named as in the settings (`mu` is now
+    `friction_coefficient`, `xsi` is `drag_coefficient`), plus `release_volume_m3` (was a
+    scenario attribute), `final_timestep`, `simulated_time`, `stop_flags`, `number_particles`,
+    `created_at`, `software_version` and the per-step `time`.
+  - Unwritten float values are NaN and integers 4294967295 instead of 0.
+  - Scenarios have no fixed run or timestep capacity. Longer runs were silently cut off.
+  - Run values share chunks of 1024 runs instead of one file each.
+  - `run` and `timestep` have no coordinate arrays, `release_area` is float32, blosc uses
+    zstd level 3 with byte shuffle.
+  - CF: `Conventions`, valid `standard_name`s, `flag_values`/`flag_masks`, and a `spatial_ref`
+    variable with `grid_mapping` when the CRS is known.
+  - Saves are locked per store and survive crashes: arrays are written first and a run only
+    counts once `number_of_runs` is replaced atomically.
+- `travel_length` and `travel_angle` skip steps without a center of mass record. They were NaN
+  and 0 for every run since slot 0 is unused, and earlier inflated by a jump to the DEM origin.
+  They are NaN when the center of mass is disabled.
+- Scenario names hash the release areas that were actually run. The hash covered only releases
+  passed as arrays, so every release from a file got the same one. It uses the stable DEM
+  hasher, so it no longer depends on the Rust version. Site hashes change with the coordinates.
+- The center of mass records carry the simulated time, stored as `time` in the result stores.
+- Holes in outline polygons are no longer part of the region of interest. They were filled.
+- `release_max_elevation` now limits the release areas. It had no effect before, cells above it
+  were released.
+- MPMDAC: the plastic compaction strain had the wrong sign, so compaction enlarged the particle
+  volume in the internal force instead of shrinking it. Peak speeds drop by about 10 % at the
+  default `bulk_modulus`.
+- Sliding block: the timestep follows the CFL condition. It stayed at the value of the first step,
+  so particles could move several cells per step. Runs now take about three times as many steps,
+  and the `particle-simulation` crown line detection is affected as well.
+- Sliding block: the fixed velocity damping of 1 % per step is gone. It depended on the timestep and
+  shortened the runout: the energy line benchmark is now 5 m from its reference, not 307 m.
+
+### Added
+- `Simulation::release_area_terrain` and the Python getters `release_mean_slope_angle`,
+  `release_max_slope_angle`, `release_mean_aspect` and `release_mean_elevation` give the mean
+  terrain and the largest slope angle of the release cells.
+  The aspect is a circular mean.
+- `release_swe` (`--release-swe` in the CLI) sets the release by snow water equivalent in kg/m²
+  instead of `release_thickness`; setting both is an error. It is the mass per horizontal area, so
+  a release cell holds `release_swe * cell_size²` whatever its slope. It must be positive, and
+  `release_swe / density` must be above 0.01 m. Result stores keep it as `release_swe`, NaN if unset.
+- CLI flags `--release-max-elevation` and `--enable-particle-relaxation`.
+- `release_areas_path` accepts polygon shapefiles (`.shp`, native and Python). All features are
+  rasterized onto the DEM grid; holes stay free. As in AvaFrame, the thickness of each feature comes
+  from its `thickness` or `d0` attribute, either all features or none must have one, and features
+  must not overlap. Without these attributes the thickness is 1 m.
+- `dem_path` and `release_areas_path` accept paths into a result store, such as
+  `avalanchers.zarr/avaWog/avaWogreleaseTexture`, so the DEM and, if present, the release areas
+  of an earlier run can be reused. Saving into the same store continues the scenario.
+- `sim.write_asc(layer, path)` writes `peak_velocity`, `peak_flow_thickness` or `release_areas` as an
+  ESRI ASCII grid, north row first and georeferenced by the DEM.
+- Reusable initial state for back calibration (Rust `Simulation` and Python `PySimulation`):
+  `store_initial_state()` prepares once and keeps the seeded, relaxed particle positions and
+  masses on the GPU; `update_settings(dict)` changes settings without reloading the data;
+  `restore_initial_state()` resets particle state and the peak fields for the next `run()`.
+  Changed settings re-run only the preparation stage they affect: model or reference surface
+  the full preparation, release thresholds, particles per cell or crown settings the release
+  and seeding, density or a changed uniform `release_thickness` a mass rescale.
+- `run()` no longer repeats terrain analysis, release areas and particle seeding when the
+  particles are already initialized (after `prepare()` or `restore_initial_state()`).
+- `sliding-block` (model 3): the previous per-particle terrain-following model.
+- `3d` (model 4): the terrain-following model with a full 3D Cartesian velocity through P2G and G2P.
+  Slower than `terrain-following` but keeps the z velocity and affine state on the particles.
+- Optional particle elevation jitter in the renderer (live viewer key `J`).
+- `particle_sort_interval` (CLI `--particle-sort-interval`, default 25): curvilinear,
+  terrain-following and 3D P2G over particles sorted by 8x8-cell tiles, accumulating each workgroup in shared memory before the
+  global atomics; 0 disables it. Results are identical to the direct P2G on the integer-atomic
+  grid; on the float-atomic grid the shared sums keep the integer quantization.
+- `momentum_stop_fraction` (CLI `--momentum-stop-fraction`, default 0 = off): stops a curvilinear,
+  terrain-following or 3D run once the total grid momentum falls below this fraction of its peak (flag `LOW_MOMENTUM`).
+- `reference_surface_length` (CLI `--reference-surface-length`, default 0 = off): curvilinear
+  gully confinement. Bed inclined by beta against a Gaussian-smoothed reference surface of this
+  width counts as a gully wall: the snow beside it presses it with its lateral stress, so the
+  normal load of the basal friction grows by `1 + K tan^2 beta` (K = 1, or the cross-slope
+  earth pressure coefficient when enabled). All other terms stay on the real bed. (Moving the
+  metric, gravity and pressure onto the reference surface, as in Gray et al. 1999, made deposits
+  creep on gorge floors below steep walls and dropped the centrifugal load of narrow bends.)
+  The live viewer exposes the setting under "terrain & release" (0 = off).
+  `verification/run_gully_test.py` checks the V-channel friction factor against the wedge limit.
+- `enable_earth_pressure_coefficient` is off by default in all models (engine, live viewer, web
+  frontend, Python defaults): Voellmy-type parameters are calibrated with hydrostatic pressure.
+- Curvilinear: `enable_earth_pressure_coefficient` now applies the Savage-Hutter
+  earth pressure coefficients of Hutter et al. (1993) to the hydrostatic pressure gradient:
+  `k_x` along the fall line of the (reference) surface and `k_y` across it, each active or
+  passive by the sign of the strain rate in its direction, from `internal_friction_angle` and
+  `basal_friction_angle`. Previously the flag had no effect in this model. The strain rates use
+  each node's own mass (the old `div_u` divided neighbour momentum by the centre mass) and turn
+  one-sided at the flow edge. `run_similarity_solution_test.py --earth-pressure` compares it
+  with the analytic solution; the dam break, similarity and gully tests pin the flag to match
+  their references.
+- Sliding block: `div_u` for the earth pressure coefficient uses each node's own mass (it divided
+  neighbour momentum by the centre mass), turns one-sided at the flow edge and reads float-atomic
+  momentum correctly.
+
 ## [0.2.0] - 2026-05-20
 
 ### Added

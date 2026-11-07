@@ -22,6 +22,32 @@ def test_pysettings_round_trip(tmp_path):
     assert loaded.dem_path == "example/dem.tif"
 
 
+def test_restore_initial_state_repeats_run():
+    sim = avalanchers.PySimulation.new()
+    sim.create_example("data/avaframe/avaParabola.png")
+    sim.set_max_timesteps(5)
+    sim.store_initial_state()
+    assert sim.has_initial_state
+
+    sim.run()
+    first = sim.peak_flow_thickness.copy()
+
+    sim.update_settings({"cfl": 0.5})
+    sim.restore_initial_state()
+    sim.run()
+    changed = sim.peak_flow_thickness.copy()
+
+    sim.update_settings({"cfl": 0.9})
+    sim.restore_initial_state()
+    sim.run()
+    again = sim.peak_flow_thickness.copy()
+
+    assert not np.array_equal(first, changed)
+    np.testing.assert_allclose(first, again, atol=1e-3)
+    with pytest.raises(RuntimeError, match="dem_path"):
+        sim.update_settings({"dem_path": "other.tif"})
+
+
 def test_simulation_binding_smoke():
     sim = avalanchers.PySimulation.new()
     sim.create_example("data/avaframe/avaParabola.png")
@@ -84,7 +110,8 @@ def test_simulation_binding_smoke():
     stopped = sim.stopped
 
     assert positions.ndim == 2 and positions.shape[1] == 3
-    assert velocities.ndim == 2 and velocities.shape[1] == 3
+    # (n, 2) for terrain-following, which has no z velocity, else (n, 3)
+    assert velocities.ndim == 2 and velocities.shape[1] in (2, 3)
     assert elevations.ndim == 1
     assert stopped.ndim == 1
 
@@ -165,6 +192,10 @@ def test_simulation_setters_and_getters():
         _ = sim.roi
     with pytest.raises(ValueError, match="crown line not available"):
         _ = sim.crown_line
+    with pytest.raises(ValueError, match="crown candidates not available"):
+        _ = sim.crown_candidates
+    with pytest.raises(ValueError, match="potential release areas not available"):
+        _ = sim.potential_release_areas
 
     for value in (
         sim.peak_velocity,
@@ -192,8 +223,10 @@ def test_simulation_setters_and_getters():
     velocities_xy = sim.particles_velocity_xy
     assert positions.shape[1] == 3
     assert positions_xy.shape[1] == 2
-    assert velocities.shape[1] == 3
+    # (n, 2) for terrain-following, which has no z velocity, else (n, 3)
+    assert velocities.shape[1] in (2, 3)
     assert velocities_xy.shape[1] == 2
+    np.testing.assert_array_equal(velocities[:, :2], velocities_xy)
     assert sim.particles_elevation.ndim == 1
     assert sim.stopped.ndim == 1
 

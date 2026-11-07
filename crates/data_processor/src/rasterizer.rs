@@ -159,20 +159,21 @@ impl RasterGrid {
         tile_data
     }
 
-    /// Standard world-space scanline fill rasterization
+    /// Standard world-space scanline fill rasterization. The rings are filled
+    /// together with the even-odd rule, so inner rings cut holes.
     pub fn rasterize(&mut self, polygon: &GeoPolygon) {
         if self.width == 0 || self.height == 0 {
             return;
         }
 
-        for ring in &polygon.rings {
-            if ring.len() < 3 {
-                continue;
-            }
+        for y in 0..self.height {
+            let world_y = self.origin_y + (y as f64 + 0.5) * self.cell_size;
+            let mut intersections = Vec::new();
 
-            for y in 0..self.height {
-                let world_y = self.origin_y + (y as f64 + 0.5) * self.cell_size;
-                let mut intersections = Vec::new();
+            for ring in &polygon.rings {
+                if ring.len() < 3 {
+                    continue;
+                }
 
                 for i in 0..ring.len() {
                     let p1 = ring[i];
@@ -184,27 +185,27 @@ impl RasterGrid {
                         intersections.push(intersect_x);
                     }
                 }
+            }
 
-                intersections.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            intersections.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
-                for pair in intersections.as_chunks::<2>().0 {
-                    // 1. Calculate the continuous cell coordinate values for the intersections
-                    let start_x_float = (pair[0] - self.origin_x) / self.cell_size;
-                    let end_x_float = (pair[1] - self.origin_x) / self.cell_size;
+            for pair in intersections.as_chunks::<2>().0 {
+                // 1. Calculate the continuous cell coordinate values for the intersections
+                let start_x_float = (pair[0] - self.origin_x) / self.cell_size;
+                let end_x_float = (pair[1] - self.origin_x) / self.cell_size;
 
-                    // 2. To strictly obey the Cell Center Rule:
-                    // A cell center at index `x` is `x + 0.5`.
-                    // - For the start, if the center is less than start_x_float, we must move to the next cell.
-                    //   (start_x_float - 0.5).ceil() gives us the first cell index whose center >= pair[0]
-                    // - For the end, (end_x_float - 0.5).ceil() gives us the first cell index whose center >= pair[1]
-                    let start_x = ((start_x_float - 0.5).ceil().max(0.0) as usize).min(self.width);
-                    let end_x = ((end_x_float - 0.5).ceil().max(0.0) as usize).min(self.width);
+                // 2. To strictly obey the Cell Center Rule:
+                // A cell center at index `x` is `x + 0.5`.
+                // - For the start, if the center is less than start_x_float, we must move to the next cell.
+                //   (start_x_float - 0.5).ceil() gives us the first cell index whose center >= pair[0]
+                // - For the end, (end_x_float - 0.5).ceil() gives us the first cell index whose center >= pair[1]
+                let start_x = ((start_x_float - 0.5).ceil().max(0.0) as usize).min(self.width);
+                let end_x = ((end_x_float - 0.5).ceil().max(0.0) as usize).min(self.width);
 
-                    // 3. Fill the cells whose centers are strictly inside the intersection pair
-                    for x in start_x..end_x {
-                        let idx = self.get_index(x, y);
-                        self.data[idx] = true;
-                    }
+                // 3. Fill the cells whose centers are strictly inside the intersection pair
+                for x in start_x..end_x {
+                    let idx = self.get_index(x, y);
+                    self.data[idx] = true;
                 }
             }
         }
@@ -571,6 +572,18 @@ mod tests {
                 false, false, false, false,
             ]
         );
+    }
+
+    #[test]
+    fn test_rasterize_cuts_inner_rings() {
+        let mut poly = create_square_poly(0.0, 0.0, 3.0, 3.0);
+        poly.rings
+            .extend(create_square_poly(1.0, 1.0, 2.0, 2.0).rings);
+
+        let grid = RasterGrid::from_polygon(&poly, 1.0);
+
+        assert!(!grid.data[grid.get_index(1, 1)]);
+        assert_eq!(grid.data.iter().filter(|&&v| v).count(), 8);
     }
 
     #[test]

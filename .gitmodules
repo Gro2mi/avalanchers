@@ -1,0 +1,3 @@
+[submodule "validation/ISeeSnow"]
+	path = validation/ISeeSnow
+	url = https://github.com/avaframe/ISeeSnow.git

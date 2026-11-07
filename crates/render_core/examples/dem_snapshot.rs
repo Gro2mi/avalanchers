@@ -9,6 +9,15 @@ const HEIGHT: u32 = 640;
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 fn main() -> anyhow::Result<()> {
+    // Network-backed loaders (reqwest/hyper) need a Tokio reactor even though the
+    // examples drive futures with pollster; a multi-thread runtime runs the IO driver
+    // on its worker threads so pollster::block_on can make progress.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .expect("failed to build Tokio runtime");
+    let _runtime_guard = runtime.enter();
     let mut args = std::env::args().skip(1);
     let dem_path = args.next();
     let out_path = args

@@ -9,6 +9,12 @@
 @group(0) @binding(8) var<storage, read_write> start_elevation: array<f32>;
 @group(0) @binding(9) var<storage, read_write> atomic_values: AtomicValues;
 @group(0) @binding(10) var<storage, read_write> debug: array<f32>;
+
+// thinner cells are not seeded; must match RELEASE_THICKNESS_THRESHOLD in lib.rs
+const RELEASE_THICKNESS_THRESHOLD: f32 = 0.01;
+// keeps the random offsets this fraction of a cell away from the cell edges,
+// so f32 rounding cannot place a particle in a neighboring cell
+const CELL_EDGE_MARGIN: f32 = 1e-3;
 // @group(0) @binding(13) var<uniform> tracked_particle_relative_positions: array<Particle>;
 // @group(0) @binding(14) var<storage, read_write> tracked_particle_ids: array<u32>;
 
@@ -19,7 +25,7 @@ fn initialize_particles(@builtin(global_invocation_id) cell: vec3<u32>) {
     }
     let idx = xy_to_idx(cell.xy);
     let snow_thickness = release_areas[idx];
-    if snow_thickness <= 0.01 {
+    if snow_thickness <= RELEASE_THICKNESS_THRESHOLD {
         return;
     }
 
@@ -28,19 +34,24 @@ fn initialize_particles(@builtin(global_invocation_id) cell: vec3<u32>) {
     var rng_seed = pcg_hash((cell.x * 73856093u) ^
     (cell.y * 19349663u) ^
     seed);
-    let factor = 1.0 / cos(radians(slope_angle_buffer[idx]));
+    // a thickness is measured normal to the slope, SWE per horizontal area
+    var factor = 1.0 / cos(radians(slope_angle_buffer[idx]));
+    if !is_nan(sim_settings.release_swe) {
+        factor = 1.0;
+    }
     let cell_volume = snow_thickness * sim_settings.cell_size * sim_settings.cell_size * factor;
     let cell_mass = cell_volume * sim_settings.snow_density;
     atomicAdd(&atomic_values.release_volume, u32(round(cell_volume)));
     let atomicParticleIndex = atomicAdd(&atomic_values.number_release_particles, sim_settings.released_particles_per_cell);
     for (var n: u32 = 0; n < sim_settings.released_particles_per_cell; n++) {
         let particleIndex = atomicParticleIndex + n;
-        let r = rand2(&rng_seed);
-        let cell_xy = (vec2f(cell.xy) + r - 0.5);
+        let r = mix(vec2f(CELL_EDGE_MARGIN), vec2f(1.0 - CELL_EDGE_MARGIN), rand2(&rng_seed));
+        // cell i covers [i, i + 1) * cell_size, as in position_to_cell
+        let particle_position = (vec2f(cell.xy) + r) * sim_settings.cell_size;
 
-        position[particleIndex] = vec2f(cell_xy * sim_settings.cell_size);
+        position[particleIndex] = particle_position;
         mass[particleIndex] = cell_mass / f32(sim_settings.released_particles_per_cell);
-        start_elevation[particleIndex] = textureSampleLevel(dem_texture, tex_sampler, cellf_to_uv(cell_xy), 0).x;
+        start_elevation[particleIndex] = textureSampleLevel(dem_texture, tex_sampler, position_to_uv(particle_position), 0).x;
     }
 }
 
@@ -69,6 +80,11 @@ const INV_MOMENTUM_FACTOR: f32 = 1 / MOMENTUM_FACTOR;
 // depth-integrated internal force (h * sigma * grad_w * area, ~1e4..1e5 N per node contribution)
 const FORCE_FACTOR: f32 = 1e-3; // i32 limit is 2.1e6 N per node
 const INV_FORCE_FACTOR: f32 = 1 / FORCE_FACTOR;
+// weak-form pressure sum m_p h_p / 2 grad_w (kg) of the curvilinear model,
+// node sum = node_mass * |grad h|: 0.001 kg resolves thin front nodes
+//   (rho*cell^2*h*J ~ 6e4 kg * 1 * 1e3 = 6e7 < 2.1e9)
+const PRESSURE_FACTOR: f32 = 1e3;
+const INV_PRESSURE_FACTOR: f32 = 1 / PRESSURE_FACTOR;
 
 // TODO precompute often used values on the cpu and pass them as uniforms to avoid redundant calculations on the gpu
 
@@ -81,6 +97,7 @@ struct SimInfo {
     max_velocity: f32,
     max_flow_thickness: f32,
     flags: u32,
+    grid_elapsed_time: f32,
 };
 
 const SIM_INFO_OUT_OF_BOUNDS: u32 = 1u << 0u;
@@ -90,7 +107,16 @@ const SIM_INFO_PARTICLE_OUT_OF_DEM_DATA: u32 = 1u << 3u;
 const SIM_INFO_STOPPED: u32 = 1u << 31u;
 const SIM_INFO_ALL_PARTICLES_STOPPED: u32 = 1u << 30u;
 const SIM_INFO_NO_NEW_CELLS: u32 = 1u << 29u;
+// almost all particles are resting or terminally stopped
+const SIM_INFO_AT_REST: u32 = 1u << 28u;
+// total momentum fell below momentum_stop_fraction of its peak
+const SIM_INFO_LOW_MOMENTUM: u32 = 1u << 27u;
 
+// reversible low-speed state; the low bits hold the rest start step while resting
+// and the consecutive slow-step count while moving
+const PARTICLE_RESTING: u32 = 1u << 26u;
+// consecutive slow steps before a particle rests
+const REST_STEPS: u32 = 20u;
 const PARTICLE_FLYING: u32 = 1u << 27u;
 const PARTICLE_OUT_OF_BOUNDS: u32 = 1u << 28u;
 const PARTICLE_IS_NAN: u32 = 1u << 29u;
@@ -105,7 +131,7 @@ struct SimSettings {
     grid_shape: vec2u,
     world_size: vec2f,
     snow_density: f32,
-    slab_thickness: f32,
+    release_thickness: f32,
     friction_coefficient: f32,
     drag_coefficient: f32,
     n0: f32,
@@ -132,6 +158,14 @@ struct SimSettings {
     // MPMDAC compressibility; bulk_modulus 0 = incompressible
     bulk_modulus: f32,
     compaction_pressure: f32,
+    // stop once total momentum < fraction * its peak; 0 disables (curvilinear)
+    momentum_stop_fraction: f32,
+    // front travel in cells covered by the no-new-cells stop window
+    no_new_cells_travel: f32,
+    // Gaussian width (m) of the curvilinear reference surface; 0 disables it
+    reference_surface_length: f32,
+    // snow water equivalent (kg/m2) of the release cells; NaN if unset
+    release_swe: f32,
 };
 
 struct AtomicValues {
@@ -143,7 +177,42 @@ struct AtomicValues {
     number_release_cells: atomic<u32>,
     number_release_particles: atomic<u32>,
     stopped_particles: atomic<u32>,
+    // resting particles counted during the current step, reset by update_sim_info
+    resting_particles: atomic<u32>,
+    // total grid momentum (kg m/s) of the current step as a 64-bit sum, reset by update_sim_info
+    momentum_lo: atomic<u32>,
+    momentum_hi: atomic<u32>,
+    // f32 bits of the largest total momentum so far
+    peak_momentum: atomic<u32>,
 };
+
+// Reversible resting: a particle rests after REST_STEPS consecutive slow steps
+// and wakes once the gathered grid speed exceeds twice the threshold. Resting
+// particles keep depositing mass but no momentum and do not move, which removes
+// sub-threshold creep inside deposits. Returns the new state: its low bits hold
+// the slow-step counter while moving and the rest start step while resting.
+fn next_rest_state(previous_state: u32, speed: f32, timestep: u32) -> u32 {
+    let low_mask = PARTICLE_RESTING - 1u;
+    var resting = (previous_state & PARTICLE_RESTING) != 0u;
+    var low_bits = previous_state & low_mask;
+    if resting {
+        if speed > 2.0 * sim_settings.velocity_threshold {
+            resting = false;
+            low_bits = 0u;
+        }
+    } else if speed < sim_settings.velocity_threshold {
+        low_bits = min(low_bits + 1u, REST_STEPS);
+        if low_bits >= REST_STEPS {
+            resting = true;
+            low_bits = timestep & low_mask;
+        }
+    } else {
+        low_bits = 0u;
+    }
+    return (previous_state & ~(PARTICLE_RESTING | low_mask))
+        | select(0u, PARTICLE_RESTING, resting)
+        | low_bits;
+}
 
 struct G2PUpdate {
     velocity: vec2f,
@@ -151,6 +220,13 @@ struct G2PUpdate {
 };
 
 @group(0) @binding(0) var<uniform> sim_settings: SimSettings;
+
+// length in steps of the no-new-cells rolling window: the fastest material
+// moves at most cfl cells per step, so round(travel / cfl) steps cover the same
+// front travel at any cfl; at least 10 steps
+fn no_new_cells_window() -> u32 {
+    return max(10u, u32(round(sim_settings.no_new_cells_travel / sim_settings.cfl)));
+}
 
 fn is_nan(x: f32) -> bool {
     let bits: u32 = bitcast<u32>(x);

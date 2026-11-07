@@ -1,7 +1,9 @@
 import avalanchers
 import numpy as np
+import pytest
 
 
+@pytest.mark.slow
 def test_simulation_run_with_settings():
     settings = {
         "dem_path": "data/avaframe/avaPfa.png",
@@ -12,6 +14,7 @@ def test_simulation_run_with_settings():
     sim.create(settings)
     sim.run()
 
+@pytest.mark.slow
 def test_simulation_run_with_example():
     sim = avalanchers.PySimulation.new()
     sim.create_example("data/avaframe/avaPfa.png")
@@ -26,6 +29,7 @@ def test_np_array_as_dem_roundtrip():
     )
     np.testing.assert_array_equal(dem_2d, sim.dem)
 
+@pytest.mark.slow
 def test_np_array_as_release_areas_roundtrip():
     sim = avalanchers.PySimulation.new()
     dem_2d = np.random.uniform(0, 50, (20, 20)).astype(np.float32)

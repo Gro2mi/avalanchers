@@ -5,8 +5,8 @@ Adapted from AvaFrame's ``runScripts/runDamBreak.py`` +
 reading them back, the avalanchers simulation is created, run and sampled
 directly in this script - no output files are needed before the analysis.
 
-The numerical flow fields are decoded DIRECTLY from the simulation's
-quantized ``grid_mass`` / ``grid_momentum`` buffers (the exact fields the
+The numerical flow fields are derived DIRECTLY from the simulation's
+``grid_mass`` / ``grid_momentum`` fields (the exact fields the
 grid physics pass consumed) every ``DAM_BREAK_CFG["save_interval"]`` seconds
 of simulated time, and compared to the analytic dam break solution of
 Faccanoni & Mangeney (2012, Test 2, case 1.2, dry bed, Coulomb friction).
@@ -37,6 +37,7 @@ Usage:
     python run_dam_break_test.py                    # run with the SETTINGS below
     python run_dam_break_test.py --show             # also open the plot windows
     python run_dam_break_test.py --t-end 30 --save-interval 0.5 --delta 12
+    python run_dam_break_test.py --weak-pressure    # weak-form pressure gradient
 """
 
 import argparse
@@ -64,8 +65,12 @@ SETTINGS = {
     "density": 200.0,
     "released_particles_per_cell": 4,
     "cfl": 0.05,
-    "velocity_threshold": 0.01,
+    "velocity_threshold": 1e-8,
     "enable_particle_interaction": True,
+    # the Faccanoni & Mangeney solution is hydrostatic (K = 1)
+    "enable_earth_pressure_coefficient": False,
+    # weak-form pressure gradient (--weak-pressure); off like the engine default
+    "enable_weak_pressure": False,
     "enable_particle_relaxation": True,
     "max_steps": 20000,
 }
@@ -79,7 +84,7 @@ DAM_BREAK_CFG = {
     "t_end": 20.0,        # simulated end time [s] (ini: tEnd = 30)
     "save_interval": 1.0, # field sampling interval [s] (ini: dt = 0.1)
     "phi": None,          # slope angle [deg]; None = measure from the DEM
-    "delta": 12.0,        # bed friction angle [deg] (ini: 21, see docstring)
+    "delta": 21.0,        # bed friction angle [deg] (ini: 21, see docstring)
     # comparison domain, horizontal meters relative to the dam front
     "x_start": -200.0,
     "x_end": 220.0,
@@ -148,13 +153,15 @@ def build_geometry(sim, header, frame):
     }
 
 
-def sample_fields(sim, dem, header, frame, density):
+def sample_fields(sim, dem, header, frame, density, sim_model):
     """One field sample decoded from the grid mass/momentum buffers."""
     import dam_break_test
+    from similarity_solution_test import SURFACE_VELOCITY_MODELS
 
     jac = dam_break_test.jacobian(dem["rasterData"], header["cellsize"])
     h, u, v, mass = dam_break_test.fields_from_grid(
-        sim, dem["rasterData"].shape, header["cellsize"], density, jac, frame=frame)
+        sim, dem["rasterData"].shape, header["cellsize"], density, jac, frame=frame,
+        surface_velocity=sim_model.lower() in SURFACE_VELOCITY_MODELS)
     return {"h": h, "u": u, "v": v}, mass
 
 
@@ -206,9 +213,12 @@ def run_simulation(settings, cfg):
     dam = build_geometry(sim, header, frame)
 
     mu = settings["friction_coefficient"]
-    sim_name = "%s_%s_delta%g" % (pathlib.Path(settings["dem_path"]).stem,
-                                  settings["friction_model"],
-                                  math.degrees(math.atan(mu)))
+    sim_name = "%s_%s_%s_delta%g" % (pathlib.Path(settings["dem_path"]).stem,
+                                     settings["sim_model"],
+                                     settings["friction_model"],
+                                     math.degrees(math.atan(mu)))
+    if settings.get("enable_weak_pressure"):
+        sim_name += "_weak"
     print(f"=== Dam break test (Faccanoni & Mangeney 2012, dry bed) - {sim_name} ===")
     print(f"DEM: {settings['dem_path']}")
     print(f"plane {frame['phi_deg']:.2f} deg, bed friction "
@@ -229,8 +239,9 @@ def run_simulation(settings, cfg):
     def record(info, check_consistency=False):
         """Sample the fields, compare to the analytic solution, append."""
         nonlocal running_peak
-        t = info.elapsed_time
-        sample, mass = sample_fields(sim, dem, header, frame, density)
+        t = info.grid_elapsed_time
+        sample, mass = sample_fields(sim, dem, header, frame, density,
+                                     settings["sim_model"])
         if check_consistency:
             dam_break_test.check_grid_mass_consistency(
                 sim, mass, np.asarray(sim.particles_mass, dtype=np.float64))
@@ -276,23 +287,23 @@ def run_simulation(settings, cfg):
 
     def record_and_print(info, check_consistency=False):
         h_l2r, h_lmaxr, vh_l2r, vh_lmaxr = record(info, check_consistency)
-        print(f"{info.elapsed_time:6.2f} {info.timestep:6d} {h_l2r:10.4f} "
+        print(f"{info.grid_elapsed_time:6.2f} {info.timestep:6d} {h_l2r:10.4f} "
               f"{h_lmaxr:10.4f} {vh_l2r:10.4f} {vh_lmaxr:10.4f}")
 
     record_and_print(info, check_consistency=True)
     while True:
         if (info.flags & SIM_INFO_STOPPED) or sim.state == "Finished":
             break
-        if info.elapsed_time >= cfg["t_end"]:
+        if info.grid_elapsed_time >= cfg["t_end"]:
             break
         if info.timestep == last_timestep:
             print("simulation made no progress - stopping")
             break
         last_timestep = info.timestep
         info = sim.run_n_steps(BATCH_STEPS)
-        if info.elapsed_time >= next_save - 1e-6:
+        if info.grid_elapsed_time >= next_save - 1e-6:
             record_and_print(info)
-            while info.elapsed_time >= next_save - 1e-6:
+            while info.grid_elapsed_time >= next_save - 1e-6:
                 next_save += cfg["save_interval"]
 
     samples["t"] = np.asarray(samples["t"])
@@ -300,6 +311,13 @@ def run_simulation(settings, cfg):
         samples[key] = np.asarray(samples[key])
     for key in errors:
         errors[key] = np.asarray(errors[key])
+    if len(samples["t"]) < 2:
+        raise RuntimeError(
+            "the dam did not move - only the initial field was sampled. The bed "
+            "friction angle (delta = %.1f deg) is too close to the slope angle "
+            "(%.1f deg): near-critical slopes stall in avalanchers' friction "
+            "solver. Lower delta for a meaningful comparison (e.g. --delta 12)."
+            % (cfg["delta"], frame["phi_deg"]))
     print(f"\nstopped after {info.timestep} steps, t = {info.elapsed_time:.2f} s "
           f"({len(samples['t'])} field samples)")
     return sim, dem, header, frame, dam, samples, errors, sim_name
@@ -316,6 +334,10 @@ def main():
     parser.add_argument("--phi", type=float, default=None,
                         help="slope angle in degrees (default: measure from DEM)")
     parser.add_argument("--max-steps", type=int, default=None)
+    parser.add_argument("--weak-pressure", action=argparse.BooleanOptionalAction,
+                        default=None,
+                        help="weak-form pressure gradient of the curvilinear model "
+                             "(default: SETTINGS)")
     parser.add_argument("--out-dir", default=str(OUTPUT_DIR))
     parser.add_argument("--gpu", default=None, help="GPU name substring to select")
     parser.add_argument("--plot-sequence", action="store_true",
@@ -342,6 +364,8 @@ def main():
         cfg["phi"] = args.phi
     if args.max_steps is not None:
         settings["max_steps"] = args.max_steps
+    if args.weak_pressure is not None:
+        settings["enable_weak_pressure"] = args.weak_pressure
     settings["friction_coefficient"] = math.tan(math.radians(cfg["delta"]))
     cfg["plot_sequence"] = cfg["plot_sequence"] or args.plot_sequence
 
@@ -355,14 +379,13 @@ def main():
         [{k: samples[k][i] for k in ("h", "u", "v")} for i in range(len(samples["t"]))],
         cfg["scale_coef"])
 
-    # analytic solution table for the analytic-only figures
+    # analytic solution over the whole run (drives the animation limits)
     times = np.arange(0.0, samples["t"][-1] + 1e-6, 0.1)
     s_axis = np.arange(cfg["x_start"] / frame["cos_phi"],
                        cfg["x_end"] / frame["cos_phi"], 0.5)
     h_ana, u_ana, _ = dam_break_test.dam_break_solution(
         frame["phi_deg"], cfg["delta"], dam["h_l"], times, s_axis,
         cfg["grav_acc"], x_back_rel=dam["x_back_rel"])
-    sol = {"t": times, "s": s_axis, "h": h_ana, "u": u_ana}
 
     # fixed axis limits for the animation: numeric and analytic maxima over
     # ALL times, so no panel rescales between frames
@@ -374,11 +397,10 @@ def main():
     }
 
     out_dir = pathlib.Path(args.out_dir) / "pics"
-    dam_break_test.plot_dam_ana_results(sol, cfg["t_save"], out_dir,
-                                        x_lim=cfg["x_lim"])
     if cfg["plot_sequence"]:
         # optional result: comparison cross-cut figure for every saved time
         # step (AvaFrame's plotSequence), stitched into an animated GIF
+        # (the individual frame figures are collapsed into the GIF)
         pngs = []
         for i in range(len(samples["t"])):
             sample0 = {k: samples[k][0] for k in ("h", "u", "v")}
@@ -386,15 +408,13 @@ def main():
             pngs.append(dam_break_test.plot_comparison_dam(
                 sample0, sample_t, frame, dam, samples["t"][i], cfg, sim_name,
                 out_dir))
-        dam_break_test.assemble_gif(pngs, out_dir / (sim_name + "_compare.gif"))
+        dam_break_test.assemble_gif(pngs, out_dir / (sim_name + "_compare.gif"),
+                                    cleanup=True)
     relative = cfg["relative_error"]
     err_h = errors["h_l2rel" if relative else "h_l2"]
     err_h_max = errors["h_lmaxrel" if relative else "h_lmax"]
     err_vh = errors["vh_l2rel" if relative else "vh_l2"]
     err_vh_max = errors["vh_lmaxrel" if relative else "vh_lmax"]
-    dam_break_test.plot_error_time(samples["t"], err_h, err_h_max, err_vh,
-                                   err_vh_max, relative, cfg["t_save"], sim_name,
-                                   out_dir)
     dam_break_test.plot_dam_break_summary(dem["rasterData"], header, frame, dam,
                                           samples,
                                           {"h_l2": err_h, "h_lmax": err_h_max,
@@ -409,6 +429,10 @@ def main():
           f"({'relative' if relative else 'absolute'}):")
     print(f"h  L2 : {err_h[i_save]:.4f}   h  LMax : {err_h_max[i_save]:.4f}")
     print(f"hv L2 : {err_vh[i_save]:.4f}   hv LMax : {err_vh_max[i_save]:.4f}")
+    lags = dam_break_test.front_lags(frame, dam, cfg, samples["h"][i_save],
+                                     samples["t"][i_save])
+    print("front lag along the slope (numerical - analytic, < 0 = behind):")
+    print("   ".join(f"h = {thr:g} m: {lag:6.1f} m" for thr, lag in lags.items()))
     return samples, errors
 
 

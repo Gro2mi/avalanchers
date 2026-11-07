@@ -1,9 +1,10 @@
 use crate::utils::*;
-use core::f32;
 use std::hash::{Hash, Hasher};
 
+/// FNV-1a. Unlike the standard library hashers its output is guaranteed not to
+/// change between Rust versions, so it can name things that are stored on disk.
 #[derive(Default)]
-struct StableHasher(u64);
+pub struct StableHasher(u64);
 
 impl Hasher for StableHasher {
     fn finish(&self) -> u64 {
@@ -326,6 +327,79 @@ impl TiffData {
     }
 }
 
+/// Gaussian-smoothed copy of a row-major raster, used as the reference
+/// surface of the curvilinear model. The separable kernel spans 3 sigma
+/// (capped at the raster size); edges are padded by point reflection, so
+/// planes stay exactly planar. NaN cells stay NaN and are skipped as
+/// neighbours. sigma_cells <= 0 returns an unchanged copy.
+pub fn smooth_gaussian(data: &[f32], width: usize, height: usize, sigma_cells: f32) -> Vec<f32> {
+    if sigma_cells.is_nan()
+        || sigma_cells <= 0.0
+        || width == 0
+        || height == 0
+        || data.len() != width * height
+    {
+        return data.to_vec();
+    }
+    let radius = (3.0 * sigma_cells).ceil() as usize;
+    let kernel: Vec<f64> = (0..=radius)
+        .map(|k| (-0.5 * (k as f64 / sigma_cells as f64).powi(2)).exp())
+        .collect();
+    let horizontal = smooth_lines(data, height, width, 1, width, &kernel);
+    smooth_lines(&horizontal, width, height, width, 1, &kernel)
+}
+
+/// Convolves `lines` lines of `len` samples each with the one-sided
+/// symmetric `kernel`. Sample i of line l sits at l * line_stride + i * step.
+fn smooth_lines(
+    data: &[f32],
+    lines: usize,
+    len: usize,
+    step: usize,
+    line_stride: usize,
+    kernel: &[f64],
+) -> Vec<f32> {
+    let mut out = data.to_vec();
+    if len < 2 {
+        return out;
+    }
+    let radius = (kernel.len() - 1).min(len - 1);
+    let mut line = vec![0.0f64; len];
+    for l in 0..lines {
+        let base = l * line_stride;
+        for (i, value) in line.iter_mut().enumerate() {
+            *value = data[base + i * step] as f64;
+        }
+        // point reflection about the end samples: f(-k) = 2 f(0) - f(k)
+        let sample = |i: isize| -> f64 {
+            if i < 0 {
+                2.0 * line[0] - line[(-i) as usize]
+            } else if i as usize >= len {
+                2.0 * line[len - 1] - line[2 * (len - 1) - i as usize]
+            } else {
+                line[i as usize]
+            }
+        };
+        for (i, center) in line.iter().enumerate() {
+            if !center.is_finite() {
+                continue;
+            }
+            let mut sum = 0.0;
+            let mut weight = 0.0;
+            for k in -(radius as isize)..=(radius as isize) {
+                let value = sample(i as isize + k);
+                if value.is_finite() {
+                    let w = kernel[k.unsigned_abs()];
+                    sum += w * value;
+                    weight += w;
+                }
+            }
+            out[base + i * step] = (sum / weight) as f32;
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -500,6 +574,46 @@ mod tests {
         // Test getting value through the high-level GeoTiff struct
         assert_eq!(geotiff.get_f32(1, 1), Some(400.0));
         assert_eq!(geotiff.get_f32(2, 0), None); // OOB width
+    }
+
+    #[test]
+    fn smooth_gaussian_keeps_planes_and_offsets_parabolas() {
+        let (width, height) = (24, 17);
+        let plane: Vec<f32> = (0..width * height)
+            .map(|i| 3.0 + 0.4 * (i % width) as f32 - 0.25 * (i / width) as f32)
+            .collect();
+        let smoothed = smooth_gaussian(&plane, width, height, 2.5);
+        for (a, b) in plane.iter().zip(&smoothed) {
+            assert!((a - b).abs() < 1e-4, "{a} vs {b}");
+        }
+
+        // a parabola gains a constant offset away from the edges
+        let parabola: Vec<f32> = (0..width * height)
+            .map(|i| 0.1 * ((i % width) as f32 - 12.0).powi(2))
+            .collect();
+        let smoothed = smooth_gaussian(&parabola, width, height, 1.5);
+        let offsets: Vec<f32> = (0..height)
+            .flat_map(|row| (6..18).map(move |col| row * width + col))
+            .map(|i| smoothed[i] - parabola[i])
+            .collect();
+        let first = offsets[0];
+        assert!(first > 0.0);
+        assert!(offsets.iter().all(|o| (o - first).abs() < 1e-3));
+    }
+
+    #[test]
+    fn smooth_gaussian_skips_nan_and_zero_sigma() {
+        let mut data = vec![1.0f32; 25];
+        data[12] = f32::NAN;
+        let smoothed = smooth_gaussian(&data, 5, 5, 1.0);
+        assert!(smoothed[12].is_nan());
+        assert!(
+            smoothed
+                .iter()
+                .filter(|v| !v.is_nan())
+                .all(|v| (v - 1.0).abs() < 1e-6)
+        );
+        assert_eq!(smooth_gaussian(&data[..4], 2, 2, 0.0), data[..4].to_vec());
     }
 
     #[test]

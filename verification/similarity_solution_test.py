@@ -12,10 +12,9 @@ results of an avalanchers simulation (see the companion script
 ``run_similarity_solution_test.py``). No avaframe imports, no output
 files.
 
-The numerical flow fields are decoded DIRECTLY from the simulation's
-quantized ``grid_mass`` / ``grid_momentum`` buffers (the same fields the
-grid physics pass consumed); the mass/momentum quantization factors MUST
-match ``crates/compute_core/src/shaders/utils.wgsl``.
+The numerical flow fields are derived DIRECTLY from the simulation's
+``grid_mass`` / ``grid_momentum`` fields (the same fields the grid physics
+pass consumed).
 
 Deviation from the AvaFrame momentum profiles: com1DFA fields carry a
 vertical velocity component (h*vz curves), avalanchers' depth-averaged
@@ -34,10 +33,6 @@ import math
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap, Normalize
-
-# p2g quantization constants - MUST match crates/compute_core/src/shaders/utils.wgsl.
-MASS_FACTOR = 1e1       # p2g stores round(mass * MASS_FACTOR) as u32
-MOMENTUM_FACTOR = 1e2   # p2g stores round(mass * velocity * MOMENTUM_FACTOR) as i32
 
 # plot constants mirroring avaframe/out3Plot/plotUtilsCfg.ini
 FIG_W = 6
@@ -68,17 +63,23 @@ def jacobian(dem, cell_size):
     return np.sqrt(1.0 + zx * zx + zy * zy)
 
 
-def fields_from_grid(sim, shape, cell_size, density, jac):
+# sim models whose velocity is the surface velocity rotated into the horizontal
+# plane: its components already measure surface distance, unlike the horizontal
+# dx/dt of the other models
+SURFACE_VELOCITY_MODELS = ("terrain-following", "terrain", "t")
+
+
+def fields_from_grid(sim, shape, cell_size, density, jac, surface_velocity=False):
     """Decode the sim's grid mass/momentum getters into thickness + velocity.
 
     These are exactly the fields the grid physics pass consumed this step.
     Returns flow thickness (normal to the surface, m), along-slope and
-    cross-slope velocity, and the dequantized grid mass, all as
+    cross-slope velocity, and the grid mass, all as
     (nrows, ncols) arrays, row 0 = south.
     """
     nrows, ncols = shape
-    mass = np.asarray(sim.grid_mass, dtype=np.float64) * (1.0 / MASS_FACTOR)
-    mom = np.asarray(sim.grid_momentum, dtype=np.float64) * (1.0 / MOMENTUM_FACTOR)
+    mass = np.asarray(sim.grid_mass, dtype=np.float64)
+    mom = np.asarray(sim.grid_momentum, dtype=np.float64)
     mom = mom.reshape((nrows * ncols, 2))
     # mirror the shader's decode: nodes below the mass quantization floor are empty
     has_mass = mass >= 1e-2
@@ -87,12 +88,16 @@ def fields_from_grid(sim, shape, cell_size, density, jac):
     mass = mass.reshape(shape)
     vel_u = vel_u.reshape(shape)
     vel_v = vel_v.reshape(shape)
+    # The reference uses surface distance along its x-aligned plane, which a
+    # horizontal dx/dt only measures with the metric.
+    if not surface_velocity:
+        vel_u = vel_u * jac
     thickness = mass / (density * cell_size * cell_size * jac)
     return thickness, vel_u, vel_v, mass
 
 
 def check_grid_mass_consistency(sim, grid_mass, particle_mass):
-    """The dequantized grid mass must match the particle total mass."""
+    """The grid mass must match the particle total mass."""
     grid_total = float(grid_mass.sum())
     particle_total = float(np.nansum(particle_mass))
     if particle_total <= 0:
@@ -100,8 +105,7 @@ def check_grid_mass_consistency(sim, grid_mass, particle_mass):
     rel = abs(grid_total - particle_total) / particle_total
     if rel > 0.01:
         print(f"WARNING: grid mass ({grid_total:.1f} kg) differs from particle mass "
-              f"({particle_total:.1f} kg) by {100.0 * rel:.2f}% - MASS_FACTOR/"
-              f"MOMENTUM_FACTOR no longer match crates/compute_core/src/shaders/utils.wgsl")
+              f"({particle_total:.1f} kg) by {100.0 * rel:.2f}%")
 
 
 # ---------------------------------------------------------------------------
@@ -473,17 +477,6 @@ def add_error_time(ax1, times, h_err_l2, h_err_lmax, vh_err_l2, vh_err_lmax,
     min_y, _ = ax1.get_ylim()
     ax1.text(t_save, min_y, "%.2f s" % t_save)
     return ax1, ax2
-
-
-def plot_error_time(times, h_err_l2, h_err_lmax, vh_err_l2, vh_err_lmax,
-                    relative, t_save, sim_name, out_dir):
-    """Standalone error-vs-time figure (port of plotErrorTime)."""
-    fig1, ax1 = plt.subplots(figsize=(2 * FIG_W, 2 * FIG_H))
-    title = " between analytical solution and avalanchers \n(simulation %s)" % sim_name
-    ax1.set_title(("Relative error difference" if relative else "Error difference") + title)
-    add_error_time(ax1, times, h_err_l2, h_err_lmax, vh_err_l2, vh_err_lmax,
-                   relative, t_save)
-    _save_fig(fig1, out_dir, "error_time_" + sim_name)
 
 
 def plot_profile_comparison(header, field, h_ana, limits, t, sim_name, out_dir):

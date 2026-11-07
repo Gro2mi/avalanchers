@@ -77,10 +77,100 @@ fn test_transforms(@builtin(global_invocation_id) global_id: vec3u) {
         return;
     }
 
+    // surface-plane velocities: inverse maps that keep the speed and stay tangent
+    let bed_normal = normalize(vec3f(0.2 * f32(cell.x) - 0.3, 0.1 - 0.15 * f32(cell.y), 1.0));
+    let surface_velocity = vec2f(1.5, -0.7);
+    let tangent_velocity = surface_to_tangent(surface_velocity, bed_normal);
+    if abs(dot(tangent_velocity, bed_normal)) > 1e-5
+        || abs(length(tangent_velocity) - length(surface_velocity)) > 1e-5
+        || length(tangent_to_surface(tangent_velocity, bed_normal) - surface_velocity) > 1e-5 {
+        data.error_code = 4i;
+        test_results[linear_idx] = data;
+        return;
+    }
+
     // Write out the pristine passing state
     test_results[linear_idx] = data;
 }
 
+// import cartesian_geometry.wgsl;
+// BEGIN cartesian_geometry.wgsl
+// Cartesian surface geometry for the terrain-following models.
+// Pure library module: velocities are 3D Cartesian vectors (vx, vy, vz)
+// tangent to the bed z = B(x, y) with unit normal n = (-grad(B), 1) / J.
+// Hessian components are passed as (B_xx, B_xy, B_yy), the layout written by
+// analyze_terrain.wgsl into the curvature texture.
+
+// The terrain-following model stores velocities in the surface plane: the 3D
+// tangent velocity rotated into the horizontal plane by the rotation that takes
+// the bed normal to z. Unlike the horizontal projection this keeps the magnitude,
+// so length(v2) is the true speed, and the map is linear on any plane, so grid
+// averages and APIC stay exact there. The components are not dx/dt.
+fn surface_to_tangent(v2: vec2f, n: vec3f) -> vec3f {
+    let along_slope = dot(n.xy, v2);
+    return vec3f(v2 - along_slope / (1.0 + n.z) * n.xy, -along_slope);
+}
+
+fn tangent_to_surface(v3: vec3f, n: vec3f) -> vec2f {
+    return v3.xy - v3.z / (1.0 + n.z) * n.xy;
+}
+
+// Removes the bed-normal component.
+fn tangent_project(v: vec3f, n: vec3f) -> vec3f {
+    return v - dot(v, n) * n;
+}
+
+// Rotates v into the tangent plane while keeping its speed, so a particle
+// moving onto a differently inclined bed does not lose kinetic energy.
+fn tangent_project_preserve_speed(v: vec3f, n: vec3f) -> vec3f {
+    let tangential = tangent_project(v, n);
+    let tangential_speed = length(tangential);
+    return select(tangential, tangential * (length(v) / tangential_speed), tangential_speed > 1e-6);
+}
+
+// Surface gradient of a scalar field given its horizontal gradient:
+// P (grad_xy, 0) with P = I - n n^T. The xy part equals
+// surface_inverse_metric(slope, grad_xy) of the curvilinear model.
+fn surface_gradient(n: vec3f, grad_xy: vec2f) -> vec3f {
+    return tangent_project(vec3f(grad_xy, 0.0), n);
+}
+
+// Bed curvature along a horizontal direction d: d^T H d.
+fn hessian_quadratic_form(hessian: vec3f, d: vec2f) -> f32 {
+    return hessian.x * d.x * d.x + 2.0 * hessian.y * d.x * d.y + hessian.z * d.y * d.y;
+}
+
+// Centripetal bed-normal acceleration kappa_n |v|^2 of a tangent velocity v.
+// Equals the curvilinear K:qq with K = H / J and q = v.xy.
+fn normal_curvature_acceleration(hessian: vec3f, v: vec3f, n: vec3f) -> f32 {
+    return n.z * hessian_quadratic_form(hessian, v.xy);
+}
+
+// Velocity used for the trapezoidal position update.
+fn arc_step_velocity(v_prev: vec3f, v_new: vec3f) -> vec3f {
+    return 0.5 * (v_prev + v_new);
+}
+
+// Curvature-corrected trapezoidal step along the bed: arc length
+// s = |v_step| dt along the tangent, bent by the normal curvature kappa.
+// kappa > 0 on a concave bed (positive Hessian form), where the path bends
+// towards the bed normal.
+// The caller snaps the elevation back onto the DEM afterwards. Next to
+// missing DEM data the curvature is undefined and the step stays straight,
+// so the particle still reaches the data gap and is flagged there.
+fn arc_step(position: vec3f, v_step: vec3f, n: vec3f, bed_kappa: f32, dt: f32) -> vec3f {
+    let speed = length(v_step);
+    let s = speed * dt;
+    if s < 1e-9 {
+        return position;
+    }
+    let kappa = select(0.0, bed_kappa, is_finite(bed_kappa));
+    let tangent_scale = s - (kappa * kappa * s * s * s) / 6.0;
+    let normal_scale = (kappa * s * s) / 2.0;
+    return position + tangent_scale * (v_step / speed) + normal_scale * n;
+}
+
+// END cartesian_geometry.wgsl
 // import utils.wgsl
 // BEGIN utils.wgsl
 const WG_SIZE_2D: u32 = 16u;
@@ -106,6 +196,11 @@ const INV_MOMENTUM_FACTOR: f32 = 1 / MOMENTUM_FACTOR;
 // depth-integrated internal force (h * sigma * grad_w * area, ~1e4..1e5 N per node contribution)
 const FORCE_FACTOR: f32 = 1e-3; // i32 limit is 2.1e6 N per node
 const INV_FORCE_FACTOR: f32 = 1 / FORCE_FACTOR;
+// weak-form pressure sum m_p h_p / 2 grad_w (kg) of the curvilinear model,
+// node sum = node_mass * |grad h|: 0.001 kg resolves thin front nodes
+//   (rho*cell^2*h*J ~ 6e4 kg * 1 * 1e3 = 6e7 < 2.1e9)
+const PRESSURE_FACTOR: f32 = 1e3;
+const INV_PRESSURE_FACTOR: f32 = 1 / PRESSURE_FACTOR;
 
 // TODO precompute often used values on the cpu and pass them as uniforms to avoid redundant calculations on the gpu
 
@@ -118,6 +213,7 @@ struct SimInfo {
     max_velocity: f32,
     max_flow_thickness: f32,
     flags: u32,
+    grid_elapsed_time: f32,
 };
 
 const SIM_INFO_OUT_OF_BOUNDS: u32 = 1u << 0u;
@@ -127,7 +223,16 @@ const SIM_INFO_PARTICLE_OUT_OF_DEM_DATA: u32 = 1u << 3u;
 const SIM_INFO_STOPPED: u32 = 1u << 31u;
 const SIM_INFO_ALL_PARTICLES_STOPPED: u32 = 1u << 30u;
 const SIM_INFO_NO_NEW_CELLS: u32 = 1u << 29u;
+// almost all particles are resting or terminally stopped
+const SIM_INFO_AT_REST: u32 = 1u << 28u;
+// total momentum fell below momentum_stop_fraction of its peak
+const SIM_INFO_LOW_MOMENTUM: u32 = 1u << 27u;
 
+// reversible low-speed state; the low bits hold the rest start step while resting
+// and the consecutive slow-step count while moving
+const PARTICLE_RESTING: u32 = 1u << 26u;
+// consecutive slow steps before a particle rests
+const REST_STEPS: u32 = 20u;
 const PARTICLE_FLYING: u32 = 1u << 27u;
 const PARTICLE_OUT_OF_BOUNDS: u32 = 1u << 28u;
 const PARTICLE_IS_NAN: u32 = 1u << 29u;
@@ -142,7 +247,7 @@ struct SimSettings {
     grid_shape: vec2u,
     world_size: vec2f,
     snow_density: f32,
-    slab_thickness: f32,
+    release_thickness: f32,
     friction_coefficient: f32,
     drag_coefficient: f32,
     n0: f32,
@@ -169,6 +274,14 @@ struct SimSettings {
     // MPMDAC compressibility; bulk_modulus 0 = incompressible
     bulk_modulus: f32,
     compaction_pressure: f32,
+    // stop once total momentum < fraction * its peak; 0 disables (curvilinear)
+    momentum_stop_fraction: f32,
+    // front travel in cells covered by the no-new-cells stop window
+    no_new_cells_travel: f32,
+    // Gaussian width (m) of the curvilinear reference surface; 0 disables it
+    reference_surface_length: f32,
+    // snow water equivalent (kg/m2) of the release cells; NaN if unset
+    release_swe: f32,
 };
 
 struct AtomicValues {
@@ -180,7 +293,42 @@ struct AtomicValues {
     number_release_cells: atomic<u32>,
     number_release_particles: atomic<u32>,
     stopped_particles: atomic<u32>,
+    // resting particles counted during the current step, reset by update_sim_info
+    resting_particles: atomic<u32>,
+    // total grid momentum (kg m/s) of the current step as a 64-bit sum, reset by update_sim_info
+    momentum_lo: atomic<u32>,
+    momentum_hi: atomic<u32>,
+    // f32 bits of the largest total momentum so far
+    peak_momentum: atomic<u32>,
 };
+
+// Reversible resting: a particle rests after REST_STEPS consecutive slow steps
+// and wakes once the gathered grid speed exceeds twice the threshold. Resting
+// particles keep depositing mass but no momentum and do not move, which removes
+// sub-threshold creep inside deposits. Returns the new state: its low bits hold
+// the slow-step counter while moving and the rest start step while resting.
+fn next_rest_state(previous_state: u32, speed: f32, timestep: u32) -> u32 {
+    let low_mask = PARTICLE_RESTING - 1u;
+    var resting = (previous_state & PARTICLE_RESTING) != 0u;
+    var low_bits = previous_state & low_mask;
+    if resting {
+        if speed > 2.0 * sim_settings.velocity_threshold {
+            resting = false;
+            low_bits = 0u;
+        }
+    } else if speed < sim_settings.velocity_threshold {
+        low_bits = min(low_bits + 1u, REST_STEPS);
+        if low_bits >= REST_STEPS {
+            resting = true;
+            low_bits = timestep & low_mask;
+        }
+    } else {
+        low_bits = 0u;
+    }
+    return (previous_state & ~(PARTICLE_RESTING | low_mask))
+        | select(0u, PARTICLE_RESTING, resting)
+        | low_bits;
+}
 
 struct G2PUpdate {
     velocity: vec2f,
@@ -188,6 +336,13 @@ struct G2PUpdate {
 };
 
 @group(0) @binding(0) var<uniform> sim_settings: SimSettings;
+
+// length in steps of the no-new-cells rolling window: the fastest material
+// moves at most cfl cells per step, so round(travel / cfl) steps cover the same
+// front travel at any cfl; at least 10 steps
+fn no_new_cells_window() -> u32 {
+    return max(10u, u32(round(sim_settings.no_new_cells_travel / sim_settings.cfl)));
+}
 
 fn is_nan(x: f32) -> bool {
     let bits: u32 = bitcast<u32>(x);

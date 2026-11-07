@@ -17,6 +17,10 @@
 //   evaluation result buffer. Runs as a single workgroup with a strided loop,
 //   so no atomics are needed. Dispatch exactly one workgroup; the CPU combines
 //   the sums into the diagonal-normalized chamfer distance.
+//   Release cells are left out of the sums, since they lie in both masks by
+//   construction and would dilute the mean with the release area fraction.
+//   They remain seeds, so a flow that never leaves the release area still
+//   gets a finite distance from the region of interest beyond it.
 
 struct ChamferParams {
     step: u32,
@@ -33,9 +37,14 @@ struct ChamferDistanceResult {
     count_sim: f32,
     sum_roi_to_sim: f32,
     count_roi: f32,
+    // 1 if the mask has any seed cell (release cells included), 0 otherwise
+    roi_seeded: u32,
+    sim_seeded: u32,
 }
 
 const NO_SEED: u32 = 0xFFFFFFFFu;
+// must match RELEASE_THICKNESS_THRESHOLD in lib.rs and initialize_particles.wgsl
+const RELEASE_THICKNESS_THRESHOLD: f32 = 0.01;
 const MAX_DISTANCE_SQUARED: i32 = 2147483647;
 const WG_SIZE: u32 = 256u;
 
@@ -47,6 +56,7 @@ const WG_SIZE: u32 = 256u;
 @group(0) @binding(6) var<storage, read_write> chamfer_nearest_sim: array<vec2u>;
 @group(0) @binding(7) var<storage, read> chamfer_nearest_sim_snapshot: array<vec2u>;
 @group(0) @binding(8) var<storage, read_write> chamfer_result: ChamferDistanceResult;
+@group(0) @binding(9) var<storage, read> release_areas: array<f32>;
 
 fn bit_is_set(word: u32, index: u32) -> bool {
     return (word & (1u << (index % 32u))) != 0u;
@@ -135,6 +145,9 @@ fn chamfer_reduce(@builtin(local_invocation_index) li: u32) {
     // x: sum_sim_to_roi, y: count_sim, z: sum_roi_to_sim, w: count_roi
     var partial = vec4f(0.0, 0.0, 0.0, 0.0);
     for (var i = li; i < num_cells; i = i + WG_SIZE) {
+        if release_areas[i] > RELEASE_THICKNESS_THRESHOLD {
+            continue;
+        }
         let simulated = grid_peak_flow_thickness[i] > sim_settings.peak_flow_thickness_threshold;
         let reference = bit_is_set(region_of_interest[i / 32u], i);
 
@@ -174,6 +187,9 @@ fn chamfer_reduce(@builtin(local_invocation_index) li: u32) {
         chamfer_result.count_sim = wg_partial[0].y;
         chamfer_result.sum_roi_to_sim = wg_partial[0].z;
         chamfer_result.count_roi = wg_partial[0].w;
+        // after flooding every cell holds a seed iff the mask has one
+        chamfer_result.roi_seeded = select(0u, 1u, chamfer_nearest_roi[0].x != NO_SEED);
+        chamfer_result.sim_seeded = select(0u, 1u, chamfer_nearest_sim[0].x != NO_SEED);
     }
 }
 
@@ -202,6 +218,11 @@ const INV_MOMENTUM_FACTOR: f32 = 1 / MOMENTUM_FACTOR;
 // depth-integrated internal force (h * sigma * grad_w * area, ~1e4..1e5 N per node contribution)
 const FORCE_FACTOR: f32 = 1e-3; // i32 limit is 2.1e6 N per node
 const INV_FORCE_FACTOR: f32 = 1 / FORCE_FACTOR;
+// weak-form pressure sum m_p h_p / 2 grad_w (kg) of the curvilinear model,
+// node sum = node_mass * |grad h|: 0.001 kg resolves thin front nodes
+//   (rho*cell^2*h*J ~ 6e4 kg * 1 * 1e3 = 6e7 < 2.1e9)
+const PRESSURE_FACTOR: f32 = 1e3;
+const INV_PRESSURE_FACTOR: f32 = 1 / PRESSURE_FACTOR;
 
 // TODO precompute often used values on the cpu and pass them as uniforms to avoid redundant calculations on the gpu
 
@@ -214,6 +235,7 @@ struct SimInfo {
     max_velocity: f32,
     max_flow_thickness: f32,
     flags: u32,
+    grid_elapsed_time: f32,
 };
 
 const SIM_INFO_OUT_OF_BOUNDS: u32 = 1u << 0u;
@@ -223,7 +245,16 @@ const SIM_INFO_PARTICLE_OUT_OF_DEM_DATA: u32 = 1u << 3u;
 const SIM_INFO_STOPPED: u32 = 1u << 31u;
 const SIM_INFO_ALL_PARTICLES_STOPPED: u32 = 1u << 30u;
 const SIM_INFO_NO_NEW_CELLS: u32 = 1u << 29u;
+// almost all particles are resting or terminally stopped
+const SIM_INFO_AT_REST: u32 = 1u << 28u;
+// total momentum fell below momentum_stop_fraction of its peak
+const SIM_INFO_LOW_MOMENTUM: u32 = 1u << 27u;
 
+// reversible low-speed state; the low bits hold the rest start step while resting
+// and the consecutive slow-step count while moving
+const PARTICLE_RESTING: u32 = 1u << 26u;
+// consecutive slow steps before a particle rests
+const REST_STEPS: u32 = 20u;
 const PARTICLE_FLYING: u32 = 1u << 27u;
 const PARTICLE_OUT_OF_BOUNDS: u32 = 1u << 28u;
 const PARTICLE_IS_NAN: u32 = 1u << 29u;
@@ -238,7 +269,7 @@ struct SimSettings {
     grid_shape: vec2u,
     world_size: vec2f,
     snow_density: f32,
-    slab_thickness: f32,
+    release_thickness: f32,
     friction_coefficient: f32,
     drag_coefficient: f32,
     n0: f32,
@@ -265,6 +296,14 @@ struct SimSettings {
     // MPMDAC compressibility; bulk_modulus 0 = incompressible
     bulk_modulus: f32,
     compaction_pressure: f32,
+    // stop once total momentum < fraction * its peak; 0 disables (curvilinear)
+    momentum_stop_fraction: f32,
+    // front travel in cells covered by the no-new-cells stop window
+    no_new_cells_travel: f32,
+    // Gaussian width (m) of the curvilinear reference surface; 0 disables it
+    reference_surface_length: f32,
+    // snow water equivalent (kg/m2) of the release cells; NaN if unset
+    release_swe: f32,
 };
 
 struct AtomicValues {
@@ -276,7 +315,42 @@ struct AtomicValues {
     number_release_cells: atomic<u32>,
     number_release_particles: atomic<u32>,
     stopped_particles: atomic<u32>,
+    // resting particles counted during the current step, reset by update_sim_info
+    resting_particles: atomic<u32>,
+    // total grid momentum (kg m/s) of the current step as a 64-bit sum, reset by update_sim_info
+    momentum_lo: atomic<u32>,
+    momentum_hi: atomic<u32>,
+    // f32 bits of the largest total momentum so far
+    peak_momentum: atomic<u32>,
 };
+
+// Reversible resting: a particle rests after REST_STEPS consecutive slow steps
+// and wakes once the gathered grid speed exceeds twice the threshold. Resting
+// particles keep depositing mass but no momentum and do not move, which removes
+// sub-threshold creep inside deposits. Returns the new state: its low bits hold
+// the slow-step counter while moving and the rest start step while resting.
+fn next_rest_state(previous_state: u32, speed: f32, timestep: u32) -> u32 {
+    let low_mask = PARTICLE_RESTING - 1u;
+    var resting = (previous_state & PARTICLE_RESTING) != 0u;
+    var low_bits = previous_state & low_mask;
+    if resting {
+        if speed > 2.0 * sim_settings.velocity_threshold {
+            resting = false;
+            low_bits = 0u;
+        }
+    } else if speed < sim_settings.velocity_threshold {
+        low_bits = min(low_bits + 1u, REST_STEPS);
+        if low_bits >= REST_STEPS {
+            resting = true;
+            low_bits = timestep & low_mask;
+        }
+    } else {
+        low_bits = 0u;
+    }
+    return (previous_state & ~(PARTICLE_RESTING | low_mask))
+        | select(0u, PARTICLE_RESTING, resting)
+        | low_bits;
+}
 
 struct G2PUpdate {
     velocity: vec2f,
@@ -284,6 +358,13 @@ struct G2PUpdate {
 };
 
 @group(0) @binding(0) var<uniform> sim_settings: SimSettings;
+
+// length in steps of the no-new-cells rolling window: the fastest material
+// moves at most cfl cells per step, so round(travel / cfl) steps cover the same
+// front travel at any cfl; at least 10 steps
+fn no_new_cells_window() -> u32 {
+    return max(10u, u32(round(sim_settings.no_new_cells_travel / sim_settings.cfl)));
+}
 
 fn is_nan(x: f32) -> bool {
     let bits: u32 = bitcast<u32>(x);

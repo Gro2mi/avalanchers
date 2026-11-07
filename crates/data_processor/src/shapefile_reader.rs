@@ -1,5 +1,7 @@
 use crate::rasterizer::{GeoPolygon, Point2D};
-use shapefile::{PolygonRing, Shape, ShapeReader};
+use shapefile::dbase::{FieldValue, Record};
+use shapefile::{PolygonRing, Reader, Shape, ShapeReader};
+use std::collections::HashMap;
 use std::path::Path;
 
 #[derive(thiserror::Error, Debug)]
@@ -10,6 +12,14 @@ pub enum ShapeError {
     NoPolygonsFound,
     #[error("Polygon index {index} out of bounds")]
     IndexOutOfBounds { index: u32 },
+    #[error("Feature {feature} has the invalid thickness {value}")]
+    InvalidThickness { feature: usize, value: String },
+}
+
+/// A polygon feature with the thickness of its attributes, if it has one.
+pub struct ReleaseFeature {
+    pub polygon: GeoPolygon,
+    pub thickness: Option<f32>,
 }
 
 /// Reads all polygons from a shapefile and returns them as a single GeoPolygon containing all rings.
@@ -71,6 +81,54 @@ pub fn read_shapefile<P: AsRef<Path>>(path: P) -> Result<GeoPolygon, ShapeError>
     Ok(GeoPolygon { rings: all_rings })
 }
 
+/// The rings of a polygon shape; empty for all other shapes.
+fn polygon_rings(shape: Shape) -> Vec<Vec<Point2D>> {
+    let mut rings = Vec::new();
+    match shape {
+        Shape::Polygon(polygon) => {
+            for ring in polygon.rings() {
+                let mut points = Vec::new();
+                let ring_points = match ring {
+                    PolygonRing::Outer(pts) => pts,
+                    PolygonRing::Inner(pts) => pts,
+                };
+                for p in ring_points {
+                    points.push(Point2D { x: p.x, y: p.y });
+                }
+                rings.push(points);
+            }
+        }
+        Shape::PolygonZ(polygon) => {
+            for ring in polygon.rings() {
+                let mut points = Vec::new();
+                let ring_points = match ring {
+                    PolygonRing::Outer(pts) => pts,
+                    PolygonRing::Inner(pts) => pts,
+                };
+                for p in ring_points {
+                    points.push(Point2D { x: p.x, y: p.y });
+                }
+                rings.push(points);
+            }
+        }
+        Shape::PolygonM(polygon) => {
+            for ring in polygon.rings() {
+                let mut points = Vec::new();
+                let ring_points = match ring {
+                    PolygonRing::Outer(pts) => pts,
+                    PolygonRing::Inner(pts) => pts,
+                };
+                for p in ring_points {
+                    points.push(Point2D { x: p.x, y: p.y });
+                }
+                rings.push(points);
+            }
+        }
+        _ => {}
+    }
+    rings
+}
+
 /// Reads all polygon features from a shapefile and returns a list of GeoPolygons.
 pub fn read_shapefile_polygons<P: AsRef<Path>>(path: P) -> Result<Vec<GeoPolygon>, ShapeError> {
     let mut reader = ShapeReader::from_path(path)?;
@@ -78,57 +136,83 @@ pub fn read_shapefile_polygons<P: AsRef<Path>>(path: P) -> Result<Vec<GeoPolygon
     let mut geo_polygons = Vec::new();
 
     for result in reader.iter_shapes() {
-        let shape = result?;
-        let mut rings = Vec::new();
-        match shape {
-            Shape::Polygon(polygon) => {
-                for ring in polygon.rings() {
-                    let mut points = Vec::new();
-                    let ring_points = match ring {
-                        PolygonRing::Outer(pts) => pts,
-                        PolygonRing::Inner(pts) => pts,
-                    };
-                    for p in ring_points {
-                        points.push(Point2D { x: p.x, y: p.y });
-                    }
-                    rings.push(points);
-                }
-            }
-            Shape::PolygonZ(polygon) => {
-                for ring in polygon.rings() {
-                    let mut points = Vec::new();
-                    let ring_points = match ring {
-                        PolygonRing::Outer(pts) => pts,
-                        PolygonRing::Inner(pts) => pts,
-                    };
-                    for p in ring_points {
-                        points.push(Point2D { x: p.x, y: p.y });
-                    }
-                    rings.push(points);
-                }
-            }
-            Shape::PolygonM(polygon) => {
-                for ring in polygon.rings() {
-                    let mut points = Vec::new();
-                    let ring_points = match ring {
-                        PolygonRing::Outer(pts) => pts,
-                        PolygonRing::Inner(pts) => pts,
-                    };
-                    for p in ring_points {
-                        points.push(Point2D { x: p.x, y: p.y });
-                    }
-                    rings.push(points);
-                }
-            }
-            _ => continue,
-        }
-
+        let rings = polygon_rings(result?);
         if !rings.is_empty() {
             geo_polygons.push(GeoPolygon { rings });
         }
     }
 
     Ok(geo_polygons)
+}
+
+/// Thickness of a feature from its `thickness` or else its `d0` attribute, the
+/// names AvaFrame reads. Field names are not case-sensitive. Missing and empty
+/// attributes give `None`.
+fn record_thickness(record: &Record, feature: usize) -> Result<Option<f32>, ShapeError> {
+    let fields: &HashMap<String, FieldValue> = record.as_ref();
+    let invalid = |value: &dyn std::fmt::Display| ShapeError::InvalidThickness {
+        feature,
+        value: value.to_string(),
+    };
+
+    for wanted in ["thickness", "d0"] {
+        let Some((_, value)) = fields
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(wanted))
+        else {
+            continue;
+        };
+        let thickness = match value {
+            FieldValue::Numeric(value) => *value,
+            FieldValue::Float(value) => value.map(f64::from),
+            FieldValue::Double(value) | FieldValue::Currency(value) => Some(*value),
+            FieldValue::Integer(value) => Some(f64::from(*value)),
+            FieldValue::Character(None) => None,
+            FieldValue::Character(Some(text)) => {
+                Some(text.trim().parse().map_err(|_| invalid(text))?)
+            }
+            other => return Err(invalid(other)),
+        };
+        if let Some(thickness) = thickness {
+            if !thickness.is_finite() || thickness < 0.0 {
+                return Err(invalid(&thickness));
+            }
+            return Ok(Some(thickness as f32));
+        }
+    }
+    Ok(None)
+}
+
+/// Reads all polygon features of a shapefile with their thickness attributes.
+/// The `.dbf` file is optional; without it no feature has a thickness.
+pub fn read_release_features<P: AsRef<Path>>(path: P) -> Result<Vec<ReleaseFeature>, ShapeError> {
+    let path = path.as_ref();
+    let mut reader = match Reader::from_path(path) {
+        Ok(reader) => reader,
+        Err(shapefile::Error::MissingDbf) => {
+            return Ok(read_shapefile_polygons(path)?
+                .into_iter()
+                .map(|polygon| ReleaseFeature {
+                    polygon,
+                    thickness: None,
+                })
+                .collect());
+        }
+        Err(error) => return Err(error.into()),
+    };
+
+    let mut features = Vec::new();
+    for (feature, result) in reader.iter_shapes_and_records().enumerate() {
+        let (shape, record) = result?;
+        let rings = polygon_rings(shape);
+        if !rings.is_empty() {
+            features.push(ReleaseFeature {
+                polygon: GeoPolygon { rings },
+                thickness: record_thickness(&record, feature)?,
+            });
+        }
+    }
+    Ok(features)
 }
 
 /// Reads the nth polygon feature from a shapefile (0-indexed) and returns it as a GeoPolygon.
