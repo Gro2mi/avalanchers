@@ -475,8 +475,21 @@
             .viewer-column .viewer-sticky {
                 position: sticky;
                 top: 1rem;
+                z-index: 10;
                 height: calc(100vh - 2rem);
                 min-height: 0;
+                border-radius: 0.75rem;
+            }
+
+            /* Scroll room for the viewer to widen over the settings (set from JS). */
+            .workflow-layout.viewer-expandable .workflow-controls {
+                padding-bottom: var(--viewer-expand-distance, 60vh);
+            }
+
+            /* While overlaying the settings, the controls row needs an opaque backdrop. */
+            .viewer-column .viewer-sticky.is-expanding {
+                background: var(--bg-0);
+                box-shadow: -18px 0 36px var(--shadow);
             }
 
             .viewer-column .viewer-shell {
@@ -780,8 +793,9 @@
                             <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
                                 <label for="simModelDropdown" class="control-label mb-0">Simulation model:</label>
                                 <select id="simModelDropdown" class="form-select w-auto">
-                                    <option value="terrain-following">Terrain-following</option>
-                                    <option value="curvilinear" selected>Curvilinear</option>
+                                    <option value="terrain-following" selected>Terrain-following</option>
+                                    <option value="3d">3D</option>
+                                    <option value="curvilinear">Curvilinear</option>
                                     <option value="sliding-block">Sliding block (legacy)</option>
                                 </select>
                             </div>

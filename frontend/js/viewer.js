@@ -9,6 +9,12 @@ const DPR_CAP = 2;
 const ZOOM_SCALE = 0.01;
 // Pinch zoom strength per pixel of finger spread; spreading ~150px doubles zoom.
 const PINCH_ZOOM_SCALE = 0.05;
+// The wheel zooms only with terrain this close to the pointer (CSS pixels);
+// elsewhere it scrolls the page.
+const WHEEL_TERRAIN_RADIUS_PX = 48;
+// Wheel events closer together than this belong to one gesture and keep its
+// zoom-or-scroll decision.
+const WHEEL_GESTURE_GAP_MS = 250;
 
 export class LiveViewer {
     constructor(sim, {
@@ -43,6 +49,8 @@ export class LiveViewer {
         this.running = false;
         this.onFinished = null;
         this.pendingResize = null;
+        // CSS size observed during scrolling, applied by the next tick.
+        this.pendingCanvasSize = null;
         this.wasAttached = false;
         // On-demand rendering: frames are only drawn while the simulation runs
         // or after something changed (camera, overlay, resize). An idle view
@@ -52,6 +60,9 @@ export class LiveViewer {
         // True while a tick is awaiting the engine: a re-entrant tick would
         // borrow the simulation twice and panic in wasm-bindgen.
         this.tickInFlight = false;
+        // Wheel gesture state, see `wheelZooms`.
+        this.lastWheelTime = -Infinity;
+        this.wheelZoomLatched = null;
 
         this.bindControls();
         this.bindPointer();
@@ -159,6 +170,7 @@ export class LiveViewer {
         this.canvas.addEventListener('contextmenu', event => event.preventDefault());
         // Scroll up (negative deltaY) zooms in, matching the native viewer.
         this.canvas.addEventListener('wheel', event => {
+            if (!this.wheelZooms(event)) return; // let the page scroll
             event.preventDefault();
             this.trySim(() => this.sim.zoom(-event.deltaY * ZOOM_SCALE));
             this.requestRender();
@@ -169,17 +181,66 @@ export class LiveViewer {
         });
     }
 
+    /**
+     * Whether a wheel event zooms the view rather than scrolling the page: only
+     * with the terrain drawn under or near the pointer, so a full-width view does
+     * not trap page scrolling. Ctrl+wheel (also what a trackpad pinch reports)
+     * always zooms. A gesture keeps its first decision: zooming out shrinks the
+     * terrain away from the pointer and must not turn into scrolling halfway.
+     */
+    wheelZooms(event) {
+        const now = performance.now();
+        const sameGesture = now - this.lastWheelTime < WHEEL_GESTURE_GAP_MS;
+        this.lastWheelTime = now;
+        if (sameGesture && this.wheelZoomLatched !== null) return this.wheelZoomLatched;
+
+        let zooms = event.ctrlKey;
+        if (!zooms) {
+            const rect = this.canvas.getBoundingClientRect();
+            if (rect.width > 0 && rect.height > 0) {
+                const ndcX = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+                const ndcY = 1 - ((event.clientY - rect.top) / rect.height) * 2;
+                // Undefined while the engine is borrowed elsewhere; zooming would
+                // be dropped then too, so scrolling the page is the better fallback.
+                zooms = this.trySim(() => this.sim.terrain_near(
+                    ndcX, ndcY,
+                    (2 * WHEEL_TERRAIN_RADIUS_PX) / rect.width,
+                    (2 * WHEEL_TERRAIN_RADIUS_PX) / rect.height,
+                )) === true;
+            }
+        }
+        this.wheelZoomLatched = zooms;
+        return zooms;
+    }
+
     observeResize() {
-        const observer = new ResizeObserver(() => this.sizeCanvas());
+        // Deferred: the observer fires on every frame while the docked viewer
+        // widens with the scroll position, and resizing here would present a
+        // cleared canvas until the next tick redraws it (a black flash).
+        const observer = new ResizeObserver(() => this.sizeCanvas({ defer: true }));
         observer.observe(this.canvas);
         this.sizeCanvas();
     }
 
-    /** Sizes the canvas backing store to its CSS box; the surface follows in tick. */
-    sizeCanvas() {
+    /**
+     * Sizes the canvas backing store to its CSS box; the surface follows in
+     * tick. With `defer`, even the backing store waits for the tick, which
+     * resizes and redraws in one go so the cleared canvas is never shown.
+     */
+    sizeCanvas({ defer = false } = {}) {
         const dpr = Math.min(window.devicePixelRatio || 1, DPR_CAP);
         const width = Math.max(1, Math.round(this.canvas.clientWidth * dpr));
         const height = Math.max(1, Math.round(this.canvas.clientHeight * dpr));
+        if (defer) {
+            if (this.canvas.width !== width || this.canvas.height !== height) {
+                this.pendingCanvasSize = { width, height };
+                this.requestRender();
+            } else {
+                this.pendingCanvasSize = null;
+            }
+            return;
+        }
+        this.pendingCanvasSize = null;
         if (this.canvas.width !== width || this.canvas.height !== height) {
             this.canvas.width = width;
             this.canvas.height = height;
@@ -282,6 +343,24 @@ export class LiveViewer {
         });
     }
 
+    /** Applies a deferred canvas size and reconfigures the surface; true if resized. */
+    applyPendingSize() {
+        if (this.pendingCanvasSize) {
+            const { width, height } = this.pendingCanvasSize;
+            this.pendingCanvasSize = null;
+            if (this.canvas.width !== width || this.canvas.height !== height) {
+                this.canvas.width = width;
+                this.canvas.height = height;
+                this.pendingResize = { width, height };
+            }
+        }
+        if (!this.pendingResize) return false;
+        const { width, height } = this.pendingResize;
+        this.pendingResize = null;
+        this.sim.resize(width, height); // synchronous in the WASM bindings
+        return true;
+    }
+
     async tick() {
         // A previous tick may still be awaiting the engine; it reschedules at
         // the end if more work is pending. Re-entering now would borrow the
@@ -299,14 +378,16 @@ export class LiveViewer {
                 this.wasAttached = attached;
 
                 if (attached && (this.running || this.needsRender)) {
-                    if (this.pendingResize) {
-                        const { width, height } = this.pendingResize;
-                        this.pendingResize = null;
-                        await this.sim.resize(width, height);
-                    }
                     const wasRunning = this.running;
                     this.needsRender = false;
-                    await this.sim.render_frame(wasRunning ? this.stepsPerFrame : 0);
+                    // Advance first: the steps await GPU readbacks, and a canvas
+                    // resized before them would sit cleared on screen meanwhile.
+                    if (wasRunning) await this.sim.render_frame(this.stepsPerFrame);
+                    // Resizing clears the canvas, so it is followed directly by a
+                    // redraw: `render_frame(0)` does not await, so both land in
+                    // the same task and no cleared frame is ever presented.
+                    const resized = this.applyPendingSize();
+                    if (!wasRunning || resized) await this.sim.render_frame(0);
                     // Resolve the run only after the final frame finished
                     // rendering: the continuation starts the background result
                     // job, which must not race this tick for the engine borrow.
