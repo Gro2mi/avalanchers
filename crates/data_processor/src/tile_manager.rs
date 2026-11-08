@@ -3,12 +3,16 @@
 // All info: https://data.bev.gv.at/geonetwork/srv/api/records/9a4e3e4f-2cd5-4f73-af51-384beb9331d0
 // 50km x 50 km tiles, 55 pieces
 // doi: https://doi.org/10.48677/9a4e3e4f-2cd5-4f73-af51-384beb9331d0
-//! swissALTI3D fetch and cache. Tries 8 acquisition years per tile (the shipped code hardcoded 2019), falls back to `decode_tiled_lzw_f32` for tiles whose LZW stream lacks an end code, resamples 2 m → 5 m by area weighting, stores into a Zarr array. `get_dem(bbox)` is the entry point.
+//! swissALTI3D fetch and cache. Each tile's acquisition year (part of its URL) comes from
+//! `data/swissalti3d_years.txt`, compressed from swisstopo's link export; falls back to `decode_tiled_lzw_f32` for
+//! tiles whose LZW stream lacks an end code, resamples 2 m → 5 m by area weighting, stores into a
+//! Zarr array. `get_dem(bbox)` is the entry point.
 use ndarray::{Array1, Array2};
 use reqwest::Client;
 use serde_json::json;
+use std::collections::HashMap;
 use std::io::Cursor;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tiff::decoder::{Decoder, DecodingResult};
 
 #[allow(unused_imports)]
@@ -251,6 +255,59 @@ pub struct TileId {
 
 pub use crate::rasterizer::BBox;
 
+/// Acquisition year of every swissALTI3D tile (2 m, LV95 GeoTIFF), run-length encoded as
+/// `northing_km easting_km year count` lines. Generated from swisstopo's link export by
+/// `data/make_swissalti3d_years.py`; to refresh it, export the links again from
+/// <https://www.swisstopo.admin.ch/en/height-model-swissalti3d> (whole Switzerland, 2 m, GeoTIFF)
+/// and rerun the script.
+const SWISSALTI3D_YEARS: &str = include_str!("../data/swissalti3d_years.txt");
+
+/// Oldest acquisition year probed when a listed URL has gone stale.
+const OLDEST_YEAR: u32 = 2017;
+
+struct TileIndex {
+    years: HashMap<TileId, u32>,
+    newest_year: u32,
+}
+
+/// Parses one `northing easting year count` run.
+fn parse_year_run(line: &str) -> Option<(u32, u32, u32, u32)> {
+    let mut it = line.split_whitespace().map(|v| v.parse::<u32>().ok());
+    let run = (it.next()??, it.next()??, it.next()??, it.next()??);
+    it.next().is_none().then_some(run)
+}
+
+fn tile_index() -> &'static TileIndex {
+    static INDEX: OnceLock<TileIndex> = OnceLock::new();
+    INDEX.get_or_init(|| {
+        let mut years = HashMap::with_capacity(50_000);
+        let mut newest_year = OLDEST_YEAR;
+        for line in SWISSALTI3D_YEARS.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let Some((northing, easting, year, count)) = parse_year_run(line) else {
+                warn!("skipping malformed swissALTI3D year line: {line}");
+                continue;
+            };
+            newest_year = newest_year.max(year);
+            for easting in easting..easting + count {
+                years.insert(TileId { easting, northing }, year);
+            }
+        }
+        TileIndex { years, newest_year }
+    })
+}
+
+fn tile_url(id: TileId, year: u32) -> String {
+    format!(
+        "https://data.geo.admin.ch/ch.swisstopo.swissalti3d/swissalti3d_{year}_{e}-{n}/swissalti3d_{year}_{e}-{n}_2_2056_5728.tif",
+        e = id.easting,
+        n = id.northing,
+    )
+}
+
 pub struct TileManager {
     client: Client,
     // zarr_storage: Arc<FilesystemStore>,
@@ -440,34 +497,49 @@ impl TileManager {
     /// Fetches the TIFF from geo.admin.ch and decodes it into a 500x500 f32 array
     async fn fetch_and_parse_tif(&self, id: TileId) -> Result<Array2<f32>, TileManagerError> {
         // swissALTI3D is flown region by region, so the acquisition year in the
-        // asset name is not the same everywhere. Try the most common year first
-        // and fall through the others rather than 404-ing on whole regions.
-        const YEARS: [u32; 8] = [2019, 2020, 2021, 2022, 2023, 2024, 2018, 2017];
-        let mut response = None;
-        let mut url = String::new();
-        let mut last_status = reqwest::StatusCode::NOT_FOUND;
-        for year in YEARS {
-            let candidate = format!(
-                "https://data.geo.admin.ch/ch.swisstopo.swissalti3d/swissalti3d_{year}_{}-{}/swissalti3d_{year}_{}-{}_2_2056_5728.tif",
-                id.easting, id.northing, id.easting, id.northing,
+        // asset name differs between tiles. The embedded year table knows it.
+        let index = tile_index();
+        let Some(&known_year) = index.years.get(&id) else {
+            return Err(TileManagerError::Http(format!(
+                "tile {:?} is outside the swissALTI3D coverage",
+                id
+            )));
+        };
+
+        let known_url = tile_url(id, known_year);
+        let mut url = known_url.clone();
+        let mut response = self.client.get(&url).send().await?;
+
+        // A tile that has been re-flown since the export was taken is published
+        // under a new year and the old asset can disappear. Only then probe the
+        // other years, newest first, and ask for the export to be refreshed.
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            warn!(
+                "tile {:?}: listed URL {} returned 404; data/swissalti3d_years.txt \
+                 is probably outdated, probing other years",
+                id, url
             );
-            let r = self.client.get(&candidate).send().await?;
-            last_status = r.status();
-            if r.status().is_success() {
-                url = candidate;
-                response = Some(r);
-                break;
+            let mut found = false;
+            for year in (OLDEST_YEAR..=index.newest_year + 1)
+                .rev()
+                .filter(|&y| y != known_year)
+            {
+                let candidate = tile_url(id, year);
+                let r = self.client.get(&candidate).send().await?;
+                if r.status().is_success() {
+                    url = candidate;
+                    response = r;
+                    found = true;
+                    break;
+                }
             }
-        }
-        let response = match response {
-            Some(r) => r,
-            None => {
+            if !found {
                 return Err(TileManagerError::Http(format!(
-                    "tile {:?}: no swissALTI3D asset found (last status {})",
-                    id, last_status
+                    "tile {:?}: no swissALTI3D asset found ({} is 404, no other year matched)",
+                    id, known_url
                 )));
             }
-        };
+        }
 
         let status = response.status();
         let content_type = response
@@ -762,20 +834,21 @@ mod tests {
             "width {}, height {}, data: {:?}",
             dem.width, dem.height, dem.data1d
         );
+        // swissalti3d_2025_2666-1159 (the acquisition listed in the link export)
         let expected_data: Vec<f32> = vec![
-            2193.765, 2194.0151, 2193.748, 2193.6294, 2193.561, 2193.7139, 2194.2805, 2194.536,
-            2194.9507, 2195.626, 2191.5327, 2191.4226, 2191.3772, 2191.008, 2191.0254, 2191.234,
-            2191.4453, 2191.792, 2192.5737, 2193.5688, 2189.028, 2188.6758, 2188.5618, 2188.2568,
-            2188.1125, 2188.3752, 2188.4995, 2189.215, 2190.123, 2191.464, 2186.6091, 2186.1787,
-            2185.8325, 2185.6245, 2185.6572, 2186.0525, 2186.2058, 2186.8484, 2188.0393, 2189.6365,
-            2183.744, 2183.0432, 2182.8381, 2182.6968, 2182.8113, 2183.2524, 2183.5571, 2184.311,
-            2186.238, 2187.9111, 2181.347, 2180.929, 2180.2715, 2180.165, 2180.377, 2180.5796,
-            2181.1045, 2181.9316, 2183.7107, 2185.0256, 2178.81, 2178.4128, 2177.768, 2177.4077,
-            2177.5413, 2177.7524, 2178.5132, 2179.2224, 2179.8389, 2181.1472, 2176.7634, 2176.1433,
-            2175.3271, 2174.9033, 2174.7737, 2175.0557, 2175.6042, 2176.2063, 2176.9907, 2178.47,
-            2174.459, 2173.519, 2172.7375, 2172.352, 2171.9524, 2172.0044, 2172.642, 2173.3938,
-            2174.9087, 2176.5313, 2171.9233, 2171.021, 2170.148, 2169.5645, 2169.3586, 2169.3037,
-            2170.0542, 2170.9807, 2172.953, 2174.6018,
+            2193.9417, 2194.0571, 2193.8872, 2193.7124, 2193.6594, 2193.8335, 2194.358, 2194.6235,
+            2195.0251, 2195.7737, 2191.6135, 2191.386, 2191.4685, 2191.1738, 2191.0537, 2191.278,
+            2191.662, 2192.0251, 2192.648, 2193.5308, 2188.9172, 2188.7844, 2188.7593, 2188.3552,
+            2188.325, 2188.556, 2188.7834, 2189.2366, 2190.1335, 2191.6125, 2186.4668, 2186.1812,
+            2186.1272, 2185.8232, 2185.757, 2186.131, 2186.3052, 2186.8694, 2188.0347, 2189.9502,
+            2183.8948, 2183.3433, 2183.0554, 2182.8442, 2182.8606, 2183.248, 2183.6804, 2184.5244,
+            2186.2798, 2188.2834, 2181.4624, 2181.0366, 2180.444, 2180.35, 2180.3245, 2180.8633,
+            2181.247, 2181.9211, 2183.9072, 2184.915, 2179.0076, 2178.318, 2177.8428, 2177.5286,
+            2177.5442, 2178.143, 2178.6748, 2179.3853, 2180.0159, 2181.3088, 2176.6655, 2176.0354,
+            2175.3628, 2175.1985, 2175.6504, 2176.1597, 2176.8206, 2177.5706, 2178.0662, 2178.9204,
+            2174.541, 2173.509, 2173.1753, 2173.7898, 2174.2112, 2174.5476, 2175.4053, 2176.0073,
+            2176.6626, 2177.45, 2171.9114, 2171.3594, 2172.1326, 2172.8123, 2173.0383, 2173.3618,
+            2174.1052, 2174.6538, 2175.4678, 2176.0383,
         ];
         assert_eq!(dem.data1d, expected_data);
     }
@@ -958,6 +1031,44 @@ mod tests {
         let debug_str = format!("{:?}", id);
         assert!(debug_str.contains("1100"));
         assert!(debug_str.contains("2700"));
+    }
+
+    #[test]
+    fn test_tile_url_and_year_run() {
+        let id = TileId {
+            easting: 2774,
+            northing: 1264,
+        };
+        assert_eq!(
+            tile_url(id, 2026),
+            "https://data.geo.admin.ch/ch.swisstopo.swissalti3d/swissalti3d_2026_2774-1264/swissalti3d_2026_2774-1264_2_2056_5728.tif"
+        );
+        assert_eq!(
+            parse_year_run("1064 2689 2022 4"),
+            Some((1064, 2689, 2022, 4))
+        );
+        assert_eq!(parse_year_run("1064 2689 2022"), None);
+        assert_eq!(parse_year_run("1064 2689 2022 4 1"), None);
+        assert_eq!(parse_year_run("a b c d"), None);
+    }
+
+    #[test]
+    fn test_embedded_tile_index() {
+        let index = tile_index();
+        // Every run must have been understood: the link export had 43 650 tiles.
+        let runs: Vec<_> = SWISSALTI3D_YEARS
+            .lines()
+            .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
+            .map(|l| parse_year_run(l).expect("valid run"))
+            .collect();
+        let tiles: u32 = runs.iter().map(|r| r.3).sum();
+        assert_eq!(index.years.len(), tiles as usize);
+        assert!(index.years.len() > 40_000);
+        let year = |easting, northing| index.years.get(&TileId { easting, northing }).copied();
+        assert_eq!(year(2501, 1120), Some(2019));
+        assert_eq!(year(2666, 1159), Some(2025));
+        assert_eq!(year(2774, 1266), Some(2026));
+        assert_eq!(year(2480, 1060), None);
     }
 
     /// 8. Test Resampling with Non-Standard Input Size
