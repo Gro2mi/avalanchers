@@ -47,9 +47,11 @@ fn benchmark_models(c: &mut Criterion) {
         let elapsed = start.elapsed();
         let info = block_on(sim.fetch_sim_info()).expect("Failed to read sim info");
         println!(
-            "{model}: {} particles, {} steps, {:.3} ms/step, stopped by {:?}",
+            "{model}: {} particles, {} steps, {:.1} s simulated (mean dt {:.4} s), {:.3} ms/step, stopped by {:?}",
             info.number_particles,
             info.timestep,
+            info.elapsed_time,
+            info.elapsed_time / info.timestep.max(1) as f32,
             elapsed.as_secs_f64() * 1e3 / info.timestep.max(1) as f64,
             info.parsed_flags()
         );

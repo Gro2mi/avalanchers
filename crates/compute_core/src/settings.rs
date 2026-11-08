@@ -19,6 +19,13 @@ pub struct SimFlags {
 }
 
 impl SimFlags {
+    pub const CURVATURE: u32 = 1 << 0;
+    pub const PARTICLE_INTERACTION: u32 = 1 << 1;
+    pub const EARTH_PRESSURE_COEFFICIENT: u32 = 1 << 2;
+    pub const ENTRAINMENT: u32 = 1 << 3;
+    pub const CENTER_OF_MASS_BIGGEST_BLOB: u32 = 1 << 4;
+    pub const WEAK_PRESSURE: u32 = 1 << 5;
+
     pub fn new(
         curvature: bool,
         particle_interaction: bool,
@@ -137,50 +144,101 @@ pub struct SimSettings {
     pub release_swe: f32,
 }
 
+/// Hashes only the fields the selected simulation, friction and constitutive
+/// model read, so a parameter added for one model, or changed while another
+/// model is selected, leaves the hash unchanged. When a model starts reading a
+/// field, add it here under that model.
 impl Hash for SimSettings {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        // Integers
+        let hash_f32 = |value: f32, state: &mut H| value.to_bits().hash(state);
+        let sim_model = SimModel::from_int(self.sim_model);
+        let grid_flow_model = matches!(
+            sim_model,
+            Some(
+                SimModel::TerrainFollowing | SimModel::Curvilinear | SimModel::ThreeDDepthAveraged
+            )
+        );
+
+        // Shared by all models: run length, grid, release and evaluation
         self.max_steps.hash(state);
         self.sim_model.hash(state);
         self.friction_model.hash(state);
         self.released_particles_per_cell.hash(state);
         self.grid_shape_x.hash(state);
         self.grid_shape_y.hash(state);
-        // Floats
-        self.world_size_x.to_bits().hash(state);
-        self.world_size_y.to_bits().hash(state);
-        self.density.to_bits().hash(state);
-        self.release_thickness.to_bits().hash(state);
-        self.release_swe.to_bits().hash(state);
-        self.friction_coefficient.to_bits().hash(state);
-        self.drag_coefficient.to_bits().hash(state);
-        self.n0.to_bits().hash(state);
-        self.i0.to_bits().hash(state);
-        self.mu0.to_bits().hash(state);
-        self.mu2.to_bits().hash(state);
-        self.grain_diameter.to_bits().hash(state);
-        self.internal_friction_angle.to_bits().hash(state);
-        self.basal_friction_angle.to_bits().hash(state);
-        self.cfl.to_bits().hash(state);
-        self.cell_size.to_bits().hash(state);
-        self.min_slope_angle.to_bits().hash(state);
-        self.max_slope_angle.to_bits().hash(state);
-        self.release_min_elevation.to_bits().hash(state);
-        self.velocity_threshold.to_bits().hash(state);
-        self.roughness_threshold.to_bits().hash(state);
-        self.peak_flow_thickness_threshold.to_bits().hash(state);
-        // MPMDAC constitutive model
-        self.constitutive_model.hash(state);
-        self.shear_modulus.to_bits().hash(state);
-        self.hardening_modulus.to_bits().hash(state);
-        // MPMDAC compressibility
-        self.bulk_modulus.to_bits().hash(state);
-        self.compaction_pressure.to_bits().hash(state);
-        self.momentum_stop_fraction.to_bits().hash(state);
-        self.no_new_cells_travel.to_bits().hash(state);
-        self.reference_surface_length.to_bits().hash(state);
-        // Flags
-        self.flags.hash(state);
+        hash_f32(self.world_size_x, state);
+        hash_f32(self.world_size_y, state);
+        hash_f32(self.cell_size, state);
+        hash_f32(self.density, state);
+        hash_f32(self.release_thickness, state);
+        hash_f32(self.release_swe, state);
+        hash_f32(self.min_slope_angle, state);
+        hash_f32(self.max_slope_angle, state);
+        hash_f32(self.release_min_elevation, state);
+        hash_f32(self.release_max_elevation, state);
+        hash_f32(self.roughness_threshold, state);
+        hash_f32(self.cfl, state);
+        hash_f32(self.velocity_threshold, state);
+        hash_f32(self.peak_flow_thickness_threshold, state);
+        hash_f32(self.no_new_cells_travel, state);
+
+        // Basal friction model
+        match FrictionModel::from_int(self.friction_model) {
+            Some(FrictionModel::Coulomb | FrictionModel::SamosAT) => {
+                hash_f32(self.friction_coefficient, state);
+            }
+            Some(FrictionModel::Voellmy | FrictionModel::VoellmyMinShear) => {
+                hash_f32(self.friction_coefficient, state);
+                hash_f32(self.drag_coefficient, state);
+            }
+            Some(FrictionModel::MuI) | None => {}
+        }
+        // mu(I) rheology, as friction model or MPMDAC constitutive law
+        if self.uses_mu_i() {
+            hash_f32(self.i0, state);
+            hash_f32(self.mu0, state);
+            hash_f32(self.mu2, state);
+            hash_f32(self.grain_diameter, state);
+        }
+
+        let mut flags_mask = SimFlags::CENTER_OF_MASS_BIGGEST_BLOB;
+        match sim_model {
+            Some(SimModel::MpmDaC) => {
+                flags_mask |= SimFlags::CURVATURE;
+                self.constitutive_model.hash(state);
+                hash_f32(self.n0, state);
+                hash_f32(self.shear_modulus, state);
+                hash_f32(self.hardening_modulus, state);
+                if self.constitutive_model == ConstitutiveModel::DruckerPrager.as_int() {
+                    hash_f32(self.internal_friction_angle, state);
+                }
+                hash_f32(self.bulk_modulus, state);
+                if self.bulk_modulus > 0.0 {
+                    hash_f32(self.compaction_pressure, state);
+                }
+            }
+            Some(_) => {
+                // depth-averaged hydrostatic pressure with earth pressure
+                // coefficients: all other models
+                flags_mask |= SimFlags::CURVATURE
+                    | SimFlags::PARTICLE_INTERACTION
+                    | SimFlags::EARTH_PRESSURE_COEFFICIENT;
+                if sim_model == Some(SimModel::Curvilinear) {
+                    flags_mask |= SimFlags::WEAK_PRESSURE;
+                }
+                if SimFlags::from_u32(self.flags).is_earth_pressure_coefficient_enabled() {
+                    hash_f32(self.internal_friction_angle, state);
+                    hash_f32(self.basal_friction_angle, state);
+                }
+            }
+            None => {}
+        }
+        if grid_flow_model {
+            hash_f32(self.momentum_stop_fraction, state);
+            hash_f32(self.reference_surface_length, state);
+        }
+
+        (self.flags & flags_mask).hash(state);
     }
 }
 
@@ -1823,5 +1881,57 @@ mod tests {
         let mut settings3 = settings1;
         settings3.friction_coefficient = 0.55;
         assert_ne!(settings1.calculate_hash(), settings3.calculate_hash());
+    }
+
+    #[test]
+    fn test_sim_settings_hash_ignores_parameters_of_other_models() {
+        // terrain following with Voellmy friction
+        let settings = SimSettings::new();
+        let hash = settings.calculate_hash();
+        let unchanged = |change: fn(&mut SimSettings)| {
+            let mut changed = settings;
+            change(&mut changed);
+            changed.calculate_hash() == hash
+        };
+
+        // mu(I) friction, MPMDAC and earth pressure (disabled) parameters
+        assert!(unchanged(|s| s.i0 = 0.5));
+        assert!(unchanged(|s| s.grain_diameter = 0.01));
+        assert!(unchanged(|s| s.n0 = 1.0));
+        assert!(unchanged(|s| s.shear_modulus = 1.0));
+        assert!(unchanged(|s| s.bulk_modulus = 1.0));
+        assert!(unchanged(|s| s.constitutive_model = 1));
+        assert!(unchanged(|s| s.internal_friction_angle = 30.0));
+        assert!(unchanged(|s| s.flags |= SimFlags::WEAK_PRESSURE));
+
+        assert!(!unchanged(|s| s.drag_coefficient = 1000.0));
+        assert!(!unchanged(|s| s.reference_surface_length = 20.0));
+        assert!(!unchanged(
+            |s| s.flags |= SimFlags::EARTH_PRESSURE_COEFFICIENT
+        ));
+        assert!(!unchanged(|s| {
+            s.flags |= SimFlags::EARTH_PRESSURE_COEFFICIENT;
+            s.internal_friction_angle = 30.0;
+        }));
+    }
+
+    #[test]
+    fn test_sim_settings_hash_follows_the_selected_models() {
+        let mut mu_i = SimSettings::new();
+        mu_i.friction_model = FrictionModel::MuI.as_int();
+        let mut changed = mu_i;
+        changed.drag_coefficient = 1000.0;
+        assert_eq!(mu_i.calculate_hash(), changed.calculate_hash());
+        changed.mu0 = 0.3;
+        assert_ne!(mu_i.calculate_hash(), changed.calculate_hash());
+
+        let mut mpmdac = SimSettings::new();
+        mpmdac.sim_model = SimModel::MpmDaC.as_int();
+        let mut changed = mpmdac;
+        changed.reference_surface_length = 20.0;
+        changed.momentum_stop_fraction = 0.01;
+        assert_eq!(mpmdac.calculate_hash(), changed.calculate_hash());
+        changed.internal_friction_angle = 30.0;
+        assert_ne!(mpmdac.calculate_hash(), changed.calculate_hash());
     }
 }
