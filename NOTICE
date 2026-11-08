@@ -1,8 +1,16 @@
 Swiss map data © swisstopo
 Source: Federal Office of Topography swisstopo
+License:  Open Government Data (OGD) License https://www.swisstopo.admin.ch/en/terms-of-use-free-geodata-and-geoservices
 
 Austrian map data © basemap.at
 https://www.basemap.at
+License: CC-BY 4.0 https://creativecommons.org/licenses/by/4.0/deed.en
 
 Avalanche outlines
 Hafner, E., Bühler, Y. (2019). SPOT6 Avalanche outlines 24 January 2018.  EnviDat.  https://www.doi.org/10.16904/envidat.77.
+License: ODbL with Database Contents License (DbCL) https://opendefinition.org/licenses/odc-odbl/
+
+Snow data
+Moritz Oberrauch, Bertrand Cluzet, Jan Magnusson, Giulia Mazzotti, Rebecca Mott, Louis Quéno, Clare Webster, Tobias Zolles, and Tobias Jonas. A high-resolution snow dataset for Switzerland (2016–2025) combining physics-based simulations and in situ observations. October 2025. 10.5281/zenodo.17313889
+License: Creative Commons Attribution 4.0 International 
+https://creativecommons.org/licenses/by/4.0/deed.en

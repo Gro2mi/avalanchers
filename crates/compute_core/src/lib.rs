@@ -1046,24 +1046,23 @@ impl ComputeOrchestrator {
             TextureFormat::R32Float,
             texture_usage_input,
         )?;
-        if sim_settings.sim_model == SimModel::Curvilinear.as_int() {
-            // the surface the flow follows; finer terrain becomes basal topography
-            let reference = crate::dem::smooth_gaussian(
-                &dem.data1d,
-                dem.width,
-                dem.height,
-                sim_settings.reference_surface_length / sim_settings.cell_size,
-            );
-            self.resources.add_texture_with_data(
-                &self.device,
-                &self.queue,
-                reference.as_slice(),
-                TextureName::DemReference,
-                self.texture_size,
-                TextureFormat::R32Float,
-                texture_usage_input,
-            )?;
-        }
+        // the surface the flow follows; finer terrain becomes basal topography
+        // (gully walls of the curvilinear, terrain-following and 3D models)
+        let reference = crate::dem::smooth_gaussian(
+            &dem.data1d,
+            dem.width,
+            dem.height,
+            sim_settings.reference_surface_length / sim_settings.cell_size,
+        );
+        self.resources.add_texture_with_data(
+            &self.device,
+            &self.queue,
+            reference.as_slice(),
+            TextureName::DemReference,
+            self.texture_size,
+            TextureFormat::R32Float,
+            texture_usage_input,
+        )?;
         match sim_settings.sim_model {
             0 | 2 | 3 | 4 => self.run_shader(
                 &ShaderName::AnalyzeTerrain,
@@ -2087,7 +2086,7 @@ impl ComputeOrchestrator {
         self.particle_sort = None;
         let sorted_p2g = match SimModel::from_int(sim_settings.sim_model) {
             Some(SimModel::Curvilinear | SimModel::TerrainFollowing) => ShaderName::P2G2DSorted,
-            Some(SimModel::ThreeD) => ShaderName::P2G3DSorted,
+            Some(SimModel::ThreeDDepthAveraged) => ShaderName::P2G3DSorted,
             _ => return Ok(()),
         };
         if self.particle_sort_interval == 0 {
@@ -2151,7 +2150,8 @@ impl ComputeOrchestrator {
     }
 
     pub async fn step_3d(&mut self, steps: u32) -> Result<SimInfo> {
-        self.step_simulation(steps, SimModel::ThreeD).await
+        self.step_simulation(steps, SimModel::ThreeDDepthAveraged)
+            .await
     }
 
     pub async fn step_sliding_block(&mut self, steps: u32) -> Result<SimInfo> {
@@ -2181,7 +2181,7 @@ impl ComputeOrchestrator {
                 .min(sim_settings.max_steps - steps_run);
             let sim_info = if sim_settings.sim_model == SimModel::SlidingBlock.as_int() {
                 self.step_sliding_block(steps).await?
-            } else if sim_settings.sim_model == SimModel::ThreeD.as_int() {
+            } else if sim_settings.sim_model == SimModel::ThreeDDepthAveraged.as_int() {
                 self.step_3d(steps).await?
             } else {
                 self.step_terrain_following(steps).await?
@@ -2450,7 +2450,7 @@ impl ComputeOrchestrator {
         // terrain-following, 3D and sliding-block particles start their step
         // from the stored elevation; the other models resample it from the DEM
         if sim_model == SimModel::TerrainFollowing.as_int()
-            || sim_model == SimModel::ThreeD.as_int()
+            || sim_model == SimModel::ThreeDDepthAveraged.as_int()
             || sim_model == SimModel::SlidingBlock.as_int()
         {
             names.push(BufferName::ParticlesElevation);

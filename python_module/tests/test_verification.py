@@ -11,7 +11,7 @@ VERIFICATION = pathlib.Path(__file__).resolve().parents[2] / "verification"
 sys.path.insert(0, str(VERIFICATION))
 
 
-GRID_FLOW_MODELS = ["curvilinear", "terrain-following", "3d"]
+GRID_FLOW_MODELS = ["curvilinear", "terrain-following", "3d-depth-averaged"]
 
 
 def gather_grid(values, positions):
@@ -306,6 +306,27 @@ def test_resting_deposit_is_remobilised_by_incoming_flow(sim_model):
     run_until_stopped(sim)
     displacement = np.linalg.norm(np.asarray(sim.particles_position_xy) - before, axis=1)
     assert displacement[deposit].mean() > 5.0
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("sim_model", GRID_FLOW_MODELS)
+def test_gully_walls_add_confinement_friction(sim_model):
+    import run_gully_test as gully
+    from similarity_solution_test import SURFACE_VELOCITY_MODELS
+
+    cfg = gully.GULLY_TEST_CFG
+    slope = cfg["slide_slope"]
+    dem, release, bounds = gully.v_channel(cfg, slope)
+    speed = {}
+    for length in (0.0, 16.0):
+        settings = dict(gully.SETTINGS, sim_model=sim_model, reference_surface_length=length)
+        series = gully.run(dem, release, bounds, cfg, settings, t_end=3.0)
+        speed[length] = gully.along_slope(series, slope, sim_model in SURFACE_VELOCITY_MODELS)[-1]
+    _, a_wedge, _ = gully.wedge_limits(cfg, slope, gully.SETTINGS["friction_coefficient"])
+    # walls inclined against the reference surface press with the snow beside them
+    assert speed[16.0] < speed[0.0]
+    # but cannot hold the flow back more than an ideal K = 1 wedge
+    assert speed[16.0] > 0.9 * a_wedge * 3.0
 
 
 @pytest.mark.parametrize("error, final_time, expected", [

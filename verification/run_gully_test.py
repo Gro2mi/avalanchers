@@ -1,4 +1,4 @@
-"""Gully confinement tests for the curvilinear reference-surface split.
+"""Gully confinement tests for the reference-surface split of the grid models.
 
 Runs avalanchers in-script on synthetic DEMs (no input files) once without
 and once with ``reference_surface_length`` (the Gaussian width of the surface
@@ -20,7 +20,8 @@ the flow follows; narrower terrain becomes confining basal topography).
    speed is reported for both runs (information only: frictionless pools
    already slosh at about 0.5 m/s without the split).
 
-Plots go to verification/outputs/gully_test/.
+Plots go to verification/outputs/gully_test/. ``--sim-model`` selects the
+curvilinear (default), terrain-following or 3d-depth-averaged model.
 """
 
 import argparse
@@ -155,20 +156,23 @@ def wedge_limits(cfg, slope_deg, mu, g=9.81):
     return a_open, a_wedge, math.degrees(beta_eff)
 
 
-def along_slope(series, slope_deg):
-    """Mean horizontal x velocity -> mean along-slope speed."""
+def along_slope(series, slope_deg, surface_velocity=False):
+    """Mean x velocity -> mean along-slope speed. A horizontal dx/dt needs the
+    slope metric, a surface velocity (terrain-following) already measures it."""
+    if surface_velocity:
+        return series["mean_u"]
     return series["mean_u"] / math.cos(math.radians(slope_deg))
 
 
-def fit_acceleration(series, slope_deg, window):
-    v = along_slope(series, slope_deg)
+def fit_acceleration(series, slope_deg, window, surface_velocity=False):
+    v = along_slope(series, slope_deg, surface_velocity)
     mask = (series["t"] >= window[0]) & (series["t"] <= window[1])
     if mask.sum() < 3:
         return float("nan")
     return float(np.polyfit(series["t"][mask], v[mask], 1)[0])
 
 
-def plot(results, cfg, mu, out_dir, show):
+def plot(results, cfg, mu, out_dir, show, sim_model="curvilinear"):
     import matplotlib
     if not show:
         matplotlib.use("Agg")
@@ -181,7 +185,8 @@ def plot(results, cfg, mu, out_dir, show):
         a_open, a_wedge, beta_eff = wedge_limits(cfg, slope, mu)
         for length in cfg["reference_lengths"]:
             s = results[key][length]
-            ax.plot(s["t"], along_slope(s, slope), color=colors[length],
+            ax.plot(s["t"], along_slope(s, slope, cfg["surface_velocity"]),
+                    color=colors[length],
                     label=f"L = {length:g} m")
         t = np.linspace(0, cfg["t_end"], 2)
         ax.plot(t, np.maximum(a_open * t, 0), ":", color="0.4", label="open slope")
@@ -199,7 +204,7 @@ def plot(results, cfg, mu, out_dir, show):
     ax.set_ylabel("mass-weighted rms speed (m/s)")
     ax.legend(frameon=False)
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / "gully_test_curvilinear.png"
+    path = out_dir / f"gully_test_{sim_model}.png"
     fig.savefig(path, dpi=130)
     if show:
         plt.show()
@@ -213,16 +218,22 @@ def main(argv=None):
                         default=GULLY_TEST_CFG["reference_lengths"][1],
                         help="reference_surface_length of the split run (m)")
     parser.add_argument("--mu", type=float, default=SETTINGS["friction_coefficient"])
+    parser.add_argument("--sim-model", default=SETTINGS["sim_model"],
+                        help="curvilinear | terrain-following | 3d-depth-averaged")
     parser.add_argument("--out-dir", type=pathlib.Path, default=OUT_DIR)
     parser.add_argument("--show", action="store_true")
     args = parser.parse_args(argv)
 
+    from similarity_solution_test import SURFACE_VELOCITY_MODELS
+
     cfg = dict(GULLY_TEST_CFG)
+    cfg["surface_velocity"] = args.sim_model.lower() in SURFACE_VELOCITY_MODELS
     cfg["reference_lengths"] = (0.0, args.reference_length)
     mu = args.mu
     results = {"stall": {}, "slide": {}, "pool": {}}
     for length in cfg["reference_lengths"]:
-        settings = dict(SETTINGS, friction_coefficient=mu, reference_surface_length=length)
+        settings = dict(SETTINGS, sim_model=args.sim_model, friction_coefficient=mu,
+                        reference_surface_length=length)
         for key in ("stall", "slide"):
             dem, release, bounds = v_channel(cfg, cfg[f"{key}_slope"])
             results[key][length] = run(dem, release, bounds, cfg, settings, cfg["t_end"])
@@ -232,7 +243,7 @@ def main(argv=None):
                                       cfg["pool_t_end"])
 
     split = cfg["reference_lengths"][1]
-    print(f"\n=== Gully test (curvilinear, Coulomb mu = {mu:g}, split L = {split:g} m) ===")
+    print(f"\n=== Gully test ({args.sim_model}, Coulomb mu = {mu:g}, split L = {split:g} m) ===")
     print("| case | L (m) | final speed (m/s) | acceleration (m/s^2) | friction factor f "
           "| open slope a, f | wedge a, f |")
     print("|---|---|---|---|---|---|---|")
@@ -245,8 +256,8 @@ def main(argv=None):
         factor = {}
         for length in cfg["reference_lengths"]:
             s = results[key][length]
-            v_end = float(along_slope(s, slope)[-1])
-            acc = fit_acceleration(s, slope, cfg["fit_window"])
+            v_end = float(along_slope(s, slope, cfg["surface_velocity"])[-1])
+            acc = fit_acceleration(s, slope, cfg["fit_window"], cfg["surface_velocity"])
             factor[length] = (math.sin(theta) - acc / 9.81) / (mu * math.cos(theta))
             print(f"| {key} {slope:g} deg | {length:g} | {v_end:.2f} | {acc:.2f} "
                   f"| {factor[length]:.2f} | {a_open:.2f}, 1.00 | {a_wedge:.2f}, {f_wedge:.2f} |")
@@ -261,7 +272,7 @@ def main(argv=None):
     print(f"\npool at rest (frictionless): peak rms speed {pool_rms[0.0]:.2f} m/s at L = 0, "
           f"{pool_rms[split]:.2f} m/s at L = {split:g} m (information only)")
 
-    path = plot(results, cfg, mu, args.out_dir, args.show)
+    path = plot(results, cfg, mu, args.out_dir, args.show, args.sim_model)
     print(f"\nplot: {path}")
     for name, ok in checks:
         print(f"{'PASS' if ok else 'FAIL'}: {name}")

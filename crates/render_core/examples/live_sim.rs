@@ -82,7 +82,7 @@ const DEFAULT_ROUGHNESS_THRESHOLD: f32 = 0.01;
 const DEFAULT_INTERNAL_FRICTION_ANGLE: f32 = 40.0;
 const DEFAULT_RELEASED_PARTICLES_PER_CELL: u32 = 8;
 const DEFAULT_MAX_STEPS: u32 = 6000;
-/// 0 disables the curvilinear reference-surface split (gully confinement)
+/// 0 disables the reference-surface split (gully confinement) of the grid models
 const DEFAULT_REFERENCE_SURFACE_LENGTH: f32 = 0.0;
 
 /// Fills in every field the settings panel edits with the engine defaults from
@@ -1226,7 +1226,11 @@ impl ApplicationHandler for Viewer {
                                             SimModel::TerrainFollowing,
                                             "Terrain-following",
                                         );
-                                        ui.selectable_value(&mut model, SimModel::ThreeD, "3D");
+                                        ui.selectable_value(
+                                            &mut model,
+                                            SimModel::ThreeDDepthAveraged,
+                                            "3D depth averaged",
+                                        );
                                         ui.selectable_value(
                                             &mut model,
                                             SimModel::Curvilinear,
@@ -1404,9 +1408,12 @@ impl ApplicationHandler for Viewer {
                                     0.001..=1.0,
                                     0.001,
                                 );
-                                // curvilinear only; 0 disables the gully confinement
+                                // grid flow models only; 0 disables the gully confinement
                                 ui.add_enabled_ui(
-                                    draft.sim_model == Some(SimModel::Curvilinear),
+                                    !matches!(
+                                        draft.sim_model,
+                                        Some(SimModel::MpmDaC | SimModel::SlidingBlock)
+                                    ),
                                     |ui| {
                                         f32_slider(
                                             ui,

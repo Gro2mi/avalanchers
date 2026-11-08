@@ -1131,7 +1131,7 @@ impl Simulation {
             match self.settings.sim_model {
                 model
                     if model == SimModel::TerrainFollowing.as_int()
-                        || model == SimModel::ThreeD.as_int()
+                        || model == SimModel::ThreeDDepthAveraged.as_int()
                         || model == SimModel::SlidingBlock.as_int() =>
                 {
                     self.orchestrator
@@ -1184,7 +1184,9 @@ impl Simulation {
             model if model == SimModel::TerrainFollowing.as_int() => {
                 self.orchestrator.step_terrain_following(steps).await?
             }
-            model if model == SimModel::ThreeD.as_int() => self.orchestrator.step_3d(steps).await?,
+            model if model == SimModel::ThreeDDepthAveraged.as_int() => {
+                self.orchestrator.step_3d(steps).await?
+            }
             model if model == SimModel::Curvilinear.as_int() => {
                 self.orchestrator.step_curvilinear(steps).await?
             }
@@ -2234,7 +2236,7 @@ impl Simulation {
         if self.settings.sim_model == SimModel::TerrainFollowing.as_int() {
             bail!(
                 "The terrain-following model has no vertical velocity: particle velocities \
-                 are 2D vectors in the surface plane, use the 3d model for a z component"
+                 are 2D vectors in the surface plane, use the 3d-depth-averaged model for a z component"
             );
         }
         if self.gpu_cache.particles_velocity_z.is_none() {
@@ -4363,7 +4365,7 @@ mod tests {
         for model in [
             SimModel::Curvilinear,
             SimModel::TerrainFollowing,
-            SimModel::ThreeD,
+            SimModel::ThreeDDepthAveraged,
         ] {
             check_sorted_p2g_matches_direct_p2g(model);
         }
@@ -4471,7 +4473,7 @@ mod tests {
             [
                 SimModel::Curvilinear,
                 SimModel::TerrainFollowing,
-                SimModel::ThreeD,
+                SimModel::ThreeDDepthAveraged,
             ]
             .map(|model| (release, model))
         }) {
@@ -4758,7 +4760,7 @@ mod tests {
         for model in [
             SimModel::Curvilinear,
             SimModel::TerrainFollowing,
-            SimModel::ThreeD,
+            SimModel::ThreeDDepthAveraged,
         ] {
             check_momentum_stop_fraction(model);
         }
@@ -5119,7 +5121,7 @@ mod tests {
     #[test_log::test]
     fn test_nodes_outside_the_flow_keep_zero_velocity() {
         const N: usize = 40;
-        for model in [SimModel::TerrainFollowing, SimModel::ThreeD] {
+        for model in [SimModel::TerrainFollowing, SimModel::ThreeDDepthAveraged] {
             let mut sim = setup_restore_sim(model);
             block_on(sim.prepare()).expect("Failed to prepare");
             block_on(sim.run_n_steps(10)).expect("Failed to run");
@@ -5146,7 +5148,7 @@ mod tests {
     fn test_3d_velocity_is_tangent_to_bed() {
         let slope_angle: f32 = 40.0;
         let mut sim = setup_simple_sim(slope_angle, 3.0);
-        sim.settings.sim_model = SimModel::ThreeD.as_int();
+        sim.settings.sim_model = SimModel::ThreeDDepthAveraged.as_int();
         sim.set_dem(&create_slope(16, 16, 3.0, slope_angle), 16, 16, 3.0)
             .expect("Failed to set interior test DEM");
         let mut release = vec![0.0; 16 * 16];

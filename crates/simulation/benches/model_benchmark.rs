@@ -15,7 +15,7 @@ use web_time::{Duration, Instant};
 
 const MODELS: [SimModel; 3] = [
     SimModel::TerrainFollowing,
-    SimModel::ThreeD,
+    SimModel::ThreeDDepthAveraged,
     SimModel::Curvilinear,
 ];
 

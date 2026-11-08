@@ -147,6 +147,7 @@ define_shaders! {
     GridPhysics3D => "grid_physics_terrain_following" entry_point "grid_physics_3d",
     G2P3D => "g2p_terrain_following" entry_point "g2p_3d",
     Friction => "friction",
+    EarthPressure => "earth_pressure",
     CurvilinearGeometry => "curvilinear_geometry",
     CartesianGeometry => "cartesian_geometry",
     Constitutive => "constitutive",
@@ -502,6 +503,26 @@ pub fn create_shader_configs(
                         ty: wgpu::BufferBindingType::Storage { read_only: false },
                         has_dynamic_offset: false,
                         min_binding_size: None,
+                    },
+                ),
+                // Binding 7:
+                (
+                    TextureName::DemReference.to_string(),
+                    BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float {
+                            filterable: has_float32_filterable,
+                        },
+                    },
+                ),
+                // Binding 8:
+                (
+                    TextureName::BasalTopography.to_string(),
+                    BindingType::StorageTexture {
+                        access: StorageTextureAccess::WriteOnly,
+                        format: TextureFormat::Rgba32Float,
+                        view_dimension: TextureViewDimension::D2,
                     },
                 ),
             ],

@@ -12,7 +12,8 @@
 @group(0) @binding(8) var<storage, read_write> sim_info: SimInfo;
 @group(0) @binding(9) var<storage, read_write> grid_velocity: array<vec2f>;
 @group(0) @binding(10) var<storage, read_write> grid_peak_velocity: array<f32>;
-// binding 11 (basal topography) is shared with the curvilinear layout, unused here
+// x = cos(beta) between the bed and the smoothed reference surface
+@group(0) @binding(11) var basal_topography_texture: texture_2d<f32>;
 // z components of the 3D model; the terrain-following layout ends at binding 11
 @group(0) @binding(12) var<storage> grid_momentum_z_atomic: array<i32>; // no_atomic_float
 // atomic_float @group(0) @binding(12) var<storage> grid_momentum_z_atomic: array<f32>;
@@ -109,6 +110,7 @@ fn node_velocity_xy(idx: u32, mass: f32) -> vec2f {
 fn update_node(xy: vec2u, n: vec3f, velocity: vec3f, mass: f32) -> vec3f {
     let use_curvature: bool = (sim_settings.flags & (1u << 0u)) != 0u;
     let use_particle_interaction: bool = (sim_settings.flags & (1u << 1u)) != 0u;
+    let use_earth_pressure_coefficient: bool = (sim_settings.flags & (1u << 2u)) != 0u;
 
     let idx = xy_to_idx(xy);
     let hessian = textureLoad(curvature_texture, vec2<i32>(xy), 0).xyz;
@@ -140,8 +142,19 @@ fn update_node(xy: vec2u, n: vec3f, velocity: vec3f, mass: f32) -> vec3f {
         (get_h(xy.x + 1, xy.y) - get_h(xy.x - 1, xy.y)) / (2.0 * sim_settings.cell_size),
         (get_h(xy.x, xy.y + 1) - get_h(xy.x, xy.y - 1)) / (2.0 * sim_settings.cell_size)
     );
-    let k = 1.0;
-    let pressure_acceleration = select(vec3f(0.0), -g_normal * k * surface_gradient(n, grad_h), use_particle_interaction);
+    // Savage-Hutter earth pressure (Hutter et al. 1993): k_x along the fall
+    // line, k_y across it, each active where the flow stretches in that
+    // direction and passive where it is compressed; hydrostatic when disabled
+    var k_grad_h = grad_h;
+    var k_y = 1.0;
+    if use_earth_pressure_coefficient {
+        // horizontal bed gradient from the unit normal
+        let slope = -n.xy / n.z;
+        let earth = earth_pressure(xy, slope, velocity.xy, grad_h);
+        k_grad_h = earth.k_grad_h;
+        k_y = earth.k_y;
+    }
+    let pressure_acceleration = select(vec3f(0.0), -g_normal * surface_gradient(n, k_grad_h), use_particle_interaction);
 
     let proposed = tangent_project(velocity + sim_info.dt * (gravity_acceleration + pressure_acceleration), n);
     let proposed_speed = length(proposed);
@@ -153,7 +166,11 @@ fn update_node(xy: vec2u, n: vec3f, velocity: vec3f, mass: f32) -> vec3f {
     // velocity_threshold keeps the low-speed gate of the shared friction model
     // from switching it off.
     let friction_speed = max(proposed_speed, sim_settings.velocity_threshold);
-    let friction_acceleration = basal_friction_acceleration(g_normal, sim_settings.snow_density, friction_speed, h, sim_settings.friction_model);
+    // gully walls, inclined by beta against the reference surface, carry the
+    // cross-slope lateral stress k_y sigma_zz of the snow beside them
+    let cos_beta = textureLoad(basal_topography_texture, vec2<i32>(xy), 0).x;
+    let wall_load = g_normal * gully_wall_load_factor(cos_beta, k_y);
+    let friction_acceleration = basal_friction_acceleration(wall_load, sim_settings.snow_density, friction_speed, h, sim_settings.friction_model);
     var new_velocity = vec3f(0.0);
     if (friction_acceleration * sim_info.dt) < proposed_speed {
         new_velocity = proposed * (1.0 - friction_acceleration * sim_info.dt / proposed_speed);
@@ -191,6 +208,118 @@ fn get_h(x: u32, y: u32) -> f32 {
     return node_mass(x_y_to_idx(x, y)) / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size) * n_z;
 }
 
+// import earth_pressure.wgsl;
+// BEGIN earth_pressure.wgsl
+// Savage-Hutter earth pressure coefficients (Hutter et al. 1993) for the grid
+// physics of the depth-averaged models.
+// Pure library module: it is textually imported and relies on the importing
+// module providing grid_mass_atomic, grid_momentum_atomic and the utils.wgsl
+// symbols (sim_settings, x_y_to_idx, INV_MASS_FACTOR, INV_MOMENTUM_FACTOR).
+
+struct EarthPressure {
+    // pressure gradient weighted with k_x along the fall line, k_y across it
+    k_grad_h: vec2f,
+    // cross-slope coefficient, also the lateral stress loading gully walls
+    k_y: f32,
+}
+
+// Earth pressure at node xy from the horizontal bed gradient `slope`, the
+// horizontal node velocity q and the horizontal gradient of the flow thickness.
+// Each coefficient is active where the flow stretches in its direction and
+// passive where it is compressed. The fall line is an eigenvector of the
+// surface metric, so the weighting commutes with projecting onto the bed.
+fn earth_pressure(xy: vec2u, slope: vec2f, q: vec2f, grad_h: vec2f) -> EarthPressure {
+    let e_x = earth_pressure_axis(slope, q);
+    let e_y = vec2f(-e_x.y, e_x.x);
+    let grad_q = velocity_gradient(xy.x, xy.y);
+    let k = earth_pressure_coefficients(
+        radians(sim_settings.internal_friction_angle),
+        radians(sim_settings.basal_friction_angle),
+        dot(e_x, grad_q * e_x),
+        dot(e_y, grad_q * e_y)
+    );
+    return EarthPressure(k.x * dot(e_x, grad_h) * e_x + k.y * dot(e_y, grad_h) * e_y, k.y);
+}
+
+// Horizontal velocity q of node (x, y) from the node's own mass and momentum;
+// z = 1 when the node holds mass, 0 below the p2g mass floor where q is
+// meaningless.
+fn node_velocity(x: u32, y: u32) -> vec3f {
+    let idx = x_y_to_idx(x, y);
+    let mass = f32(grid_mass_atomic[idx]) * INV_MASS_FACTOR; // no_atomic_float
+    // atomic_float let mass = grid_mass_atomic[idx];
+    if mass < 1e-2 {
+        return vec3f(0.0);
+    }
+    let q = vec2f(
+        f32(grid_momentum_atomic[idx * 2]) * INV_MOMENTUM_FACTOR, // no_atomic_float
+        f32(grid_momentum_atomic[idx * 2 + 1]) * INV_MOMENTUM_FACTOR // no_atomic_float
+        // atomic_float grid_momentum_atomic[idx * 2],
+        // atomic_float grid_momentum_atomic[idx * 2 + 1]
+    ) / mass;
+    return vec3f(q, 1.0);
+}
+
+// Derivative of q along one grid axis: central where both neighbours hold
+// mass, one-sided against the centre at the flow edge, zero for an isolated
+// node. Empty nodes carry no velocity, so a spreading front is not mistaken
+// for a compressed one.
+fn edge_aware_derivative(low: vec3f, centre: vec2f, high: vec3f) -> vec2f {
+    let dx = sim_settings.cell_size;
+    if low.z > 0.0 && high.z > 0.0 {
+        return (high.xy - low.xy) / (2.0 * dx);
+    }
+    if high.z > 0.0 {
+        return (high.xy - centre) / dx;
+    }
+    if low.z > 0.0 {
+        return (centre - low.xy) / dx;
+    }
+    return vec2f(0.0);
+}
+
+// Horizontal velocity gradient, columns dq/dx and dq/dy: grad_q * e is the
+// derivative of q along e, dot(e, grad_q * e) the strain rate along e.
+fn velocity_gradient(x: u32, y: u32) -> mat2x2f {
+    let centre = node_velocity(x, y).xy;
+    return mat2x2f(
+        edge_aware_derivative(node_velocity(x - 1u, y), centre, node_velocity(x + 1u, y)),
+        edge_aware_derivative(node_velocity(x, y - 1u), centre, node_velocity(x, y + 1u))
+    );
+}
+
+// Savage-Hutter downslope axis: the fall line, the flow direction on flat
+// ground.
+fn earth_pressure_axis(slope: vec2f, q: vec2f) -> vec2f {
+    if length(slope) > 1e-3 {
+        return -normalize(slope);
+    }
+    if length(q) > 1e-6 {
+        return normalize(q);
+    }
+    return vec2f(1.0, 0.0);
+}
+
+// Earth pressure coefficients (k_x, k_y) of Hutter et al. (1993) from the
+// internal and bed friction angles and the strain rates along and across the
+// downslope axis; >= 0 (stretching) selects the active state.
+fn earth_pressure_coefficients(phi: f32, delta: f32, strain_x: f32, strain_y: f32) -> vec2f {
+    let cos2_phi = cos(phi) * cos(phi);
+    let cos2_delta = cos(delta) * cos(delta);
+    let tan2_delta = tan(delta) * tan(delta);
+    // delta > phi has no Mohr-Coulomb limit state; clamp to the phi = delta case
+    let root = sqrt(max(1.0 - cos2_phi / cos2_delta, 0.0));
+    let k_x = select(
+        2.0 / cos2_phi * (1.0 + root) - 1.0,
+        2.0 / cos2_phi * (1.0 - root) - 1.0,
+        strain_x >= 0.0
+    );
+    let root_y = sqrt((1.0 - k_x) * (1.0 - k_x) + 4.0 * tan2_delta);
+    let k_y = select(0.5 * (k_x + 1.0 + root_y), 0.5 * (k_x + 1.0 - root_y), strain_y >= 0.0);
+    return vec2f(k_x, k_y);
+}
+
+// END earth_pressure.wgsl
 // import cartesian_geometry.wgsl;
 // BEGIN cartesian_geometry.wgsl
 // Cartesian surface geometry for the terrain-following models.
@@ -337,6 +466,18 @@ fn basal_friction_acceleration(g_eff: f32, density: f32, proposed_speed: f32, h:
     }
 
     return shear_stress / max(mass_per_area, 1e-6);
+}
+
+// Gully confinement: snow filling a gully presses its walls (inclined by beta
+// against the smoothed reference surface) with the cross-flow stress
+// k_y sigma_zz of the material beside it. Relative to the bed-normal load of
+// the column above, the wall normal stress grows by 1 + k_y tan^2(beta).
+// The bed-normal h already equals the hydraulic radius, so the
+// velocity-dependent drag needs no wetted-area correction.
+// cos_beta = 1 (no reference surface) gives 1.
+fn gully_wall_load_factor(cos_beta: f32, k_y: f32) -> f32 {
+    let tan2_beta = 1.0 / (cos_beta * cos_beta) - 1.0;
+    return 1.0 + k_y * tan2_beta;
 }
 
 // END friction.wgsl

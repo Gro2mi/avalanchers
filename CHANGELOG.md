@@ -130,7 +130,7 @@ All notable changes to this project might be documented in this file.
 - `run()` no longer repeats terrain analysis, release areas and particle seeding when the
   particles are already initialized (after `prepare()` or `restore_initial_state()`).
 - `sliding-block` (model 3): the previous per-particle terrain-following model.
-- `3d` (model 4): the terrain-following model with a full 3D Cartesian velocity through P2G and G2P.
+- `3d-depth-averaged` (model 4, alias `3d`): the terrain-following model with a full 3D Cartesian velocity through P2G and G2P.
   Slower than `terrain-following` but keeps the z velocity and affine state on the particles.
 - Optional particle elevation jitter in the renderer (live viewer key `J`).
 - `particle_sort_interval` (CLI `--particle-sort-interval`, default 25): curvilinear,
@@ -139,15 +139,17 @@ All notable changes to this project might be documented in this file.
   grid; on the float-atomic grid the shared sums keep the integer quantization.
 - `momentum_stop_fraction` (CLI `--momentum-stop-fraction`, default 0 = off): stops a curvilinear,
   terrain-following or 3D run once the total grid momentum falls below this fraction of its peak (flag `LOW_MOMENTUM`).
-- `reference_surface_length` (CLI `--reference-surface-length`, default 0 = off): curvilinear
-  gully confinement. Bed inclined by beta against a Gaussian-smoothed reference surface of this
+- `reference_surface_length` (CLI `--reference-surface-length`, default 0 = off): gully
+  confinement in the curvilinear, terrain-following and 3d-depth-averaged models. Bed inclined by beta against a Gaussian-smoothed reference surface of this
   width counts as a gully wall: the snow beside it presses it with its lateral stress, so the
   normal load of the basal friction grows by `1 + K tan^2 beta` (K = 1, or the cross-slope
   earth pressure coefficient when enabled). All other terms stay on the real bed. (Moving the
   metric, gravity and pressure onto the reference surface, as in Gray et al. 1999, made deposits
   creep on gorge floors below steep walls and dropped the centrifugal load of narrow bends.)
   The live viewer exposes the setting under "terrain & release" (0 = off).
-  `verification/run_gully_test.py` checks the V-channel friction factor against the wedge limit.
+  `verification/run_gully_test.py` checks the V-channel friction factor against the wedge limit
+  (`--sim-model` selects the model). All grid models load the walls with the cross-slope earth
+  pressure coefficient when it is enabled, otherwise with K = 1.
 - `enable_earth_pressure_coefficient` is off by default in all models (engine, live viewer, web
   frontend, Python defaults): Voellmy-type parameters are calibrated with hydrostatic pressure.
 - Curvilinear: `enable_earth_pressure_coefficient` now applies the Savage-Hutter
@@ -159,6 +161,10 @@ All notable changes to this project might be documented in this file.
   one-sided at the flow edge. `run_similarity_solution_test.py --earth-pressure` compares it
   with the analytic solution; the dam break, similarity and gully tests pin the flag to match
   their references.
+- Terrain-following and 3d-depth-averaged: the optional earth pressure coefficients (off by
+  default) act on the pressure gradient and the gully wall load like in the curvilinear model.
+  The helpers moved into the shared `earth_pressure.wgsl`. On the similarity solution with earth
+  pressure the relative thickness error at 20 s is 0.075 (0.066 with K = 1).
 - Sliding block: `div_u` for the earth pressure coefficient uses each node's own mass (it divided
   neighbour momentum by the centre mass), turns one-sided at the flow edge and reads float-atomic
   momentum correctly.

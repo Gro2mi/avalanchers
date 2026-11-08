@@ -49,7 +49,8 @@ ALL_TESTS_DIR = REPO_ROOT / "verification" / "outputs" / "all_tests"
 
 TEST_NAMES = ["energy_line", "curvature", "similarity_solution", "dam_break", "rotation"]
 # models checked against the analytical references (with Coulomb friction)
-ANALYTIC_MODELS = ("curvilinear", "curvi", "c", "terrain-following", "terrain", "t", "3d")
+ANALYTIC_MODELS = ("curvilinear", "curvi", "c", "terrain-following", "terrain", "t",
+                   "3d-depth-averaged", "3d")
 
 TEST_TITLES = {
     "energy_line": "Energy Line",
@@ -379,7 +380,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="run all avalanchers verification tests and write a markdown report")
     parser.add_argument("--sim-model", default="curvilinear",
-                        help="terrain-following | 3d | curvilinear | mpmdac | sliding-block")
+                        help="terrain-following | 3d-depth-averaged | curvilinear | mpmdac | sliding-block")
     parser.add_argument("--friction-model", default=None,
                         help="override the friction model (default: coulomb)")
     parser.add_argument("--mu", type=float, default=None,

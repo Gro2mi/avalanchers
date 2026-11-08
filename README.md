@@ -140,7 +140,7 @@ unlike curvilinear velocities the components are not `(dx/dt, dy/dt)`. A particl
 reaching a differently inclined bed loses the velocity component normal to it, so
 flows are deflected by side walls instead of running up them. There is no z velocity:
 `particles_velocity` is `(n, 2)` and `fetch_particles_velocity_z` returns an
-error. The `3d` model carries the full Cartesian vector instead, at a higher cost.
+error. The `3d-depth-averaged` model carries the full Cartesian vector instead, at a higher cost.
 
 ### Python
 
@@ -228,12 +228,12 @@ rather than the C `zstd` bindings, because `zstd-sys` needs a clang cross-compil
 
 ``cargo bench -p simulation``
 
-Computation time of the terrain-following, 3d and curvilinear models on the
+Computation time of the terrain-following, 3d-depth-averaged and curvilinear models on the
 avaWog test case, a full run until the simulation stops by itself:
 
 ``cargo bench -p simulation --bench model_benchmark``
 
-Append ``-- terrain-following`` (or ``3d``, ``curvilinear``) to run one model only.
+Append ``-- terrain-following`` (or ``3d-depth-averaged``, ``curvilinear``) to run one model only.
 Criterion reports the change against the previous run and writes HTML reports to
 ``target/criterion``.
 

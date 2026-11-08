@@ -123,8 +123,9 @@ pub struct SimSettings {
     /// The no-new-cells stop window spans round(travel / cfl) steps, at least
     /// 10: the steps the fastest material needs to travel this many cells.
     pub no_new_cells_travel: f32,
-    /// Curvilinear: Gaussian width (m) of the reference surface that defines
-    /// gully wall inclinations for the confinement friction; 0 disables it.
+    /// Curvilinear, terrain-following and 3D depth averaged: Gaussian width (m)
+    /// of the reference surface that defines gully wall inclinations for the
+    /// confinement friction; 0 disables it.
     pub reference_surface_length: f32,
     /// Snow water equivalent (kg/m²) of every release cell, set instead of
     /// `release_thickness`, NaN if unset; read it with
@@ -706,8 +707,9 @@ pub enum SimModel {
     MpmDaC,
     /// Legacy per-particle sliding-block model (former model 0).
     SlidingBlock,
-    /// Terrain-following grid model that carries the full 3D Cartesian velocity.
-    ThreeD,
+    /// Depth-averaged terrain-following grid model that carries the full 3D
+    /// Cartesian velocity.
+    ThreeDDepthAveraged,
 }
 
 impl SimModel {
@@ -717,7 +719,7 @@ impl SimModel {
             1 => Some(Self::Curvilinear),
             2 => Some(Self::MpmDaC),
             3 => Some(Self::SlidingBlock),
-            4 => Some(Self::ThreeD),
+            4 => Some(Self::ThreeDDepthAveraged),
             _ => None,
         }
     }
@@ -728,7 +730,7 @@ impl SimModel {
             Self::Curvilinear => 1,
             Self::MpmDaC => 2,
             Self::SlidingBlock => 3,
-            Self::ThreeD => 4,
+            Self::ThreeDDepthAveraged => 4,
         }
     }
 }
@@ -742,7 +744,7 @@ impl FromStr for SimModel {
             "curvilinear" | "curvi" | "c" => Ok(Self::Curvilinear),
             "mpmdac" | "mpm-dac" | "mpm_depth_averaged_curvilinear" => Ok(Self::MpmDaC),
             "sliding-block" | "block" | "b" => Ok(Self::SlidingBlock),
-            "3d" => Ok(Self::ThreeD),
+            "3d-depth-averaged" | "3d" => Ok(Self::ThreeDDepthAveraged),
             _ => Err(format!("unknown simulation model: {value}")),
         }
     }
@@ -755,7 +757,7 @@ impl fmt::Display for SimModel {
             Self::Curvilinear => "curvilinear",
             Self::MpmDaC => "mpmdac",
             Self::SlidingBlock => "sliding-block",
-            Self::ThreeD => "3d",
+            Self::ThreeDDepthAveraged => "3d-depth-averaged",
         })
     }
 }
@@ -1007,7 +1009,8 @@ pub struct Settings {
     /// the steps the fastest material needs to travel this many cells,
     /// round(travel / cfl) and at least 10 (default 65 cells, 72 steps at CFL 0.9).
     pub no_new_cells_travel: Option<f32>,
-    /// Curvilinear: Gaussian width (m) of the smoothed reference surface.
+    /// Curvilinear, terrain-following and 3D depth averaged: Gaussian width (m)
+    /// of the smoothed reference surface.
     /// Bed inclined by beta against it counts as a gully wall whose normal
     /// load grows by 1 + K tan^2(beta) from the lateral pressure of the snow
     /// beside it; 0 or unset disables it.
@@ -1500,7 +1503,7 @@ mod tests {
             SimModel::Curvilinear,
             SimModel::MpmDaC,
             SimModel::SlidingBlock,
-            SimModel::ThreeD,
+            SimModel::ThreeDDepthAveraged,
         ];
 
         for model in models {
@@ -1519,7 +1522,7 @@ mod tests {
 
         assert_eq!(SimModel::from_int(3), Some(SimModel::SlidingBlock));
 
-        assert_eq!(SimModel::from_int(4), Some(SimModel::ThreeD));
+        assert_eq!(SimModel::from_int(4), Some(SimModel::ThreeDDepthAveraged));
         assert_eq!(SimModel::from_int(5), None);
         assert_eq!(SimModel::from_int(u32::MAX), None);
     }

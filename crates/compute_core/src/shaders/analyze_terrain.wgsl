@@ -4,6 +4,14 @@
 @group(0) @binding(4) var<storage, read_write> slope_angle_buffer: array<f32>;
 @group(0) @binding(5) var<storage, read_write> slope_aspect_buffer: array<f32>;
 @group(0) @binding(6) var<storage, read_write> debug: array<f32>;
+// Gaussian-smoothed DEM (a copy of the DEM when reference_surface_length is 0)
+@group(0) @binding(7) var dem_reference_texture: texture_2d<f32>;
+// x = cos(beta) between the bed and reference surface normals
+@group(0) @binding(8) var basal_topography_texture: texture_storage_2d<rgba32float, write>;
+
+// Gully walls steeper than 70 degrees against the reference surface load
+// the flow like 70 degree walls (keeps 1 / cos(beta) bounded at cliffs)
+const MIN_COS_BETA: f32 = 0.34202014;
 
 
 @compute @workgroup_size(WG_SIZE_2D, WG_SIZE_2D, 1)
@@ -52,6 +60,19 @@ fn analyze_terrain(@builtin(global_invocation_id) cell: vec3<u32>) {
     // textureStore(normalsTexture, coord, normal_f16);
     textureStore(terrain_geometry_texture, coord, vec4f(normal, profile_curvature));
     textureStore(curvature_texture, coord, vec4f(dxx, dxy, dyy, plan_curvature));
+
+    // Inclination beta of the bed against the smoothed reference surface, the
+    // gully wall angle (cos(beta) = 1 exactly when disabled)
+    var basal_topography = vec4f(1.0, 0.0, 0.0, 0.0);
+    if sim_settings.reference_surface_length > 0.0 {
+        let ref_dx = (textureLoad(dem_reference_texture, coord + vec2<i32>(1, 0), 0).r
+            - textureLoad(dem_reference_texture, coord + vec2<i32>(-1, 0), 0).r) / (2.0 * resolution);
+        let ref_dy = (textureLoad(dem_reference_texture, coord + vec2<i32>(0, 1), 0).r
+            - textureLoad(dem_reference_texture, coord + vec2<i32>(0, -1), 0).r) / (2.0 * resolution);
+        let cos_beta = dot(normal, normalize(vec3f(-ref_dx, -ref_dy, 1.0)));
+        basal_topography.x = clamp(cos_beta, MIN_COS_BETA, 1.0);
+    }
+    textureStore(basal_topography_texture, coord, basal_topography);
 
     let slope_angle = degrees(acos(normal.z));
 
