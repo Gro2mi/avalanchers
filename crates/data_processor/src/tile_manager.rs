@@ -281,6 +281,37 @@ pub fn decode_tiled_lzw_f32(bytes: &[u8]) -> Result<(u32, u32, Vec<f32>), TileMa
     Ok((width, height, out))
 }
 
+/// reqwest needs a Tokio reactor, but `get_dem` is driven by whatever executor
+/// the caller has: the CLI and the simulation tests use `pollster`, the Python
+/// bindings Tokio. Every request therefore runs on this dedicated runtime.
+fn http_runtime() -> &'static tokio::runtime::Runtime {
+    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_name("swissalti3d-http")
+            .enable_all()
+            .build()
+            .expect("failed to start the HTTP runtime for swissALTI3D downloads")
+    })
+}
+
+/// Runs `future` on [`http_runtime`] and awaits its result through a channel,
+/// which works from any executor, inside a Tokio runtime or not.
+async fn on_http_runtime<F, T>(future: F) -> Result<T, TileManagerError>
+where
+    F: std::future::Future<Output = Result<T, reqwest::Error>> + Send + 'static,
+    T: Send + 'static,
+{
+    let (tx, rx) = futures::channel::oneshot::channel();
+    http_runtime().spawn(async move {
+        let _ = tx.send(future.await);
+    });
+    rx.await
+        .map_err(|_| TileManagerError::Http("HTTP task was cancelled".into()))?
+        .map_err(TileManagerError::from)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TileId {
     pub northing: u32,
@@ -574,7 +605,7 @@ impl TileManager {
     async fn get(&self, url: &str) -> Result<reqwest::Response, TileManagerError> {
         let mut retries = 0;
         loop {
-            let response = self.client.get(url).send().await?;
+            let response = on_http_runtime(self.client.get(url).send()).await?;
             let status = response.status();
             let throttled = status == reqwest::StatusCode::TOO_MANY_REQUESTS
                 || status == reqwest::StatusCode::SERVICE_UNAVAILABLE;
@@ -655,7 +686,7 @@ impl TileManager {
             )));
         }
 
-        let bytes = response.bytes().await?;
+        let bytes = on_http_runtime(response.bytes()).await?;
 
         if bytes.len() < 8 {
             return Err(TileManagerError::InvalidData);
@@ -934,6 +965,23 @@ mod tests {
         let error = pollster::block_on(manager.get_dem(&bbox)).unwrap_err();
         assert!(matches!(error, TileManagerError::TileMissing(_)));
         assert!(error.to_string().starts_with("tile_missing"));
+    }
+
+    /// The CLI and the simulation drive `get_dem` with `pollster`, i.e. outside
+    /// any Tokio runtime; reqwest used to panic there with "no reactor running".
+    #[test]
+    fn fetch_tiles_without_tokio_runtime() {
+        let dir = tempdir().expect("temp dir");
+        let manager = TileManager::new(dir.path().to_str().unwrap()).expect("tile manager");
+        let bbox = BBox {
+            min_northing: 1159502,
+            max_northing: 1159549,
+            min_easting: 2666100,
+            max_easting: 2666150,
+        };
+        let dem = pollster::block_on(manager.get_dem(&bbox)).expect("download outside Tokio");
+        assert_eq!((dem.width, dem.height), (10, 10));
+        assert!(dem.data1d.iter().all(|v| v.is_finite()));
     }
 
     #[tokio::test]

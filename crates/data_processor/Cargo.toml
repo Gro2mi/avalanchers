@@ -34,6 +34,8 @@ zarrs_plugin = { workspace = true }
 zarrs_data_type = { workspace = true }
 reqwest = { workspace = true }
 futures = { workspace = true }
+# reqwest needs a Tokio reactor; tile downloads run on their own runtime.
+tokio = { workspace = true, features = ["rt-multi-thread"] }
 ndarray = { workspace = true }
 bytes = { workspace = true }
 
