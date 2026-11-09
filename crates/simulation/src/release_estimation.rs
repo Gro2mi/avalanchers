@@ -1483,8 +1483,8 @@ mod tests {
 
         // lowest cell of the outline sits on the crown line and must be
         // released; the highest-elevation cell on the far diagonal must not
-        let low_on_crown = 0 * width + 30;
-        let high_far_from_crown = 10 * width + 0;
+        let low_on_crown = 30; // row 0, column 30
+        let high_far_from_crown = 10 * width; // row 10, column 0
         assert_eq!(estimate.release_areas[low_on_crown], 1.0);
         assert_eq!(estimate.release_areas[high_far_from_crown], 0.0);
         assert_eq!(estimate.number_release_cells, 110); // 25% of 441 cells

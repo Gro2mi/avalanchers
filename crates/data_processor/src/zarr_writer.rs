@@ -425,7 +425,9 @@ mod tests {
 
         let decoded: Vec<f32> = chunk
             .bytes
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
         assert_eq!(decoded, dem.data1d);

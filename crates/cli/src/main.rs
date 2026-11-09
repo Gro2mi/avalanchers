@@ -496,12 +496,14 @@ mod tests {
 
     #[test]
     fn cli_args_override_settings_file() {
-        let mut settings = Settings::default();
-        settings.max_steps = Some(10);
-        settings.density = Some(123.4);
-        settings.sim_model = Some(SimModel::TerrainFollowing);
-        settings.friction_model = Some(FrictionModel::Voellmy);
-        settings.enable_curvature = Some(false);
+        let mut settings = Settings {
+            max_steps: Some(10),
+            density: Some(123.4),
+            sim_model: Some(SimModel::TerrainFollowing),
+            friction_model: Some(FrictionModel::Voellmy),
+            enable_curvature: Some(false),
+            ..Default::default()
+        };
 
         let args = Args {
             file_path: None,

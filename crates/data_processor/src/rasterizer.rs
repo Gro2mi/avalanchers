@@ -454,7 +454,7 @@ mod tests {
 
         // Because the scanline checks Y = 1.0 (the center), and our poly is between Y=1.2 and 1.8,
         // it must NOT rasterize it (evaluates to 0). This is expected behavior for discrete grids.
-        assert_eq!(grid.data[0], false);
+        assert!(!grid.data[0]);
     }
 
     #[test]
@@ -465,7 +465,7 @@ mod tests {
         grid.rasterize(&poly);
 
         // It hits the Y=1.0 scanline, so it should be painted
-        assert_eq!(grid.data[0], true);
+        assert!(grid.data[0]);
     }
 
     // =========================================================================
@@ -537,13 +537,13 @@ mod tests {
         // Row 0 (y=0): [x=0, x=1] -> World Y mid-point is 1.0.
 
         // At y=0 (world_y=1.0): Polygon starts at Y=2.0, so this row is empty (0, 0)
-        assert_eq!(padded[0], false); // (x=0, y=0)
-        assert_eq!(padded[1], false); // (x=1, y=0)
+        assert!(!padded[0]); // (x=0, y=0)
+        assert!(!padded[1]); // (x=1, y=0)
 
         // At y=1 (world_y=3.0): Polygon covers X from 2.0 to 8.0.
         // Tile column 0 (world_x=1.0) is empty. Tile column 1 (world_x=3.0) intersects the polygon!
-        assert_eq!(padded[2], false); // (x=0, y=1)
-        assert_eq!(padded[3], true); // (x=1, y=1)
+        assert!(!padded[2]); // (x=0, y=1)
+        assert!(padded[3]); // (x=1, y=1)
     }
 
     #[test]

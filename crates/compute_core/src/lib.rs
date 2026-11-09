@@ -3583,6 +3583,9 @@ mod tests {
         info!("{:#?}", test_output.iter().take(10).collect::<Vec<_>>());
     }
     #[test_log::test]
+    // The test shader writes marker values such as 3.1415 and 2.71828; they
+    // are compared exactly and are not meant to be the true constants.
+    #[allow(clippy::approx_constant)]
     fn test_shader_utils() {
         let mut orchestrator: ComputeOrchestrator =
             block_on(ComputeOrchestrator::new()).expect("Failed to create ComputeOrchestrator");
@@ -3681,7 +3684,7 @@ mod tests {
             sim_model: samples_per_cell, // for sampling steps per cell
             ..Default::default()
         };
-        let steps = sim_settings.grid_shape_x * samples_per_cell as u32 + 1;
+        let steps = sim_settings.grid_shape_x * samples_per_cell + 1;
         orchestrator
             .create_buffers_and_texture_descriptions(&sim_settings)
             .unwrap();
@@ -3747,7 +3750,7 @@ mod tests {
                 && i < (steps as usize - samples_per_cell as usize / 2)
             {
                 let expected_elevation =
-                    1 as f32 / samples_per_cell as f32 * (i as u32 - samples_per_cell / 2) as f32;
+                    1_f32 / samples_per_cell as f32 * (i as u32 - samples_per_cell / 2) as f32;
                 let elevation_diff = (sampling_data.dem_sampled - expected_elevation).abs();
                 sampling_diffs.push(elevation_diff);
                 assert!(
@@ -3810,7 +3813,7 @@ mod tests {
             .expect("Failed to write simulation settings");
         orchestrator.add_buffer(
             BufferName::TestOutput,
-            400 as usize,
+            400_usize,
             BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
         );
 
@@ -3826,7 +3829,7 @@ mod tests {
 
         for model in 0..6u32 {
             let shear_stress = match model {
-                0 | 1 | 2 => sim_settings.friction_coefficient * normal_stress,
+                0..=2 => sim_settings.friction_coefficient * normal_stress,
                 3 => {
                     let rs0 = 0.222f32;
                     let rs = density * proposed_speed * proposed_speed / (normal_stress + 0.001);
@@ -3924,7 +3927,7 @@ mod tests {
 
         orchestrator.add_buffer(
             BufferName::TestOutput,
-            400 as usize,
+            400_usize,
             BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
         );
         block_on(orchestrator.run_shader(

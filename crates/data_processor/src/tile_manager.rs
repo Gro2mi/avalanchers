@@ -1036,7 +1036,7 @@ mod tests {
     }
 
     /// 1. Test the Zarr Cache Initialization
-    /// Ensures that the directory is created and the root Zarr group is written.
+    ///    Ensures that the directory is created and the root Zarr group is written.
     #[test]
     fn test_tile_manager_initialization() {
         // Create a temporary directory that will be automatically deleted
@@ -1059,7 +1059,7 @@ mod tests {
     }
 
     /// 2. Test Resampling on Uniform Terrain
-    /// A perfectly flat 2m terrain should result in a perfectly flat 5m terrain.
+    ///    A perfectly flat 2m terrain should result in a perfectly flat 5m terrain.
     #[test]
     fn test_resample_uniform_terrain() {
         // Create a 500x500 array where every point is exactly 1200.5 meters high
@@ -1077,7 +1077,7 @@ mod tests {
     }
 
     /// 3. Test Resampling on Step Terrain (Block Mean accuracy)
-    /// Tests that the fractional bounding box logic correctly averages pixels.
+    ///    Tests that the fractional bounding box logic correctly averages pixels.
     #[test]
     fn test_resample_step_terrain() {
         let mut input_dtm = Array2::<f32>::zeros((500, 500));
@@ -1207,7 +1207,7 @@ mod tests {
             northing: 1100,
             easting: 2700,
         };
-        let id_clone = id.clone();
+        let id_clone = id;
         assert_eq!(id_clone, id);
 
         let debug_str = format!("{:?}", id);

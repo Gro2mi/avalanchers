@@ -1102,7 +1102,7 @@ mod tests {
 
     #[test_log::test]
     fn test_get_index() {
-        let mut dem: Dem = block_on(load_dem(&PARABOLA_PATH.to_string())).unwrap();
+        let mut dem: Dem = block_on(load_dem(PARABOLA_PATH)).unwrap();
         dem.bounds.xmin = 100.0;
         dem.bounds.xmax = 1000.0;
         dem.bounds.ymin = 300.0;
@@ -1115,8 +1115,8 @@ mod tests {
             z: Some(0.0),
         };
         let (dx, dy) = dem.get_index(&pt).expect("DEM scale should be valid");
-        assert_eq!(dx, 73.3139648);
-        assert_eq!(dy, 146.627930);
+        assert_eq!(dx, 73.313_965);
+        assert_eq!(dy, 146.627_93);
     }
 
     #[test_log::test]
@@ -1131,17 +1131,17 @@ mod tests {
         assert_eq!(dem.bounds.ymax, -2997.5);
         let mut expected: Vec<f32> = vec![
             2200.0,
-            2193.260085,
-            2186.530510,
-            2179.811275,
-            2173.102380,
-            2166.403825,
-            2159.715610,
-            2153.037735,
-            2146.370200,
-            2139.713005,
-            2133.066150,
-            2126.429636,
+            2_193.26,
+            2_186.530_5,
+            2_179.811_3,
+            2_173.102_3,
+            2_166.403_8,
+            2_159.715_6,
+            2_153.037_8,
+            2_146.37,
+            2_139.713,
+            2_133.066_2,
+            2_126.429_7,
         ];
         add(&mut expected, 1.0);
         if dem.data1d[..expected.len()] != expected[..] {
@@ -1179,11 +1179,11 @@ mod tests {
         );
         assert_eq!(tiff.get_f32(500, 500).unwrap(), 1370.8146);
         assert_eq!(tiff.metadata.cell_size, 10.0);
-        assert_eq!(tiff.metadata.bounds.xmin, 684366.3320);
+        assert_eq!(tiff.metadata.bounds.xmin, 684_366.3);
         assert_eq!(tiff.metadata.bounds.ymin, 5205162.1636);
         assert_eq!(
             tiff.metadata.bounds.xmax,
-            684366.3320 + 10.0 * tiff.metadata.width as f32
+            684_366.3 + 10.0 * tiff.metadata.width as f32
         );
         assert_eq!(
             tiff.metadata.bounds.ymax,
@@ -1365,7 +1365,7 @@ mod tests {
             .await;
 
         // Act
-        let url = format!("{}/assets/map.png", &mock_server.uri());
+        let url = format!("{}/assets/map.png", mock_server.uri());
         let result = read_png(&url).await;
 
         // Assert
@@ -2101,7 +2101,7 @@ NODATA_value  -1
 
         let original_grid = EsriGrid {
             header: original_header,
-            data: vec![1.5, f32::NAN as f32, 3.0, 4.25, 5.0, 6.1],
+            data: vec![1.5, f32::NAN, 3.0, 4.25, 5.0, 6.1],
         };
 
         // 1. Export the struct to a memory vector (Simulating writing a file)

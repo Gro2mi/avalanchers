@@ -1148,11 +1148,12 @@ mod tests {
     }
 
     fn create_test_dem() -> Dem {
-        let mut dem = Dem::default();
-        dem.cell_size = 1.0;
-        dem.width = 10;
-        dem.height = 20;
-        dem
+        Dem {
+            cell_size: 1.0,
+            width: 10,
+            height: 20,
+            ..Default::default()
+        }
     }
 
     #[test_log::test]

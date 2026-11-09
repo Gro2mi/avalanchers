@@ -1529,10 +1529,10 @@ impl ApplicationHandler for Viewer {
 
         // Panel changes rebuild the simulation; running after the frame means the
         // fresh buffers are only drawn on the next redraw.
-        if let Some(settings) = pending_settings {
-            if let Err(error) = self.rebuild(settings) {
-                tracing::error!("simulation rebuild failed: {error}");
-            }
+        if let Some(settings) = pending_settings
+            && let Err(error) = self.rebuild(settings)
+        {
+            tracing::error!("simulation rebuild failed: {error}");
         }
     }
 

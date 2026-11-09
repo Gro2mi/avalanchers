@@ -3144,8 +3144,8 @@ mod tests {
         assert_eq!(sim.settings.grid_shape_x, 2);
         assert_eq!(sim.settings.grid_shape_y, 3);
 
-        assert_eq!(sim.settings.world_size_x, 3.0 * 2 as f32);
-        assert_eq!(sim.settings.world_size_y, 3.0 * 3 as f32);
+        assert_eq!(sim.settings.world_size_x, 3.0 * 2_f32);
+        assert_eq!(sim.settings.world_size_y, 3.0 * 3_f32);
         assert_eq!(sim.settings.release_min_elevation, 1500.0);
 
         block_on(sim.analyze_terrain()).expect("Failed to compute normals after setting DEM");
@@ -3662,7 +3662,7 @@ mod tests {
         let cell_area = cell_size * cell_size;
         let mass_diff = cell_area * (2 * 200) as f32 / slope_angle.to_radians().cos()
             - block_on(sim.get_total_mass()).expect("Failed to get total mass");
-        let volume_diff = cell_area * 2 as f32 / slope_angle.to_radians().cos()
+        let volume_diff = cell_area * 2_f32 / slope_angle.to_radians().cos()
             - block_on(sim.get_total_volume()).expect("Failed to get total volume");
         println!("Volume difference: {}", volume_diff);
         println!("Mass difference: {}", mass_diff);
@@ -3849,6 +3849,9 @@ mod tests {
     }
 
     #[test_log::test]
+    // Expected GPU outputs as computed in f32; some differ from the std
+    // constants in the last digit and are compared exactly.
+    #[allow(clippy::approx_constant)]
     fn test_analyze_terrain_curvilinear() {
         if std::env::var("GITHUB_ACTIONS").is_ok()
             && (cfg!(target_os = "macos") || cfg!(target_os = "windows"))
@@ -3953,6 +3956,9 @@ mod tests {
     }
 
     #[test_log::test]
+    // Expected GPU outputs as computed in f32; some differ from the std
+    // constants in the last digit and are compared exactly.
+    #[allow(clippy::approx_constant)]
     fn test_analyze_terrain() {
         if std::env::var("GITHUB_ACTIONS").is_ok()
             && (cfg!(target_os = "macos") || cfg!(target_os = "windows"))
@@ -4373,10 +4379,8 @@ mod tests {
             positions.hist_float()
         );
         assert_eq!(number_release_particles as usize * 2, positions.len());
-        for chunk in positions.chunks_exact(2) {
-            let [x, y] = chunk else {
-                continue;
-            };
+        for chunk in positions.as_chunks::<2>().0 {
+            let [x, y] = chunk;
             assert!(*x > 100.0);
             assert!(*x < 400.0);
             assert!(*y < 1150.0);
@@ -4782,7 +4786,9 @@ mod tests {
         let grid_momentum =
             block_on(sim.fetch_grid_momentum()).expect("Failed to fetch grid momentum");
         let grid_momentum = grid_momentum
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .fold([0.0f64; 2], |sum, node| {
                 [sum[0] + node[0] as f64, sum[1] + node[1] as f64]
             });

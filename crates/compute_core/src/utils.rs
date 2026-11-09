@@ -919,7 +919,7 @@ mod tests {
 
     #[test]
     fn test_vec_min_max_nested() {
-        let data = vec![vec![10.5, 2.0, 35.7], vec![1.2, 50.0], vec![-5.5]];
+        let data = [vec![10.5, 2.0, 35.7], vec![1.2, 50.0], vec![-5.5]];
 
         // Testing MaxValue for [Vec<T>]
         assert_eq!(data.max_value(), Some(50.0));
