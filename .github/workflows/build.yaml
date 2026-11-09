@@ -128,22 +128,45 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
-      - uses: dtolnay/rust-toolchain@stable
-
       - uses: ./.github/actions/software-gpu
-
-      - uses: Swatinem/rust-cache@v2
 
       # The extension is abi3, so one wheel serves every Python version. It is
       # built once and the tests run against exactly the wheel that is shipped.
+      #
+      # Built in the manylinux_2_28 container (glibc 2.28, toolchain inside), so
+      # the wheel loads on any distribution with glibc >= 2.28. Built on the
+      # runner it would require the runner's glibc and fail to import on older
+      # systems such as Ubuntu 24.04 (glibc 2.39). In the container:
+      # - git refuses the checkout (owned by another user), so the commit is
+      #   passed to build.rs; a CI checkout is never dirty;
+      # - LZMA_API_STATIC links liblzma statically instead of the container's.
       - name: Build wheel
         uses: PyO3/maturin-action@v1
         with:
           command: build
+          # manylinux sets the container and the matching --compatibility;
+          # passing --compatibility here as well gives two platform tags.
           args: --release --out dist
+          manylinux: 2_28
+          docker-options: >-
+            -e AVALANCHERS_GIT_COMMIT=${{ github.sha }}
+            -e AVALANCHERS_GIT_DIRTY=false
+            -e LZMA_API_STATIC=1
 
       - name: Install wheel and test dependencies
         run: pip install dist/*.whl pytest pandas pyarrow scipy matplotlib
+
+      - name: Check wheel
+        run: |
+          ls dist
+          python - <<'EOF'
+          import os
+          import avalanchers
+          info = avalanchers.build_info()
+          print(info)
+          assert info["git_commit"] == os.environ["GITHUB_SHA"], info
+          assert not info["git_dirty"], info
+          EOF
 
       - name: Python tests
         run: pytest ./python_module/tests

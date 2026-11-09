@@ -5,6 +5,8 @@ All notable changes to this project might be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- The Linux wheel imports on systems with an older glibc than the CI runner, e.g. Ubuntu 24.04. It
+  is built in the manylinux_2_28 container and runs from glibc 2.28 on.
 - Errors of the swissALTI3D tile manager now say what went wrong instead of only "Failed to create
   tile manager", also when the tiles were fetched for an existing manager.
 - The simulation runs in Chrome again. The center of mass shader failed WGSL uniformity validation
