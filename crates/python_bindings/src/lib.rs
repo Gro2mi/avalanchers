@@ -766,19 +766,25 @@ impl PySimulation {
     ///
     /// Args:
     ///     path: Output zarr path. Defaults to ``avalanchers.zarr``.
+    ///     label: What the run is, e.g. ``"cma_best"`` or ``"predicted"``, to
+    ///         tell it apart from the other runs of its scenario. Stored in the
+    ///         scenario attribute ``run_labels``, which the ``run_label``
+    ///         column indexes into. Defaults to ``""``.
     ///
     /// Returns:
     ///     dict: ``store``, ``site`` and ``scenario`` names and the ``run``
     ///     index the results were stored at.
-    #[pyo3(signature = (path=None))]
+    #[pyo3(signature = (path=None, label=None))]
     pub fn save<'py>(
         &mut self,
         py: Python<'py>,
         path: Option<String>,
+        label: Option<String>,
     ) -> PyResult<Bound<'py, PyDict>> {
+        let label = label.unwrap_or_default();
         let saved = match path {
-            Some(path) => self.inner.save_with_path(&path).block_on(),
-            None => self.inner.save().block_on(),
+            Some(path) => self.inner.save_with_path_labeled(&path, &label).block_on(),
+            None => self.inner.save_labeled(&label).block_on(),
         }
         .map_runtime_err()?;
         let dict = PyDict::new(py);
@@ -1487,6 +1493,24 @@ type PyTexture<'py> = (
 );
 
 /// Python module entry point for the avalanche simulator.
+/// The build of this module, as written to result stores.
+///
+/// Returns:
+///     dict: ``version`` (package version), ``software_version``
+///     (``<version>+<short commit>``, with ``.dirty`` when the build sources
+///     differed from the commit; the entry of a run in ``software_versions``),
+///     ``git_commit`` (full hash, ``"unknown"`` without git) and ``git_dirty``.
+#[pyfunction]
+fn build_info(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
+    use data_processor::store_schema::{GIT_COMMIT, GIT_DIRTY, SOFTWARE_VERSION};
+    let dict = PyDict::new(py);
+    dict.set_item("version", env!("CARGO_PKG_VERSION"))?;
+    dict.set_item("software_version", SOFTWARE_VERSION)?;
+    dict.set_item("git_commit", GIT_COMMIT)?;
+    dict.set_item("git_dirty", GIT_DIRTY)?;
+    Ok(dict)
+}
+
 #[pymodule]
 fn _avalanchers(m: &Bound<'_, PyModule>) -> PyResult<()> {
     pyo3_log::init();
@@ -1500,5 +1524,6 @@ fn _avalanchers(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyTimestepData>()?;
 
     m.add_function(wrap_pyfunction!(list_available_gpus, m)?)?;
+    m.add_function(wrap_pyfunction!(build_info, m)?)?;
     Ok(())
 }

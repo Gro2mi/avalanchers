@@ -1410,11 +1410,18 @@ impl Simulation {
     /// away from [`Self::output_path`] if it differs.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn save_with_path(&mut self, path: &str) -> Result<SavedRun> {
+        self.save_with_path_labeled(path, "").await
+    }
+
+    /// Native only: [`Self::save_with_path`] with a run label (see
+    /// [`Self::save_labeled`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn save_with_path_labeled(&mut self, path: &str, label: &str) -> Result<SavedRun> {
         if self.output_path != path {
             self.output = None;
             self.output_path = path.to_string();
         }
-        self.save().await
+        self.save_labeled(label).await
     }
 
     /// Name of the site this simulation writes to, derived from the DEM.
@@ -1457,7 +1464,7 @@ impl Simulation {
     }
 
     /// Gathers everything the result stores keep of the finished run.
-    async fn collect_run(&mut self) -> Result<RunRecord> {
+    async fn collect_run(&mut self, label: &str) -> Result<RunRecord> {
         if self.state < SimulationState::Finished {
             bail!("Run the simulation before saving results");
         }
@@ -1491,6 +1498,7 @@ impl Simulation {
             number_particles: sim_info.number_particles,
             stop_flags: sim_info.flags,
             created_at,
+            label: label.to_string(),
             settings: self.settings,
         })
     }
@@ -1501,7 +1509,7 @@ impl Simulation {
     /// responsible for persisting the returned entries.
     #[cfg(target_arch = "wasm32")]
     pub async fn export_zarr_entries(&mut self) -> Result<Vec<ZarrEntry>> {
-        let run = self.collect_run().await?;
+        let run = self.collect_run("").await?;
         let release_areas = self.fetch_release_areas().await?.to_vec();
         Ok(data_processor::zarr_writer::build_result_store(
             &self.site_name(),
@@ -1523,7 +1531,16 @@ impl Simulation {
     /// was stored.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn save(&mut self) -> Result<SavedRun> {
-        let run = self.collect_run().await?;
+        self.save_labeled("").await
+    }
+
+    /// Native only: [`Self::save`] with a label that tells this run apart from
+    /// the others of its scenario, e.g. `cma_best` or `predicted`. The store
+    /// keeps the labels in the scenario attribute `run_labels`, and the
+    /// `run_label` column of each run indexes into it.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn save_labeled(&mut self, label: &str) -> Result<SavedRun> {
+        let run = self.collect_run(label).await?;
         let release_areas = self.fetch_release_areas().await?.to_vec();
         timer_checkpoint("Peak data fetched");
 

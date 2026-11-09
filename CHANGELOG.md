@@ -104,6 +104,21 @@ All notable changes to this project might be documented in this file.
   shortened the runout: the energy line benchmark is now 5 m from its reference, not 307 m.
 
 ### Added
+- Every build names its commit: the version string written to result stores and shown by
+  `cli --version` is `<version>+<short commit>`, with `.dirty` when the build sources (`crates/`,
+  `Cargo.toml`, `Cargo.lock`) differed from the commit. New stores also get the full hash in the
+  root attributes `avalanchers_git_commit`, `avalanchers_git_dirty` and
+  `avalanchers_software_version`. Python: `avalanchers.build_info()`, `__git_commit__`,
+  `__software_version__`, `__git_dirty__`. Builds without a git checkout take the commit from
+  the environment variables `AVALANCHERS_GIT_COMMIT` and `AVALANCHERS_GIT_DIRTY`. Release builds
+  track the dirty flag exactly; debug builds only update it on commits, checkouts and staging.
+- Runs can carry a label that tells them apart within a scenario, e.g. a calibrated optimum and a
+  predicted run: `Simulation::save_labeled` / `save_with_path_labeled`, and
+  `PySimulation.save(path, label=...)` in Python. The scenario attribute `run_labels` lists the
+  labels and the new `run_label` column indexes into it, like `software_version`; the empty label
+  marks a run saved without one. `AvalanchersScenario.run_labels`, `.labels` and
+  `.runs_labeled(label)` read them back. The store format stays 0.2.0: older stores have no
+  `run_label` column, and their runs count as unlabeled.
 - Result stores keep the outline: a scenario run from an outline gets an `outline` array (`uint8`,
   1 inside) and its `outline_hash`. A run with another outline is not appended to that scenario,
   and a scenario loaded from a store brings its outline back as the region of interest. DEM-only

@@ -339,6 +339,7 @@ mod tests {
             number_particles: 1,
             stop_flags: 0,
             created_at: 1.0,
+            label: String::new(),
             settings: SimSettings::default(),
         }
     }

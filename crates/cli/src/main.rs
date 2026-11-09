@@ -49,7 +49,8 @@ fn parse_constitutive_model(value: &str) -> Result<ConstitutiveModel> {
 #[derive(Parser, Debug)]
 #[command(
     name = "avalanchers",
-    version,
+    // `<version>+<short commit>[.dirty]`, the build written to result stores.
+    version = data_processor::store_schema::SOFTWARE_VERSION,
     about = "Dense flow avalanche simulation on the GPU"
 )]
 struct Args {

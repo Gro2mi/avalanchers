@@ -362,7 +362,7 @@ impl Output {
             )?;
         }
 
-        self.create_group(scenario, store_schema::scenario_attributes(0, &[]))
+        self.create_group(scenario, store_schema::scenario_attributes(0, &[], &[]))
     }
 
     /// Writes the outline of `scenario` unless it already has it. Its hash in
@@ -417,7 +417,12 @@ impl Output {
             .ok_or_else(|| {
                 OutputError::InvalidData(format!("Scenario '{scenario}' has no number_of_runs"))
             })?;
-        let software_version = register_software_version(group.attributes_mut())?;
+        let software_version = register(
+            group.attributes_mut(),
+            "software_versions",
+            SOFTWARE_VERSION,
+        )?;
+        let run_label = register(group.attributes_mut(), "run_labels", &run.label)?;
 
         let capacity = self.grow_runs(scenario, run_id)?;
         self.grow_tracks(scenario, run)?;
@@ -441,7 +446,7 @@ impl Output {
             array.store_array_subset(&subset, &row)?;
         }
 
-        for column in run.columns(software_version) {
+        for column in run.columns(software_version, run_label) {
             let node = format!("{scenario}/{}", column.name);
             let array = if self.node_exists(&node) {
                 Array::open(self.store.clone(), &format!("/{node}"))?
@@ -587,26 +592,24 @@ fn track_width(length: usize) -> u64 {
     (length as u64).div_ceil(TRACK_CHUNK[1]).max(1) * TRACK_CHUNK[1]
 }
 
-/// Returns the index of this build in `software_versions`, adding it if needed.
-fn register_software_version(attributes: &mut Attributes) -> Result<u32, OutputError> {
-    let versions = attributes
-        .entry("software_versions")
+/// Index of `value` in the list attribute `key`, appended if missing.
+fn register(attributes: &mut Attributes, key: &str, value: &str) -> Result<u32, OutputError> {
+    let values = attributes
+        .entry(key)
         .or_insert_with(|| json!([]))
         .as_array_mut()
-        .ok_or_else(|| OutputError::InvalidData("software_versions is no list".to_string()))?;
-    let index = versions
-        .iter()
-        .position(|version| version == SOFTWARE_VERSION)
-        .unwrap_or_else(|| {
-            versions.push(json!(SOFTWARE_VERSION));
-            versions.len() - 1
-        });
+        .ok_or_else(|| OutputError::InvalidData(format!("{key} is no list")))?;
+    let index = values.iter().position(|v| v == value).unwrap_or_else(|| {
+        values.push(json!(value));
+        values.len() - 1
+    });
     Ok(index as u32)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store_schema::{GIT_COMMIT, GIT_DIRTY};
     use crate::zarr_writer::build_result_store;
     use compute_core::dem::Bounds;
     use compute_core::settings::SimSettings;
@@ -657,6 +660,7 @@ mod tests {
             number_particles: 64,
             stop_flags: 1 << 31,
             created_at: 1_790_000_000.0,
+            label: String::new(),
             settings: SimSettings {
                 released_particles_per_cell: 4,
                 friction_coefficient: value,
@@ -705,6 +709,13 @@ mod tests {
         let root = Group::open(output.store.clone(), "/").unwrap();
         assert_eq!(root.attributes()["avalanchers_format"], FORMAT_VERSION);
         assert_eq!(root.attributes()["Conventions"], "CF-1.8");
+        assert_eq!(root.attributes()["avalanchers_git_commit"], GIT_COMMIT);
+        assert_eq!(
+            root.attributes()["avalanchers_software_version"],
+            SOFTWARE_VERSION
+        );
+        assert!(SOFTWARE_VERSION.starts_with(&format!("{}+", env!("CARGO_PKG_VERSION"))));
+        assert_eq!(SOFTWARE_VERSION.ends_with(".dirty"), GIT_DIRTY);
 
         // Reopening a store of this format works.
         Output::new(path.to_str().unwrap()).unwrap();
@@ -749,6 +760,27 @@ mod tests {
 
         let volume: Vec<f32> = read(&output, &format!("{SCENARIO}/release_volume_m3"));
         assert_eq!(volume[..2], [100.0, 200.0], "the volume belongs to the run");
+    }
+
+    #[test_log::test]
+    fn test_run_labels_tell_runs_of_a_scenario_apart() {
+        let (_tmp_dir, _path, output) = store("labels.zarr");
+        let labeled = |value, label: &str| RunRecord {
+            label: label.to_string(),
+            ..run(value, 5)
+        };
+        add(&output, &labeled(10.0, "cma_best"));
+        add(&output, &labeled(20.0, "predicted"));
+        add(&output, &labeled(30.0, ""));
+        add(&output, &labeled(40.0, "predicted"));
+
+        let group = Group::open(output.store.clone(), &format!("/{SCENARIO}")).unwrap();
+        assert_eq!(
+            group.attributes()["run_labels"],
+            json!(["cma_best", "predicted", ""])
+        );
+        let labels: Vec<u32> = read(&output, &format!("{SCENARIO}/run_label"));
+        assert_eq!(labels[..5], [0, 1, 2, 1, NO_DATA_U32]);
     }
 
     /// Row 0 of every grid is the south edge, so `y` has to ascend with the rows.

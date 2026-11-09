@@ -14,6 +14,10 @@
 //! Row 0 of every grid is the south edge and `x`/`y` are cell centers. The `run`
 //! dimension can be longer than the number of runs: `number_of_runs` in the
 //! scenario attributes is authoritative and is the last thing written per run.
+//!
+//! Runs are told apart by their settings and by `run_label`, an index into the
+//! scenario attribute `run_labels` (e.g. `["", "cma_best", "predicted"]`); the
+//! empty label marks a run saved without one.
 
 use compute_core::SimInfoFlags;
 use compute_core::dem::Dem;
@@ -24,9 +28,31 @@ use serde_json::{Map, Value, json};
 /// Version of the layout. Stores of any other version are rejected on open.
 pub const FORMAT_VERSION: &str = "0.2.0";
 
-/// Identifies the build that wrote a run.
+/// Identifies the build that wrote a run: `<version>+<short commit>`, with
+/// `.dirty` appended when the build sources differed from the commit.
 pub const SOFTWARE_VERSION: &str =
     concat!(env!("CARGO_PKG_VERSION"), "+", env!("AVALANCHERS_GIT_HASH"));
+
+/// Full hash of the commit the build was made from (`unknown` without git).
+pub const GIT_COMMIT: &str = env!("AVALANCHERS_GIT_COMMIT");
+
+/// Whether the build sources differed from [`GIT_COMMIT`].
+pub const GIT_DIRTY: bool = const_str_eq(env!("AVALANCHERS_GIT_DIRTY"), "true");
+
+const fn const_str_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
 
 /// Fill value of integer run columns, where 0 is usually a valid value.
 pub const NO_DATA_U32: u32 = u32::MAX;
@@ -83,6 +109,9 @@ pub fn root_attributes() -> Attributes {
         "Conventions": "CF-1.8",
         "source": "avalanchers",
         "avalanchers_version": env!("CARGO_PKG_VERSION"),
+        "avalanchers_software_version": SOFTWARE_VERSION,
+        "avalanchers_git_commit": GIT_COMMIT,
+        "avalanchers_git_dirty": GIT_DIRTY,
         "avalanchers_repo": "https://github.com/Gro2mi/avalanchers",
         "avalanchers_format": FORMAT_VERSION,
     }))
@@ -107,13 +136,19 @@ pub fn site_attributes(dem: &Dem) -> Attributes {
     }))
 }
 
-/// `software_versions` lists the builds that wrote to the scenario; the
-/// `software_version` run column indexes into it.
-pub fn scenario_attributes(number_of_runs: u64, software_versions: &[&str]) -> Attributes {
+/// `software_versions` lists the builds that wrote to the scenario and
+/// `run_labels` the labels of its runs; the `software_version` and `run_label`
+/// run columns index into them.
+pub fn scenario_attributes(
+    number_of_runs: u64,
+    software_versions: &[&str],
+    run_labels: &[&str],
+) -> Attributes {
     attributes(json!({
         "aspect_release_degrees": null,
         "number_of_runs": number_of_runs,
         "software_versions": software_versions,
+        "run_labels": run_labels,
     }))
 }
 
@@ -263,6 +298,8 @@ pub struct RunRecord {
     pub stop_flags: u32,
     /// Unix time in seconds at which the run was saved.
     pub created_at: f64,
+    /// What the run is, e.g. `cma_best` or `predicted`; empty for none.
+    pub label: String,
     pub settings: SimSettings,
 }
 
@@ -311,7 +348,9 @@ impl RunRecord {
     }
 
     /// The `(run)` values: results, provenance and every field of the settings.
-    pub fn columns(&self, software_version: u32) -> Vec<RunColumn> {
+    /// `software_version` and `run_label` are indices into the scenario
+    /// attributes `software_versions` and `run_labels`.
+    pub fn columns(&self, software_version: u32, run_label: u32) -> Vec<RunColumn> {
         let column = |name: &str, value, attributes| RunColumn {
             name: name.to_string(),
             value,
@@ -378,6 +417,14 @@ impl RunRecord {
                 Scalar::U32(software_version),
                 attributes(json!({
                     "long_name": "Index into the software_versions attribute of the scenario",
+                    "units": "1",
+                })),
+            ),
+            column(
+                "run_label",
+                Scalar::U32(run_label),
+                attributes(json!({
+                    "long_name": "Index into the run_labels attribute of the scenario",
                     "units": "1",
                 })),
             ),
@@ -502,6 +549,7 @@ mod tests {
             number_particles: 6,
             stop_flags: 7,
             created_at: 8.0,
+            label: String::new(),
             settings,
         }
     }
@@ -536,7 +584,7 @@ mod tests {
             release_max_elevation: f32::INFINITY,
             ..SimSettings::default()
         };
-        let columns = record(settings).columns(0);
+        let columns = record(settings).columns(0, 0);
 
         assert_eq!(
             find(&columns, "released_particles_per_cell"),

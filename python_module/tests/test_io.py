@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import xarray as xr
+import zarr
 from avalanchers import AvalanchersOutput
 
 
@@ -248,6 +249,23 @@ def test_outline_is_saved_with_the_scenario(tmp_path, monkeypatch):
     np.testing.assert_array_equal(site.dem.values, sim.dem)
 
 
+def test_runs_are_told_apart_by_their_label(tmp_path):
+    path = str(tmp_path / "labels.zarr")
+    sim = avalanchers.PySimulation.new()
+    sim.create_example("data/avaframe/avaPfa.png")
+    sim.run()
+    first = sim.save(path, label="cma_best")
+    second = sim.save(path, label="predicted")
+    third = sim.save(path)
+    assert (first["scenario"], second["scenario"]) == (third["scenario"],) * 2
+    assert [first["run"], second["run"], third["run"]] == [0, 1, 2]
+
+    scenario = AvalanchersOutput(path).get_site(first["site"]).get_scenario(first["scenario"])
+    assert scenario.run_labels == ["cma_best", "predicted", ""]
+    assert scenario.labels == ["cma_best", "predicted", ""]
+    assert scenario.runs_labeled("predicted") == [1]
+
+
 def assert_dataarray_shape(
     ds: xr.Dataset,
     variable: str,
@@ -264,3 +282,25 @@ def assert_dataarray_shape(
     assert da.sizes == {"y": y_len, "x": x_len}, (
         f"Unexpected shape for {variable}: {da.sizes}"
     )
+
+
+def test_build_info_names_the_commit_written_to_stores(tmp_path):
+    info = avalanchers.build_info()
+    assert info["version"] == avalanchers.__version__
+    assert info["software_version"].startswith(f"{info['version']}+")
+    assert info["software_version"].endswith(".dirty") == info["git_dirty"]
+    assert avalanchers.__git_commit__ == info["git_commit"]
+    if info["git_commit"] != "unknown":
+        assert len(info["git_commit"]) == 40
+        assert info["software_version"].split("+")[1].startswith(info["git_commit"][:12])
+
+    path = str(tmp_path / "build.zarr")
+    sim = avalanchers.PySimulation.new()
+    sim.create_example("data/avaframe/avaPfa.png")
+    sim.run()
+    saved = sim.save(path)
+    data = AvalanchersOutput(path)
+    root = zarr.open_group(path, mode="r").attrs
+    assert root["avalanchers_git_commit"] == info["git_commit"]
+    scenario = data.get_site(saved["site"]).get_scenario(saved["scenario"])
+    assert scenario.software_versions == [info["software_version"]]

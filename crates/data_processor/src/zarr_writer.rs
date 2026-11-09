@@ -259,7 +259,8 @@ pub fn build_result_store(
     );
 
     let scenario_path = format!("{site_name}/{scenario_name}");
-    let mut scenario_attributes = store_schema::scenario_attributes(1, &[SOFTWARE_VERSION]);
+    let mut scenario_attributes =
+        store_schema::scenario_attributes(1, &[SOFTWARE_VERSION], &[&run.label]);
     if let Some(outline) = outline {
         scenario_attributes.insert("outline_hash".to_string(), json!(outline.hash()));
     }
@@ -311,7 +312,7 @@ pub fn build_result_store(
             data,
         );
     }
-    for column in run.columns(0) {
+    for column in run.columns(0, 0) {
         builder.add_column(
             &format!("{scenario_path}/{}", column.name),
             column.value,
@@ -370,6 +371,7 @@ mod tests {
             number_particles: 8,
             stop_flags: 0,
             created_at: 1.0,
+            label: String::new(),
             settings: SimSettings::default(),
         };
         build_result_store("site-a_1234", "scenario-b_5678", &dem, &release, None, &run)
