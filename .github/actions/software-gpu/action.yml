@@ -1,0 +1,33 @@
+name: Software GPU
+description: >
+  Installs Mesa's software Vulkan driver (lavapipe) so the wgpu tests run on the
+  CPU of a GitHub-hosted Ubuntu runner. Pair it with the job environment
+  WGPU_BACKEND=vulkan and VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json.
+
+runs:
+  using: composite
+  steps:
+    - name: Install Mesa Vulkan
+      shell: bash
+      run: |
+        # The hosted runner may contain a stale Google Chrome source. Chrome
+        # is not required, so remove it before refreshing the package indexes.
+        sudo find /etc/apt/sources.list.d -maxdepth 1 -type f \
+          \( -iname '*chrome*' -o -iname '*google*' \) -delete
+        if [ -f /etc/apt/sources.list ]; then
+          sudo sed -i '/dl\.google\.com\/linux\/chrome/d' /etc/apt/sources.list
+        fi
+        sudo find /var/lib/apt/lists -maxdepth 1 -type f \
+          \( -iname '*chrome*' -o -iname '*google*' \) -delete
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq --no-install-recommends \
+          libegl1-mesa-dev \
+          libgl1-mesa-dri \
+          libxcb-xfixes0-dev \
+          mesa-vulkan-drivers \
+          libvulkan-dev \
+          vulkan-tools
+
+    - name: Verify software GPU
+      shell: bash
+      run: vulkaninfo --summary

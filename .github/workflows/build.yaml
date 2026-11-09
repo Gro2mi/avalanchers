@@ -11,202 +11,155 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-jobs:
-  build:
-    name: Build on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        # Build all 3 on release tags; only Ubuntu on standard push/PR
-        os: >-
-          ${{ startsWith(github.ref, 'refs/tags/v')
-            && fromJSON('["ubuntu-latest", "macos-latest", "windows-latest"]')
-            || fromJSON('["ubuntu-latest"]')
-          }}
+permissions:
+  contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+
+# Independent jobs run in parallel, so the wall-clock time is that of the
+# slowest job rather than the sum of all steps. Every job uploads its outputs
+# as an `artifacts-*` artifact; release.yaml merges all of them and
+# gh-pages-deploy.yaml takes `artifacts-wasm`.
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.x'
-          cache: 'pip'
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: wasm32-unknown-unknown
           components: clippy, rustfmt
 
-      - name: Install Graphics Stack (Ubuntu)
-        if: matrix.os == 'ubuntu-latest'
-        env:
-          # Force the use of the Software Rasterizer
-          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
-        run: |
-          # The hosted runner may contain a stale Google Chrome source. Chrome
-          # is not required by this workflow, so remove it before refreshing
-          # the package indexes.
-          sudo find /etc/apt/sources.list.d -maxdepth 1 -type f \
-            \( -iname '*chrome*' -o -iname '*google*' \) -delete
-          if [ -f /etc/apt/sources.list ]; then
-            sudo sed -i '/dl\.google\.com\/linux\/chrome/d' /etc/apt/sources.list
-          fi
-          sudo find /var/lib/apt/lists -maxdepth 1 -type f \
-            \( -iname '*chrome*' -o -iname '*google*' \) -delete
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            libegl1-mesa-dev \
-            libgl1-mesa-dri \
-            libxcb-xfixes0-dev \
-            mesa-vulkan-drivers \
-            libvulkan-dev \
-            vulkan-tools
+      - uses: Swatinem/rust-cache@v2
 
-      - name: Verify Software GPU
-        if: matrix.os == 'ubuntu-latest'
-        env:
-          # Tell Vulkan to look in the standard ICD directory
-          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
-        run: |
-          # If the first path failed, let's find where it actually is:
-          ls /usr/share/vulkan/icd.d/
-          vulkaninfo --summary
+      - name: Rust formatting
+        run: cargo fmt --check
 
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-        
+      - name: Clippy
+        run: cargo clippy -q -- -D warnings
 
-      - name: Install Dependencies (Linux)
-        if: matrix.os == 'ubuntu-latest'
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends llvm-dev libclang-dev python3-dev
+      - name: Python linting
+        run: pipx run ruff check ./python_module
 
-      - name: Lint
-        if: matrix.os == 'ubuntu-latest' 
-        env:
-            # This forces wgpu to use the software adapter
-            WGPU_BACKEND: vulkan 
-            VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
-        run: |
-          cargo fmt --check
-          cargo clippy -q -- -D warnings
-
-      - name: Build CLI Binary
-        run: cargo build -p cli --release
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: .github/tint/package-lock.json
 
       # Tint is the WGSL compiler of Chrome and enforces rules naga does not,
       # so shaders that run natively and in Firefox can still fail in Chrome.
-      - name: Validate Shaders with Tint
-        if: matrix.os == 'ubuntu-latest'
+      - name: Validate shaders with Tint
         run: |
-          cargo run -q -p compute_core --release --example dump_shaders -- target/browser_shaders
+          cargo run -q -p compute_core --example dump_shaders -- target/browser_shaders
           npm ci --prefix .github/tint
           node .github/tint/check_shaders.mjs target/browser_shaders crates/render_core/src/shaders
 
-      - name: Test Linux
-        if: matrix.os == 'ubuntu-latest'
-        env:
-            # This forces wgpu to use the software adapter
-            WGPU_BACKEND: vulkan 
-            VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
-        run:
-          cargo test -p compute_core -p data_processor -p simulation --release
-
-      - name: Test MacOS
-        if: matrix.os == 'macos-latest'
-        env:
-          WGPU_BACKEND: metal
-        run:
-          cargo test -p compute_core -p data_processor -p simulation --release
-
-      - name: Test Windows
-        if: matrix.os == 'windows-latest'
-        env:
-          # Force WGPU to use DX12 (Standard for Windows)
-          WGPU_BACKEND: dx12
-        run:
-          cargo test -p compute_core -p data_processor --release -- --test-threads=1 
-  
-      # --- COVERAGE (Ubuntu Only) ---
-      - name: Install Tarpaulin
-        if: matrix.os == 'ubuntu-latest' 
-        # && github.event_name == 'pull_request'
-        # Using a binary install is much faster than 'cargo install'
+      - name: Check frontend JS syntax
         run: |
-          curl -s https://api.github.com/repos/xd009642/tarpaulin/releases/latest \
-          | grep "browser_download_url.*x86_64-unknown-linux-musl.tar.gz" \
-          | cut -d : -f 2,3 \
-          | tr -d \" \
-          | wget -qi -
-          tar -xzf cargo-tarpaulin-*.tar.gz
-          mv cargo-tarpaulin ~/.cargo/bin/
-          cargo tarpaulin --version
+          for f in main plot plotly_dark sources tile_utils utils viewer; do
+            node --check "frontend/js/$f.js"
+          done
 
-      - name: Coverage
-        if: matrix.os == 'ubuntu-latest' 
-        # && github.event_name == 'pull_request'
-        env:
-          # This forces wgpu to use the software adapter
-          WGPU_BACKEND: vulkan 
-          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
-          SKIP_FOR_TARPAULIN: "true"
+  test:
+    name: Rust tests and coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      WGPU_BACKEND: vulkan
+      VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: ./.github/actions/software-gpu
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-tarpaulin
+
+      # Tarpaulin runs the whole test suite, so the tests are not run a
+      # second time without instrumentation; a failing test fails this step.
+      - name: Tests with coverage
         run: |
-          sudo apt-get install -y python3-dev
           cargo tarpaulin \
             --engine llvm \
             --out html --out lcov --out xml \
             --output-dir coverage_report \
             --run-types Tests \
-            --verbose \
             --skip-clean \
             --timeout 600 \
             --fail-under 80 \
             -p compute_core -p data_processor -p simulation
 
-        
-      - name: Build and Install Python Package
-        run: pip install .
-
-      - name: Install pytest dependencies
-        run: pip install pytest ruff pandas pyarrow scipy matplotlib
-
-      - name: Python Linting
-        run: ruff check ./python_module
-
-      - name: Python Tests
-        run: pytest ./python_module/tests
-
-      # - name: Upload to codecov.io
-      #   uses: codecov/codecov-action@v1.0.2
-      #   with:
-      #     token: ${{secrets.CODECOV_TOKEN}}
-
-      - name: Upload Coverage Results
-        if: matrix.os == 'ubuntu-latest' 
-        # && github.event_name == 'pull_request'
+      - name: Upload coverage report
+        if: always()
         uses: actions/upload-artifact@v6
         with:
           name: code-coverage-report
           path: coverage_report/
+          if-no-files-found: ignore
 
+  python:
+    name: Python package
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      WGPU_BACKEND: vulkan
+      VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
+    steps:
+      - uses: actions/checkout@v5
 
-      - name: Prepare CLI Artifacts
-        shell: bash
-        run: |
-          mkdir -p bin_dist
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            mv target/release/*.exe bin_dist/avalanchers-cli-${{ matrix.os }}.exe || true
-          else
-            # Find the binary (assuming it's named after your project) 
-            # and rename it to include the OS for clarity in the release
-            cp target/release/cli bin_dist/avalanchers-cli-${{ matrix.os }} || true
-          fi
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+          cache: pip
+          cache-dependency-path: pyproject.toml
 
-      - name: Build Python Wheels
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: ./.github/actions/software-gpu
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The extension is abi3, so one wheel serves every Python version. It is
+      # built once and the tests run against exactly the wheel that is shipped.
+      - name: Build wheel
         uses: PyO3/maturin-action@v1
         with:
           command: build
-          args: --release --out dist --find-interpreter
+          args: --release --out dist
+
+      - name: Install wheel and test dependencies
+        run: pip install dist/*.whl pytest pandas pyarrow scipy matplotlib
+
+      - name: Python tests
+        run: pytest ./python_module/tests
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: artifacts-wheel-ubuntu-latest
+          path: dist/*.whl
+          retention-days: 3
+
+  wasm:
+    name: WebAssembly
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
 
       # wasm-pack downloads wasm-bindgen and wasm-opt from GitHub releases on
       # every run and gives up on the first failed request, which breaks the
@@ -215,7 +168,6 @@ jobs:
       # on PATH and downloads nothing.
       - name: Resolve WASM tool versions
         id: wasm-tools
-        if: matrix.os == 'ubuntu-latest'
         run: |
           set -euo pipefail
           # wasm-bindgen-cli must match the wasm-bindgen crate exactly.
@@ -228,14 +180,13 @@ jobs:
 
       - name: Cache WASM tools
         id: wasm-tools-cache
-        if: matrix.os == 'ubuntu-latest'
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ${{ steps.wasm-tools.outputs.dir }}
           key: wasm-tools-${{ runner.os }}-pack${{ steps.wasm-tools.outputs.wasm-pack }}-bindgen${{ steps.wasm-tools.outputs.wasm-bindgen }}-binaryen${{ steps.wasm-tools.outputs.binaryen }}
 
       - name: Install wasm-pack, wasm-bindgen and wasm-opt
-        if: matrix.os == 'ubuntu-latest' && steps.wasm-tools-cache.outputs.cache-hit != 'true'
+        if: steps.wasm-tools-cache.outputs.cache-hit != 'true'
         env:
           TOOLS: ${{ steps.wasm-tools.outputs.dir }}
           WASM_PACK: ${{ steps.wasm-tools.outputs.wasm-pack }}
@@ -264,54 +215,118 @@ jobs:
           rm -rf "$TOOLS"/wasm-bindgen-*-musl "$TOOLS"/binaryen-version_*
 
       - name: Add WASM tools to PATH
-        if: matrix.os == 'ubuntu-latest'
         run: |
           echo "${{ steps.wasm-tools.outputs.dir }}/bin" >> "$GITHUB_PATH"
           "${{ steps.wasm-tools.outputs.dir }}/bin/wasm-pack" --version
           "${{ steps.wasm-tools.outputs.dir }}/bin/wasm-bindgen" --version
           "${{ steps.wasm-tools.outputs.dir }}/bin/wasm-opt" --version
 
-      - name: Build WASM (Ubuntu Only)
-        if: matrix.os == 'ubuntu-latest'
+      - name: Build WASM
         run: wasm-pack build crates/wasm_bindings --target web --release --out-dir wasm_dist
 
-      - name: Test WASM Bindings (Node)
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          cd crates/wasm_bindings
-          wasm-pack test --node
+      - name: Test WASM bindings (Node)
+        working-directory: crates/wasm_bindings
+        run: wasm-pack test --node
 
-      - name: Test frontend JS
-        if: matrix.os == 'ubuntu-latest'
+      - name: Stage WASM artifacts
         run: |
-          node --check frontend/js/main.js
-          node --check frontend/js/plot.js
-          node --check frontend/js/plotly_dark.js
-          node --check frontend/js/sources.js
-          node --check frontend/js/tile_utils.js
-          node --check frontend/js/utils.js
-          node --check frontend/js/viewer.js
-        
+          mkdir -p staging/wasm
+          cp crates/wasm_bindings/wasm_dist/*.wasm crates/wasm_bindings/wasm_dist/*.js staging/wasm/
 
-      # --- UPLOAD ---
-      - name: Prepare Artifacts for Upload
+      - uses: actions/upload-artifact@v6
+        with:
+          name: artifacts-wasm
+          path: staging/
+          retention-days: 3
+
+  cli:
+    name: CLI
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build CLI binary
+        run: cargo build -p cli --release
+
+      - name: Stage CLI artifacts
+        run: |
+          mkdir -p staging
+          cp target/release/cli staging/avalanchers-cli-ubuntu-latest
+          cp settings.json README.md LICENSE NOTICE staging/
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: artifacts-cli-ubuntu-latest
+          path: staging/
+          retention-days: 3
+
+  # macOS and Windows are only built for releases: tests, CLI binary and wheel.
+  release-platforms:
+    name: Release build on ${{ matrix.os }}
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            backend: metal
+            test-args: -p compute_core -p data_processor -p simulation
+            cli: target/release/cli
+          - os: windows-latest
+            backend: dx12
+            test-args: -p compute_core -p data_processor
+            test-threads: --test-threads=1
+            cli: target/release/cli.exe
+    env:
+      WGPU_BACKEND: ${{ matrix.backend }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Rust tests
+        run: cargo test ${{ matrix.test-args }} --release -- ${{ matrix.test-threads }}
+
+      - name: Build CLI binary
+        run: cargo build -p cli --release
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --out dist
+
+      - name: Python tests
         shell: bash
         run: |
-          mkdir -p staging_all
-          mkdir -p staging_all/wasm
-          cp -r dist/*.whl staging_all/ || true
-          cp -r bin_dist/* staging_all/ || true
-          cp -r crates/wasm_bindings/wasm_dist/*.wasm staging_all/wasm || true
-          cp -r crates/wasm_bindings/wasm_dist/*.js staging_all/wasm || true
-          cp -r settings.json staging_all/ || true
-          cp -r README.md staging_all/ || true
-          cp -r LICENSE staging_all/ || true
-          cp -r NOTICE staging_all/ || true
+          pip install dist/*.whl pytest pandas pyarrow scipy matplotlib
+          pytest ./python_module/tests
 
-      - name: Upload All Artifacts
-        uses: actions/upload-artifact@v6
+      - name: Stage artifacts
+        shell: bash
+        run: |
+          mkdir -p staging
+          ext="${{ runner.os == 'Windows' && '.exe' || '' }}"
+          cp "${{ matrix.cli }}" "staging/avalanchers-cli-${{ matrix.os }}$ext"
+          cp dist/*.whl staging/
+
+      - uses: actions/upload-artifact@v6
         with:
           name: artifacts-${{ matrix.os }}
-          path: staging_all/
-          if-no-files-found: warn
+          path: staging/
           retention-days: 3

@@ -19,12 +19,12 @@ jobs:
       
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Download Build Artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
-          name: artifacts-ubuntu-latest
+          name: artifacts-wasm
           path: ./downloaded_assets
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
