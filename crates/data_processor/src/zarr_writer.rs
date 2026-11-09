@@ -7,7 +7,8 @@
 //! re-opened by every reader of the native stores.
 
 use crate::store_schema::{
-    self, Attributes, FORMAT_VERSION, NO_DATA_U32, RunField, RunRecord, SOFTWARE_VERSION, Scalar,
+    self, Attributes, FORMAT_VERSION, NO_DATA_U32, Outline, RunField, RunRecord, SOFTWARE_VERSION,
+    Scalar,
 };
 use compute_core::dem::Dem;
 use half::f16;
@@ -146,6 +147,26 @@ impl ZarrStoreBuilder {
         );
     }
 
+    fn add_u8_array(
+        &mut self,
+        path: &str,
+        shape: &[usize],
+        dimension_names: &[&str],
+        attributes: Attributes,
+        data: Vec<u8>,
+    ) {
+        debug_assert_eq!(shape.iter().product::<usize>(), data.len());
+        self.add_array(
+            path,
+            "uint8",
+            json!(0),
+            shape,
+            dimension_names,
+            attributes,
+            Some(data),
+        );
+    }
+
     fn add_column(&mut self, path: &str, value: Scalar, attributes: Attributes) {
         let (data_type, fill_value, bytes) = match value {
             Scalar::U32(v) => ("uint32", json!(NO_DATA_U32), v.to_le_bytes().to_vec()),
@@ -207,12 +228,14 @@ impl ZarrStoreBuilder {
     }
 }
 
-/// Builds a `<site>/<scenario>` store holding the DEM and a single run.
+/// Builds a `<site>/<scenario>` store holding the DEM, the optional outline
+/// and a single run.
 pub fn build_result_store(
     site_name: &str,
     scenario_name: &str,
     dem: &Dem,
     release_areas: &[f32],
+    outline: Option<Outline<'_>>,
     run: &RunRecord,
 ) -> Vec<ZarrEntry> {
     let mut builder = ZarrStoreBuilder::new();
@@ -236,10 +259,11 @@ pub fn build_result_store(
     );
 
     let scenario_path = format!("{site_name}/{scenario_name}");
-    builder.add_group(
-        &scenario_path,
-        store_schema::scenario_attributes(1, &[SOFTWARE_VERSION]),
-    );
+    let mut scenario_attributes = store_schema::scenario_attributes(1, &[SOFTWARE_VERSION]);
+    if let Some(outline) = outline {
+        scenario_attributes.insert("outline_hash".to_string(), json!(outline.hash()));
+    }
+    builder.add_group(&scenario_path, scenario_attributes);
     builder.add_coordinates(&scenario_path, dem);
     builder.add_f32_array(
         &format!("{scenario_path}/release_area"),
@@ -249,6 +273,15 @@ pub fn build_result_store(
         store_schema::release_area_attributes(dem),
         release_areas,
     );
+    if let Some(outline) = outline {
+        builder.add_u8_array(
+            &format!("{scenario_path}/outline"),
+            &[height, width],
+            &["y", "x"],
+            store_schema::outline_attributes(dem, outline.source),
+            outline.to_u8(),
+        );
+    }
     for RunField {
         name,
         data,
@@ -339,7 +372,7 @@ mod tests {
             created_at: 1.0,
             settings: SimSettings::default(),
         };
-        build_result_store("site-a_1234", "scenario-b_5678", &dem, &release, &run)
+        build_result_store("site-a_1234", "scenario-b_5678", &dem, &release, None, &run)
     }
 
     fn metadata(entries: &[ZarrEntry], path: &str) -> Value {

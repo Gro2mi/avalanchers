@@ -22,6 +22,7 @@ use pyo3::{
     IntoPyObjectExt,
     exceptions::{PyIOError, PyKeyError, PyRuntimeError, PyTypeError, PyValueError},
     prelude::*,
+    types::PyDict,
 };
 use pythonize::depythonize;
 use simulation::{Simulation, init_logging};
@@ -760,18 +761,75 @@ impl PySimulation {
 
     /// Save the current results to disk.
     ///
+    /// The outline (region of interest) is stored with the scenario when the
+    /// simulation was created from one.
+    ///
     /// Args:
     ///     path: Output zarr path. Defaults to ``avalanchers.zarr``.
+    ///
+    /// Returns:
+    ///     dict: ``store``, ``site`` and ``scenario`` names and the ``run``
+    ///     index the results were stored at.
     #[pyo3(signature = (path=None))]
-    pub fn save(&mut self, path: Option<String>) -> PyResult<()> {
-        match path {
-            Some(path) => self
-                .inner
-                .save_with_path(&path)
-                .block_on()
-                .map_runtime_err(),
-            None => self.inner.save().block_on().map_runtime_err(),
+    pub fn save<'py>(
+        &mut self,
+        py: Python<'py>,
+        path: Option<String>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let saved = match path {
+            Some(path) => self.inner.save_with_path(&path).block_on(),
+            None => self.inner.save().block_on(),
         }
+        .map_runtime_err()?;
+        let dict = PyDict::new(py);
+        dict.set_item("store", saved.store)?;
+        dict.set_item("site", saved.site)?;
+        dict.set_item("scenario", saved.scenario)?;
+        dict.set_item("run", saved.run_id)?;
+        Ok(dict)
+    }
+
+    /// Diagnostic state of the simulation, read from the GPU (timestep,
+    /// simulated time, particle count, stop ``flags``, ...).
+    #[getter]
+    pub fn sim_info(&mut self) -> PyResult<PySimInfo> {
+        let sim_info = self.inner.fetch_sim_info().block_on().map_runtime_err()?;
+        Ok(PySimInfo { inner: sim_info })
+    }
+
+    /// The GPU adapter the simulation runs on.
+    ///
+    /// Returns:
+    ///     dict: ``name``, ``device_type`` (e.g. ``"DiscreteGpu"``, ``"Cpu"``),
+    ///     ``backend`` (e.g. ``"Vulkan"``), ``vendor`` and ``device`` (PCI
+    ///     ids), ``driver`` and ``driver_info``.
+    #[getter]
+    pub fn adapter_info<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let info = self.inner.adapter_info();
+        let dict = PyDict::new(py);
+        dict.set_item("name", info.name)?;
+        dict.set_item("device_type", format!("{:?}", info.device_type))?;
+        dict.set_item("backend", format!("{:?}", info.backend))?;
+        dict.set_item("vendor", info.vendor)?;
+        dict.set_item("device", info.device)?;
+        dict.set_item("driver", info.driver)?;
+        dict.set_item("driver_info", info.driver_info)?;
+        Ok(dict)
+    }
+
+    /// Release volume and center-of-mass trajectory of the finished run,
+    /// without the grid readbacks of :meth:`save`.
+    ///
+    /// Returns:
+    ///     dict: ``release_volume_m3``, ``travel_length`` (m) and
+    ///     ``travel_angle`` (degrees) of the center of mass.
+    pub fn run_summary<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let summary = self.inner.run_summary().block_on().map_runtime_err()?;
+        let dict = PyDict::new(py);
+        dict.set_item("release_volume_m3", summary.release_volume_m3)?;
+        dict.set_item("travel_length", summary.travel_length)?;
+        dict.set_item("travel_angle", summary.travel_angle)?;
+        Ok(dict)
     }
 
     /// Write a grid to an ESRI ASCII file georeferenced by the DEM.

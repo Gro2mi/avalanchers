@@ -6,7 +6,8 @@
 //! an interrupted save is overwritten by the next one.
 
 use crate::store_schema::{
-    self, Attributes, FORMAT_VERSION, NO_DATA_U32, RunField, RunRecord, SOFTWARE_VERSION, Scalar,
+    self, Attributes, FORMAT_VERSION, NO_DATA_U32, Outline, RunField, RunRecord, SOFTWARE_VERSION,
+    Scalar,
 };
 use compute_core::dem::Dem;
 use half::f16;
@@ -118,16 +119,18 @@ impl Output {
     }
 
     /// Appends a run to `<site>/<scenario>`, creating both as needed, and
-    /// returns its run id.
+    /// returns its run id. The `outline` is stored with the scenario; a
+    /// scenario that already holds another outline is not appended to.
     pub fn add_run(
         &self,
         site_name: &str,
         scenario_name: &str,
         dem: &Dem,
         release_area: &[f32],
+        outline: Option<Outline<'_>>,
         run: &RunRecord,
     ) -> Result<u64, OutputError> {
-        Self::validate(dem, release_area, run)?;
+        Self::validate(dem, release_area, outline, run)?;
 
         let _lock = self.lock()?;
         if !self.node_exists(site_name) {
@@ -137,17 +140,28 @@ impl Output {
         if !self.node_exists(&scenario) {
             self.create_scenario(&scenario, dem, release_area, run)?;
         }
+        if let Some(outline) = outline {
+            self.store_outline(&scenario, dem, outline)?;
+        }
         self.append_run(&scenario, dem, run)
     }
 
-    fn validate(dem: &Dem, release_area: &[f32], run: &RunRecord) -> Result<(), OutputError> {
+    fn validate(
+        dem: &Dem,
+        release_area: &[f32],
+        outline: Option<Outline<'_>>,
+        run: &RunRecord,
+    ) -> Result<(), OutputError> {
         let cells = dem.width * dem.height;
         let grids = run.grids(dem);
-        let sizes = [
+        let mut sizes = vec![
             ("release_area", release_area.len()),
             (grids[0].name, grids[0].data.len()),
             (grids[1].name, grids[1].data.len()),
         ];
+        if let Some(outline) = outline {
+            sizes.push(("outline", outline.cells.len()));
+        }
         for (name, size) in sizes {
             if size != cells {
                 return Err(OutputError::InvalidData(format!(
@@ -349,6 +363,48 @@ impl Output {
         }
 
         self.create_group(scenario, store_schema::scenario_attributes(0, &[]))
+    }
+
+    /// Writes the outline of `scenario` unless it already has it. Its hash in
+    /// the scenario attributes is committed after the array, like a run.
+    fn store_outline(
+        &self,
+        scenario: &str,
+        dem: &Dem,
+        outline: Outline<'_>,
+    ) -> Result<(), OutputError> {
+        let mut group = Group::open(self.store.clone(), &format!("/{scenario}"))?;
+        let hash = outline.hash();
+        match group
+            .attributes()
+            .get("outline_hash")
+            .and_then(Value::as_str)
+        {
+            Some(stored) if stored == hash => return Ok(()),
+            Some(stored) => {
+                return Err(OutputError::InvalidData(format!(
+                    "Scenario '{scenario}' holds another outline (hash {stored}, got {hash})"
+                )));
+            }
+            None => {}
+        }
+        let (height, width) = (dem.height as u64, dem.width as u64);
+        let array = self.create_array(
+            &format!("{scenario}/outline"),
+            vec![height, width],
+            vec![height, width],
+            zarrs::array::data_type::uint8(),
+            FillValue::from(0u8),
+            1,
+            &["y", "x"],
+            store_schema::outline_attributes(dem, outline.source),
+        )?;
+        array.store_chunk(&[0, 0], outline.to_u8())?;
+
+        group
+            .attributes_mut()
+            .insert("outline_hash".to_string(), json!(hash));
+        self.commit_group(scenario, &group)
     }
 
     fn append_run(&self, scenario: &str, dem: &Dem, run: &RunRecord) -> Result<u64, OutputError> {
@@ -618,7 +674,7 @@ mod tests {
 
     fn add(output: &Output, run: &RunRecord) -> u64 {
         output
-            .add_run("Chamonix", "Valley_A", &dem(), &[1.5; CELLS], run)
+            .add_run("Chamonix", "Valley_A", &dem(), &[1.5; CELLS], None, run)
             .unwrap()
     }
 
@@ -766,7 +822,7 @@ mod tests {
         let mut bad = run(1.0, 3);
         bad.peak_flow_velocity.pop();
 
-        let result = output.add_run("Chamonix", "Valley_A", &dem(), &[1.5; CELLS], &bad);
+        let result = output.add_run("Chamonix", "Valley_A", &dem(), &[1.5; CELLS], None, &bad);
         assert!(matches!(result, Err(OutputError::InvalidData(_))));
         assert!(!path.join("Chamonix").exists());
     }
@@ -851,9 +907,113 @@ mod tests {
         nodes
     }
 
+    /// Inside the outline: the first cell of the two upper rows.
+    const OUTLINE: [bool; CELLS] = {
+        let mut cells = [false; CELLS];
+        cells[WIDTH] = true;
+        cells[2 * WIDTH] = true;
+        cells
+    };
+
+    fn outline(cells: &[bool]) -> Option<Outline<'_>> {
+        Some(Outline {
+            cells,
+            source: "polygon_7",
+        })
+    }
+
+    fn add_with_outline(
+        output: &Output,
+        cells: &[bool],
+        run: &RunRecord,
+    ) -> Result<u64, OutputError> {
+        output.add_run(
+            "Chamonix",
+            "Valley_A",
+            &dem(),
+            &[1.5; CELLS],
+            outline(cells),
+            run,
+        )
+    }
+
+    #[test_log::test]
+    fn test_outline_is_stored_with_the_scenario() {
+        let (_tmp_dir, _path, output) = store("outline.zarr");
+        add_with_outline(&output, &OUTLINE, &run(1.0, 3)).unwrap();
+
+        let stored: Vec<u8> = read(&output, &format!("{SCENARIO}/outline"));
+        let expected: Vec<u8> = OUTLINE.iter().map(|&inside| inside as u8).collect();
+        assert_eq!(stored, expected);
+
+        let array = Array::open(output.store.clone(), &format!("/{SCENARIO}/outline")).unwrap();
+        assert_eq!(array.attributes()["source"], "polygon_7");
+        assert_eq!(array.attributes()["flag_meanings"], "outside inside");
+        let group = Group::open(output.store.clone(), &format!("/{SCENARIO}")).unwrap();
+        assert_eq!(
+            group.attributes()["outline_hash"],
+            json!(outline(&OUTLINE).unwrap().hash())
+        );
+    }
+
+    #[test_log::test]
+    fn test_runs_without_outline_store_none() {
+        let (_tmp_dir, path, output) = store("no_outline.zarr");
+        add(&output, &run(1.0, 3));
+        assert!(!path.join(SCENARIO).join("outline").exists());
+        let group = Group::open(output.store.clone(), &format!("/{SCENARIO}")).unwrap();
+        assert!(group.attributes().get("outline_hash").is_none());
+    }
+
+    #[test_log::test]
+    fn test_runs_with_the_same_outline_share_the_scenario() {
+        let (_tmp_dir, _path, output) = store("same_outline.zarr");
+        assert_eq!(
+            add_with_outline(&output, &OUTLINE, &run(1.0, 3)).unwrap(),
+            0
+        );
+        assert_eq!(
+            add_with_outline(&output, &OUTLINE, &run(2.0, 3)).unwrap(),
+            1
+        );
+        // A run without an outline keeps the stored one.
+        assert_eq!(add(&output, &run(3.0, 3)), 2);
+        assert_eq!(number_of_runs(&output), 3);
+    }
+
+    #[test_log::test]
+    fn test_another_outline_is_rejected() {
+        let (_tmp_dir, _path, output) = store("other_outline.zarr");
+        add_with_outline(&output, &OUTLINE, &run(1.0, 3)).unwrap();
+
+        let mut other = OUTLINE;
+        other[0] = true;
+        let error = add_with_outline(&output, &other, &run(2.0, 3)).unwrap_err();
+        assert!(matches!(error, OutputError::InvalidData(_)), "{error}");
+        assert_eq!(number_of_runs(&output), 1);
+    }
+
+    #[test_log::test]
+    fn test_outline_of_the_wrong_size_is_rejected() {
+        let (_tmp_dir, path, output) = store("short_outline.zarr");
+        let error = add_with_outline(&output, &OUTLINE[1..], &run(1.0, 3)).unwrap_err();
+        assert!(matches!(error, OutputError::InvalidData(_)), "{error}");
+        assert!(!path.join("Chamonix").exists());
+    }
+
     fn write_browser_store(path: &Path) {
-        let entries =
-            build_result_store("Chamonix", "Valley_A", &dem(), &[1.5; CELLS], &run(1.0, 5));
+        write_browser_store_with(path, None);
+    }
+
+    fn write_browser_store_with(path: &Path, outline: Option<Outline<'_>>) {
+        let entries = build_result_store(
+            "Chamonix",
+            "Valley_A",
+            &dem(),
+            &[1.5; CELLS],
+            outline,
+            &run(1.0, 5),
+        );
         for entry in entries {
             let file = path.join(&entry.path);
             fs::create_dir_all(file.parent().unwrap()).unwrap();
@@ -870,6 +1030,23 @@ mod tests {
         write_browser_store(&browser_path);
 
         assert_eq!(schema(&browser_path), schema(&native_path));
+    }
+
+    #[test_log::test]
+    fn test_browser_stores_with_outline_have_the_native_layout() {
+        let (tmp_dir, native_path, output) = store("native.zarr");
+        add_with_outline(&output, &OUTLINE, &run(1.0, 5)).unwrap();
+
+        let browser_path = tmp_dir.path().join("browser.zarr");
+        write_browser_store_with(&browser_path, outline(&OUTLINE));
+
+        assert_eq!(schema(&browser_path), schema(&native_path));
+        // The native writer accepts the outline the browser wrote.
+        let browser = Output::new(browser_path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            add_with_outline(&browser, &OUTLINE, &run(2.0, 5)).unwrap(),
+            1
+        );
     }
 
     #[test_log::test]

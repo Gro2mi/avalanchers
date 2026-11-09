@@ -208,9 +208,68 @@ jobs:
           command: build
           args: --release --out dist --find-interpreter
 
-      - name: Install wasm-pack
+      # wasm-pack downloads wasm-bindgen and wasm-opt from GitHub releases on
+      # every run and gives up on the first failed request, which breaks the
+      # build whenever GitHub's release downloads hiccup. Install pinned tools
+      # ourselves (with retries, cached between runs) so wasm-pack finds them
+      # on PATH and downloads nothing.
+      - name: Resolve WASM tool versions
+        id: wasm-tools
         if: matrix.os == 'ubuntu-latest'
-        run: cargo install wasm-pack
+        run: |
+          set -euo pipefail
+          # wasm-bindgen-cli must match the wasm-bindgen crate exactly.
+          wasm_bindgen=$(cargo metadata --format-version 1 --manifest-path crates/wasm_bindings/Cargo.toml \
+            | jq -r '[.packages[] | select(.name == "wasm-bindgen") | .version] | first')
+          echo "wasm-bindgen=$wasm_bindgen" >> "$GITHUB_OUTPUT"
+          echo "wasm-pack=0.15.1" >> "$GITHUB_OUTPUT"
+          echo "binaryen=130" >> "$GITHUB_OUTPUT"
+          echo "dir=$HOME/.wasm-tools" >> "$GITHUB_OUTPUT"
+
+      - name: Cache WASM tools
+        id: wasm-tools-cache
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.wasm-tools.outputs.dir }}
+          key: wasm-tools-${{ runner.os }}-pack${{ steps.wasm-tools.outputs.wasm-pack }}-bindgen${{ steps.wasm-tools.outputs.wasm-bindgen }}-binaryen${{ steps.wasm-tools.outputs.binaryen }}
+
+      - name: Install wasm-pack, wasm-bindgen and wasm-opt
+        if: matrix.os == 'ubuntu-latest' && steps.wasm-tools-cache.outputs.cache-hit != 'true'
+        env:
+          TOOLS: ${{ steps.wasm-tools.outputs.dir }}
+          WASM_PACK: ${{ steps.wasm-tools.outputs.wasm-pack }}
+          WASM_BINDGEN: ${{ steps.wasm-tools.outputs.wasm-bindgen }}
+          BINARYEN: ${{ steps.wasm-tools.outputs.binaryen }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$TOOLS/bin"
+          fetch() {
+            curl -fsSL --retry 6 --retry-all-errors --retry-delay 10 -o "$RUNNER_TEMP/tool.tar.gz" "$1"
+            tar xzf "$RUNNER_TEMP/tool.tar.gz" -C "$TOOLS"
+          }
+
+          # crates.io, not GitHub releases: the prebuilt wasm-pack asset is flaky.
+          cargo install wasm-pack --version "$WASM_PACK" --locked --root "$TOOLS"
+
+          if fetch "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/${WASM_BINDGEN}/wasm-bindgen-${WASM_BINDGEN}-x86_64-unknown-linux-musl.tar.gz"; then
+            mv "$TOOLS/wasm-bindgen-${WASM_BINDGEN}-x86_64-unknown-linux-musl"/{wasm-bindgen,wasm-bindgen-test-runner,wasm2es6js} "$TOOLS/bin/"
+          else
+            echo "::warning::prebuilt wasm-bindgen download failed, building it from source"
+            cargo install wasm-bindgen-cli --version "$WASM_BINDGEN" --locked --root "$TOOLS"
+          fi
+
+          fetch "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN}/binaryen-version_${BINARYEN}-x86_64-linux.tar.gz"
+          mv "$TOOLS/binaryen-version_${BINARYEN}/bin/wasm-opt" "$TOOLS/bin/"
+          rm -rf "$TOOLS"/wasm-bindgen-*-musl "$TOOLS"/binaryen-version_*
+
+      - name: Add WASM tools to PATH
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          echo "${{ steps.wasm-tools.outputs.dir }}/bin" >> "$GITHUB_PATH"
+          "${{ steps.wasm-tools.outputs.dir }}/bin/wasm-pack" --version
+          "${{ steps.wasm-tools.outputs.dir }}/bin/wasm-bindgen" --version
+          "${{ steps.wasm-tools.outputs.dir }}/bin/wasm-opt" --version
 
       - name: Build WASM (Ubuntu Only)
         if: matrix.os == 'ubuntu-latest'

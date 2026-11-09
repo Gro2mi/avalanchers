@@ -5,6 +5,8 @@ All notable changes to this project might be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- Errors of the swissALTI3D tile manager now say what went wrong instead of only "Failed to create
+  tile manager", also when the tiles were fetched for an existing manager.
 - The simulation runs in Chrome again. The center of mass shader failed WGSL uniformity validation
   there, which Firefox does not enforce.
 - The biggest-blob center of mass no longer risks reading stale blob labels or masses. Its phases
@@ -102,6 +104,20 @@ All notable changes to this project might be documented in this file.
   shortened the runout: the energy line benchmark is now 5 m from its reference, not 307 m.
 
 ### Added
+- Result stores keep the outline: a scenario run from an outline gets an `outline` array (`uint8`,
+  1 inside) and its `outline_hash`. A run with another outline is not appended to that scenario,
+  and a scenario loaded from a store brings its outline back as the region of interest. DEM-only
+  runs store none. The store format stays 0.2.0.
+- A simulation created from an outline with a DEM fetched from swissALTI3D tiles names its site
+  after the outline file (`polygon-10720_<hash>`) instead of `default-site_<hash>`.
+- `save` returns the `store`, `site`, `scenario` and `run` it wrote to. Python also gets the
+  `sim_info` and `adapter_info` getters and `run_summary()`, which gives the release volume and the
+  center-of-mass travel length and angle without the grid readbacks of a save.
+- `AVALANCHERS_TILES_OFFLINE=1` turns a missing swissALTI3D tile into a `tile_missing` error
+  instead of a download, so many concurrent jobs only read a prefilled cache.
+  `AVALANCHERS_TILE_DELAY_MS` pauses after each downloaded tile. Tiles are still downloaded one
+  after another, and a request the server throttles (HTTP 429 or 503) is retried after its
+  `Retry-After`, up to five times.
 - `Simulation::release_area_terrain` and the Python getters `release_mean_slope_angle`,
   `release_max_slope_angle`, `release_mean_aspect` and `release_mean_elevation` give the mean
   terrain and the largest slope angle of the release cells.

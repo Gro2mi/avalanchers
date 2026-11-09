@@ -5,6 +5,7 @@
 //! <store>.zarr/                  attrs: avalanchers_format, Conventions, ...
 //!   <site>_<dem hash>/           dem, x, y, spatial_ref
 //!     <scenario>_<release hash>/ x, y, spatial_ref, release_area,
+//!                                outline (y, x; optional, attrs: outline_hash),
 //!                                peak_flow_velocity, peak_flow_thickness (run, y, x),
 //!                                center_of_mass_x/y, time (run, timestep),
 //!                                one 1-D array per run value (see RunRecord::columns)
@@ -176,6 +177,49 @@ pub fn release_area_attributes(dem: &Dem) -> Attributes {
         attributes(json!({
             "long_name": "Release Area Thickness",
             "units": "m",
+        })),
+    )
+}
+
+/// The outline (region of interest) the runs of a scenario are evaluated
+/// against, stored as a `uint8` 0/1 mask next to the release area.
+#[derive(Clone, Copy, Debug)]
+pub struct Outline<'a> {
+    /// One entry per DEM cell, `true` inside the outline.
+    pub cells: &'a [bool],
+    /// Where the outline came from, e.g. the stem of its shapefile.
+    pub source: &'a str,
+}
+
+impl Outline<'_> {
+    /// The mask as stored, 1 inside and 0 outside.
+    pub fn to_u8(&self) -> Vec<u8> {
+        self.cells.iter().map(|&inside| inside as u8).collect()
+    }
+
+    /// FNV-1a hash of the mask in hex. It is stable across builds, so a
+    /// scenario can tell whether a later run used the same outline.
+    pub fn hash(&self) -> String {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for &inside in self.cells {
+            hash ^= inside as u64;
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
+        }
+        hash ^= self.cells.len() as u64;
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+        format!("{hash:016x}")
+    }
+}
+
+pub fn outline_attributes(dem: &Dem, source: &str) -> Attributes {
+    with_grid_mapping(
+        dem,
+        attributes(json!({
+            "long_name": "Avalanche outline",
+            "description": "Mapped outline the runs are evaluated against",
+            "flag_values": [0, 1],
+            "flag_meanings": "outside inside",
+            "source": source,
         })),
     )
 }

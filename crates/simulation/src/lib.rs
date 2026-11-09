@@ -45,7 +45,7 @@ use compute_core::{
     settings::{CrownLineMethod, ReleaseFillMethod, Settings, SimModel, SimSettings},
     utils::*,
 };
-use data_processor::store_schema::{RunRecord, store_path_stem};
+use data_processor::store_schema::{Outline, RunRecord, store_path_stem};
 #[cfg(target_arch = "wasm32")]
 use data_processor::zarr_writer::ZarrEntry;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -176,6 +176,12 @@ pub struct SimulationLoadResult {
     pub dem: Dem,
     /// Region-of-interest (area that should be considered for release areas, e.g. avalanche outline) cell mask, `width * height` long.
     pub roi: Vec<bool>,
+    /// Where the outline in `roi` came from: the stem of the outline file,
+    /// or the `source` of an outline read back from a result store. `None`
+    /// when `roi` is no outline, e.g. the all-true mask of a DEM-only run.
+    pub outline_source: Option<String>,
+    /// Path of the outline file, if one was configured.
+    pub outlines_path: Option<String>,
     /// Path the DEM was loaded from; empty when unknown.
     pub dem_path: String,
     /// Path of a release-area texture, if one was configured.
@@ -242,6 +248,11 @@ pub struct Simulation {
     /// Region-of-interest (avalanche outline) cell mask, one entry per cell.
     pub roi: Vec<bool>,
     roi_uploaded: bool,
+    /// Origin of the outline in `roi`, stored with the results; `None` when
+    /// `roi` is no outline (see [`SimulationLoadResult::outline_source`]).
+    outline_source: Option<String>,
+    /// Path of the outline file the simulation was created from.
+    outlines_path: Option<String>,
     /// Destination of [`Simulation::save`] (Zarr store path or prefix).
     pub output_path: String,
     release_areas_path: Option<String>,
@@ -282,6 +293,39 @@ pub struct Simulation {
     initial_state: Option<InitialState>,
     #[cfg(not(target_arch = "wasm32"))]
     output: Option<data_processor::output::Output>,
+}
+
+/// Where [`Simulation::save`] stored a run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SavedRun {
+    /// Path of the Zarr store.
+    pub store: String,
+    pub site: String,
+    pub scenario: String,
+    /// Index of the run along the scenario's `run` dimension.
+    pub run_id: u64,
+}
+
+/// Values of a finished run that need no grid readback, see
+/// [`Simulation::run_summary`].
+#[derive(Clone, Copy, Debug)]
+pub struct RunSummary {
+    /// Volume of the particles at the end of the run, from their mass and
+    /// the snow density (as stored with a saved run).
+    pub release_volume_m3: f32,
+    /// Length of the center-of-mass path in metres.
+    pub travel_length: f32,
+    /// Angle of the center-of-mass path in degrees.
+    pub travel_angle: f32,
+}
+
+/// Stem of a file path, e.g. `polygon_10720` for `data/polygon_10720.shp`.
+fn file_stem(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or(path)
+        .to_string()
 }
 
 /// Terrain of the release area, see [`Simulation::release_area_terrain`].
@@ -382,6 +426,8 @@ impl Simulation {
             dem_path: String::new(),
             dem: Dem::default(),
             roi: Vec::new(),
+            outline_source: None,
+            outlines_path: None,
             roi_uploaded: false,
             number_particles: 0,
             state: SimulationState::Uninitialized,
@@ -486,9 +532,26 @@ impl Simulation {
             settings.release_areas_path.clone(),
         );
 
-        let (settings_result, dem_result, outline) =
+        #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
+        let (settings_result, dem_result, mut outline) =
             data_processor::create_sim_settings_and_dem(settings).await?;
         settings_result.validate().map_err(anyhow::Error::msg)?;
+
+        #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
+        let mut outline_source = settings.outlines_path.as_deref().map(file_stem);
+        // A scenario read back from a result store brings its outline along,
+        // so it is evaluated against the same outline again.
+        #[cfg(not(target_arch = "wasm32"))]
+        if outline_source.is_none()
+            && let Some(path) = release_areas_path.as_deref()
+            && data_processor::store_schema::split_store_path(path).is_some()
+            && let Some((cells, source)) = data_processor::store_reader::read_outline(path)?
+            && cells.len() == outline.len()
+        {
+            info!("Using the outline stored with {path}");
+            outline = cells;
+            outline_source = Some(source);
+        }
 
         timer_checkpoint("Load settings");
 
@@ -498,6 +561,8 @@ impl Simulation {
             enable_particle_relaxation: settings.enable_particle_relaxation.unwrap_or(true),
             dem: dem_result,
             roi: outline,
+            outline_source,
+            outlines_path: settings.outlines_path.clone(),
             batch_compute_steps: settings.batch_compute_steps,
             particle_sort_interval: settings.particle_sort_interval,
             dem_path: dem_path.unwrap_or_default(),
@@ -536,6 +601,8 @@ impl Simulation {
         self.dem_path = data.dem_path;
         self.roi = data.roi;
         self.roi_uploaded = false;
+        self.outline_source = data.outline_source;
+        self.outlines_path = data.outlines_path;
         self.output_path = data
             .output_path
             .unwrap_or_else(|| "avalanchers.zarr".to_string());
@@ -824,6 +891,7 @@ impl Simulation {
         }
         self.roi = roi.to_vec();
         self.roi_uploaded = false;
+        self.outline_source = Some("array".to_string());
         Ok(())
     }
 
@@ -1341,7 +1409,7 @@ impl Simulation {
     /// Native only: writes the results to the Zarr store at `path`, switching
     /// away from [`Self::output_path`] if it differs.
     #[cfg(not(target_arch = "wasm32"))]
-    pub async fn save_with_path(&mut self, path: &str) -> Result<()> {
+    pub async fn save_with_path(&mut self, path: &str) -> Result<SavedRun> {
         if self.output_path != path {
             self.output = None;
             self.output_path = path.to_string();
@@ -1351,8 +1419,12 @@ impl Simulation {
 
     /// Name of the site this simulation writes to, derived from the DEM.
     pub fn site_name(&self) -> String {
+        // A DEM fetched from tiles has no path and an attribution as source;
+        // its outline file names the site instead, e.g. `polygon-10720`.
         let source = if !self.dem_path.is_empty() {
             self.dem_path.as_str()
+        } else if let Some(outlines_path) = self.outlines_path.as_deref() {
+            outlines_path
         } else {
             self.dem.source.as_str()
         };
@@ -1436,6 +1508,7 @@ impl Simulation {
             &self.scenario_name(&release_areas),
             &self.dem,
             &release_areas,
+            self.outline(),
             &run,
         ))
     }
@@ -1444,20 +1517,67 @@ impl Simulation {
     /// [`Self::output_path`], creating the site (derived from the DEM, see
     /// [`Self::site_name`]) and scenario (derived from the release areas, see
     /// [`Self::scenario_name`]) entries as needed.
+    ///
+    /// The outline is stored with the scenario when the simulation has one
+    /// (see [`SimulationLoadResult::outline_source`]). Returns where the run
+    /// was stored.
     #[cfg(not(target_arch = "wasm32"))]
-    pub async fn save(&mut self) -> Result<()> {
+    pub async fn save(&mut self) -> Result<SavedRun> {
         let run = self.collect_run().await?;
         let release_areas = self.fetch_release_areas().await?.to_vec();
         timer_checkpoint("Peak data fetched");
 
-        let site_name = self.site_name();
-        let scenario_name = self.scenario_name(&release_areas);
+        let site = self.site_name();
+        let scenario = self.scenario_name(&release_areas);
         if self.output.is_none() {
             self.output = Some(data_processor::output::Output::new(&self.output_path)?);
         }
         let output = self.output.as_ref().unwrap();
-        output.add_run(&site_name, &scenario_name, &self.dem, &release_areas, &run)?;
-        Ok(())
+        let run_id = output.add_run(
+            &site,
+            &scenario,
+            &self.dem,
+            &release_areas,
+            self.outline(),
+            &run,
+        )?;
+        Ok(SavedRun {
+            store: self.output_path.clone(),
+            site,
+            scenario,
+            run_id,
+        })
+    }
+
+    /// The outline stored with the results, if `roi` is one and still fits
+    /// the DEM.
+    fn outline(&self) -> Option<Outline<'_>> {
+        let source = self.outline_source.as_deref()?;
+        (self.roi.len() == self.dem.width * self.dem.height).then_some(Outline {
+            cells: &self.roi,
+            source,
+        })
+    }
+
+    /// Name of the adapter the simulation runs on, with its type and backend.
+    pub fn adapter_info(&self) -> wgpu::AdapterInfo {
+        self.orchestrator.adapter.get_info()
+    }
+
+    /// Release volume and center-of-mass trajectory of the finished run,
+    /// without the grid readbacks of a save.
+    pub async fn run_summary(&mut self) -> Result<RunSummary> {
+        if self.state < SimulationState::Finished {
+            bail!("Run the simulation before summarizing it");
+        }
+        let release_volume_m3 = self.get_total_volume().await?;
+        let center_of_mass = self.fetch_center_of_mass().await?;
+        let (_, _, travel_length, travel_angle) = trajectory_summary(center_of_mass, 0.0, 0.0);
+        Ok(RunSummary {
+            release_volume_m3,
+            travel_length,
+            travel_angle,
+        })
     }
 
     /// Native only: writes the grid `layer` (`peak_velocity`,
@@ -5831,6 +5951,77 @@ mod tests {
             sim.dem.data1d.len(),
             "ROI length should match DEM data length"
         );
+    }
+
+    /// A tile DEM is named after its outline file, the outline is stored with
+    /// the scenario and comes back when the scenario is loaded again.
+    #[test_log::test]
+    fn test_outline_is_saved_and_read_back() {
+        let mut sim = block_on(Simulation::new()).expect("Failed to create Simulation");
+        let settings = Settings {
+            outlines_path: Some(ROI_PATH.to_string()),
+            outlines_padding: Some(50.0),
+            max_steps: Some(20),
+            ..Default::default()
+        };
+        block_on(sim.create(settings)).expect("Failed to create simulation");
+        assert!(sim.site_name().starts_with("polygon-10721_"));
+        block_on(sim.run()).expect("Failed to run simulation");
+        let summary = block_on(sim.run_summary()).expect("Failed to summarize");
+        assert!(summary.release_volume_m3 > 0.0);
+        assert!(summary.travel_length.is_finite() && summary.travel_angle.is_finite());
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let path = tmp_dir.path().join("outline.zarr").display().to_string();
+        let saved = block_on(sim.save_with_path(&path)).expect("Failed to save simulation");
+        assert_eq!(saved.site, sim.site_name());
+        assert_eq!(saved.run_id, 0);
+        let scenario = format!("{path}/{}/{}", saved.site, saved.scenario);
+        let (outline, source) = data_processor::store_reader::read_outline(&scenario)
+            .unwrap()
+            .expect("the outline is stored");
+        assert_eq!(outline, sim.roi);
+        assert_eq!(source, "polygon_10721");
+
+        let mut reloaded = block_on(Simulation::new()).expect("Failed to create Simulation");
+        let settings = Settings {
+            dem_path: Some(scenario.clone()),
+            max_steps: Some(20),
+            ..Default::default()
+        };
+        block_on(reloaded.create(settings)).expect("Failed to load the scenario");
+        assert_eq!(reloaded.roi, sim.roi);
+        block_on(reloaded.run()).expect("Failed to run reloaded simulation");
+        let saved_again =
+            block_on(reloaded.save_with_path(&path)).expect("Failed to save reloaded run");
+        assert_eq!(saved_again.run_id, 1, "same outline, same scenario");
+    }
+
+    /// The all-true mask of a DEM-only simulation is no outline.
+    #[test_log::test]
+    fn test_dem_only_runs_store_no_outline() {
+        let mut sim = setup_simple_sim(40.0, 4.0);
+        block_on(sim.run()).expect("Failed to run simulation");
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let path = tmp_dir.path().join("dem_only.zarr").display().to_string();
+        let saved = block_on(sim.save_with_path(&path)).expect("Failed to save simulation");
+        let scenario = format!("{path}/{}/{}", saved.site, saved.scenario);
+        assert_eq!(
+            data_processor::store_reader::read_outline(&scenario).unwrap(),
+            None
+        );
+    }
+
+    #[test_log::test]
+    fn test_run_summary_and_adapter_info() {
+        let mut sim = setup_simple_sim(40.0, 4.0);
+        assert!(block_on(sim.run_summary()).is_err(), "needs a finished run");
+        block_on(sim.run()).expect("Failed to run simulation");
+        let summary = block_on(sim.run_summary()).expect("Failed to summarize");
+        assert!(summary.release_volume_m3 > 0.0);
+        // NaN without center-of-mass records, as on this tiny grid.
+        assert!(summary.travel_length.is_nan() || summary.travel_length >= 0.0);
+        assert!(!sim.adapter_info().name.is_empty());
     }
 }
 

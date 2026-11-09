@@ -259,6 +259,37 @@ pub(crate) fn read_release_areas(path: &str) -> Result<Vec<f32>, OutputError> {
     Ok(read_array(&selection.open()?, &node)?.0)
 }
 
+/// Reads the outline of the scenario `path` selects together with the
+/// `source` it was stored with, or `None` if the scenario has no outline.
+pub fn read_outline(path: &str) -> Result<Option<(Vec<bool>, String)>, OutputError> {
+    let selection = Selection::parse(path)?;
+    let scenario = selection
+        .scenario
+        .as_ref()
+        .ok_or_else(|| no_scenario(path))?;
+    let node = format!("{}/{scenario}/outline", selection.site);
+    if !Path::new(&selection.store)
+        .join(&node)
+        .join("zarr.json")
+        .is_file()
+    {
+        return Ok(None);
+    }
+    let array = Array::open(selection.open()?, &format!("/{node}"))?;
+    let subset = ArraySubset::new_with_shape(array.shape().to_vec());
+    let cells: Vec<u8> = array.retrieve_array_subset::<Vec<u8>>(&subset)?;
+    let source = array
+        .attributes()
+        .get("source")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    Ok(Some((
+        cells.into_iter().map(|cell| cell != 0).collect(),
+        source,
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,7 +353,7 @@ mod tests {
         let output = Output::new(&path).unwrap();
         for (name, release) in scenarios {
             output
-                .add_run("pass_abc", name, &dem(), release, &run())
+                .add_run("pass_abc", name, &dem(), release, None, &run())
                 .unwrap();
         }
         (tmp_dir, path)
@@ -466,7 +497,7 @@ mod tests {
         let (_tmp_dir, path) = store(&[("north_def", &RELEASE_A)]);
         Output::new(&path)
             .unwrap()
-            .add_run("ridge_jkl", "north_def", &dem(), &RELEASE_A, &run())
+            .add_run("ridge_jkl", "north_def", &dem(), &RELEASE_A, None, &run())
             .unwrap();
 
         for query in [path.clone(), format!("{path}/nope")] {
@@ -497,5 +528,34 @@ mod tests {
         root.store_metadata().unwrap();
         let result = Selection::parse(&path);
         assert!(matches!(result, Err(OutputError::Format { .. })));
+    }
+
+    #[test_log::test]
+    fn test_outline_is_read_back_with_its_source() {
+        use crate::store_schema::Outline;
+        let (_tmp_dir, path) = store(&[("north_def", &RELEASE_A)]);
+        let scenario = format!("{path}/pass_abc/north_def");
+        assert_eq!(read_outline(&scenario).unwrap(), None);
+
+        let cells = [true, false, false, true, true, false];
+        Output::new(&path)
+            .unwrap()
+            .add_run(
+                "pass_abc",
+                "south_xyz",
+                &dem(),
+                &RELEASE_A,
+                Some(Outline {
+                    cells: &cells,
+                    source: "polygon_3",
+                }),
+                &run(),
+            )
+            .unwrap();
+        let (read, source) = read_outline(&format!("{path}/pass_abc/south_xyz"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(read, cells);
+        assert_eq!(source, "polygon_3");
     }
 }

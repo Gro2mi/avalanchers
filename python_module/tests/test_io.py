@@ -211,6 +211,43 @@ def test_simulation_save():
         shutil.rmtree(path)
 
 
+@pytest.mark.slow
+def test_outline_is_saved_with_the_scenario(tmp_path, monkeypatch):
+    # The Rust tests keep the swissALTI3D tiles of this outline in
+    # crates/simulation/dtm_cache.zarr, which TileManager opens from the cwd.
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    monkeypatch.chdir(os.path.join(repo, "crates", "simulation"))
+    path = str(tmp_path / "outline.zarr")
+
+    sim = avalanchers.PySimulation.new()
+    sim.create(
+        {
+            "outlines_path": "../../data/outline/polygon_10721.shp",
+            "outlines_padding": 50,
+            "max_steps": 20,
+        }
+    )
+    sim.run()
+    summary = sim.run_summary()
+    assert summary["release_volume_m3"] > 0
+    assert np.isfinite(summary["travel_angle"])
+    assert sim.sim_info.timestep > 0
+    assert sim.adapter_info["name"]
+
+    saved = sim.save(path)
+    assert saved["site"].startswith("polygon-10721_")
+    assert saved["run"] == 0
+
+    data = AvalanchersOutput(path)
+    site = data.get_site(saved["site"])
+    ds = site.get_scenario(saved["scenario"]).dataset
+    assert ds.outline.dims == ("y", "x")
+    assert ds.outline.attrs["source"] == "polygon_10721"
+    # Same orientation as the DEM: row 0 is the south edge in both.
+    np.testing.assert_array_equal(ds.outline.values, sim.roi.astype(np.uint8))
+    np.testing.assert_array_equal(site.dem.values, sim.dem)
+
+
 def assert_dataarray_shape(
     ds: xr.Dataset,
     variable: str,

@@ -53,7 +53,7 @@ pub enum DataProcessorError {
     #[error("No outlines path provided")]
     NoneOutlinesPath,
     #[cfg(not(target_arch = "wasm32"))]
-    #[error("Failed to create tile manager")]
+    #[error("Tile manager: {0}")]
     TileManagerError(#[from] crate::tile_manager::TileManagerError),
     #[cfg(not(target_arch = "wasm32"))]
     #[error(transparent)]
