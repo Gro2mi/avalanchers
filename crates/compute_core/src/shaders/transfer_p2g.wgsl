@@ -5,6 +5,15 @@ fn quantize_momentum_component(value: f32) -> i32 {
     return i32(round(clamped));
 }
 
+// Quantized mass contribution of the integer grid. A contribution whose mass
+// rounds to zero must not deposit momentum either: mass is quantized 10x
+// coarser than momentum (MASS_FACTOR vs MOMENTUM_FACTOR), so light particles
+// with small stencil weights (thin flow margins, many particles per cell)
+// would leave momentum without mass and an unbounded node velocity.
+fn quantize_mass(value: f32) -> u32 {
+    return u32(round(value * MASS_FACTOR));
+}
+
 fn transfer_p2g(p_idx: u32) {
     transfer_p2g_with_affine(p_idx, mat2x2f(vec2f(0.0), vec2f(0.0)));
 }
@@ -35,7 +44,9 @@ fn transfer_p2g_with_affine(p_idx: u32, affine_matrix: mat2x2f) {
             // atomicAdd(&grid_momentum_atomic[idx * 2u], p_mass * affine_velocity.x * weight);
             // atomicAdd(&grid_momentum_atomic[idx * 2u + 1u], p_mass * affine_velocity.y * weight);
 
-            atomicAdd(&grid_mass_atomic[idx], u32(round(p_mass * weight * MASS_FACTOR))); // no_atomic_float 
+            let quantized_mass = quantize_mass(p_mass * weight); // no_atomic_float
+            if quantized_mass == 0u { continue; } // no_atomic_float
+            atomicAdd(&grid_mass_atomic[idx], quantized_mass); // no_atomic_float
             let momentum_x = p_mass * affine_velocity.x * weight * MOMENTUM_FACTOR; // no_atomic_float
             let momentum_y = p_mass * affine_velocity.y * weight * MOMENTUM_FACTOR; // no_atomic_float
             // resting particles carry no momentum; skipping zero adds saves most of their atomics
