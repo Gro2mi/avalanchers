@@ -289,7 +289,9 @@ pub struct RunRecord {
     pub center_of_mass_y: Vec<f32>,
     pub time: Vec<f32>,
     pub release_volume_m3: f32,
-    pub travel_length: f32,
+    pub travel_length_2d: f32,
+    pub travel_length_3d: f32,
+    pub travel_vertical_drop: f32,
     pub travel_angle: f32,
     pub final_timestep: u32,
     pub simulated_time: f32,
@@ -367,12 +369,30 @@ impl RunRecord {
                 plain("Release volume", "m3"),
             ),
             column(
-                "travel_length",
-                Scalar::F32(self.travel_length),
+                "travel_length_2d",
+                Scalar::F32(self.travel_length_2d),
                 attributes(json!({
-                    "long_name": "Travel length",
+                    "long_name": "2D travel length",
                     "units": "m",
-                    "description": "Length of the path of the center of mass",
+                    "description": "Horizontal length of the path of the center of mass",
+                })),
+            ),
+            column(
+                "travel_length_3d",
+                Scalar::F32(self.travel_length_3d),
+                attributes(json!({
+                    "long_name": "3D travel length",
+                    "units": "m",
+                    "description": "Three-dimensional length of the path of the center of mass",
+                })),
+            ),
+            column(
+                "travel_vertical_drop",
+                Scalar::F32(self.travel_vertical_drop),
+                attributes(json!({
+                    "long_name": "Center-of-mass vertical drop",
+                    "units": "m",
+                    "description": "First minus last valid center-of-mass elevation; negative for a net rise",
                 })),
             ),
             column(
@@ -542,7 +562,9 @@ mod tests {
             center_of_mass_y: Vec::new(),
             time: Vec::new(),
             release_volume_m3: 1.0,
-            travel_length: 2.0,
+            travel_length_2d: 2.0,
+            travel_length_3d: 2.5,
+            travel_vertical_drop: 1.5,
             travel_angle: 3.0,
             final_timestep: 4,
             simulated_time: 5.0,
@@ -574,6 +596,23 @@ mod tests {
         );
         assert_eq!(store_path_stem("runs.zarr"), None);
         assert_eq!(store_path_stem("dem_1.asc"), None);
+    }
+
+    #[test]
+    fn test_travel_length_columns_describe_horizontal_and_3d_paths() {
+        let columns = record(SimSettings::default()).columns(0, 0);
+        assert_eq!(find(&columns, "travel_length_2d"), Scalar::F32(2.0));
+        assert_eq!(find(&columns, "travel_length_3d"), Scalar::F32(2.5));
+        assert_eq!(find(&columns, "travel_vertical_drop"), Scalar::F32(1.5));
+        assert!(columns.iter().all(|column| column.name != "travel_length"));
+        for name in [
+            "travel_length_2d",
+            "travel_length_3d",
+            "travel_vertical_drop",
+        ] {
+            let column = columns.iter().find(|column| column.name == name).unwrap();
+            assert_eq!(column.attributes["units"], "m");
+        }
     }
 
     #[test]

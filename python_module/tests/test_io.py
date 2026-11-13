@@ -10,6 +10,54 @@ import zarr
 from avalanchers import AvalanchersOutput
 
 
+@pytest.mark.parametrize(
+    "model",
+    ["terrain-following", "curvilinear", "mpmdac", "sliding-block", "3d-depth-averaged"],
+)
+@pytest.mark.parametrize("batched", [False, True])
+def test_every_simulation_model_saves_3d_travel_length(tmp_path, model, batched):
+    sim = avalanchers.PySimulation.new()
+    sim.create({
+        "sim_model": model,
+        "max_steps": 20,
+        "cfl": 0.1,
+        "released_particles_per_cell": 4,
+        "enable_center_of_mass": True,
+    })
+    x = np.arange(32, dtype=np.float32) * 4.0
+    dem = np.ascontiguousarray(
+        np.tile(1000.0 + x * np.tan(np.deg2rad(35.0)), (32, 1)), dtype=np.float32
+    )
+    release = np.zeros((32, 32), dtype=np.float32)
+    release[14:18, 14:18] = 1.0
+    sim.set_dem_with_bounds(dem, 4.0, 0.0, 128.0, 0.0, 128.0, 1.0)
+    sim.set_release_areas(release)
+    if batched:
+        info = sim.run_n_steps(3)
+        assert np.isfinite(info.travel_length_3d)
+        while info.timestep < 20 and not info.flags & (1 << 31):
+            info = sim.run_n_steps(5)
+    else:
+        sim.run()
+        info = sim.sim_info
+    summary = sim.run_summary()
+    assert np.isfinite(summary["travel_length_2d"])
+    assert np.isfinite(summary["travel_length_3d"])
+    assert summary["travel_length_3d"] >= summary["travel_length_2d"] - 1e-4
+    for name in ("travel_length_2d", "travel_length_3d", "travel_vertical_drop", "travel_angle"):
+        assert summary[name] == pytest.approx(getattr(info, name))
+        assert info[name] == pytest.approx(summary[name])
+
+    path = str(tmp_path / "run.zarr")
+    saved = sim.save(path)
+    scenario = AvalanchersOutput(path).get_site(saved["site"]).get_scenario(saved["scenario"])
+    stored = scenario.dataset
+    for name in ("travel_length_2d", "travel_length_3d", "travel_vertical_drop", "travel_angle"):
+        assert stored[name].isel(run=0).item() == pytest.approx(summary[name])
+        assert stored[name].attrs["units"] == ("degrees" if name == "travel_angle" else "m")
+    assert "travel_length" not in stored
+
+
 def test_export_calibration_parameters(tmp_path):
     path = str(tmp_path / "calibration.parquet")
 
@@ -185,8 +233,9 @@ def test_simulation_save():
     assert np.isclose(ds.friction_coefficient.isel(run=1).item(), 0.2)
     assert np.isclose(ds.drag_coefficient.isel(run=1).item(), 2000.0)
     assert ds.released_particles_per_cell.isel(run=1).item() > 0
-    assert np.isfinite(ds.travel_length.isel(run=1).item())
-    assert ds.travel_length.isel(run=1).item() > 0
+    assert np.isfinite(ds.travel_length_2d.isel(run=1).item())
+    assert ds.travel_length_2d.isel(run=1).item() > 0
+    assert "travel_length" not in ds
     assert ds.final_timestep.isel(run=1).item() > 0
     time = ds.time.isel(run=1).values
     time = time[np.isfinite(time)]
@@ -231,6 +280,9 @@ def test_outline_is_saved_with_the_scenario(tmp_path, monkeypatch):
     sim.run()
     summary = sim.run_summary()
     assert summary["release_volume_m3"] > 0
+    assert np.isfinite(summary["travel_length_2d"])
+    assert np.isfinite(summary["travel_length_3d"])
+    assert "travel_length" not in summary
     assert np.isfinite(summary["travel_angle"])
     assert sim.sim_info.timestep > 0
     assert sim.adapter_info["name"]

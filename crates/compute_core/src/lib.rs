@@ -153,6 +153,7 @@ pub struct GpuCache {
     pub particles_mass: Option<Vec<f32>>,
     pub grid_mass: Option<Vec<f32>>,
     pub grid_momentum: Option<Vec<f32>>,
+    pub grid_momentum_z: Option<Vec<f32>>,
     pub particles_velocity: Option<Vec<[f32; 2]>>,
     pub particles_velocity_z: Option<Vec<f32>>,
     pub particles_stopped: Option<Vec<ParticleState>>,
@@ -176,6 +177,7 @@ impl GpuCache {
         self.particles_mass = None;
         self.grid_mass = None;
         self.grid_momentum = None;
+        self.grid_momentum_z = None;
         self.particles_velocity = None;
         self.particles_velocity_z = None;
         self.particles_stopped = None;
@@ -198,7 +200,7 @@ impl GpuCache {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct SimInfo {
     pub timestep: u32,
     pub dt: f32,
@@ -209,7 +211,43 @@ pub struct SimInfo {
     pub max_flow_thickness: f32,
     pub flags: u32,
     pub grid_elapsed_time: f32,
+    /// Horizontal center-of-mass path length in metres.
+    pub travel_length_2d: f32,
+    /// Three-dimensional center-of-mass path length in metres.
+    pub travel_length_3d: f32,
+    /// First minus latest valid center-of-mass elevation, in metres.
+    pub travel_vertical_drop: f32,
+    /// atan2(travel_vertical_drop, travel_length_2d), in degrees; zero without horizontal motion.
+    pub travel_angle: f32,
+    pub _first_center_of_mass_timestep: u32,
+    pub _last_center_of_mass_timestep: u32,
+    pub _pad: u32,
 }
+
+impl Default for SimInfo {
+    fn default() -> Self {
+        Self {
+            timestep: 0,
+            dt: 0.0,
+            elapsed_time: 0.0,
+            number_particles: 0,
+            elevation_threshold: 0.0,
+            max_velocity: 0.0,
+            max_flow_thickness: 0.0,
+            flags: 0,
+            grid_elapsed_time: 0.0,
+            travel_length_2d: f32::NAN,
+            travel_length_3d: f32::NAN,
+            travel_vertical_drop: f32::NAN,
+            travel_angle: f32::NAN,
+            _first_center_of_mass_timestep: u32::MAX,
+            _last_center_of_mass_timestep: u32::MAX,
+            _pad: 0,
+        }
+    }
+}
+
+const _: () = assert!(size_of::<SimInfo>() == 64);
 
 impl SimInfo {
     pub fn parsed_flags(&self) -> SimInfoFlags {
@@ -229,6 +267,10 @@ impl std::fmt::Debug for SimInfo {
             .field("elevation_threshold", &self.elevation_threshold)
             .field("max_velocity", &self.max_velocity)
             .field("max_flow_thickness", &self.max_flow_thickness)
+            .field("travel_length_2d", &self.travel_length_2d)
+            .field("travel_length_3d", &self.travel_length_3d)
+            .field("travel_vertical_drop", &self.travel_vertical_drop)
+            .field("travel_angle", &self.travel_angle)
             .field("flags", &self.parsed_flags())
             .finish()
     }
@@ -1121,12 +1163,20 @@ impl ComputeOrchestrator {
             BufferName::SimSettings,
             sim_settings.as_bytes(),
         )?;
-        let mut roi_bits = vec![0u32; roi.len().div_ceil(32)];
-        for (i, &flag) in roi.iter().enumerate() {
-            if flag {
-                roi_bits[i / 32] |= 1 << (i % 32);
+        // an empty mask means no outline: every cell may release
+        let roi_bits = if roi.is_empty() {
+            let number_cells =
+                sim_settings.grid_shape_x as usize * sim_settings.grid_shape_y as usize;
+            vec![u32::MAX; number_cells.div_ceil(32)]
+        } else {
+            let mut roi_bits = vec![0u32; roi.len().div_ceil(32)];
+            for (i, &flag) in roi.iter().enumerate() {
+                if flag {
+                    roi_bits[i / 32] |= 1 << (i % 32);
+                }
             }
-        }
+            roi_bits
+        };
         self.resources
             .write_buffer(&self.queue, BufferName::RegionOfInterest, &roi_bits)?;
         self.run_shader(

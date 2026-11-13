@@ -162,14 +162,19 @@ pub struct RenderView {
 
 impl RenderView {
     /// Builds the view on the simulation's device. Grid and particle buffers are
-    /// bound only if they exist: before `prepare` the view shows bare terrain.
-    /// The canvas `width`/`height` attributes must be set already.
+    /// bound only if they exist and `bind_grids` / `bind_particles` allow it:
+    /// after a new DEM the orchestrator still holds the previous grid's buffers
+    /// until `prepare` rebuilds them, so the caller withholds them and the view
+    /// shows bare terrain. The canvas `width`/`height` attributes must be set
+    /// already.
     pub fn new(
         orchestrator: &ComputeOrchestrator,
         canvas: web_sys::HtmlCanvasElement,
         dem: &Dem,
         exaggeration: f32,
         particle_count: u32,
+        bind_grids: bool,
+        bind_particles: bool,
     ) -> Result<Self> {
         let device = orchestrator.device.clone();
         let queue = orchestrator.queue.clone();
@@ -191,8 +196,17 @@ impl RenderView {
         )?
         .with_vertical_exaggeration(exaggeration);
 
+        let particles = if bind_particles {
+            clone_particle_buffers(orchestrator)
+        } else {
+            None
+        };
         let mut renderer = Renderer::new(&device, &queue, config.format, width, height, &terrain);
-        renderer.particles_mut().set_count(particle_count);
+        renderer.particles_mut().set_count(if particles.is_some() {
+            particle_count
+        } else {
+            0
+        });
         renderer.particles_mut().set_max_velocity(30.0);
         renderer
             .particles_mut()
@@ -205,8 +219,12 @@ impl RenderView {
             terrain,
             device,
             queue,
-            grids: clone_grid_buffers(orchestrator),
-            particles: clone_particle_buffers(orchestrator),
+            grids: if bind_grids {
+                clone_grid_buffers(orchestrator)
+            } else {
+                Vec::new()
+            },
+            particles,
             show_particles: true,
             overlay: Overlay::PeakFlowVelocity,
         };

@@ -313,8 +313,12 @@ pub struct RunSummary {
     /// Volume of the particles at the end of the run, from their mass and
     /// the snow density (as stored with a saved run).
     pub release_volume_m3: f32,
-    /// Length of the center-of-mass path in metres.
-    pub travel_length: f32,
+    /// Horizontal length of the center-of-mass path in metres.
+    pub travel_length_2d: f32,
+    /// Three-dimensional length of the center-of-mass path in metres.
+    pub travel_length_3d: f32,
+    /// First minus last valid center-of-mass elevation in metres.
+    pub travel_vertical_drop: f32,
     /// Angle of the center-of-mass path in degrees.
     pub travel_angle: f32,
 }
@@ -611,6 +615,8 @@ impl Simulation {
             self.output = None;
         }
         self.release_areas_path = data.release_areas_path;
+        self.release_areas_array = None;
+        self.number_particles = 0;
         self.release_area_fraction = data.release_area_fraction;
         self.crown_line_method = data
             .crown_line_method
@@ -844,6 +850,15 @@ impl Simulation {
         };
         self.settings.set_dem(&self.dem);
         self.initial_state = None;
+        self.number_particles = 0;
+        // An outline of another grid no longer applies. Without an outline every
+        // cell may release, as for a DEM loaded without one; an empty mask would
+        // exclude every cell from the release areas.
+        if self.roi.len() != expected_len {
+            self.roi = vec![true; expected_len];
+            self.outline_source = None;
+        }
+        self.roi_uploaded = false;
 
         self.state = SimulationState::DemLoaded;
         info!(
@@ -1303,7 +1318,6 @@ impl Simulation {
             timer_checkpoint("Particles initialized");
         }
         self.compute_particles().await?;
-        self.sim_info = self.fetch_sim_info().await?;
         self.state = SimulationState::Finished;
 
         timer_checkpoint("Simulation finished");
@@ -1468,17 +1482,15 @@ impl Simulation {
         if self.state < SimulationState::Finished {
             bail!("Run the simulation before saving results");
         }
-        let sim_info = self.fetch_sim_info().await?;
+        let sim_info = self.sim_info;
         let release_volume_m3 = self.get_total_volume().await?;
         let peak_flow_velocity = self.fetch_peak_velocity().await?.clone();
         let peak_flow_thickness = self.fetch_peak_flow_thickness().await?.to_vec();
 
         let origin_x = self.dem.bounds.xmin;
         let origin_y = self.dem.bounds.ymin;
-        let center_of_mass = self.fetch_center_of_mass().await?;
-        let time = center_of_mass.iter().map(|result| result.time).collect();
-        let (center_of_mass_x, center_of_mass_y, travel_length, travel_angle) =
-            trajectory_summary(center_of_mass, origin_x, origin_y);
+        let (center_of_mass_x, center_of_mass_y, time) =
+            trajectory_positions(self.fetch_center_of_mass().await?, origin_x, origin_y);
 
         let created_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1491,8 +1503,10 @@ impl Simulation {
             center_of_mass_y,
             time,
             release_volume_m3,
-            travel_length,
-            travel_angle,
+            travel_length_2d: sim_info.travel_length_2d,
+            travel_length_3d: sim_info.travel_length_3d,
+            travel_vertical_drop: sim_info.travel_vertical_drop,
+            travel_angle: sim_info.travel_angle,
             final_timestep: sim_info.timestep,
             simulated_time: sim_info.elapsed_time,
             number_particles: sim_info.number_particles,
@@ -1582,18 +1596,19 @@ impl Simulation {
     }
 
     /// Release volume and center-of-mass trajectory of the finished run,
-    /// without the grid readbacks of a save.
+    /// without the grid or per-step trajectory readbacks of a save. Trajectory
+    /// metrics come from the already-read final simulation info.
     pub async fn run_summary(&mut self) -> Result<RunSummary> {
         if self.state < SimulationState::Finished {
             bail!("Run the simulation before summarizing it");
         }
         let release_volume_m3 = self.get_total_volume().await?;
-        let center_of_mass = self.fetch_center_of_mass().await?;
-        let (_, _, travel_length, travel_angle) = trajectory_summary(center_of_mass, 0.0, 0.0);
         Ok(RunSummary {
             release_volume_m3,
-            travel_length,
-            travel_angle,
+            travel_length_2d: self.sim_info.travel_length_2d,
+            travel_length_3d: self.sim_info.travel_length_3d,
+            travel_vertical_drop: self.sim_info.travel_vertical_drop,
+            travel_angle: self.sim_info.travel_angle,
         })
     }
 
@@ -2462,6 +2477,33 @@ impl Simulation {
         Ok(self.gpu_cache.grid_momentum.as_ref().unwrap())
     }
 
+    /// Per-cell deposited vertical momentum in kg m/s of the 3D depth-averaged
+    /// model; zero for every other model (reset_grid clears it each step).
+    pub async fn fetch_grid_momentum_z(&mut self) -> Result<&Vec<f32>> {
+        if self.state < SimulationState::ParticlesInitialized {
+            bail!("Simulation must be initialized before reading grid buffers");
+        }
+        if self.gpu_cache.grid_momentum_z.is_none() {
+            self.gpu_cache.read_count += 1;
+            // MOMENTUM_FACTOR of utils.wgsl
+            const MOMENTUM_FACTOR: f32 = 1e2;
+            let momentum = if self.orchestrator.has_float32_atomic() {
+                self.orchestrator
+                    .read_buffer::<f32>(BufferName::GridMomentumZ)
+                    .await?
+            } else {
+                self.orchestrator
+                    .read_buffer::<i32>(BufferName::GridMomentumZ)
+                    .await?
+                    .iter()
+                    .map(|momentum| *momentum as f32 / MOMENTUM_FACTOR)
+                    .collect()
+            };
+            self.gpu_cache.grid_momentum_z = Some(momentum);
+        }
+        Ok(self.gpu_cache.grid_momentum_z.as_ref().unwrap())
+    }
+
     /// Per-particle elevation values.
     pub async fn fetch_particles_elevation(&mut self) -> Result<&Vec<f32>> {
         if self.state < SimulationState::ParticlesInitialized {
@@ -2654,9 +2696,6 @@ fn checked_particle_count(release_cells: u32, particles_per_cell: u32) -> Result
         .ok_or_else(|| anyhow::anyhow!("Particle count exceeds u32 capacity"))
 }
 
-/// Converts center-of-mass records into absolute world coordinates (adding
-/// the DEM origin) and derives the total travel length and average travel
-/// angle in degrees.
 fn hash_release_areas(release_areas: &[f32]) -> u64 {
     let mut hasher = StableHasher::default();
     for value in release_areas {
@@ -2665,11 +2704,41 @@ fn hash_release_areas(release_areas: &[f32]) -> u64 {
     hasher.finish()
 }
 
-fn trajectory_summary(
+fn trajectory_positions(
+    records: &[CenterOfMassResult],
+    origin_x: f32,
+    origin_y: f32,
+) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    let mut x = Vec::with_capacity(records.len());
+    let mut y = Vec::with_capacity(records.len());
+    let mut time = Vec::with_capacity(records.len());
+    for record in records {
+        let valid = record.total_mass > 0.0
+            && record.com_x.is_finite()
+            && record.com_y.is_finite()
+            && record.elevation.is_finite();
+        x.push(if valid {
+            origin_x + record.com_x
+        } else {
+            f32::NAN
+        });
+        y.push(if valid {
+            origin_y + record.com_y
+        } else {
+            f32::NAN
+        });
+        time.push(record.time);
+    }
+    (x, y, time)
+}
+
+/// CPU parity oracle, extended with three-dimensional segment lengths.
+#[cfg(test)]
+fn trajectory_summary_cpu(
     center_of_mass: &[CenterOfMassResult],
     origin_x: f32,
     origin_y: f32,
-) -> (Vec<f32>, Vec<f32>, f32, f32) {
+) -> (Vec<f32>, Vec<f32>, f32, f32, f32, f32) {
     // Slots of steps that did not run are NaN and the shader reports (0, 0, 0)
     // for steps without mass, neither of which is a position.
     let is_record = |result: &&CenterOfMassResult| {
@@ -2695,9 +2764,16 @@ fn trajectory_summary(
 
     let records: Vec<_> = center_of_mass.iter().filter(is_record).collect();
     let (Some(first), Some(last)) = (records.first(), records.last()) else {
-        return (center_of_mass_x, center_of_mass_y, f32::NAN, f32::NAN);
+        return (
+            center_of_mass_x,
+            center_of_mass_y,
+            f32::NAN,
+            f32::NAN,
+            f32::NAN,
+            f32::NAN,
+        );
     };
-    let travel_length = records
+    let travel_length_2d = records
         .windows(2)
         .map(|results| {
             let dx = results[1].com_x - results[0].com_x;
@@ -2705,9 +2781,18 @@ fn trajectory_summary(
             dx.hypot(dy)
         })
         .sum::<f32>();
+    let travel_length_3d = records
+        .windows(2)
+        .map(|results| {
+            let dx = results[1].com_x - results[0].com_x;
+            let dy = results[1].com_y - results[0].com_y;
+            let dz = results[1].elevation - results[0].elevation;
+            dx.hypot(dy).hypot(dz)
+        })
+        .sum::<f32>();
     let vertical_drop = first.elevation - last.elevation;
-    let travel_angle = if travel_length > 0.0 {
-        vertical_drop.atan2(travel_length).to_degrees()
+    let travel_angle = if travel_length_2d > 0.0 {
+        vertical_drop.atan2(travel_length_2d).to_degrees()
     } else {
         0.0
     };
@@ -2715,8 +2800,10 @@ fn trajectory_summary(
     (
         center_of_mass_x,
         center_of_mass_y,
-        travel_length,
+        travel_length_2d,
         travel_angle,
+        travel_length_3d,
+        vertical_drop,
     )
 }
 
@@ -2734,6 +2821,141 @@ mod tests {
     const GAR_PATH: &str = "../../data/avaframe/avaGar.png";
     const GAR_RELEASE_TEXTURE_PATH: &str = "../../data/avaframe/avaGarreleaseTexture.png";
     const ROI_PATH: &str = "../../data/outline/polygon_10721.shp";
+
+    fn accumulate_test_trajectory(
+        orchestrator: &mut ComputeOrchestrator,
+        records: &[CenterOfMassResult],
+    ) -> SimInfo {
+        orchestrator.add_buffer_with_data(
+            BufferName::CenterOfMass,
+            records,
+            wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+        );
+        orchestrator.add_buffer_with_data(
+            BufferName::SimInfo,
+            &[SimInfo::default()],
+            wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+        );
+        // Exercise the same accumulator as the production center-of-mass
+        // dispatch, with synthetic records instead of a terrain reduction.
+        let source = format!(
+            "{}\n{}",
+            compute_core::shaders::load_shader_source(
+                compute_core::shaders::ShaderName::ComputeCenterOfMass,
+                orchestrator.has_float32_atomic(),
+            ),
+            r#"
+@compute @workgroup_size(1)
+fn test_trajectory() {
+    for (var index = 0u; index < arrayLength(&center_of_mass); index += 1u) {
+        update_trajectory(index);
+    }
+}
+"#
+        );
+        let module = orchestrator
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("Trajectory accumulator parity"),
+                source: wgpu::ShaderSource::Wgsl(source.into()),
+            });
+        let pipeline =
+            orchestrator
+                .device
+                .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("Trajectory accumulator parity"),
+                    layout: None,
+                    module: &module,
+                    entry_point: Some("test_trajectory"),
+                    compilation_options: Default::default(),
+                    cache: None,
+                });
+        let bind_group = orchestrator
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Trajectory accumulator parity"),
+                layout: &pipeline.get_bind_group_layout(0),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: orchestrator
+                            .resources
+                            .get_buffer(&BufferName::CenterOfMass)
+                            .unwrap()
+                            .as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: orchestrator
+                            .resources
+                            .get_buffer(&BufferName::SimInfo)
+                            .unwrap()
+                            .as_entire_binding(),
+                    },
+                ],
+            });
+        let mut encoder = orchestrator
+            .device
+            .create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+        }
+        orchestrator.queue.submit(Some(encoder.finish()));
+        block_on(orchestrator.get_sim_info()).expect("Failed to read accumulated trajectory")
+    }
+
+    fn assert_trajectory_summary_matches_cpu(
+        orchestrator: &mut ComputeOrchestrator,
+        records: &[CenterOfMassResult],
+        origin_x: f32,
+        origin_y: f32,
+    ) -> (Vec<f32>, Vec<f32>, f32, f32) {
+        let expected = trajectory_summary_cpu(records, origin_x, origin_y);
+        let actual = accumulate_test_trajectory(orchestrator, records);
+        let (actual_x, actual_y, actual_time) = trajectory_positions(records, origin_x, origin_y);
+        let assert_close = |actual: f32, expected: f32, tolerance: f32| {
+            if expected.is_nan() {
+                assert!(actual.is_nan(), "expected NaN, got {actual}");
+            } else if expected.is_infinite() {
+                assert_eq!(actual, expected);
+            } else {
+                assert!(
+                    (actual - expected).abs() <= tolerance,
+                    "GPU {actual}, CPU {expected}, tolerance {tolerance}"
+                );
+            }
+        };
+        assert_eq!(actual_x.len(), records.len());
+        assert_eq!(actual_y.len(), records.len());
+        assert_eq!(actual_time.len(), records.len());
+        for index in 0..records.len() {
+            assert_close(actual_x[index], expected.0[index], 0.0);
+            assert_close(actual_y[index], expected.1[index], 0.0);
+            assert_close(actual_time[index], records[index].time, 0.0);
+        }
+        let length_tolerance = 1e-4 + expected.2.abs() * 1e-4;
+        assert_close(actual.travel_length_2d, expected.2, length_tolerance);
+        assert_close(
+            actual.travel_length_3d,
+            expected.4,
+            1e-4 + expected.4.abs() * 1e-4,
+        );
+        assert_close(actual.travel_angle, expected.3, 1e-3);
+        assert_close(actual.travel_vertical_drop, expected.5, 0.0);
+        (
+            actual_x,
+            actual_y,
+            actual.travel_length_2d,
+            actual.travel_angle,
+        )
+    }
 
     #[test]
     fn test_init_logging_idempotent() {
@@ -2762,12 +2984,14 @@ mod tests {
                 ..Default::default()
             },
         ];
-        let (x, y, length, angle) = trajectory_summary(&center_of_mass, 100.0, 300.0);
+        let mut orchestrator = block_on(ComputeOrchestrator::new()).unwrap();
+        let (x, y, length, angle) =
+            assert_trajectory_summary_matches_cpu(&mut orchestrator, &center_of_mass, 100.0, 300.0);
 
         assert_eq!(x, vec![100.0, 103.0]);
         assert_eq!(y, vec![300.0, 304.0]);
         assert!((length - 5.0).abs() < f32::EPSILON);
-        assert!((angle - 45.0).abs() < f32::EPSILON);
+        assert!((angle - 45.0).abs() < 1e-3);
     }
 
     #[test]
@@ -2786,23 +3010,256 @@ mod tests {
             record(0.0, 0.0, 0.0, 0.0),    // all mass has left
             CenterOfMassResult::default(), // the run ended
         ];
-        let (x, y, length, angle) = trajectory_summary(&center_of_mass, 100.0, 300.0);
+        let mut orchestrator = block_on(ComputeOrchestrator::new()).unwrap();
+        let (x, y, length, angle) =
+            assert_trajectory_summary_matches_cpu(&mut orchestrator, &center_of_mass, 100.0, 300.0);
 
         assert!(x[0].is_nan() && y[0].is_nan());
         assert_eq!(x[1..3], [100.0, 103.0]);
         assert_eq!(y[1..3], [300.0, 304.0]);
         assert!(x[3].is_nan() && x[4].is_nan());
         assert!((length - 5.0).abs() < f32::EPSILON);
-        assert!((angle - 45.0).abs() < f32::EPSILON);
+        assert!((angle - 45.0).abs() < 1e-3);
     }
 
     #[test]
     fn test_trajectory_summary_without_records_is_nan() {
         let center_of_mass = vec![CenterOfMassResult::default(); 3];
-        let (x, _, length, angle) = trajectory_summary(&center_of_mass, 100.0, 300.0);
+        let mut orchestrator = block_on(ComputeOrchestrator::new()).unwrap();
+        let (x, _, length, angle) =
+            assert_trajectory_summary_matches_cpu(&mut orchestrator, &center_of_mass, 100.0, 300.0);
 
         assert!(x.iter().all(|value| value.is_nan()));
         assert!(length.is_nan() && angle.is_nan());
+    }
+
+    #[test]
+    fn test_trajectory_summary_gpu_parity() {
+        let mut orchestrator = block_on(ComputeOrchestrator::new()).unwrap();
+        let record = |com_x, com_y, elevation, total_mass| CenterOfMassResult {
+            com_x,
+            com_y,
+            elevation,
+            total_mass,
+            time: 12.5,
+            ..Default::default()
+        };
+        for records in [
+            vec![record(0.0, 0.0, 10.0, 1.0)],
+            vec![record(3.0, 4.0, 10.0, 1.0); 65],
+            vec![
+                record(0.0, 0.0, 10.0, 1.0),
+                record(f32::NAN, 1.0, 1.0, 1.0),
+                record(1.0, f32::INFINITY, 1.0, 1.0),
+                record(1.0, 1.0, f32::NEG_INFINITY, 1.0),
+                record(1.0, 1.0, 1.0, -1.0),
+                record(1.0, 1.0, 1.0, f32::NAN),
+                record(1.0, 1.0, 1.0, -0.0),
+                record(3.0, 4.0, 15.0, f32::INFINITY),
+            ],
+            vec![record(0.0, 0.0, 0.0, 1.0), record(1e20, 1e20, -1e20, 1.0)],
+            vec![record(0.0, 0.0, 10.0, 1.0), record(1e-20, 1e-20, 5.0, 1.0)],
+        ] {
+            assert_trajectory_summary_matches_cpu(&mut orchestrator, &records, 100.0, -300.0);
+        }
+        for count in [63, 64, 65, 127, 128, 129, 1025, 100_003] {
+            let mut records: Vec<_> = (0..count)
+                .map(|index| {
+                    let t = index as f32 * 0.1;
+                    record(t.cos() * 500.0, t.sin() * 300.0, 1000.0 - t, 1.0)
+                })
+                .collect();
+            assert_trajectory_summary_matches_cpu(
+                &mut orchestrator,
+                &records,
+                600_000.0,
+                5_000_000.0,
+            );
+            // Invalid slots, including long gaps, must not break the path.
+            for (index, record) in records.iter_mut().enumerate() {
+                if index % 7 == 0 || (60..195).contains(&index) {
+                    *record = CenterOfMassResult::default();
+                }
+            }
+            assert_trajectory_summary_matches_cpu(&mut orchestrator, &records, -100.0, 300.0);
+            records.fill(CenterOfMassResult::default());
+            assert_trajectory_summary_matches_cpu(&mut orchestrator, &records, 0.0, 0.0);
+        }
+    }
+
+    #[test]
+    fn test_trajectory_summary_3d_length_includes_each_elevation_change() {
+        let mut orchestrator = block_on(ComputeOrchestrator::new()).unwrap();
+        let record = |com_x, com_y, elevation| CenterOfMassResult {
+            com_x,
+            com_y,
+            elevation,
+            total_mass: 1.0,
+            ..Default::default()
+        };
+        let path = [
+            record(0.0, 0.0, 10.0),
+            record(3.0, 4.0, -2.0),
+            record(3.0, 4.0, 10.0),
+        ];
+        let mut gapped_path = vec![CenterOfMassResult::default(); 194];
+        gapped_path[1] = path[0];
+        gapped_path[64] = path[1];
+        gapped_path[193] = path[2];
+        for records in [path.as_slice(), gapped_path.as_slice()] {
+            assert_trajectory_summary_matches_cpu(&mut orchestrator, records, 0.0, 0.0);
+            let info = block_on(orchestrator.get_sim_info()).unwrap();
+            assert!((info.travel_length_2d - 5.0).abs() <= 1e-4);
+            assert!(info.travel_angle.abs() <= 1e-3);
+            assert!((info.travel_length_3d - 25.0).abs() <= 1e-4);
+            assert_eq!(info.travel_vertical_drop, 0.0);
+        }
+        let vertical_path = [record(0.0, 0.0, 10.0), record(0.0, 0.0, -2.0)];
+        assert_trajectory_summary_matches_cpu(&mut orchestrator, &vertical_path, 0.0, 0.0);
+        let info = block_on(orchestrator.get_sim_info()).unwrap();
+        assert_eq!(info.travel_length_2d, 0.0);
+        assert_eq!(info.travel_angle, 0.0);
+        assert!((info.travel_length_3d - 12.0).abs() <= 1e-4);
+        assert_eq!(info.travel_vertical_drop, 12.0);
+    }
+
+    fn setup_trajectory_sim() -> Simulation {
+        let mut sim = block_on(Simulation::new()).unwrap();
+        block_on(sim.create(Settings {
+            sim_model: Some(SimModel::TerrainFollowing),
+            max_steps: Some(80),
+            ..Default::default()
+        }))
+        .unwrap();
+        sim.set_dem(&create_slope(32, 32, 4.0, 35.0), 32, 32, 4.0)
+            .unwrap();
+        let mut release = vec![0.0; 32 * 32];
+        for y in 14..18 {
+            for x in 14..18 {
+                release[y * 32 + x] = 1.0;
+            }
+        }
+        sim.set_release_areas(&release).unwrap();
+        sim
+    }
+
+    #[test]
+    fn test_trajectory_summary_finished_run_matches_cpu() {
+        let mut sim = setup_trajectory_sim();
+        block_on(sim.run()).expect("Failed to run simulation");
+        assert!(sim.gpu_cache.center_of_mass.is_none());
+        let allocations = sim.orchestrator.resources.buffer_sizes();
+        let summary = block_on(sim.run_summary()).expect("Failed to summarize run");
+        assert_eq!(sim.orchestrator.resources.buffer_sizes(), allocations);
+        let run = block_on(sim.collect_run("GPU parity")).expect("Failed to collect run");
+        assert!(sim.gpu_cache.center_of_mass.is_some());
+        let records = block_on(sim.fetch_center_of_mass()).unwrap().clone();
+        let expected = trajectory_summary_cpu(&records, sim.dem.bounds.xmin, sim.dem.bounds.ymin);
+        assert!(expected.2.is_finite() && expected.2 > 0.0);
+        for (actual, expected) in run
+            .center_of_mass_x
+            .iter()
+            .zip(&expected.0)
+            .chain(run.center_of_mass_y.iter().zip(&expected.1))
+        {
+            assert!(actual == expected || (actual.is_nan() && expected.is_nan()));
+        }
+        assert_eq!(run.time.len(), records.len());
+        for (actual, expected) in run
+            .time
+            .iter()
+            .zip(records.iter().map(|record| record.time))
+        {
+            assert!(*actual == expected || (actual.is_nan() && expected.is_nan()));
+        }
+        assert!(
+            (run.travel_length_2d - expected.2).abs() <= 1e-4 + expected.2.abs() * 1e-4,
+            "GPU length {}, CPU length {}",
+            run.travel_length_2d,
+            expected.2
+        );
+        assert!(
+            (run.travel_angle - expected.3).abs() <= 1e-3,
+            "GPU angle {}, CPU angle {}",
+            run.travel_angle,
+            expected.3
+        );
+        assert!(
+            (run.travel_length_3d - expected.4).abs() <= 1e-4 + expected.4.abs() * 1e-4,
+            "GPU 3D length {}, CPU 3D length {}",
+            run.travel_length_3d,
+            expected.4
+        );
+        assert_eq!(summary.travel_length_2d, run.travel_length_2d);
+        assert_eq!(summary.travel_length_3d, run.travel_length_3d);
+        assert_eq!(summary.travel_vertical_drop, expected.5);
+        assert_eq!(run.travel_vertical_drop, expected.5);
+        assert_eq!(summary.travel_angle, run.travel_angle);
+        for name in [BufferName::SimInfo, BufferName::CenterOfMass] {
+            sim.orchestrator
+                .resources
+                .get_buffer(&name)
+                .unwrap()
+                .destroy();
+        }
+        let cached = block_on(sim.run_summary()).expect("Summary must not access the GPU");
+        assert_eq!(cached.travel_length_2d, summary.travel_length_2d);
+        assert_eq!(cached.travel_length_3d, summary.travel_length_3d);
+        assert_eq!(cached.travel_vertical_drop, summary.travel_vertical_drop);
+        assert_eq!(cached.travel_angle, summary.travel_angle);
+    }
+
+    #[test]
+    fn test_trajectory_summary_batches_and_restores() {
+        let mut sim = setup_trajectory_sim();
+        block_on(sim.store_initial_state()).unwrap();
+        let partial = block_on(sim.run_n_steps(3)).unwrap();
+        let records = block_on(
+            sim.orchestrator
+                .read_buffer::<CenterOfMassResult>(BufferName::CenterOfMass),
+        )
+        .unwrap();
+        let expected = trajectory_summary_cpu(&records, 0.0, 0.0);
+        assert!((partial.travel_length_2d - expected.2).abs() <= 1e-4 + expected.2.abs() * 1e-4);
+        assert!((partial.travel_length_3d - expected.4).abs() <= 1e-4 + expected.4.abs() * 1e-4);
+        assert_eq!(partial.travel_vertical_drop, expected.5);
+        assert!((partial.travel_angle - expected.3).abs() <= 1e-3);
+
+        while sim.state < SimulationState::Finished {
+            block_on(sim.run_n_steps(7)).unwrap();
+        }
+        let batched = block_on(sim.run_summary()).unwrap();
+        block_on(sim.restore_initial_state()).unwrap();
+        assert!(sim.sim_info.travel_length_2d.is_nan());
+        assert!(sim.sim_info.travel_length_3d.is_nan());
+        assert!(sim.sim_info.travel_vertical_drop.is_nan());
+        assert!(sim.sim_info.travel_angle.is_nan());
+        block_on(sim.run()).unwrap();
+        let restored = block_on(sim.run_summary()).unwrap();
+        for (actual, expected) in [
+            (restored.travel_length_2d, batched.travel_length_2d),
+            (restored.travel_length_3d, batched.travel_length_3d),
+            (restored.travel_vertical_drop, batched.travel_vertical_drop),
+        ] {
+            assert!(
+                (actual - expected).abs() <= 1e-4 + expected.abs() * 1e-4,
+                "restored {actual}, batched {expected}"
+            );
+        }
+        assert!((restored.travel_angle - batched.travel_angle).abs() <= 1e-3);
+
+        sim.update_settings(&Settings {
+            enable_center_of_mass: Some(false),
+            ..Default::default()
+        })
+        .unwrap();
+        block_on(sim.restore_initial_state()).unwrap();
+        block_on(sim.run()).unwrap();
+        let disabled = block_on(sim.run_summary()).unwrap();
+        assert!(disabled.travel_length_2d.is_nan());
+        assert!(disabled.travel_length_3d.is_nan());
+        assert!(disabled.travel_vertical_drop.is_nan());
+        assert!(disabled.travel_angle.is_nan());
     }
 
     #[test_log::test]
@@ -3511,6 +3968,30 @@ mod tests {
             }
         }
         data
+    }
+
+    /// The web frontend creates the simulation without a DEM, sets the DEM from
+    /// data and lets the engine compute the release areas; switching to a DEM
+    /// of another size must not keep the previous grid's outline.
+    #[test_log::test]
+    fn test_computed_release_areas_after_set_dem() {
+        let mut sim: Simulation = block_on(Simulation::new()).expect("Failed to create Simulation");
+        let settings = Settings {
+            sim_model: Some(SimModel::SlidingBlock),
+            release_min_elevation: Some(0.0),
+            ..Default::default()
+        };
+        block_on(sim.create(settings)).expect("Failed to create simulation");
+        for size in [16, 24] {
+            sim.set_dem(&create_slope(size, size, 5.0, 35.0), size, size, 5.0)
+                .expect("Failed to set DEM");
+            assert_eq!(sim.roi.len(), size * size);
+            block_on(sim.prepare()).expect("Failed to prepare simulation");
+            assert!(
+                sim.number_particles > 0,
+                "no release cells on a {size}x{size} DEM"
+            );
+        }
     }
 
     fn setup_simple_sim(slope_angle: f32, cell_size: f32) -> Simulation {
@@ -5992,7 +6473,7 @@ mod tests {
         block_on(sim.run()).expect("Failed to run simulation");
         let summary = block_on(sim.run_summary()).expect("Failed to summarize");
         assert!(summary.release_volume_m3 > 0.0);
-        assert!(summary.travel_length.is_finite() && summary.travel_angle.is_finite());
+        assert!(summary.travel_length_2d.is_finite() && summary.travel_angle.is_finite());
 
         let tmp_dir = tempfile::tempdir().unwrap();
         let path = tmp_dir.path().join("outline.zarr").display().to_string();
@@ -6043,7 +6524,7 @@ mod tests {
         let summary = block_on(sim.run_summary()).expect("Failed to summarize");
         assert!(summary.release_volume_m3 > 0.0);
         // NaN without center-of-mass records, as on this tiny grid.
-        assert!(summary.travel_length.is_nan() || summary.travel_length >= 0.0);
+        assert!(summary.travel_length_2d.is_nan() || summary.travel_length_2d >= 0.0);
         assert!(!sim.adapter_info().name.is_empty());
     }
 }

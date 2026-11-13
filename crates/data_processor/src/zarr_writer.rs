@@ -364,7 +364,9 @@ mod tests {
             center_of_mass_y: vec![f32::NAN, 3.0, 4.0],
             time: vec![f32::NAN, 0.5, 1.0],
             release_volume_m3: 12.0,
-            travel_length: 100.0,
+            travel_length_2d: 100.0,
+            travel_length_3d: 125.0,
+            travel_vertical_drop: 75.0,
             travel_angle: 30.0,
             final_timestep: 2,
             simulated_time: 1.0,
@@ -400,9 +402,43 @@ mod tests {
             "site-a_1234/scenario-b_5678/peak_flow_thickness/c/0/0/0",
             "site-a_1234/scenario-b_5678/center_of_mass_x/c/0/0",
             "site-a_1234/scenario-b_5678/time/c/0/0",
+            "site-a_1234/scenario-b_5678/travel_length_2d/zarr.json",
+            "site-a_1234/scenario-b_5678/travel_length_2d/c/0",
+            "site-a_1234/scenario-b_5678/travel_length_3d/zarr.json",
+            "site-a_1234/scenario-b_5678/travel_length_3d/c/0",
+            "site-a_1234/scenario-b_5678/travel_vertical_drop/c/0",
             "site-a_1234/scenario-b_5678/released_particles_per_cell/c/0",
         ] {
             assert!(paths.contains(&expected.to_string()), "missing {expected}");
+        }
+    }
+
+    #[test]
+    fn test_travel_lengths_are_stored_as_distinct_metric_columns() {
+        let entries = build();
+        assert!(
+            !entries
+                .iter()
+                .any(|entry| entry.path == "site-a_1234/scenario-b_5678/travel_length/zarr.json")
+        );
+        for (name, expected) in [
+            ("travel_length_2d", 100.0),
+            ("travel_length_3d", 125.0),
+            ("travel_vertical_drop", 75.0),
+        ] {
+            let prefix = format!("site-a_1234/scenario-b_5678/{name}");
+            let parsed = metadata(&entries, &format!("{prefix}/zarr.json"));
+            assert_eq!(parsed["data_type"], "float32");
+            assert_eq!(parsed["dimension_names"], json!(["run"]));
+            assert_eq!(parsed["attributes"]["units"], "m");
+            let chunk = entries
+                .iter()
+                .find(|entry| entry.path == format!("{prefix}/c/0"))
+                .expect("travel length chunk");
+            assert_eq!(
+                f32::from_le_bytes(chunk.bytes[..4].try_into().unwrap()),
+                expected
+            );
         }
     }
 

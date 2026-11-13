@@ -181,12 +181,28 @@ Stores follow the layout in `data_processor::store_schema`, written by `data_pro
       release_area   # array: the release areas of the scenario
       peak_flow_velocity, peak_flow_thickness  # (run, y, x)
       center_of_mass_x, center_of_mass_y, time # (run, timestep), indexed by step, NaN without enable_center_of_mass
-      friction_coefficient, cfl, travel_length, created_at, ...  # (run): results, provenance, every setting
+      travel_length_2d, travel_length_3d, travel_vertical_drop, travel_angle  # (run): center-of-mass trajectory
+      friction_coefficient, cfl, created_at, ...  # (run): results, provenance, every setting
 ```
 
 The `run` dimension grows in blocks, so only the first `number_of_runs` entries (a scenario attribute) are runs;
 `AvalanchersScenario.dataset` already cuts it to those. `x` and `y` are cell centers. Each save holds a lock in the file
 `<store>.zarr.lock` next to the store, so several processes can write to one store.
+
+The center-of-mass shader accumulates horizontal `travel_length_2d`, `travel_length_3d`,
+`travel_vertical_drop` and travel angle during each simulation step. These values live in the existing `SimInfo`
+buffer and arrive with its normal batch readback: no post-simulation shader or additional metrics buffer is needed.
+Both lengths sum the distances between consecutive valid center-of-mass records, in metres; the 3D length includes
+elevation changes, not just the net vertical drop. Invalid slots remain NaN and are skipped across gaps.
+Without valid records all metrics are NaN; a stationary trajectory has zero lengths and angle. The travel angle
+still uses horizontal length and the first-to-last valid elevation drop (negative for a net rise).
+`run_summary` (including Python) uses the already-read simulation info, without a trajectory readback.
+Saves read the center-of-mass records only for coordinates and timestamps and add the DEM origin on the CPU.
+All four metrics are saved in native and browser Zarr stores; appending
+to an older native store adds missing length columns with NaN for prior runs; existing `travel_length` columns
+are not renamed automatically. New summaries and saves use `travel_length_2d` only for horizontal length.
+GPU parity tests require exact coordinates
+and timestamps, each length within `1e-4 + 1e-4 * abs(CPU length)` and angle within `0.001` degrees.
 
 Grids keep row 0 at the south edge, so `y` ascends with the rows, in the store as well as in arrays such as
 `sim.peak_velocity`. Formats that list the north row first are flipped when they are read and written, see

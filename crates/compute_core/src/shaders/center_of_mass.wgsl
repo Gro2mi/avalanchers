@@ -93,6 +93,45 @@ fn get_elevation(position_xy: vec2f) -> f32 {
     return textureSampleLevel(dem_texture, tex_sampler, uv, 0).x;
 }
 
+fn trajectory_distance(delta: vec3f) -> f32 {
+    let absolute = abs(delta);
+    let scale = max(max(absolute.x, absolute.y), absolute.z);
+    if scale == 0.0 || !is_finite(scale) {
+        return scale;
+    }
+    // Scale before squaring, like hypot, to avoid overflow and underflow.
+    return scale * length(absolute / scale);
+}
+
+fn update_trajectory(timestep: u32) {
+    let current = center_of_mass[timestep];
+    let mass_bits = bitcast<u32>(current.total_mass);
+    if (mass_bits & 0x80000000u) != 0u || mass_bits == 0u || mass_bits > 0x7f800000u
+        || !is_finite(current.com.x) || !is_finite(current.com.y) || !is_finite(current.com.z) {
+        return;
+    }
+    let previous_timestep = sim_info._last_center_of_mass_timestep;
+    if previous_timestep == 0xffffffffu {
+        sim_info._first_center_of_mass_timestep = timestep;
+        sim_info.travel_length_2d = 0.0;
+        sim_info.travel_length_3d = 0.0;
+    } else {
+        if timestep <= previous_timestep {
+            return;
+        }
+        let delta = current.com - center_of_mass[previous_timestep].com;
+        sim_info.travel_length_2d += trajectory_distance(vec3f(delta.xy, 0.0));
+        sim_info.travel_length_3d += trajectory_distance(delta);
+    }
+    sim_info._last_center_of_mass_timestep = timestep;
+    sim_info.travel_vertical_drop =
+        center_of_mass[sim_info._first_center_of_mass_timestep].com.z - current.com.z;
+    sim_info.travel_angle = 0.0;
+    if sim_info.travel_length_2d > 0.0 {
+        sim_info.travel_angle = degrees(atan2(sim_info.travel_vertical_drop, sim_info.travel_length_2d));
+    }
+}
+
 @compute @workgroup_size(WG_SIZE_2D, WG_SIZE_2D, 1)
 fn center_of_mass_seed(@builtin(global_invocation_id) id: vec3u) {
     if (sim_info.flags & SIM_INFO_STOPPED) != 0u {
@@ -287,6 +326,7 @@ fn compute_center_of_mass(@builtin(local_invocation_index) li: u32) {
         center_of_mass[timestep].total_mass = total_mass;
         center_of_mass[timestep].time = sim_info.elapsed_time;
         center_of_mass[timestep].com = select(vec3f(0.0, 0.0, 0.0), vec3f(x, y, elevation), total_mass > 0.0);
+        update_trajectory(timestep);
     }
 }
 
@@ -333,6 +373,13 @@ struct SimInfo {
     max_flow_thickness: f32,
     flags: u32,
     grid_elapsed_time: f32,
+    travel_length_2d: f32,
+    travel_length_3d: f32,
+    travel_vertical_drop: f32,
+    travel_angle: f32,
+    _first_center_of_mass_timestep: u32,
+    _last_center_of_mass_timestep: u32,
+    _pad: u32,
 };
 
 const SIM_INFO_OUT_OF_BOUNDS: u32 = 1u << 0u;

@@ -194,6 +194,13 @@ struct SimInfo {
     max_flow_thickness: f32,
     flags: u32,
     grid_elapsed_time: f32,
+    travel_length_2d: f32,
+    travel_length_3d: f32,
+    travel_vertical_drop: f32,
+    travel_angle: f32,
+    _first_center_of_mass_timestep: u32,
+    _last_center_of_mass_timestep: u32,
+    _pad: u32,
 };
 
 const SIM_INFO_OUT_OF_BOUNDS: u32 = 1u << 0u;

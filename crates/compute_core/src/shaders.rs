@@ -3300,6 +3300,19 @@ mod tests {
     }
 
     #[test]
+    fn center_of_mass_shaders_validate_with_integer_and_float_atomics() {
+        for shader in [
+            ShaderName::ComputeCenterOfMass,
+            ShaderName::CenterOfMassSeed,
+            ShaderName::CenterOfMassPropagate,
+        ] {
+            for has_float32_atomic in [false, true] {
+                validate_wgsl(shader, has_float32_atomic);
+            }
+        }
+    }
+
+    #[test]
     fn p2g_shaders_validate_with_integer_and_float_atomics() {
         for shader in [
             ShaderName::P2G2D,

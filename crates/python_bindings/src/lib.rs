@@ -110,6 +110,30 @@ impl PySimInfo {
         self.inner.max_flow_thickness
     }
 
+    /// Horizontal center-of-mass path length in metres.
+    #[getter]
+    fn travel_length_2d(&self) -> f32 {
+        self.inner.travel_length_2d
+    }
+
+    /// Three-dimensional center-of-mass path length in metres.
+    #[getter]
+    fn travel_length_3d(&self) -> f32 {
+        self.inner.travel_length_3d
+    }
+
+    /// First minus latest valid center-of-mass elevation in metres.
+    #[getter]
+    fn travel_vertical_drop(&self) -> f32 {
+        self.inner.travel_vertical_drop
+    }
+
+    /// Center-of-mass travel angle in degrees, based on horizontal path length.
+    #[getter]
+    fn travel_angle(&self) -> f32 {
+        self.inner.travel_angle
+    }
+
     /// Bitmask of simulation status flags.
     #[getter]
     fn flags(&self) -> u32 {
@@ -127,6 +151,10 @@ impl PySimInfo {
             "elevation_threshold" => self.inner.elevation_threshold.into_py_any(py),
             "max_velocity" => self.inner.max_velocity.into_py_any(py),
             "max_flow_thickness" => self.inner.max_flow_thickness.into_py_any(py),
+            "travel_length_2d" => self.inner.travel_length_2d.into_py_any(py),
+            "travel_length_3d" => self.inner.travel_length_3d.into_py_any(py),
+            "travel_vertical_drop" => self.inner.travel_vertical_drop.into_py_any(py),
+            "travel_angle" => self.inner.travel_angle.into_py_any(py),
             "flags" => self.inner.flags.into_py_any(py),
             other => Err(PyKeyError::new_err(format!(
                 "Unknown sim info field: '{other}'"
@@ -827,13 +855,16 @@ impl PySimulation {
     /// without the grid readbacks of :meth:`save`.
     ///
     /// Returns:
-    ///     dict: ``release_volume_m3``, ``travel_length`` (m) and
-    ///     ``travel_angle`` (degrees) of the center of mass.
+    ///     dict: ``release_volume_m3``, horizontal ``travel_length_2d`` (m),
+    ///     ``travel_length_3d`` (m), ``travel_vertical_drop`` (m) and ``travel_angle``
+    ///     (degrees) of the center of mass, accumulated during the simulation.
     pub fn run_summary<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let summary = self.inner.run_summary().block_on().map_runtime_err()?;
         let dict = PyDict::new(py);
         dict.set_item("release_volume_m3", summary.release_volume_m3)?;
-        dict.set_item("travel_length", summary.travel_length)?;
+        dict.set_item("travel_length_2d", summary.travel_length_2d)?;
+        dict.set_item("travel_length_3d", summary.travel_length_3d)?;
+        dict.set_item("travel_vertical_drop", summary.travel_vertical_drop)?;
         dict.set_item("travel_angle", summary.travel_angle)?;
         Ok(dict)
     }
@@ -1392,6 +1423,19 @@ impl PySimulation {
         let data = self
             .inner
             .fetch_grid_momentum()
+            .block_on()
+            .map_runtime_err()?;
+        Ok(data.to_pyarray(py))
+    }
+
+    /// f32 array of the per-cell deposited vertical momentum in kg m/s,
+    /// ``height * width``. Only the 3D depth-averaged model carries it; it is
+    /// zero for the other models.
+    #[getter]
+    fn get_grid_momentum_z<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<f32>>> {
+        let data = self
+            .inner
+            .fetch_grid_momentum_z()
             .block_on()
             .map_runtime_err()?;
         Ok(data.to_pyarray(py))

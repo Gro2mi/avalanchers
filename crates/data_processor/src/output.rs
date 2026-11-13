@@ -653,7 +653,9 @@ mod tests {
             center_of_mass_y: vec![value + 1.0; steps],
             time: vec![0.5; steps],
             release_volume_m3: value * 10.0,
-            travel_length: value * 100.0,
+            travel_length_2d: value * 100.0,
+            travel_length_3d: value * 125.0,
+            travel_vertical_drop: value * 75.0,
             travel_angle: 30.0,
             final_timestep: steps as u32,
             simulated_time: 12.5,
@@ -760,6 +762,15 @@ mod tests {
 
         let volume: Vec<f32> = read(&output, &format!("{SCENARIO}/release_volume_m3"));
         assert_eq!(volume[..2], [100.0, 200.0], "the volume belongs to the run");
+
+        let horizontal: Vec<f32> = read(&output, &format!("{SCENARIO}/travel_length_2d"));
+        let length_3d: Vec<f32> = read(&output, &format!("{SCENARIO}/travel_length_3d"));
+        assert_eq!(horizontal[..2], [1000.0, 2000.0]);
+        assert_eq!(length_3d[..2], [1250.0, 2500.0]);
+        assert!(length_3d[2].is_nan(), "unwritten 3D lengths are NaN");
+        let drop: Vec<f32> = read(&output, &format!("{SCENARIO}/travel_vertical_drop"));
+        assert_eq!(drop[..2], [750.0, 1500.0]);
+        assert!(drop[2].is_nan());
     }
 
     #[test_log::test]
@@ -834,6 +845,20 @@ mod tests {
         assert!(x[row + steps].is_nan());
         assert_eq!(x[299], 1.0);
         assert!(x[300].is_nan());
+    }
+
+    #[test_log::test]
+    fn test_travel_length_3d_added_to_existing_store() {
+        let (_tmp_dir, path, output) = store("new_3d_length.zarr");
+        add(&output, &run(1.0, 3));
+        fs::remove_dir_all(path.join(SCENARIO).join("travel_length_3d")).unwrap();
+
+        add(&output, &run(2.0, 3));
+        let length_3d: Vec<f32> = read(&output, &format!("{SCENARIO}/travel_length_3d"));
+        assert!(length_3d[0].is_nan(), "older runs have no 3D length");
+        assert_eq!(length_3d[1], 250.0);
+        let horizontal: Vec<f32> = read(&output, &format!("{SCENARIO}/travel_length_2d"));
+        assert_eq!(horizontal[..2], [100.0, 200.0]);
     }
 
     #[test_log::test]

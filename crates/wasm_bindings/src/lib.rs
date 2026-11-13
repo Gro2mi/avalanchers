@@ -496,12 +496,17 @@ impl WasmSimulation {
             return Err(JsValue::from_str("set a DEM before attaching the renderer"));
         }
 
+        // Until `prepare` rebuilds them, the orchestrator's grid and particle
+        // buffers may still belong to a previous DEM of another size.
+        let state = self.inner.get_state();
         let mut view = RenderView::new(
             self.inner.orchestrator(),
             canvas,
             &self.inner.dem,
             exaggeration,
             self.inner.number_particles(),
+            state >= SimulationState::TerrainAnalyzed,
+            state >= SimulationState::ParticlesInitialized,
         )
         .map_err(to_js_err)?;
         if let Some(camera) = self.last_camera {
