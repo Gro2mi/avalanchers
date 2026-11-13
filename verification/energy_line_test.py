@@ -401,3 +401,139 @@ def generate_energy_plot(ava_profile_mass, dem, fields, cfg, g, mu, sim_name,
         plt.show()
     plt.close(fig)
     return result_energy_test, save_path
+
+
+# ---------------------------------------------------------------------------
+# thesis figures - 15 cm text width, Computer Modern, PDF + PNG
+# ---------------------------------------------------------------------------
+
+def _energy_analysis(ava_profile_mass, dem, cfg, g, mu):
+    """Runout, alpha-line intersection and energy heights (shared by the
+    thesis figures)."""
+    alpha_deg = np.rad2deg(np.arctan(mu))
+    _, runout_angle_deg = get_runout_angle(ava_profile_mass)
+    slope_ext, s_int, z_int, coef_ext = get_alpha_profile_intersection(
+        cfg, ava_profile_mass, mu, dem["header"]["cellsize"])
+    z_ene, u2, _, _, result = get_energy_info(
+        ava_profile_mass, g, mu, s_int, z_int, runout_angle_deg, alpha_deg)
+    return {"alpha_deg": alpha_deg, "runout_angle_deg": runout_angle_deg,
+            "s_int": s_int, "z_int": z_int, "z_ene": z_ene, "u2": u2,
+            "result": result}
+
+
+def thesis_energy_profile(ava_profile_mass, dem, cfg, g, mu):
+    """Center-of-mass profile with the simulated energy line and the alpha
+    line (a, zoomed runout inset) and the velocity height along the path
+    against the alpha-line prediction (b)."""
+    import thesis_style as ts
+
+    info = _energy_analysis(ava_profile_mass, dem, cfg, g, mu)
+    s = ava_profile_mass["s"]
+    z = ava_profile_mass["z"]
+    z0 = z[0]
+    s_end, z_end = s[-1], z[-1]
+    s_int, z_int = info["s_int"], info["z_int"]
+    red, blue, orange = ts.VERMILION, ts.BLUE, ts.ORANGE
+
+    fig, axes = plt.subplots(2, 1, figsize=ts.size(1.0, 0.72), sharex=True,
+                             height_ratios=(2.0, 1.0), layout="constrained")
+    ax = axes[0]
+    ax.plot(s, z, color=ts.BLACK, label="center of mass path")
+    ax.plot(s, info["z_ene"], linestyle="none", marker="o", markersize=2.5,
+            color=orange, label=r"energy height $z + \Vert\mathbf{u}\Vert^2/2g$")
+    ax.plot(s[[0, -1]], info["z_ene"][[0, -1]], color=red,
+            label=r"simulated energy line ($%.2f^\circ$)" % info["runout_angle_deg"])
+    ax.plot([s[0], s_int], [z0, z0 - mu * s_int], color=blue, linestyle="--",
+            label=r"$\alpha$ line ($%.2f^\circ$)" % info["alpha_deg"])
+    ax.set_ylabel(r"$z$ (m)")
+    ax.legend(loc="lower left")
+    ts.panel_label(ax, "a", loc=(0.015, 0.95))
+
+    # zoom on the runout point
+    err_s = abs(s_end - s_int)
+    pad_s = max(4.0 * err_s, 15.0)
+    s_lo, s_hi = min(s_end, s_int) - pad_s, max(s_end, s_int) + pad_s
+    inset = ax.inset_axes([0.55, 0.45, 0.42, 0.5])
+    inset.plot(s, z, color=ts.BLACK)
+    inset.plot(s[[0, -1]], info["z_ene"][[0, -1]], color=red)
+    inset.plot([s[0], s_int], [z0, z0 - mu * s_int], color=blue, linestyle="--")
+    inset.plot(s_end, z_end, marker="o", color=red, markersize=4)
+    inset.plot(s_int, z_int, marker="s", color=blue, markersize=4,
+               markerfacecolor="none")
+    in_win = (s >= s_lo) & (s <= s_hi)
+    z_window = np.concatenate([z[in_win], [z_end, z_int, z0 - mu * s_lo, z0 - mu * s_hi]])
+    z_pad = 0.15 * (z_window.max() - z_window.min() + 1.0)
+    inset.set_xlim(s_lo, s_hi)
+    inset.set_ylim(z_window.min() - z_pad, z_window.max() + z_pad)
+    inset.tick_params(labelsize=7)
+    inset.set_title(r"runout: $\Delta s = %+.2f$ m, $\Delta\alpha = %+.3f^\circ$"
+                    % (info["result"]["runOutSError"], info["result"]["runOutAngleError"]),
+                    fontsize=7, pad=3)
+    ax.indicate_inset_zoom(inset, edgecolor="0.4")
+
+    ax = axes[1]
+    velocity_height = info["u2"] / (2.0 * g)
+    predicted = np.maximum(z0 - mu * s - z, 0.0)
+    ax.plot(s, velocity_height, color=orange, marker="o", markersize=2.5,
+            label=r"simulation $\Vert\mathbf{u}\Vert^2/2g$")
+    ax.plot(s, predicted, color=blue, linestyle="--",
+            label=r"$\alpha$ line $-$ path")
+    ax.set_xlabel(r"path length $s$ (m)")
+    ax.set_ylabel(r"$\Vert\mathbf{u}\Vert^2/2g$ (m)")
+    ax.set_ylim(bottom=0.0)
+    ax.legend(loc="upper right")
+    ax.text(0.5, 0.06, "RMSE %.2f m" % info["result"]["rmseVelocityElevation"],
+            transform=ax.transAxes, ha="center")
+    ts.panel_label(ax, "b", loc=(0.015, 0.95))
+    return fig
+
+
+def thesis_energy_map(ava_profile_mass, dem, pfv):
+    """Peak flow velocity on the DEM hillshade with the center-of-mass path."""
+    import thesis_style as ts
+
+    header = dem["header"]
+    extent = [header["xmin"], header["xmax"], header["ymin"], header["ymax"]]
+    x_min, x_max, y_min, y_max = constrain_plots_to_data(pfv, header)
+    aspect = (y_max - y_min) / max(x_max - x_min, 1e-9)
+    fig, ax = plt.subplots(figsize=ts.size(1.0, min(1.1, 0.9 * aspect + 0.1)),
+                           layout="constrained")
+    ts.hillshade(ax, dem["rasterData"], extent, header["cellsize"])
+    im = ax.imshow(np.ma.masked_where(pfv <= 0, pfv), origin="lower", extent=extent,
+                   cmap="viridis", zorder=2, interpolation="nearest")
+    ax.plot(ava_profile_mass["x"], ava_profile_mass["y"], color="w", linewidth=2.2,
+            zorder=3)
+    ax.plot(ava_profile_mass["x"], ava_profile_mass["y"], color=ts.VERMILION,
+            linewidth=1.1, zorder=4, label="center of mass path")
+    ax.plot(ava_profile_mass["x"][0], ava_profile_mass["y"][0], marker="o",
+            linestyle="none", color=ts.VERMILION, markeredgecolor="w", zorder=5,
+            label="start")
+    ax.plot(ava_profile_mass["x"][-1], ava_profile_mass["y"][-1], marker="X",
+            linestyle="none", color=ts.VERMILION, markeredgecolor="w", markersize=7,
+            zorder=5, label="stop")
+    ax.set_xlim(x_min, x_max)
+    ax.set_ylim(y_min, y_max)
+    ax.set_aspect("equal")
+    ax.grid(False)
+    ax.set_xlabel(r"$x$ (m)")
+    ax.set_ylabel(r"$y$ (m)")
+    fig.colorbar(im, ax=ax, shrink=0.85, pad=0.01,
+                 label=r"peak flow velocity (m s$^{-1}$)")
+    ax.legend(loc="upper right", frameon=True, framealpha=0.85, edgecolor="none")
+    return fig
+
+
+def plot_thesis_figures(ava_profile_mass, dem, pfv, cfg, g, mu, out_dir,
+                        prefix="energyline"):
+    """Thesis figures of the energy line test (see thesis_style); written as
+    PDF + PNG to <out_dir>/thesis. Returns the PNG paths."""
+    import thesis_style as ts
+
+    out_dir = pathlib.Path(out_dir) / "thesis"
+    with ts.style():
+        return [
+            ts.save(thesis_energy_profile(ava_profile_mass, dem, cfg, g, mu),
+                    out_dir, f"{prefix}_profile"),
+            ts.save(thesis_energy_map(ava_profile_mass, dem, pfv),
+                    out_dir, f"{prefix}_map"),
+        ]

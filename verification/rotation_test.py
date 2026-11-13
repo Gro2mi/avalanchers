@@ -11,7 +11,7 @@ Where AvaFrame rotates com1DFA peak rasters with ``geoTrans.rotateRaster``
 and compares along an AIMEC path transform, this port:
 
 - rotates the DEM + release rasters with ``scipy.ndimage.rotate`` (+angle =
-  counterclockwise in map coordinates, rotated about the domain center,
+  clockwise in map coordinates with row 0 = south, rotated about the domain center,
   domain/bounds kept identical) and hands them to the simulation with
   ``set_dem_with_bounds`` / ``set_release_areas``
 - rotates the resulting peak fields back with -angle and compares them to
@@ -39,8 +39,10 @@ FS = 12
 # ---------------------------------------------------------------------------
 
 def rotate_raster(raster, angle_deg, cval=0.0):
-    """Rotate raster content by `angle_deg` (CCW in map coordinates, i.e.
-    row 0 = south, origin lower) about the domain center; shape preserved."""
+    """Rotate raster content by `angle_deg` about the domain center; shape
+    preserved. Positive angles turn the content CLOCKWISE in map coordinates
+    (row 0 = south, origin lower) - checked numerically: an east point lands
+    south at +90 deg (scipy rotates counterclockwise in row-0-top images)."""
     return ndimage_rotate(np.asarray(raster, dtype=np.float64), angle_deg,
                           reshape=False, order=1, mode="constant",
                           cval=cval, prefilter=False)
@@ -272,3 +274,153 @@ def _save_fig(fig, out_dir, name):
     print("plot saved to %s" % path)
     plt.close(fig)
     return path
+
+
+# ---------------------------------------------------------------------------
+# thesis figures - 15 cm text width, Computer Modern, PDF + PNG
+# ---------------------------------------------------------------------------
+
+def rotate_points_back(x, y, angle_deg, header):
+    """Map points of a run on the rotated rasters back into the reference
+    frame. rotate_raster(+angle) turns the content CLOCKWISE in map
+    coordinates (row 0 = south) about the domain center, so the points are
+    turned counterclockwise by +angle."""
+    cx = 0.5 * (header["xmin"] + header["xmax"])
+    cy = 0.5 * (header["ymin"] + header["ymax"])
+    a = math.radians(angle_deg)
+    dx = np.asarray(x, dtype=float) - cx
+    dy = np.asarray(y, dtype=float) - cy
+    return (cx + dx * math.cos(a) - dy * math.sin(a),
+            cy + dx * math.sin(a) + dy * math.cos(a))
+
+
+def _map_window(header, mask, buffer_m=30.0):
+    cs = header["cellsize"]
+    rows, cols = np.where(mask)
+    return (header["xmin"] + cols.min() * cs - buffer_m,
+            header["xmin"] + (cols.max() + 1) * cs + buffer_m,
+            header["ymin"] + rows.min() * cs - buffer_m,
+            header["ymin"] + (rows.max() + 1) * cs + buffer_m)
+
+
+def _thesis_rotation_paths(ts, dem, header, angles, profiles, masks):
+    from matplotlib.lines import Line2D
+
+    extent = [header["xmin"], header["xmax"], header["ymin"], header["ymax"]]
+    union = np.logical_or.reduce([masks[a] for a in angles])
+    x_lo, x_hi, y_lo, y_hi = _map_window(header, union)
+    aspect = (y_hi - y_lo) / (x_hi - x_lo)
+    fig, ax = plt.subplots(figsize=ts.size(1.0, min(1.1, 0.85 * aspect + 0.1)),
+                           layout="constrained")
+    ts.hillshade(ax, dem, extent, header["cellsize"])
+    xs = header["xmin"] + (np.arange(header["ncols"]) + 0.5) * header["cellsize"]
+    ys = header["ymin"] + (np.arange(header["nrows"]) + 0.5) * header["cellsize"]
+    handles = []
+    for k, (color, angle) in enumerate(zip(ts.SERIES_COLORS, angles)):
+        style = "-" if k == 0 else "--"
+        ax.contour(xs, ys, masks[angle].astype(float), levels=[0.5], colors=color,
+                   linewidths=1.0, linestyles=style, zorder=3)
+        px, py = rotate_points_back(profiles[angle]["x"], profiles[angle]["y"], angle, header)
+        ax.plot(px, py, color=color, linestyle=style, linewidth=1.2, zorder=4)
+        ax.plot(px[-1], py[-1], marker="X", linestyle="none", color=color,
+                markeredgecolor="w", markersize=6, zorder=5)
+        handles.append(Line2D([], [], color=color, linestyle=style,
+                              label=r"$%g^\circ$" % angle + (" (reference)" if k == 0 else "")))
+    ax.set_xlim(x_lo, x_hi)
+    ax.set_ylim(y_lo, y_hi)
+    ax.set_aspect("equal")
+    ax.grid(False)
+    ax.set_xlabel(r"$x$ (m)")
+    ax.set_ylabel(r"$y$ (m)")
+    handles += [Line2D([], [], color=ts.BLACK, marker="X", linestyle="none",
+                       markersize=6, label="center of mass stop")]
+    fig.legend(handles=handles, loc="outside lower center", ncol=len(handles),
+               title="grid rotation (paths and affected areas in the reference frame)")
+    return fig
+
+
+def _thesis_rotation_areas(ts, header, ref_mask, masks, results, angles):
+    from matplotlib.colors import ListedColormap, BoundaryNorm
+
+    others = angles[1:]
+    x_lo, x_hi, y_lo, y_hi = _map_window(
+        header, np.logical_or.reduce([ref_mask] + [masks[a] for a in others]), 15.0)
+    aspect = (y_hi - y_lo) / (x_hi - x_lo)
+    n = len(others)
+    fig, axes = plt.subplots(1, n, sharey=True, squeeze=False, layout="constrained",
+                             figsize=ts.size(1.0, min(1.0, aspect / n + 0.16)))
+    extent = [header["xmin"], header["xmax"], header["ymin"], header["ymax"]]
+    cmap = ListedColormap(["#BBBBBB", ts.VERMILION, ts.BLUE])
+    norm = BoundaryNorm([0.5, 1.5, 2.5, 3.5], cmap.N)
+    dice = {r["angle"]: r["dice"] for r in results}
+    for k, angle in enumerate(others):
+        ax = axes[0, k]
+        comparison = np.zeros(ref_mask.shape)
+        comparison[ref_mask & masks[angle]] = 1     # both
+        comparison[ref_mask & ~masks[angle]] = 2    # reference only
+        comparison[~ref_mask & masks[angle]] = 3    # rotated only
+        ax.imshow(np.ma.masked_where(comparison == 0, comparison), origin="lower",
+                  extent=extent, cmap=cmap, norm=norm, interpolation="nearest")
+        ax.set_xlim(x_lo, x_hi)
+        ax.set_ylim(y_lo, y_hi)
+        ax.set_aspect("equal")
+        ax.grid(False)
+        ax.set_title(r"(%s) $%g^\circ$, Dice $= %.3f$"
+                     % ("abcdefgh"[k], angle, dice.get(angle) or float("nan")))
+        ax.set_xlabel(r"$x$ (m)")
+    axes[0, 0].set_ylabel(r"$y$ (m)")
+    handles = [plt.Rectangle((0, 0), 1, 1, fc="#BBBBBB", label="both"),
+               plt.Rectangle((0, 0), 1, 1, fc=ts.VERMILION, label="reference only"),
+               plt.Rectangle((0, 0), 1, 1, fc=ts.BLUE, label="rotated run only")]
+    fig.legend(handles=handles, loc="outside lower center", ncol=3)
+    return fig
+
+
+def _thesis_rotation_along_path(ts, sections, stats_per_angle, angles):
+    from matplotlib.lines import Line2D
+
+    s = sections[0]
+    fig, axes = plt.subplots(2, 1, sharex=True, figsize=ts.size(1.0, 0.6),
+                             layout="constrained")
+    handles = []
+    for k, (color, angle) in enumerate(zip(ts.SERIES_COLORS, angles)):
+        for ax, key in zip(axes, ("pft", "pfv")):
+            vmax, vmean = stats_per_angle[angle][key]
+            ax.plot(s, vmax, color=color)
+            ax.plot(s, vmean, color=color, linestyle="--")
+        handles.append(Line2D([], [], color=color,
+                              label=r"$%g^\circ$" % angle + (" (ref.)" if k == 0 else "")))
+    axes[0].set_ylabel(r"peak $h$ (m)")
+    axes[1].set_ylabel(r"peak $\Vert\mathbf{u}\Vert$ (m s$^{-1}$)")
+    axes[1].set_xlabel(r"distance along the reference path $s$ (m)")
+    for label, ax in zip("ab", axes):
+        ax.set_ylim(bottom=0.0)
+        ts.panel_label(ax, label, loc=(0.015, 0.93))
+    handles += [Line2D([], [], color=ts.BLACK, label="cross-section max"),
+                Line2D([], [], color=ts.BLACK, linestyle="--", label="cross-section mean")]
+    fig.legend(handles=handles, loc="outside lower center", ncol=len(handles))
+    return fig
+
+
+def plot_thesis_figures(dem, header, results, profiles, masks, sections,
+                        stats_per_angle, angles, out_dir):
+    """Thesis figures of the rotation test (see thesis_style), all in the
+    reference frame: paths + affected-area outlines, area agreement maps and
+    max/mean values along the reference path. PDF + PNG in
+    <out_dir>/thesis; returns the PNG paths."""
+    import pathlib
+    import thesis_style as ts
+
+    out_dir = pathlib.Path(out_dir) / "thesis"
+    ref_mask = masks[angles[0]]
+    with ts.style():
+        paths = [ts.save(_thesis_rotation_paths(ts, dem, header, angles, profiles, masks),
+                         out_dir, "rotation_paths")]
+        if len(angles) > 1:
+            paths.append(ts.save(_thesis_rotation_areas(ts, header, ref_mask, masks,
+                                                        results, angles),
+                                 out_dir, "rotation_areas"))
+        paths.append(ts.save(_thesis_rotation_along_path(ts, sections, stats_per_angle,
+                                                         angles),
+                             out_dir, "rotation_along_path"))
+    return paths

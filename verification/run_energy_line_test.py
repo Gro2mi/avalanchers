@@ -213,6 +213,8 @@ def main():
     parser.add_argument("--friction-model", default=None,
                         help="coulomb | voellmy | voellmy-min-shear | samosat")
     parser.add_argument("--max-steps", type=int, default=None)
+    from cli_args import add_particles_per_cell_argument
+    add_particles_per_cell_argument(parser)
     parser.add_argument("--save-steps", type=int, default=None,
                         help="sample the center of mass path every N steps")
     parser.add_argument("--t-end", type=float, default=None,
@@ -240,6 +242,8 @@ def main():
         settings["friction_model"] = args.friction_model
     if args.max_steps is not None:
         settings["max_steps"] = args.max_steps
+    if args.particles_per_cell is not None:
+        settings["released_particles_per_cell"] = args.particles_per_cell
     save_steps = args.save_steps if args.save_steps is not None else SAVE_STEPS
 
     import energy_line_test
@@ -255,6 +259,9 @@ def main():
         ava_profile_mass, dem, {"pfv": pfv}, ENERGY_LINE_TEST_CFG,
         g=9.81, mu=settings["friction_coefficient"], sim_name=sim_name,
         out_dir=pathlib.Path(args.out_dir) / "pics", show=args.show)
+    energy_line_test.plot_thesis_figures(
+        ava_profile_mass, dem, pfv, ENERGY_LINE_TEST_CFG, g=9.81,
+        mu=settings["friction_coefficient"], out_dir=pathlib.Path(args.out_dir) / "pics")
 
     print()
     print("Runout s      : %.2f m" % result["sEnd"])

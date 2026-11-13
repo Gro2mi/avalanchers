@@ -334,6 +334,8 @@ def main():
     parser.add_argument("--phi", type=float, default=None,
                         help="slope angle in degrees (default: measure from DEM)")
     parser.add_argument("--max-steps", type=int, default=None)
+    from cli_args import add_particles_per_cell_argument
+    add_particles_per_cell_argument(parser)
     parser.add_argument("--weak-pressure", action=argparse.BooleanOptionalAction,
                         default=None,
                         help="weak-form pressure gradient of the curvilinear model "
@@ -364,6 +366,8 @@ def main():
         cfg["phi"] = args.phi
     if args.max_steps is not None:
         settings["max_steps"] = args.max_steps
+    if args.particles_per_cell is not None:
+        settings["released_particles_per_cell"] = args.particles_per_cell
     if args.weak_pressure is not None:
         settings["enable_weak_pressure"] = args.weak_pressure
     settings["friction_coefficient"] = math.tan(math.radians(cfg["delta"]))
@@ -421,6 +425,8 @@ def main():
                                            "vh_l2": err_vh, "vh_lmax": err_vh_max},
                                           cfg["t_save"], cfg, sim_name, settings,
                                           out_dir)
+    dam_break_test.plot_thesis_figures(dem["rasterData"], header, frame, dam, samples,
+                                       errors, cfg, out_dir)
 
     i_save = int(min(np.searchsorted(samples["t"], cfg["t_save"]),
                      len(samples["t"]) - 1))

@@ -27,6 +27,12 @@ Usage:
     python run_similarity_solution_test.py              # run with the SETTINGS below
     python run_similarity_solution_test.py --t-end 10   # shorter run
     python run_similarity_solution_test.py --plot-sequence --show
+    python run_similarity_solution_test.py --sim-model 3d-depth-averaged
+
+The 3D depth-averaged model carries the full Cartesian velocity: its momentum
+is compared in x, y AND z (h*u_z from ``grid_momentum_z``). Thesis figures
+(PDF + PNG, 15 cm text width) and an error CSV are written to
+``<out-dir>/pics/thesis``.
 """
 
 import argparse
@@ -184,59 +190,75 @@ def run_simulation(settings, cfg):
     y1_grid = y_map - cfg["center"][1]
     jac = sst.jacobian(dem, cs)
     surface_velocity = settings["sim_model"].lower() in sst.SURFACE_VELOCITY_MODELS
+    three_d = sst.is_three_d(settings["sim_model"])
+    if three_d:
+        print("3D depth-averaged model: momentum compared in x, y AND z "
+              "(grid_momentum + grid_momentum_z)")
 
-    samples = {"t": [], "h": [], "u": [], "v": []}
+    samples = {"t": [], "h": [], "u": [], "v": [], "vx": [], "vy": [], "speed": [],
+               "vz": [] if three_d else None}
     errors = {k: [] for k in ("h_l2", "h_l2rel", "h_lmax", "h_lmaxrel",
-                              "vh_l2", "vh_l2rel", "vh_lmax", "vh_lmaxrel")}
+                              "vh_l2", "vh_l2rel", "vh_lmax", "vh_lmaxrel",
+                              "vhz_l2", "vhz_l2rel", "vhz_lmax", "vhz_lmaxrel")}
     save_times = sorted({min(t, cfg["t_end"]) for t in np.arange(
         cfg["save_interval"], cfg["t_end"] + 1e-6, cfg["save_interval"])})
 
     def record(info):
         """Sample the grid fields, compare to the analytic solution."""
         t = info.grid_elapsed_time
-        h, u, v, mass = sst.fields_from_grid(sim, dem.shape, cs, density, jac,
-                                             surface_velocity)
+        field = sst.fields_from_grid(sim, dem.shape, cs, density, jac,
+                                     surface_velocity, three_d)
         samples["t"].append(t)
-        samples["h"].append(h)
-        samples["u"].append(u)
-        samples["v"].append(v)
+        for key in ("h", "u", "v", "vx", "vy", "speed", "vz"):
+            if samples[key] is not None:
+                samples[key].append(field[key])
+        h = field["h"]
         h_ana = sst.similarity_fields(sol, t, x1_grid, y1_grid, cfg["l_x"],
                                       cfg["l_y"], cfg["rel_th"], cfg["zeta"],
                                       cfg["delta"], cfg["grav_acc"])
         h_l2, h_l2rel, h_lmax, h_lmaxrel = sst.norm_l2_scal(
             h_ana["h"], h, cs, cos_z)
-        vh_l2, vh_l2rel, vh_lmax, vh_lmaxrel = sst.norm_l2_vect(
-            (h_ana["h"] * h_ana["u"], h_ana["h"] * h_ana["v"]),
-            (h * u, h * v), cs, cos_z)
-        errors["h_l2"].append(h_l2)
-        errors["h_l2rel"].append(h_l2rel)
-        errors["h_lmax"].append(h_lmax)
-        errors["h_lmaxrel"].append(h_lmaxrel)
-        errors["vh_l2"].append(vh_l2)
-        errors["vh_l2rel"].append(vh_l2rel)
-        errors["vh_lmax"].append(vh_lmax)
-        errors["vh_lmaxrel"].append(vh_lmaxrel)
+        if three_d:
+            # full Cartesian momentum vector (AvaFrame normL2Vect with fz)
+            vh_ana = tuple(h_ana["h"] * h_ana[k] for k in ("vx", "vy", "vz"))
+            vh_sim = tuple(h * field[k] for k in ("vx", "vy", "vz"))
+            vhz = sst.norm_l2_scal(vh_ana[2], vh_sim[2], cs, cos_z)
+        else:
+            # in-plane momentum (u along slope, v across): equals the 3D norm
+            # for a velocity tangent to the plane
+            vh_ana = (h_ana["h"] * h_ana["u"], h_ana["h"] * h_ana["v"])
+            vh_sim = (h * field["u"], h * field["v"])
+            vhz = (float("nan"),) * 4
+        vh_l2, vh_l2rel, vh_lmax, vh_lmaxrel = sst.norm_l2_vect(vh_ana, vh_sim, cs, cos_z)
+        for key, value in zip(errors, (h_l2, h_l2rel, h_lmax, h_lmaxrel,
+                                       vh_l2, vh_l2rel, vh_lmax, vh_lmaxrel) + tuple(vhz)):
+            errors[key].append(value)
         total_h = float(np.nansum(h))
         x_com_sim = float(np.nansum(h * x_map) / total_h) if total_h > 0 else float("nan")
-        return t, h_l2rel, h_lmaxrel, vh_l2rel, vh_lmaxrel, x_com_sim, h_ana["x_center"]
+        return (t, h_l2rel, h_lmaxrel, vh_l2rel, vh_lmaxrel, vhz[1], x_com_sim,
+                h_ana["x_center"])
 
     info = sim.run_n_steps(1)
-    first_h, _, _, first_mass = sst.fields_from_grid(sim, dem.shape, cs,
-                                                     density, jac, surface_velocity)
+    first = sst.fields_from_grid(sim, dem.shape, cs, density, jac, surface_velocity,
+                                 three_d)
     sst.check_grid_mass_consistency(
-        sim, first_mass, np.asarray(sim.particles_mass, dtype=np.float64))
+        sim, first["mass"], np.asarray(sim.particles_mass, dtype=np.float64))
     last_step = -1
     idx_time = 0
 
     print()
     print(f"{'t [s]':>6} {'steps':>6} {'hL2rel':>10} {'hLMaxrel':>10} "
-          f"{'huL2rel':>10} {'huLMaxrel':>10} {'xCom sim/ana [m]':>20}")
+          f"{'huL2rel':>10} {'huLMaxrel':>10}"
+          + (f" {'huzL2rel':>10}" if three_d else "")
+          + f" {'xCom sim/ana [m]':>20}")
     while idx_time < len(save_times) and info.timestep != last_step:
         last_step = info.timestep
         while idx_time < len(save_times) and info.grid_elapsed_time >= save_times[idx_time] - 1e-6:
-            t, h_l2r, h_lmaxr, vh_l2r, vh_lmaxr, x_com_sim, x_com_ana = record(info)
+            t, h_l2r, h_lmaxr, vh_l2r, vh_lmaxr, vhz_l2r, x_com_sim, x_com_ana = record(info)
             print(f"{t:6.2f} {info.timestep:6d} {h_l2r:10.4f} {h_lmaxr:10.4f} "
-                  f"{vh_l2r:10.4f} {vh_lmaxr:10.4f} {x_com_sim:9.1f}/{x_com_ana:<9.1f}")
+                  f"{vh_l2r:10.4f} {vh_lmaxr:10.4f}"
+                  + (f" {vhz_l2r:10.4f}" if three_d else "")
+                  + f" {x_com_sim:9.1f}/{x_com_ana:<9.1f}")
             idx_time += 1
         if idx_time >= len(save_times):
             break
@@ -247,8 +269,9 @@ def run_simulation(settings, cfg):
               f"t={info.elapsed_time:.2f} s before reaching the first save "
               f"time of {save_times[0]:.2f} s")
     samples["t"] = np.asarray(samples["t"])
-    for key in ("h", "u", "v"):
-        samples[key] = np.asarray(samples[key])
+    for key in ("h", "u", "v", "vx", "vy", "speed", "vz"):
+        if samples[key] is not None:
+            samples[key] = np.asarray(samples[key])
     for key in errors:
         errors[key] = np.asarray(errors[key])
     print(f"\nstopped after {info.timestep} steps, t = {info.elapsed_time:.2f} s "
@@ -265,6 +288,10 @@ def main():
     parser.add_argument("--delta", type=float, default=None,
                         help="bed friction angle in degrees")
     parser.add_argument("--max-steps", type=int, default=None)
+    from cli_args import add_particles_per_cell_argument
+    add_particles_per_cell_argument(parser)
+    parser.add_argument("--sim-model", default=None,
+                        help="curvilinear | terrain-following | 3d-depth-averaged | mpmdac")
     parser.add_argument("--earth-pressure", action="store_true",
                         help="Savage-Hutter earth pressure coefficients in the "
                              "analytic solution and the simulation")
@@ -289,8 +316,12 @@ def main():
         cfg["save_interval"] = args.save_interval
     if args.delta is not None:
         cfg["delta"] = args.delta
+    if args.sim_model is not None:
+        settings["sim_model"] = args.sim_model
     if args.max_steps is not None:
         settings["max_steps"] = args.max_steps
+    if args.particles_per_cell is not None:
+        settings["released_particles_per_cell"] = args.particles_per_cell
     cfg["flag_earth"] = cfg["flag_earth"] or args.earth_pressure
     settings["friction_coefficient"] = math.tan(math.radians(cfg["delta"]))
     # earth pressure as in the analytic solution (Savage-Hutter K from phi, delta)
@@ -306,10 +337,12 @@ def main():
         raise RuntimeError("no field samples - nothing to plot")
 
     relative = cfg["relative_error"]
-    err_h = errors["h_l2rel" if relative else "h_l2"]
-    err_h_max = errors["h_lmaxrel" if relative else "h_lmax"]
-    err_vh = errors["vh_l2rel" if relative else "vh_l2"]
-    err_vh_max = errors["vh_lmaxrel" if relative else "vh_lmax"]
+    suffix = "rel" if relative else ""
+    plot_errors = {key: errors[key + suffix] for key in
+                   ("h_l2", "h_lmax", "vh_l2", "vh_lmax", "vhz_l2", "vhz_lmax")}
+    err_h, err_h_max = plot_errors["h_l2"], plot_errors["h_lmax"]
+    err_vh, err_vh_max = plot_errors["vh_l2"], plot_errors["vh_lmax"]
+    three_d = sst.is_three_d(settings["sim_model"])
 
     # analytic solution + limits at the highlighted time
     cos_z = math.cos(math.radians(cfg["zeta"]))
@@ -327,26 +360,24 @@ def main():
     i_save = int(min(np.searchsorted(samples["t"], cfg["t_save"]),
                      len(samples["t"]) - 1))
     t_plot = samples["t"][i_save]
-    field = {k: samples[k][i_save] for k in ("h", "u", "v")}
-    h_ana = sst.similarity_fields(sol, t_plot, x1_grid, y1_grid, cfg["l_x"],
-                                  cfg["l_y"], cfg["rel_th"], cfg["zeta"],
-                                  cfg["delta"], cfg["grav_acc"])
-    speed = np.hypot(field["u"], field["v"])
-    limits = sst.get_plot_limits(field["h"], speed, cfg["center"][0],
-                                 cfg["center"][1], header, cfg["scale_coef"])
+
+    def analytic_at(t):
+        return sst.similarity_fields(sol, t, x1_grid, y1_grid, cfg["l_x"],
+                                     cfg["l_y"], cfg["rel_th"], cfg["zeta"],
+                                     cfg["delta"], cfg["grav_acc"])
+
+    field = sst.sample_field(samples, i_save)
+    h_ana = analytic_at(t_plot)
+    limits = sst.get_plot_limits(field, cfg["center"][0], cfg["center"][1],
+                                 header, cfg["scale_coef"])
 
     if cfg["plot_sequence"]:
         contour_pngs = []
         profile_pngs = []
         for i, t in enumerate(samples["t"]):
-            field_i = {k: samples[k][i] for k in ("h", "u", "v")}
-            h_ana_i = sst.similarity_fields(sol, t, x1_grid, y1_grid, cfg["l_x"],
-                                            cfg["l_y"], cfg["rel_th"],
-                                            cfg["zeta"], cfg["delta"],
-                                            cfg["grav_acc"])
-            speed_i = np.hypot(field_i["u"], field_i["v"])
-            limits_i = sst.get_plot_limits(field_i["h"], speed_i,
-                                           cfg["center"][0], cfg["center"][1],
+            field_i = sst.sample_field(samples, i)
+            h_ana_i = analytic_at(t)
+            limits_i = sst.get_plot_limits(field_i, cfg["center"][0], cfg["center"][1],
                                            header, cfg["scale_coef"])
             profile_pngs.append(sst.plot_profile_comparison(
                 header, field_i, h_ana_i, limits_i, t, sim_name, out_dir))
@@ -356,17 +387,21 @@ def main():
         sst.assemble_gif(contour_pngs, out_dir / (sim_name + "_contours.gif"))
         sst.assemble_gif(profile_pngs, out_dir / (sim_name + "_profiles.gif"))
 
-    sst.plot_simi_sol_summary(header, field, h_ana, limits,
-                              {"h_l2": err_h, "h_lmax": err_h_max,
-                               "vh_l2": err_vh, "vh_lmax": err_vh_max},
+    sst.plot_simi_sol_summary(header, field, h_ana, limits, plot_errors,
                               samples["t"], t_plot, cfg, sim_name, settings,
                               out_dir)
+    sst.plot_thesis_figures(header, samples, analytic_at, errors, cfg["t_save"],
+                            cfg["center"][1], out_dir, three_d, cfg["scale_coef"])
 
     print()
     print(f"errors at t = {t_plot:.2f} s "
           f"({'relative' if relative else 'absolute'}):")
     print(f"h  L2 : {err_h[i_save]:.4f}   h  LMax : {err_h_max[i_save]:.4f}")
-    print(f"hu L2 : {err_vh[i_save]:.4f}   hu LMax : {err_vh_max[i_save]:.4f}")
+    print(f"hu L2 : {err_vh[i_save]:.4f}   hu LMax : {err_vh_max[i_save]:.4f}"
+          + ("  (3D vector norm)" if three_d else "  (in-plane norm)"))
+    if three_d:
+        print(f"huz L2: {plot_errors['vhz_l2'][i_save]:.4f}   "
+              f"huz LMax: {plot_errors['vhz_lmax'][i_save]:.4f}")
     return samples, errors
 
 

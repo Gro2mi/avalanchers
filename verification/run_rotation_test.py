@@ -4,7 +4,7 @@ Adapted from AvaFrame's ``runScripts/runRotationTest.py`` +
 ``ana1Tests/rotationTest.py``: analyze the effect of the GRID ORIENTATION
 on the simulation results. Instead of com1DFA output files (and pre-rotated
 input shapefiles), the base DEM and release raster are read once, rotated
-in memory by every angle in ``ROTATIONS`` (counterclockwise, about the
+in memory by every angle in ``ROTATIONS`` (clockwise in map coordinates, about the
 domain center, bounds kept identical) and handed to fresh simulations with
 ``set_dem_with_bounds`` / ``set_release_areas`` - nothing is written before
 the analysis.
@@ -38,7 +38,7 @@ OUTPUT_DIR = REPO_ROOT / "verification" / "outputs" / "rotation_test"
 BASE_DEM = REPO_ROOT / "data" / "avaframe" / "avaTripleBowl.png"
 BASE_RELEASE = REPO_ROOT / "data" / "avaframe" / "avaTripleBowlreleaseTexture.png"
 
-# grid alignment angles in degrees (counterclockwise); the FIRST angle is
+# grid alignment angles in degrees (clockwise in map coordinates); the FIRST angle is
 # the reference all rotations are compared against
 ROTATIONS = [0.0, 30.0, 60.0]
 
@@ -155,6 +155,8 @@ def main():
     parser.add_argument("--mu", type=float, default=None,
                         help="Coulomb friction coefficient")
     parser.add_argument("--max-steps", type=int, default=None)
+    from cli_args import add_particles_per_cell_argument
+    add_particles_per_cell_argument(parser)
     parser.add_argument("--save-steps", type=int, default=None)
     parser.add_argument("--out-dir", default=str(OUTPUT_DIR))
     parser.add_argument("--gpu", default=None, help="GPU name substring to select")
@@ -171,6 +173,8 @@ def main():
         settings["friction_coefficient"] = args.mu
     if args.max_steps is not None:
         settings["max_steps"] = args.max_steps
+    if args.particles_per_cell is not None:
+        settings["released_particles_per_cell"] = args.particles_per_cell
     save_steps = args.save_steps if args.save_steps is not None else SAVE_STEPS
     rotations = args.angles if args.angles is not None else list(ROTATIONS)
     mu = settings["friction_coefficient"]
@@ -203,6 +207,7 @@ def main():
     results = []
     fields = {}       # per angle: native-frame peak fields {"pfv", "pft"}
     back = {}         # per angle: peak fields rotated into the reference frame
+    profiles = {}     # per angle: center-of-mass path in the run's own frame
     ref_path = None
     for angle in rotations:
         print(f"\n--- rotation {angle:g} deg ---")
@@ -246,6 +251,7 @@ def main():
             "pft": fields[angle]["pft"] if angle == 0 else
             rotation_test.rotate_raster(fields[angle]["pft"], -angle, cval=np.nan),
         }
+        profiles[angle] = profile
         results.append({"angle": angle, "simName": "rot%g" % angle,
                         **result, "dice": None})
         if angle == rotations[0]:
@@ -280,6 +286,8 @@ def main():
                                         {a: masks[a] for a in rotations
                                          if a != rotations[0]},
                                         ROTATION_TEST_CFG, sim_name, pics)
+    rotation_test.plot_thesis_figures(dem["rasterData"], header, results, profiles,
+                                      masks, sections, stats_per_angle, rotations, pics)
     return results
 
 

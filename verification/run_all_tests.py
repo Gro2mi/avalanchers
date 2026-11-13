@@ -8,14 +8,29 @@ animated GIFs, and writes everything into one markdown document:
     verification/outputs/all_tests/<model>_<timestamp>/report.md
 
 Model switching: ``--sim-model`` accepts any avalanchers model string
-(``terrain-following`` | ``curvilinear`` | ``mpmdac`` | ``sliding-block``) and is injected into
-every test's settings before it runs. The analytic reference solutions
-(alpha line, Faccanoni-Mangeney, Hutter 1993) are exact only for
-``curvilinear`` + Coulomb friction - for other models the tests still run
-and produce plots/tables, but treat them as model-comparison runs, not
-analytic validation. The curvature-specific benchmark is explicitly skipped
-for other models or friction laws. ``--friction-model`` / ``--mu`` optionally override
-the friction (defaults: Coulomb with each test's documented angle).
+(``curvilinear`` | ``terrain-following`` | ``3d-depth-averaged`` | ``mpmdac``
+| ``sliding-block``) and is injected into every test's settings before it
+runs. The analytic reference solutions (alpha line, Faccanoni-Mangeney,
+Hutter 1993) apply to the depth-averaged models (curvilinear,
+terrain-following, 3d-depth-averaged) with Coulomb friction - for other
+models the tests still run and produce plots/tables, but treat them as
+model-comparison runs, not analytic validation. The curvature-specific
+benchmark is explicitly skipped for other models or friction laws.
+``--friction-model`` / ``--mu`` optionally override the friction (defaults:
+Coulomb with each test's documented angle).
+
+3D depth-averaged model: it carries the full Cartesian velocity, so the
+similarity solution test compares the momentum in x, y AND z (h*u_z from
+the vertical grid momentum) and reports the 3D vector error plus a separate
+h*u_z error.
+
+Thesis output: every test writes thesis figures (vector PDF + 300 dpi PNG,
+15 cm text width, Computer Modern; see ``thesis_style.py``) to
+``<test>/pics/thesis`` - the similarity solution and dam break tests also an
+error CSV. The report lists them first, with captions, ahead of the
+AvaFrame-style quick-look figures, and the run directory gets booktabs
+tables: ``summary.tex``, ``similarity_errors.tex``, ``dam_break_errors.tex``,
+``curvature.tex`` and ``rotation.tex`` (``\\usepackage{booktabs,tabularx}``).
 
 Each test runs in its own subfolder and a failure of one test does not stop
 the others - failures are reported in the markdown. Curvilinear/Coulomb runs
@@ -24,8 +39,9 @@ runs rather than numerical passes.
 
 Usage:
     python run_all_tests.py                          # all 5 tests, curvilinear
-    python run_all_tests.py --sim-model mpmdac       # switch the model
+    python run_all_tests.py --sim-model 3d-depth-averaged   # switch the model
     python run_all_tests.py --tests energy_line dam_break --quick
+    python run_all_tests.py --particles-per-cell 8          # particles per release cell
 """
 
 import argparse
@@ -60,16 +76,110 @@ TEST_TITLES = {
     "rotation": "Rotation",
 }
 
-# plot files embedded in the report, in order, per test (globs relative to
-# <test>/pics)
-REPORT_PLOTS = {
-    "energy_line": ["*EnergyTest*.png"],
-    "curvature": ["*CurvatureTest*.png"],
-    "similarity_solution": ["*SimiSolTest.png", "*_profiles.gif", "*_contours.gif"],
-    "dam_break": ["*DamBreakTest.png", "*_compare.gif"],
-    "rotation": ["*_runout_comparison.png", "*_sl_comparison.png",
-                 "*_areas_comparison.png", "*EnergyTest*.png"],
+THREE_D_MODELS = ("3d-depth-averaged", "3d")
+
+# what each test verifies (report text, reusable in the thesis methods)
+TEST_DESCRIPTIONS = {
+    "energy_line": (
+        "AvaFrame energy line test: with pure Coulomb friction the mass-averaged "
+        "center of mass must stop where the energy line of slope mu meets its path "
+        "(runout angle alpha = arctan mu), and its velocity height u^2/2g must follow "
+        "the vertical distance between that energy line and the path."),
+    "curvature": (
+        "Curvature-dependent normal load on the energy-line DEM and release: runs with "
+        "the curvature load on and off are compared to a point-slider reference with "
+        "the curvature load (no internal pressure); the curvature load must shorten "
+        "the runout on the concave bed and match the corrected energy line better "
+        "than the uncorrected alpha line."),
+    "similarity_solution": (
+        "Parabolic heap spreading on a 35 deg plane with 25 deg Coulomb bed friction, "
+        "compared to the similarity solution of Hutter, Siegel & Savage (1993). Flow "
+        "thickness h and momentum h*u are compared on the grid at every second "
+        "(relative L2 and Linf norms, AvaFrame simiSol)."),
+    "dam_break": (
+        "Dry-bed dam break on an inclined plane with Coulomb friction, compared to the "
+        "analytic solution of Faccanoni & Mangeney (2012, test 2, case 1.2)."),
+    "rotation": (
+        "AvaFrame rotation test: DEM and release are rotated by several angles, every "
+        "run gets the energy line analysis and its peak fields are rotated back; "
+        "runout and affected area (Dice) must not depend on the grid orientation."),
 }
+
+# plot files embedded in the report, in order, per test: (glob relative to
+# <test>/pics, caption)
+REPORT_PLOTS = {
+    "energy_line": [
+        ("thesis/energyline_profile.png",
+         "Center-of-mass altitude along the path with the energy heights z + u^2/2g, "
+         "the simulated energy line and the alpha line (a; the inset zooms on the "
+         "runout point: dot = simulation, square = alpha line), and the velocity height "
+         "against the distance between alpha line and path (b)."),
+        ("thesis/energyline_map.png",
+         "Peak flow velocity on the DEM with the center-of-mass path."),
+        ("*EnergyTest*.png", "AvaFrame-style energy line summary."),
+    ],
+    "curvature": [
+        ("thesis/curvature_velocity_height.png",
+         "Velocity height u^2/2g of the center of mass with the curvature load off and "
+         "on (a; markers = simulation, dashed = analytical point slider, dotted = "
+         "analytical stop) and the energy-height residual simulation - analytical (b)."),
+        ("*CurvatureTest*.png", "Energy height and residual (quick-look figure)."),
+    ],
+    "similarity_solution": [
+        ("thesis/simisol_profiles_*.png",
+         "Flow thickness h (a, b) and momentum components (c, d) along the flow "
+         "(y = 0) and across it through the analytic heap center; simulation solid, "
+         "analytical dashed. h*u_z is shown for the 3D model only."),
+        ("thesis/simisol_momentum_maps_*.png",
+         "Momentum components h*u_x, h*u_y (and h*u_z for the 3D model): "
+         "simulation, analytical solution and difference."),
+        ("thesis/simisol_centerline_evolution.png",
+         "Center-line profiles (y = 0) of h (a) and h|u| (b) at several times; "
+         "simulation solid, analytical dashed."),
+        ("thesis/simisol_contours_evolution.png",
+         "Flow thickness contours at 10 % (thick) and 60 % (thin) of the analytic "
+         "peak thickness at several times; + marks the analytic heap center."),
+        ("thesis/simisol_errors.png",
+         "Relative L2 and Linf errors of flow thickness (a) and momentum (b) over "
+         "time; for the 3D model the momentum error is the 3D vector norm, markers "
+         "show the vertical component h*u_z."),
+        ("*SimiSolTest.png", "AvaFrame-style summary (simiSol) at the highlighted time."),
+        ("*_profiles.gif", "Animated profile comparison (AvaFrame twin-axis panels)."),
+        ("*_contours.gif", "Animated flow thickness contour comparison."),
+    ],
+    "dam_break": [
+        ("thesis/dambreak_profiles.png",
+         "Flow thickness (a), speed (b) and momentum (c) along the slope through the dam "
+         "center at several times; simulation solid, analytical dashed. The analytical "
+         "curves start at the material mid-point (ticks in a), the upstream end of the "
+         "error domain; upstream the semi-infinite-dam solution does not apply."),
+        ("thesis/dambreak_map_*.png",
+         "Flow thickness at the highlighted time in the slope frame of the profiles "
+         "(along-slope distance s from the dam front, cross-slope distance from the dam "
+         "axis) with the error domain, the profile line and the analytical front."),
+        ("thesis/dambreak_errors.png",
+         "Relative L2 and Linf errors of flow thickness (a) and momentum |h u| (b) "
+         "within the error domain over time."),
+        ("*DamBreakTest.png", "AvaFrame-style dam break summary at the highlighted time."),
+        ("*_compare.gif", "Animated dam break comparison."),
+    ],
+    "rotation": [
+        ("thesis/rotation_paths.png",
+         "Center-of-mass paths and affected-area outlines (peak flow thickness above "
+         "the threshold) of all grid rotations, rotated back into the reference frame."),
+        ("thesis/rotation_areas.png",
+         "Affected-area agreement of each rotated run with the reference run."),
+        ("thesis/rotation_along_path.png",
+         "Maximum (solid) and mean (dashed) peak flow thickness (a) and peak speed (b) "
+         "on cross sections along the reference center-of-mass path."),
+        ("*_runout_comparison.png", "Runout per grid rotation (quick-look figure)."),
+        ("*_sl_comparison.png", "Max/mean values along the path (quick-look figure)."),
+        ("*_areas_comparison.png", "Affected area vs the reference (quick-look figure)."),
+    ],
+}
+
+# times of the similarity solution error table
+SIMILARITY_TABLE_TIMES = (5.0, 10.0, 15.0, 20.0)
 
 # ANSI escape codes (tracing output)
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
@@ -113,6 +223,8 @@ def _patch_common(settings, args):
         settings["friction_coefficient"] = args.mu
     if args.weak_pressure is not None:
         settings["enable_weak_pressure"] = args.weak_pressure
+    if args.particles_per_cell is not None:
+        settings["released_particles_per_cell"] = args.particles_per_cell
 
 
 def run_energy_line_test(test_dir, args):
@@ -244,7 +356,8 @@ def _md_table(header, rows):
     out = ["| " + " | ".join(header) + " |",
            "|" + "|".join(["---"] * len(header)) + "|"]
     for row in rows:
-        out.append("| " + " | ".join(str(v) for v in row) + " |")
+        # a literal pipe (e.g. |ds|) would split the cell
+        out.append("| " + " | ".join(str(v).replace("|", "\\|") for v in row) + " |")
     return "\n".join(out)
 
 
@@ -252,24 +365,67 @@ def _details(summary, body):
     return f"<details>\n<summary>{summary}</summary>\n\n```\n{body}\n```\n\n</details>"
 
 
-def _relative_images(test_dir, patterns):
-    """Markdown image lines for test_dir/pics following the given glob order."""
+def _is_three_d(args):
+    return args.sim_model.lower() in THREE_D_MODELS
+
+
+def _relative_images(test_dir, plots):
+    """Markdown image + caption lines for test_dir/pics, in the plot order.
+
+    Each figure gets a numbered caption; thesis figures also link their PDF.
+    """
     pics = test_dir / "pics"
     if not pics.is_dir():
         return []
     lines = []
     seen = set()
-    for pattern in patterns:
+    for pattern, caption in plots:
         for p in sorted(pics.glob(pattern)):
             if p in seen:
                 continue
             seen.add(p)
             rel = p.relative_to(test_dir.parent).as_posix()
-            lines.append(f"![{p.name}]({rel})")
+            pdf = p.with_suffix(".pdf")
+            link = (f" [PDF]({pdf.relative_to(test_dir.parent).as_posix()})"
+                    if pdf.is_file() else "")
+            lines += [f"![{p.stem}]({rel})", "",
+                      f"*{p.name}: {caption}*{link}", ""]
     return lines
 
 
-def _headline(test, ret):
+def _with_z(name, args):
+    """Tests reporting the vertical momentum error separately (3D model)."""
+    return name == "similarity_solution" and _is_three_d(args)
+
+
+def _similarity_rows(ret, args, with_z=None):
+    """Error table rows at SIMILARITY_TABLE_TIMES: (t, hL2, hLinf, huL2, huLinf[, huzL2, huzLinf]).
+
+    Used for the similarity solution and the dam break test (same error keys)."""
+    samples, errors = ret
+    times = np.asarray(samples["t"])
+    if not len(times):
+        return []
+    keys = ["h_l2rel", "h_lmaxrel", "vh_l2rel", "vh_lmaxrel"]
+    if (_is_three_d(args) if with_z is None else with_z):
+        keys += ["vhz_l2rel", "vhz_lmaxrel"]
+    rows = []
+    for wanted in SIMILARITY_TABLE_TIMES:
+        if wanted > times[-1] + 0.5:
+            continue
+        i = int(np.argmin(np.abs(times - wanted)))
+        rows.append([times[i]] + [float(errors[k][i]) for k in keys])
+    return rows
+
+
+def _similarity_header(args, with_z=None):
+    header = ["t [s]", "h L2", "h Linf", "hu L2", "hu Linf"]
+    if (_is_three_d(args) if with_z is None else with_z):
+        header += ["hu_z L2", "hu_z Linf"]
+    return header
+
+
+def _headline(test, ret, args=None):
     """One-line headline metric per test from its main() return value."""
     try:
         if test == "energy_line":
@@ -279,7 +435,7 @@ def _headline(test, ret):
                     f"velocity-height rmse {result['rmseVelocityElevation']:.2f} m")
         if test == "curvature":
             if ret is None:
-                return "skipped: curvature reference requires curvilinear or terrain-following with Coulomb"
+                return "skipped: curvature reference requires a depth-averaged model with Coulomb"
             result = ret["cases"][True]["result"]
             return (f"runout sim/analytic {result['simulated_runout']:.1f}/{result['horizontal_runout']:.1f} m, "
                     f"energy RMSE {result['energy_rmse']:.3f} m, "
@@ -288,8 +444,12 @@ def _headline(test, ret):
             samples, errors = ret
             times = samples["t"]
             i_ref = int(np.argmin(np.abs(times - 5.0)))
-            return (f"rel h L2 {errors['h_l2rel'][i_ref]:.3f} @ t={times[i_ref]:.1f} s, "
-                    f"{errors['h_l2rel'][-1]:.3f} @ t={times[-1]:.1f} s")
+            text = (f"rel h L2 {errors['h_l2rel'][i_ref]:.3f} @ t={times[i_ref]:.1f} s, "
+                    f"{errors['h_l2rel'][-1]:.3f} @ t={times[-1]:.1f} s; "
+                    f"rel hu L2 {errors['vh_l2rel'][-1]:.3f}")
+            if test == "similarity_solution" and args is not None and _is_three_d(args):
+                text += f" (3D), rel hu_z L2 {errors['vhz_l2rel'][-1]:.3f}"
+            return text + f" @ t={times[-1]:.1f} s"
         if test == "rotation":
             results = ret
             ref = results[0]
@@ -304,14 +464,14 @@ def _headline(test, ret):
 
 
 def _test_section(name, test_dir, ret, output, error, args, assessment):
-    lines = [f"## {TEST_TITLES[name]}", ""]
+    lines = [f"## {TEST_TITLES[name]}", "", TEST_DESCRIPTIONS[name], ""]
     if error is not None:
         lines += ["**FAILED**", "", "```", error.strip(), "```", ""]
     else:
         lines += [f"status: **{assessment[0]}**", ""]
         lines += [f"- {reason}" for reason in assessment[1]]
         lines.append("")
-    headline = _headline(name, ret) if error is None else ""
+    headline = _headline(name, ret, args) if error is None else ""
     if headline:
         lines += [headline, ""]
 
@@ -326,10 +486,31 @@ def _test_section(name, test_dir, ret, output, error, args, assessment):
                          f"{r['zEnd'] - ref['zEnd']:+.2f}",
                          f"{r['runoutAngle'] - ref['runoutAngle']:+.3f}",
                          "-" if r["dice"] is None else f"{r['dice']:.3f}"])
-        lines += ["| angle [deg] | sEnd [m] | zEnd [m] | runout angle [deg] | ds [m] | dz [m] | dAngle [deg] | Dice |",
-                  "|---|---|---|---|---|---|---|---|"]
-        lines += ["| " + " | ".join(str(v) for v in row) + " |" for row in rows]
-        lines.append("")
+        lines += [_md_table(["angle [deg]", "sEnd [m]", "zEnd [m]", "runout angle [deg]",
+                             "ds [m]", "dz [m]", "dAngle [deg]", "Dice"], rows), ""]
+
+    # similarity solution / dam break: relative error table at selected times
+    if name in ("similarity_solution", "dam_break") and error is None and ret:
+        with_z = _with_z(name, args)
+        rows = _similarity_rows(ret, args, with_z)
+        if rows:
+            if name == "dam_break":
+                norm = "|h u| within the error domain"
+            elif with_z:
+                norm = "3D vector norm of (h u_x, h u_y, h u_z)"
+            else:
+                norm = "in-plane norm of (h u, h v)"
+            lines += [f"Relative errors (momentum: {norm}):", "",
+                      _md_table(_similarity_header(args, with_z),
+                                [[f"{row[0]:.1f}"] + [f"{v:.4f}" for v in row[1:]]
+                                 for row in rows]), ""]
+
+    thesis = test_dir / "pics" / "thesis"
+    if error is None and thesis.is_dir():
+        csvs = sorted(p.name for p in thesis.glob("*.csv"))
+        extra = (" and " + ", ".join(f"`{c}`" for c in csvs)) if csvs else ""
+        lines += [f"Thesis figures (PDF + PNG){extra}: "
+                  f"`{thesis.relative_to(test_dir.parent).as_posix()}/`", ""]
 
     lines += _relative_images(test_dir, REPORT_PLOTS[name])
     if output:
@@ -337,34 +518,199 @@ def _test_section(name, test_dir, ret, output, error, args, assessment):
     return "\n".join(lines) + "\n"
 
 
+# ---------------------------------------------------------------------------
+# LaTeX tables (booktabs) for the thesis
+# ---------------------------------------------------------------------------
+
+_LATEX_ESCAPES = {"\\": r"\textbackslash{}", "&": r"\&", "%": r"\%", "$": r"\$",
+                  "#": r"\#", "_": r"\_", "{": r"\{", "}": r"\}", "~": r"\~{}",
+                  "^": r"\^{}", "|": r"$|$"}
+
+
+def _tex(text):
+    text = "".join(_LATEX_ESCAPES.get(c, c) for c in str(text))
+    return text.replace(">=", r"$\geq$").replace("<=", r"$\leq$")
+
+
+def _latex_table(caption, label, colspec, header, rows, packages="booktabs",
+                 environment="tabular"):
+    """booktabs table environment as text; `rows` are lists of cell strings."""
+    width = "{\\textwidth}" if environment == "tabularx" else ""
+    return "\n".join([
+        f"% generated by verification/run_all_tests.py - needs \\usepackage{{{packages}}}",
+        "\\begin{table}[htbp]",
+        "  \\centering\\small",
+        f"  \\caption{{{caption}}}",
+        f"  \\label{{{label}}}",
+        f"  \\begin{{{environment}}}{width}{{{colspec}}}",
+        "    \\toprule",
+        "    " + " & ".join(header) + r" \\",
+        "    \\midrule",
+        *("    " + " & ".join(row) + r" \\" for row in rows),
+        "    \\bottomrule",
+        f"  \\end{{{environment}}}",
+        "\\end{table}",
+        ""])
+
+
+def _tex_number(value, digits=2):
+    """Number with `digits` significant digits; tiny values as a x 10^b."""
+    if not np.isfinite(value):
+        return "--"
+    if value != 0 and abs(value) < 1e-2:
+        mantissa, exponent = f"{value:.{digits - 1}e}".split("e")
+        return rf"${mantissa}\times10^{{{int(exponent)}}}$"
+    return f"{value:.{digits}g}"
+
+
+def _error_table_rows(rows):
+    return [[f"{row[0]:.1f}"] + [f"{v:.3f}" for v in row[1:]] for row in rows]
+
+
+def _error_table_header(with_z, momentum=r"h\mathbf{u}"):
+    head = [r"$t$ (s)", r"$h$, $L_2$", r"$h$, $L_\infty$",
+            rf"${momentum}$, $L_2$", rf"${momentum}$, $L_\infty$"]
+    if with_z:
+        head += [r"$hu_z$, $L_2$", r"$hu_z$, $L_\infty$"]
+    return head
+
+
+def write_latex_tables(run_dir, entries, args):
+    """booktabs tables for the thesis, written to the run directory:
+    summary.tex (all tests) plus, for every test that ran without error,
+    similarity_errors.tex, dam_break_errors.tex, curvature.tex and
+    rotation.tex. Returns the written paths."""
+    model = _tex(args.sim_model)
+    tag = re.sub("[^a-z0-9]", "", args.sim_model.lower())
+    tables = {}
+
+    rows = []
+    for name in args.tests:
+        entry = entries[name]
+        status = "error" if entry["error"] else entry["assessment"][0]
+        headline = "" if entry["error"] else _headline(name, entry["ret"], args)
+        rows.append([_tex(TEST_TITLES[name]), _tex(status), _tex(headline)])
+    tables["summary.tex"] = _latex_table(
+        f"Verification tests of the {model} model.", f"tab:verification_{tag}", "llX",
+        ["test", "status", "result"], rows, "booktabs,tabularx", "tabularx")
+
+    def ok(name):
+        entry = entries.get(name)
+        return entry is not None and not entry["error"] and entry["ret"]
+
+    if ok("similarity_solution"):
+        with_z = _with_z("similarity_solution", args)
+        rows = _similarity_rows(entries["similarity_solution"]["ret"], args, with_z)
+        if rows:
+            norm = ("the 3D vector $(hu_x, hu_y, hu_z)$" if with_z
+                    else "the in-plane vector $(hu_x, hu_y)$")
+            tables["similarity_errors.tex"] = _latex_table(
+                f"Relative errors of the {model} model against the similarity solution of "
+                f"Hutter et al.~(1993); the momentum error uses {norm}.",
+                f"tab:simisol_{tag}", "r" * len(rows[0]), _error_table_header(with_z),
+                _error_table_rows(rows))
+
+    if ok("dam_break"):
+        rows = _similarity_rows(entries["dam_break"]["ret"], args, False)
+        if rows:
+            tables["dam_break_errors.tex"] = _latex_table(
+                f"Relative errors of the {model} model against the dam break solution of "
+                "Faccanoni and Mangeney~(2012) within the error domain; the momentum error "
+                r"uses $h\lVert\mathbf{u}\rVert$.",
+                f"tab:dambreak_{tag}", "r" * len(rows[0]),
+                _error_table_header(False, r"h\lVert\mathbf{u}\rVert"),
+                _error_table_rows(rows))
+
+    if ok("curvature"):
+        cases = entries["curvature"]["ret"]["cases"]
+        rows = []
+        for enabled in (False, True):
+            r = cases[enabled]["result"]
+            rows.append(["on" if enabled else "off",
+                         f"{r['horizontal_runout']:.1f}", f"{r['simulated_runout']:.1f}",
+                         f"{r['runout_error']:+.1f}", f"{r['energy_rmse']:.2f}",
+                         _tex_number(r['final_rms_speed'])])
+        tables["curvature.tex"] = _latex_table(
+            f"Curvature test of the {model} model: horizontal runout of the analytical "
+            "point slider and of the simulated center of mass, energy-height RMSE and the "
+            "final RMS particle speed.",
+            f"tab:curvature_{tag}", "lrrrrr",
+            ["curvature", "analytical (m)", "simulated (m)", r"$\Delta$ (m)",
+             "RMSE (m)", r"$u_\mathrm{rms}$ (m s$^{-1}$)"], rows)
+
+    if ok("rotation"):
+        results = entries["rotation"]["ret"]
+        ref = results[0]
+        rows = [[f"{r['angle']:g}", f"{r['sEnd']:.2f}", f"{r['sEnd'] - ref['sEnd']:+.2f}",
+                 f"{r['runoutAngle']:.3f}", f"{r['runoutAngle'] - ref['runoutAngle']:+.3f}",
+                 "--" if r["dice"] is None else f"{r['dice']:.3f}"] for r in results]
+        tables["rotation.tex"] = _latex_table(
+            f"Rotation test of the {model} model: center-of-mass runout length and runout "
+            f"angle per grid rotation, differences to the reference ({ref['angle']:g}"
+            r"$^\circ$) and Dice coefficient of the affected area.",
+            f"tab:rotation_{tag}", "rrrrrr",
+            [r"rotation ($^\circ$)", r"$s_\mathrm{end}$ (m)", r"$\Delta s$ (m)",
+             r"runout angle ($^\circ$)", r"$\Delta$ ($^\circ$)", "Dice"], rows)
+
+    paths = []
+    for name, text in tables.items():
+        path = run_dir / name
+        path.write_text(text, encoding="utf-8")
+        paths.append(path)
+    return paths
+
+
+def _build_info():
+    """avalanchers software version (with commit / dirty flag) of this run."""
+    try:
+        import avalanchers
+        return str(avalanchers.__software_version__)
+    except Exception:
+        return "unknown"
+
+
 def write_report(run_dir, test_dirs, entries, args, elapsed, timestamp):
     summary_rows = []
     for name in args.tests:
         entry = entries[name]
         status = "error" if entry["error"] else entry["assessment"][0]
-        headline = _headline(name, entry["ret"]) if not entry["error"] else ""
+        headline = _headline(name, entry["ret"], args) if not entry["error"] else ""
         summary_rows.append([TEST_TITLES[name], status, headline])
+    tex_paths = write_latex_tables(run_dir, entries, args)
+    momentum = ("3D (x, y, z) - the model carries the vertical momentum"
+                if _is_three_d(args) else "in-plane (x, y)")
     doc = [
         "# avalanchers verification report",
         "",
-        f"- tests: {', '.join(TEST_TITLES[t] for t in args.tests)}",
-        f"- sim model: **{args.sim_model}**"
-        + (f", friction model: {args.friction_model}" if args.friction_model else "")
-        + (f", mu: {args.mu}" if args.mu else "")
-        + " (analytic references apply to curvilinear and terrain-following with Coulomb only)",
-        f"- timestamp: {timestamp}",
-        f"- runtime: {elapsed / 60:.1f} min",
-        "- numerical guardrails: final thickness relative L2 <= 0.15, momentum relative L2 <= 0.25;",
-        "  required field time 20 s (10 s in quick mode); energy runout error <= 2%,",
-        "  velocity-height RMSE <= 3 m; rotation runout difference <= 2% and Dice >= 0.85.",
-        "- These are regression guardrails, not physical model certification.",
-        "- curvature: each slider runout error <= 2%, energy-height RMSE <= 3 m,",
-        "  final RMS speed <= 0.1 m/s; curvature must shorten runout and halve",
-        "  energy error relative to the uncorrected alpha line.",
+        _md_table(["run", "value"], [
+            ["sim model", f"**{args.sim_model}**"
+             + (f", friction model {args.friction_model}" if args.friction_model else "")
+             + (f", mu {args.mu}" if args.mu else "")],
+            ["momentum compared", momentum],
+            ["particles per cell", str(args.particles_per_cell)
+             if args.particles_per_cell is not None else "test defaults"],
+            ["avalanchers build", f"`{_build_info()}`"],
+            ["tests", ", ".join(TEST_TITLES[t] for t in args.tests)
+             + (" (quick mode)" if args.quick else "")],
+            ["timestamp", timestamp],
+            ["runtime", f"{elapsed / 60:.1f} min"],
+            ["LaTeX tables", ", ".join(f"`{p.name}`" for p in tex_paths)],
+        ]),
+        "",
+        "The analytic references apply to the depth-averaged models (curvilinear, "
+        "terrain-following, 3d-depth-averaged) with Coulomb friction; other models are "
+        "comparison runs.",
         "",
         "## Summary",
         "",
         _md_table(["test", "status", "headline"], summary_rows),
+        "",
+        "Regression guardrails (not a physical model certification): final flow thickness "
+        "relative L2 <= 0.15 and momentum relative L2 <= 0.25 at t >= 20 s (10 s in quick "
+        "mode); energy line runout error <= 2 %, velocity-height RMSE <= 3 m; rotation "
+        "runout difference <= 2 % and Dice >= 0.85; curvature: each slider runout error "
+        "<= 2 %, energy-height RMSE <= 3 m, final RMS speed <= 0.1 m/s, the curvature load "
+        "must shorten the runout and halve the energy error of the uncorrected alpha line.",
         "",
     ]
     for name in args.tests:
@@ -389,6 +735,8 @@ def main():
                         default=None,
                         help="weak-form pressure gradient of the curvilinear model "
                              "(default: each test's SETTINGS)")
+    from cli_args import add_particles_per_cell_argument
+    add_particles_per_cell_argument(parser)
     parser.add_argument("--tests", nargs="+", default=TEST_NAMES, choices=TEST_NAMES)
     parser.add_argument("--out-dir", default=None,
                         help="run directory (default: all_tests/<model>_<timestamp>)")
@@ -424,6 +772,7 @@ def main():
 
     report = write_report(run_dir, test_dirs, entries, args, elapsed, timestamp)
     print(f"\nreport written to {report}")
+    print(f"LaTeX tables in {run_dir}")
     for name in args.tests:
         if entries[name]["assessment"][0] in ("error", "failed"):
             print(f"WARNING: {name} FAILED - see the report")

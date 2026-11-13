@@ -218,6 +218,8 @@ def main(argv=None):
                         default=GULLY_TEST_CFG["reference_lengths"][1],
                         help="reference_surface_length of the split run (m)")
     parser.add_argument("--mu", type=float, default=SETTINGS["friction_coefficient"])
+    from cli_args import add_particles_per_cell_argument
+    add_particles_per_cell_argument(parser)
     parser.add_argument("--sim-model", default=SETTINGS["sim_model"],
                         help="curvilinear | terrain-following | 3d-depth-averaged")
     parser.add_argument("--out-dir", type=pathlib.Path, default=OUT_DIR)
@@ -234,6 +236,8 @@ def main(argv=None):
     for length in cfg["reference_lengths"]:
         settings = dict(SETTINGS, sim_model=args.sim_model, friction_coefficient=mu,
                         reference_surface_length=length)
+        if args.particles_per_cell is not None:
+            settings["released_particles_per_cell"] = args.particles_per_cell
         for key in ("stall", "slide"):
             dem, release, bounds = v_channel(cfg, cfg[f"{key}_slope"])
             results[key][length] = run(dem, release, bounds, cfg, settings, cfg["t_end"])
