@@ -744,7 +744,8 @@ impl PySimulation {
     /// Settings changed with :meth:`update_settings` take effect, and only
     /// the preparation stages they affect run again:
     ///
-    /// - ``sim_model`` or ``reference_surface_length``: full preparation,
+    /// - ``sim_model``, ``reference_surface_length`` or ``integer_atomics``:
+    ///   full preparation,
     /// - release thresholds (slope, elevation, roughness),
     ///   ``released_particles_per_cell``, ``release_area_fraction``, the
     ///   crown line and release fill settings or

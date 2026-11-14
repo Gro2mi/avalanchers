@@ -266,7 +266,41 @@ impl Default for SimSettings {
     }
 }
 
+/// Integer-atomic grid (GPUs without float atomics, or `integer_atomics`):
+/// node masses and momenta are fixed point numbers in u32 / i32 whose factors
+/// fill the integer range with the largest node values a flow can reach, a
+/// [`MAX_FLOW_THICKNESS`] deep column over a cell moving at
+/// [`MAX_FLOW_VELOCITY`], times [`QUANTIZATION_SAFETY`]. Must match utils.wgsl.
+pub const MAX_FLOW_THICKNESS: f32 = 30.0;
+/// Largest flow speed (m/s) the integer momentum range holds, see
+/// [`MAX_FLOW_THICKNESS`].
+pub const MAX_FLOW_VELOCITY: f32 = 100.0;
+/// Headroom of the integer range above [`MAX_FLOW_THICKNESS`] and
+/// [`MAX_FLOW_VELOCITY`]; also covers the slope factor of the node mass.
+pub const QUANTIZATION_SAFETY: f32 = 2.0;
+/// Integer range used for masses (u32) and momenta (i32): below 2^32 and 2^31
+/// so that a rounded maximum still converts without saturating.
+const QUANTIZATION_U32_RANGE: f32 = 4.0e9;
+const QUANTIZATION_I32_RANGE: f32 = 2.0e9;
+
 impl SimSettings {
+    /// Largest node mass (kg) the integer-atomic grid holds, see
+    /// [`MAX_FLOW_THICKNESS`]; same expression as `max_node_mass` in
+    /// utils.wgsl.
+    pub fn max_node_mass(&self) -> f32 {
+        QUANTIZATION_SAFETY * MAX_FLOW_THICKNESS * self.density * self.cell_size * self.cell_size
+    }
+
+    /// Integer units per kg of the integer-atomic grid mass.
+    pub fn mass_factor(&self) -> f32 {
+        QUANTIZATION_U32_RANGE / self.max_node_mass()
+    }
+
+    /// Integer units per kg m/s of the integer-atomic grid momentum.
+    pub fn momentum_factor(&self) -> f32 {
+        QUANTIZATION_I32_RANGE / (self.max_node_mass() * MAX_FLOW_VELOCITY)
+    }
+
     /// Length in steps of the no-new-cells rolling window, see utils.wgsl.
     pub fn no_new_cells_window(&self) -> u32 {
         ((self.no_new_cells_travel / self.cfl).round() as u32).max(10)
@@ -1164,6 +1198,10 @@ pub struct Settings {
     pub enable_weak_pressure: Option<bool>,
     pub enable_entrainment: Option<bool>,
     pub enable_center_of_mass: Option<bool>,
+    /// Accumulate the grid with integer (fixed point) atomics even on GPUs
+    /// with float atomics, as WebGPU does (defaults to false). Masses and
+    /// momenta are then quantized, see [`SimSettings::mass_factor`].
+    pub integer_atomics: Option<bool>,
     /// How the particles are placed in the release cells: `random`,
     /// `relaxed`, `uniform-random` or `uniform-relaxed` (defaults to
     /// `uniform-relaxed`), see [`ParticlePlacement`].
@@ -1275,6 +1313,29 @@ mod tests {
         assert_eq!(settings.world_size_y, dem.cell_size * dem.height as f32);
     }
 
+    #[test]
+    fn integer_grid_factors_fill_the_integer_range() {
+        let mut settings = SimSettings {
+            cell_size: 5.0,
+            density: 200.0,
+            ..SimSettings::new()
+        };
+        // 2 x 30 m x 200 kg/m3 x 25 m2
+        assert!((settings.max_node_mass() - 3.0e5).abs() < 1.0);
+        for cell_size in [1.0, 5.0, 25.0] {
+            settings.cell_size = cell_size;
+            let max_mass = settings.max_node_mass() * settings.mass_factor();
+            let max_momentum =
+                settings.max_node_mass() * MAX_FLOW_VELOCITY * settings.momentum_factor();
+            assert!(max_mass <= u32::MAX as f32 && max_mass > 0.9 * u32::MAX as f32);
+            assert!(max_momentum <= i32::MAX as f32 && max_momentum > 0.9 * i32::MAX as f32);
+            // a 1 m release, 64 particles per cell: units per particle do not
+            // depend on the cell size
+            let particle_mass = settings.density * cell_size * cell_size / 64.0;
+            assert!((particle_mass * settings.mass_factor() - 4.0e9 / (64.0 * 60.0)).abs() < 10.0);
+        }
+    }
+
     #[test_log::test]
     fn test_simsettings_as_bytes_length() {
         let settings = SimSettings::new();
@@ -1341,6 +1402,7 @@ mod tests {
             enable_entrainment: Some(false),
             enable_weak_pressure: Some(false),
             enable_center_of_mass: Some(true),
+            integer_atomics: Some(true),
             center_of_mass_biggest_blob: Some(false),
         };
         let dem = create_test_dem();

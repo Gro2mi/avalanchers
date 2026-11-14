@@ -10,7 +10,6 @@ compute_core = { workspace = true }
 wgpu = { workspace = true }
 anyhow = { workspace = true }
 bytemuck = { workspace = true }
-tempfile = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rand  = { workspace = true }
@@ -18,12 +17,13 @@ regex = { workspace = true }
 futures-intrusive = { workspace = true }
 tracing = { workspace = true}
 tracing-subscriber = { workspace = true }
-test-log = { workspace = true }
 futures = { workspace = true }
 web-time = { workspace = true }
 
 
 [dev-dependencies]
+test-log = { workspace = true }
+tempfile = { workspace = true }
 pollster = { workspace = true }
 shapefile = { workspace = true }
 criterion = { workspace = true, features = ["html_reports"] }

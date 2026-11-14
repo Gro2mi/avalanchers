@@ -226,6 +226,8 @@ def _patch_common(settings, args):
         settings["enable_weak_pressure"] = args.weak_pressure
     if args.particles_per_cell is not None:
         settings["released_particles_per_cell"] = args.particles_per_cell
+    if args.integer_atomics:
+        settings["integer_atomics"] = True
 
 
 def run_energy_line_test(test_dir, args):
@@ -690,6 +692,8 @@ def write_report(run_dir, test_dirs, entries, args, elapsed, timestamp):
             ["momentum compared", momentum],
             ["particles per cell", str(args.particles_per_cell)
              if args.particles_per_cell is not None else "test defaults"],
+            ["grid atomics", "integer (forced with --integer-atomics)"
+             if args.integer_atomics else "float where the GPU supports them"],
             ["avalanchers build", f"`{_build_info()}`"],
             ["tests", ", ".join(TEST_TITLES[t] for t in args.tests)
              + (" (quick mode)" if args.quick else "")],
@@ -745,10 +749,14 @@ def main():
                         help="reduced run lengths (rotation 2 angles, t_end 10 s)")
     parser.add_argument("--no-sequences", action="store_true",
                         help="skip the per-time-step figure sequences and GIFs")
+    parser.add_argument("--integer-atomics", action="store_true",
+                        help="accumulate the grid with integer atomics also on GPUs "
+                             "with float atomics, as in the browser")
     args = parser.parse_args()
 
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    tag = f"{args.sim_model}_{time.strftime('%Y%m%d_%H%M%S')}"
+    atomics = "_int" if args.integer_atomics else ""
+    tag = f"{args.sim_model}{atomics}_{time.strftime('%Y%m%d_%H%M%S')}"
     run_dir = pathlib.Path(args.out_dir) if args.out_dir else \
         ALL_TESTS_DIR / tag
     run_dir.mkdir(parents=True, exist_ok=True)

@@ -141,6 +141,9 @@ struct ReleaseConfig {
 /// Settings the stored initial particles were prepared with.
 struct InitialState {
     settings: SimSettings,
+    /// The grid was accumulated with float atomics (see
+    /// `ComputeOrchestrator::set_integer_atomics`).
+    float_atomics: bool,
     release: ReleaseConfig,
     /// Release thickness per cell as prepared, rescaled on the GPU together
     /// with the particle masses when the release thickness changes.
@@ -173,6 +176,9 @@ pub struct SimulationLoadResult {
     pub enable_center_of_mass: bool,
     /// How the particles are placed in the release cells.
     pub particle_placement: ParticlePlacement,
+    /// Accumulate the grid with integer atomics even on GPUs with float
+    /// atomics.
+    pub integer_atomics: bool,
     /// Loaded digital elevation model.
     pub dem: Dem,
     /// Region-of-interest (area that should be considered for release areas, e.g. avalanche outline) cell mask, `width * height` long.
@@ -471,7 +477,7 @@ impl Simulation {
         let mut simulation = simulation?;
         let simulation_data = simulation_data?;
 
-        simulation.apply_data(simulation_data);
+        simulation.apply_data(simulation_data)?;
         Ok(simulation)
     }
 
@@ -565,6 +571,7 @@ impl Simulation {
             settings: settings_result,
             enable_center_of_mass: settings.enable_center_of_mass.unwrap_or(true),
             particle_placement: settings.particle_placement.unwrap_or_default(),
+            integer_atomics: settings.integer_atomics.unwrap_or(false),
             dem: dem_result,
             roi: outline,
             outline_source,
@@ -589,8 +596,11 @@ impl Simulation {
 
     /// Installs previously loaded data and resets all GPU state; the
     /// simulation ends in [`SimulationState::DemLoaded`], or
-    /// [`SimulationState::DemMissing`] when the DEM is empty.
-    pub fn apply_data(&mut self, data: SimulationLoadResult) {
+    /// [`SimulationState::DemMissing`] when the DEM is empty. Fails only when
+    /// the shader pipelines of a changed atomic variant cannot be built.
+    pub fn apply_data(&mut self, data: SimulationLoadResult) -> Result<()> {
+        self.orchestrator
+            .set_integer_atomics(data.integer_atomics)?;
         self.settings = data.settings;
         self.enable_center_of_mass = data.enable_center_of_mass;
         self.particle_placement = data.particle_placement;
@@ -652,14 +662,14 @@ impl Simulation {
         }
 
         timer_checkpoint("Simulation updated/created");
+        Ok(())
     }
 
     /// Loads and applies the data described by `settings`, replacing anything
     /// currently loaded ([`Self::load_data`] + [`Self::apply_data`]).
     pub async fn create(&mut self, settings: Settings) -> Result<()> {
         let data = Self::load_data(&settings).await?;
-        self.apply_data(data);
-        Ok(())
+        self.apply_data(data)
     }
 
     /// Creates the simulation from a DEM path with default settings.
@@ -973,6 +983,15 @@ impl Simulation {
         if let Some(placement) = patch.particle_placement {
             self.particle_placement = placement;
         }
+        if let Some(integer_atomics) = patch.integer_atomics
+            && self.orchestrator.set_integer_atomics(integer_atomics)?
+            && self.state > SimulationState::DemLoaded
+        {
+            // the pipelines changed: everything on the GPU is prepared again
+            // (restore_initial_state sees the changed variant)
+            self.state = SimulationState::DemLoaded;
+            self.gpu_cache.reset_simulation_result();
+        }
         if let Some(fraction) = patch.release_area_fraction {
             self.release_area_fraction = Some(fraction);
         }
@@ -1052,7 +1071,8 @@ impl Simulation {
             self.uniform_release_thickness(old),
             self.uniform_release_thickness(new),
         );
-        if old.sim_model != new.sim_model
+        if initial.float_atomics != self.orchestrator.has_float32_atomic()
+            || old.sim_model != new.sim_model
             || old.grid_shape_x != new.grid_shape_x
             || old.grid_shape_y != new.grid_shape_y
             || old.cell_size != new.cell_size
@@ -1106,6 +1126,7 @@ impl Simulation {
             .await?;
         self.initial_state = Some(InitialState {
             settings: self.settings,
+            float_atomics: self.orchestrator.has_float32_atomic(),
             release: self.release_config(),
             release_areas,
             release_areas_scale: 1.0,
@@ -1118,7 +1139,8 @@ impl Simulation {
     /// Settings changed since then (see [`Self::update_settings`]) take
     /// effect; only the preparation stages they affect run again:
     ///
-    /// - model, grid or reference surface: full preparation,
+    /// - model, grid, reference surface or `integer_atomics`: full
+    ///   preparation,
     /// - release thresholds, particles per cell, release configuration,
     ///   a `release_thickness` set on a release with its own thickness or
     ///   a switch between `release_thickness` and `release_swe`: release
@@ -2434,8 +2456,7 @@ impl Simulation {
         }
         if self.gpu_cache.grid_mass.is_none() {
             self.gpu_cache.read_count += 1;
-            // MASS_FACTOR of utils.wgsl
-            const MASS_FACTOR: f32 = 1e1;
+            let mass_factor = self.settings.mass_factor();
             let mass = if self.orchestrator.has_float32_atomic() {
                 self.orchestrator
                     .read_buffer::<f32>(BufferName::GridMass)
@@ -2445,7 +2466,7 @@ impl Simulation {
                     .read_buffer::<u32>(BufferName::GridMass)
                     .await?
                     .iter()
-                    .map(|mass| *mass as f32 / MASS_FACTOR)
+                    .map(|mass| *mass as f32 / mass_factor)
                     .collect()
             };
             self.gpu_cache.grid_mass = Some(mass);
@@ -2460,8 +2481,7 @@ impl Simulation {
         }
         if self.gpu_cache.grid_momentum.is_none() {
             self.gpu_cache.read_count += 1;
-            // MOMENTUM_FACTOR of utils.wgsl
-            const MOMENTUM_FACTOR: f32 = 1e2;
+            let momentum_factor = self.settings.momentum_factor();
             let momentum = if self.orchestrator.has_float32_atomic() {
                 self.orchestrator
                     .read_buffer::<f32>(BufferName::GridMomentum)
@@ -2471,7 +2491,7 @@ impl Simulation {
                     .read_buffer::<i32>(BufferName::GridMomentum)
                     .await?
                     .iter()
-                    .map(|momentum| *momentum as f32 / MOMENTUM_FACTOR)
+                    .map(|momentum| *momentum as f32 / momentum_factor)
                     .collect()
             };
             self.gpu_cache.grid_momentum = Some(momentum);
@@ -2487,8 +2507,7 @@ impl Simulation {
         }
         if self.gpu_cache.grid_momentum_z.is_none() {
             self.gpu_cache.read_count += 1;
-            // MOMENTUM_FACTOR of utils.wgsl
-            const MOMENTUM_FACTOR: f32 = 1e2;
+            let momentum_factor = self.settings.momentum_factor();
             let momentum = if self.orchestrator.has_float32_atomic() {
                 self.orchestrator
                     .read_buffer::<f32>(BufferName::GridMomentumZ)
@@ -2498,7 +2517,7 @@ impl Simulation {
                     .read_buffer::<i32>(BufferName::GridMomentumZ)
                     .await?
                     .iter()
-                    .map(|momentum| *momentum as f32 / MOMENTUM_FACTOR)
+                    .map(|momentum| *momentum as f32 / momentum_factor)
                     .collect()
             };
             self.gpu_cache.grid_momentum_z = Some(momentum);
@@ -5017,8 +5036,9 @@ fn test_trajectory() {
     #[test_log::test]
     fn test_sorted_p2g_matches_direct_p2g() {
         // integer grid sums do not depend on the deposit order, so the
-        // tile-sorted P2G must reproduce the direct P2G exactly; float-atomic
-        // devices never sort, their direct P2G deposits without quantization
+        // tile-sorted P2G must reproduce the direct P2G up to the rounding of
+        // single contributions (forced with integer_atomics, so this runs on
+        // float-atomic GPUs as well)
         for model in [
             SimModel::Curvilinear,
             SimModel::TerrainFollowing,
@@ -5031,6 +5051,12 @@ fn test_trajectory() {
     fn check_sorted_p2g_matches_direct_p2g(model: SimModel) {
         let run = |sort_interval: u32| {
             let mut sim = setup_simple_sim(30.0, 5.0);
+            // the integer grid, also on float-atomic GPUs
+            sim.update_settings(&Settings {
+                integer_atomics: Some(true),
+                ..Default::default()
+            })
+            .expect("Failed to select integer atomics");
             sim.settings.sim_model = model.as_int();
             sim.particle_placement = ParticlePlacement::Random;
             sim.orchestrator.particle_sort_interval = sort_interval;
@@ -5045,33 +5071,62 @@ fn test_trajectory() {
             sim.set_release_areas(&release)
                 .expect("Failed to set release");
             block_on(sim.run_n_steps(40)).expect("Failed to run");
-            let float_atomics = sim.orchestrator.has_float32_atomic();
+            assert!(!sim.orchestrator.has_float32_atomic());
             assert_eq!(
                 sim.orchestrator.particle_sort_enabled(),
-                sort_interval > 0 && !float_atomics,
-                "{model}: float-atomic devices must deposit without the quantizing tile"
+                sort_interval > 0,
+                "{model}: the integer grid sorts"
             );
-            let mut positions = block_on(sim.fetch_particles_position())
+            let positions = block_on(sim.fetch_particles_position())
                 .expect("Failed to fetch positions")
                 .clone();
-            positions.sort_by(|a, b| a.partial_cmp(b).unwrap());
             let grid_mass: Vec<u32> = block_on(sim.orchestrator.read_buffer(BufferName::GridMass))
                 .expect("Failed to read grid mass");
             let grid_momentum: Vec<u32> =
                 block_on(sim.orchestrator.read_buffer(BufferName::GridMomentum))
                     .expect("Failed to read grid momentum");
-            (positions, grid_mass, grid_momentum, float_atomics)
+            (positions, grid_mass, grid_momentum)
         };
-        let (direct_positions, direct_mass, direct_momentum, float_atomics) = run(0);
+        let (direct_positions, direct_mass, direct_momentum) = run(0);
         assert!(direct_mass.iter().any(|mass| *mass > 0));
-        let (sorted_positions, sorted_mass, sorted_momentum, _) = run(3);
-        if float_atomics {
-            // both runs used the direct P2G, whose f32 sums depend on the order
-            return;
-        }
-        assert_eq!(direct_mass, sorted_mass);
-        assert_eq!(direct_momentum, sorted_momentum);
-        assert_eq!(direct_positions, sorted_positions);
+        let (sorted_positions, sorted_mass, sorted_momentum) = run(3);
+        // A contribution holds up to ~1e6 units of the range-based factors,
+        // which f32 resolves to ~0.1 unit: the separately compiled shaders
+        // may contract the weights differently and flip a rounding by one
+        // unit, which 40 steps grow to ~1e-5 of the node values.
+        let assert_close = |direct: &[u32], sorted: &[u32], signed: bool, name: &str| {
+            let value = |v: u32| if signed { v as i32 as f64 } else { v as f64 };
+            let max = direct.iter().map(|&v| value(v).abs()).fold(0.0, f64::max);
+            let worst = direct
+                .iter()
+                .zip(sorted)
+                .map(|(&d, &s)| (value(d) - value(s)).abs())
+                .fold(0.0, f64::max);
+            assert!(
+                worst <= 1e-4 * max,
+                "{model}: sorted {name} differs by {worst} of {max}"
+            );
+        };
+        assert_close(&direct_mass, &sorted_mass, false, "mass");
+        assert_close(&direct_momentum, &sorted_momentum, true, "momentum");
+        // the sort permutes the particles: compare the sorted coordinates
+        let sorted_axis = |positions: &[[f32; 2]], axis: usize| {
+            let mut values: Vec<f32> = positions.iter().map(|p| p[axis]).collect();
+            values.sort_by(f32::total_cmp);
+            values
+        };
+        let worst_position = (0..2)
+            .flat_map(|axis| {
+                sorted_axis(&direct_positions, axis)
+                    .into_iter()
+                    .zip(sorted_axis(&sorted_positions, axis))
+                    .map(|(d, s)| (d - s).abs())
+            })
+            .fold(0.0f32, f32::max);
+        assert!(
+            worst_position <= 1e-2,
+            "{model}: sorted positions differ by {worst_position} m"
+        );
     }
 
     /// Wall time of a full run per grid model on one scenario. Run with
@@ -5328,7 +5383,7 @@ fn test_trajectory() {
                 .expect("Failed to set release");
             block_on(sim.run_n_steps(1)).expect("Failed to run");
             // float atomics hold kg directly; otherwise dequantize with
-            // MASS_FACTOR = 1e1 and PRESSURE_FACTOR = 1e3 (utils.wgsl)
+            // SimSettings::mass_factor and PRESSURE_FACTOR = 1e3 (utils.wgsl)
             let (mass, sums): (Vec<f32>, Vec<f32>) = if sim.orchestrator.has_float32_atomic() {
                 (
                     block_on(sim.orchestrator.read_buffer(BufferName::GridMass))
@@ -5342,7 +5397,9 @@ fn test_trajectory() {
                 let sums: Vec<i32> = block_on(sim.orchestrator.read_buffer(BufferName::GridForces))
                     .expect("Failed to read weak pressure sums");
                 (
-                    mass.iter().map(|mass| *mass as f32 * 0.1).collect(),
+                    mass.iter()
+                        .map(|mass| *mass as f32 / sim.settings.mass_factor())
+                        .collect(),
                     sums.iter().map(|sum| *sum as f32 * 1e-3).collect(),
                 )
             };
@@ -5511,6 +5568,47 @@ fn test_trajectory() {
             assert_same_run(&sim, &thickness, &thickness_again);
             assert_same_run(&sim, &velocity, &velocity_again);
         }
+    }
+
+    /// Switching integer_atomics on a stored simulation prepares it again with
+    /// the other grid variant on the next restore. Runs on the integer grid
+    /// repeat exactly and stay close to the float run; switching back returns
+    /// to float atomics where the GPU has them.
+    #[test_log::test]
+    fn test_integer_atomics_switch_prepares_again() {
+        let mut sim = setup_restore_sim(SimModel::Curvilinear);
+        block_on(sim.store_initial_state()).expect("Failed to store initial state");
+        let float_supported = sim.orchestrator.float32_atomic_supported();
+        assert_eq!(sim.orchestrator.has_float32_atomic(), float_supported);
+        let (_, thickness, _) = run_and_collect(&mut sim);
+        let select = |sim: &mut Simulation, integer_atomics: bool| {
+            sim.update_settings(&Settings {
+                integer_atomics: Some(integer_atomics),
+                ..Default::default()
+            })
+            .expect("Failed to select the atomic variant");
+        };
+
+        select(&mut sim, true);
+        assert!(!sim.orchestrator.has_float32_atomic());
+        block_on(sim.restore_initial_state()).expect("Failed to restore");
+        assert_eq!(sim.get_state(), SimulationState::ParticlesInitialized);
+        let (_, integer_thickness, _) = run_and_collect(&mut sim);
+        block_on(sim.restore_initial_state()).expect("Failed to restore");
+        let (_, integer_again, _) = run_and_collect(&mut sim);
+        assert_eq!(integer_thickness, integer_again);
+        let total = |values: &[f32]| values.iter().map(|&v| v as f64).sum::<f64>();
+        let (float_total, integer_total) = (total(&thickness), total(&integer_thickness));
+        assert!(
+            (float_total - integer_total).abs() <= 2e-2 * float_total,
+            "integer grid {integer_total} far from float grid {float_total}"
+        );
+
+        select(&mut sim, false);
+        assert_eq!(sim.orchestrator.has_float32_atomic(), float_supported);
+        block_on(sim.restore_initial_state()).expect("Failed to restore");
+        let (_, back, _) = run_and_collect(&mut sim);
+        assert_same_run(&sim, &thickness, &back);
     }
 
     #[test_log::test]
@@ -5924,76 +6022,116 @@ fn test_trajectory() {
     /// from nodes that only this flow's lightest particles reached.
     #[test_log::test]
     fn test_light_flow_margin_keeps_its_velocity() {
-        const N: usize = 24;
-        const CELL_SIZE: f32 = 5.0;
-        const VELOCITY: [f32; 2] = [1.5, 0.5];
         for model in [
             SimModel::Curvilinear,
             SimModel::TerrainFollowing,
             SimModel::ThreeDDepthAveraged,
         ] {
-            let mut sim = setup_simple_sim(0.0, CELL_SIZE);
-            sim.settings.sim_model = model.as_int();
-            sim.settings.flags = 0;
-            sim.settings.velocity_threshold = 0.0;
-            sim.settings.friction_model = 0;
-            sim.settings.friction_coefficient = 0.0;
-            // 0.02 m at 64 particles per cell: 1.6 kg particles, whose outer
-            // stencil weights deposit less than the integer grid's 0.05 kg
-            sim.settings.released_particles_per_cell = 64;
-            sim.set_dem(&create_slope(N, N, CELL_SIZE, 0.0), N, N, CELL_SIZE)
-                .expect("Failed to set flat DEM");
-            let mut release = vec![0.0; N * N];
-            for y in 9..15 {
-                for x in 9..15 {
-                    release[y * N + x] = 0.02;
-                }
-            }
-            sim.set_release_areas(&release)
-                .expect("Failed to set release");
-            block_on(sim.prepare()).expect("Failed to prepare margin test");
-            if !sim.orchestrator.has_float32_atomic() {
+            let Some(loss) = light_flow_margin_loss(model, false) else {
                 info!("{model}: no float atomics, the integer grid quantizes light deposits");
                 return;
-            }
-            let count = sim.number_particles as usize;
-            block_on(
-                sim.orchestrator
-                    .write_buffer(BufferName::ParticlesVelocity, &vec![VELOCITY; count]),
-            )
-            .expect("Failed to seed velocities");
-            block_on(
-                sim.orchestrator
-                    .write_buffer(BufferName::ParticlesAffineMatrix, &vec![[0.0f32; 4]; count]),
-            )
-            .expect("Failed to seed affine matrices");
-            if model == SimModel::ThreeDDepthAveraged {
-                block_on(
-                    sim.orchestrator
-                        .write_buffer(BufferName::ParticlesVelocityZ, &vec![0.0f32; count]),
-                )
-                .expect("Failed to seed vertical velocities");
-                block_on(
-                    sim.orchestrator
-                        .write_buffer(BufferName::ParticlesAffineZ, &vec![[0.0f32; 2]; count]),
-                )
-                .expect("Failed to seed vertical affine vectors");
-            }
-            block_on(sim.run_n_steps(5)).expect("Failed to advance margin test");
-            // the quantizing sorted tile is for integer-atomic devices only
-            assert!(!sim.orchestrator.particle_sort_enabled());
-            let speed = VELOCITY[0].hypot(VELOCITY[1]);
-            let velocities =
-                block_on(sim.fetch_particles_velocity()).expect("Failed to read velocities");
-            let worst = velocities
-                .iter()
-                .map(|v| (v[0] - VELOCITY[0]).hypot(v[1] - VELOCITY[1]))
-                .fold(0.0f32, f32::max);
+            };
             assert!(
-                worst <= 1e-3 * speed,
-                "{model}: a particle lost {worst} m/s of its uniform {speed} m/s"
+                loss <= 1e-3,
+                "{model}: a particle's velocity changed by {loss} of its uniform speed"
             );
         }
+    }
+
+    /// The integer-atomic grid quantizes masses and momenta with factors that
+    /// fill its range for 30 m of flow at 100 m/s (x2): the light margin
+    /// particles keep their velocity up to the rounding of their smallest
+    /// momentum deposits. Runs on every GPU (integer_atomics).
+    #[test_log::test]
+    fn test_light_flow_margin_on_the_integer_grid() {
+        for model in [
+            SimModel::Curvilinear,
+            SimModel::TerrainFollowing,
+            SimModel::ThreeDDepthAveraged,
+        ] {
+            let loss = light_flow_margin_loss(model, true).expect("integer grid always runs");
+            info!("{model}: integer grid margin change {loss:.2e} of the speed");
+            assert!(
+                loss <= INTEGER_MARGIN_LOSS,
+                "{model}: a particle's velocity changed by {loss} of its uniform speed"
+            );
+        }
+    }
+
+    /// Largest relative speed change of a light margin particle in five steps
+    /// on the integer grid (measured 3.0 % with 5 m cells): the outer stencil
+    /// deposits of a 1.6 kg particle at 1.6 m/s are about 2.6 momentum units,
+    /// whose rounding the margin nodes average over few particles.
+    const INTEGER_MARGIN_LOSS: f32 = 0.05;
+
+    /// Worst relative velocity change of a forceless uniform flow (0.02 m, 64
+    /// particles per cell, 1.6 kg particles) after five steps, on the integer
+    /// or the float grid; `None` when float atomics are asked for but missing.
+    fn light_flow_margin_loss(model: SimModel, integer_atomics: bool) -> Option<f32> {
+        const N: usize = 24;
+        const CELL_SIZE: f32 = 5.0;
+        const VELOCITY: [f32; 2] = [1.5, 0.5];
+        let mut sim = setup_simple_sim(0.0, CELL_SIZE);
+        sim.update_settings(&Settings {
+            integer_atomics: Some(integer_atomics),
+            ..Default::default()
+        })
+        .expect("Failed to select the atomic variant");
+        if !integer_atomics && !sim.orchestrator.has_float32_atomic() {
+            return None;
+        }
+        assert_eq!(sim.orchestrator.has_float32_atomic(), !integer_atomics);
+        sim.settings.sim_model = model.as_int();
+        sim.settings.flags = 0;
+        sim.settings.velocity_threshold = 0.0;
+        sim.settings.friction_model = 0;
+        sim.settings.friction_coefficient = 0.0;
+        sim.settings.released_particles_per_cell = 64;
+        sim.set_dem(&create_slope(N, N, CELL_SIZE, 0.0), N, N, CELL_SIZE)
+            .expect("Failed to set flat DEM");
+        let mut release = vec![0.0; N * N];
+        for y in 9..15 {
+            for x in 9..15 {
+                release[y * N + x] = 0.02;
+            }
+        }
+        sim.set_release_areas(&release)
+            .expect("Failed to set release");
+        block_on(sim.prepare()).expect("Failed to prepare margin test");
+        let count = sim.number_particles as usize;
+        block_on(
+            sim.orchestrator
+                .write_buffer(BufferName::ParticlesVelocity, &vec![VELOCITY; count]),
+        )
+        .expect("Failed to seed velocities");
+        block_on(
+            sim.orchestrator
+                .write_buffer(BufferName::ParticlesAffineMatrix, &vec![[0.0f32; 4]; count]),
+        )
+        .expect("Failed to seed affine matrices");
+        if model == SimModel::ThreeDDepthAveraged {
+            block_on(
+                sim.orchestrator
+                    .write_buffer(BufferName::ParticlesVelocityZ, &vec![0.0f32; count]),
+            )
+            .expect("Failed to seed vertical velocities");
+            block_on(
+                sim.orchestrator
+                    .write_buffer(BufferName::ParticlesAffineZ, &vec![[0.0f32; 2]; count]),
+            )
+            .expect("Failed to seed vertical affine vectors");
+        }
+        block_on(sim.run_n_steps(5)).expect("Failed to advance margin test");
+        // the sorted tile is for the integer grid only
+        assert_eq!(sim.orchestrator.particle_sort_enabled(), integer_atomics);
+        let speed = VELOCITY[0].hypot(VELOCITY[1]);
+        let velocities =
+            block_on(sim.fetch_particles_velocity()).expect("Failed to read velocities");
+        let worst = velocities
+            .iter()
+            .map(|v| (v[0] - VELOCITY[0]).hypot(v[1] - VELOCITY[1]))
+            .fold(0.0f32, f32::max);
+        Some(worst / speed)
     }
 
     /// Simulation on a 64x64 slope with a release block on its upper part.

@@ -1253,6 +1253,7 @@ mod tests {
             enable_weak_pressure: Some(true),
             enable_particle_interaction: Some(true),
             particle_placement: Some(ParticlePlacement::UniformRelaxed),
+            integer_atomics: Some(true),
             enable_earth_pressure_coefficient: Some(true),
             enable_center_of_mass: Some(true),
             center_of_mass_biggest_blob: Some(true),

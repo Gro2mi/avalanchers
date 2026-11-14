@@ -2,7 +2,7 @@
 // physics of the depth-averaged models.
 // Pure library module: it is textually imported and relies on the importing
 // module providing grid_mass_atomic, grid_momentum_atomic and the utils.wgsl
-// symbols (sim_settings, x_y_to_idx, INV_MASS_FACTOR, INV_MOMENTUM_FACTOR).
+// symbols (sim_settings, x_y_to_idx, inv_mass_factor(), inv_momentum_factor()).
 
 struct EarthPressure {
     // pressure gradient weighted with k_x along the fall line, k_y across it
@@ -34,16 +34,16 @@ fn earth_pressure(xy: vec2u, slope: vec2f, q: vec2f, grad_h: vec2f) -> EarthPres
 // below the p2g mass quantum, where q is meaningless).
 fn node_velocity(x: u32, y: u32) -> vec3f {
     let idx = x_y_to_idx(x, y);
-    let mass = f32(grid_mass_atomic[idx]) * INV_MASS_FACTOR; // no_atomic_float
+    let mass = f32(grid_mass_atomic[idx]) * inv_mass_factor(); // no_atomic_float
     // atomic_float let mass = grid_mass_atomic[idx];
-    let node_is_empty = mass < 1e-2; // no_atomic_float
+    let node_is_empty = mass < min_node_mass(); // no_atomic_float
     // atomic_float let node_is_empty = mass <= 0.0;
     if node_is_empty {
         return vec3f(0.0);
     }
     let q = vec2f(
-        f32(grid_momentum_atomic[idx * 2]) * INV_MOMENTUM_FACTOR, // no_atomic_float
-        f32(grid_momentum_atomic[idx * 2 + 1]) * INV_MOMENTUM_FACTOR // no_atomic_float
+        f32(grid_momentum_atomic[idx * 2]) * inv_momentum_factor(), // no_atomic_float
+        f32(grid_momentum_atomic[idx * 2 + 1]) * inv_momentum_factor() // no_atomic_float
         // atomic_float grid_momentum_atomic[idx * 2],
         // atomic_float grid_momentum_atomic[idx * 2 + 1]
     ) / mass;

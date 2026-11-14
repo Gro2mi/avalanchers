@@ -273,16 +273,18 @@ impl Overlay {
 }
 
 /// Attaches `overlay`'s grid buffer to the renderer. The momentum overlay needs
-/// the interleaved-i32 shader mode; every other grid is a plain scalar field.
+/// the interleaved-i32 shader mode (`momentum_unit` kg m/s per step); every
+/// other grid is a plain scalar field.
 fn attach_overlay(
     renderer: &mut Renderer,
     device: &wgpu::Device,
     overlay: Overlay,
     buffer: Option<&wgpu::Buffer>,
+    momentum_unit: f32,
 ) {
     match overlay {
         Overlay::GridMomentum => {
-            renderer.set_grid_momentum_overlay(device, buffer, overlay.range())
+            renderer.set_grid_momentum_overlay(device, buffer, overlay.range(), momentum_unit)
         }
         _ => renderer.set_grid_overlay(device, buffer, overlay.range()),
     }
@@ -338,16 +340,21 @@ struct SimulationView {
 
 impl SimulationView {
     /// Factor from a raw `GridMass` value to metres of flow, and whether the
-    /// mass is stored as f32 bits (float-atomic adapters) instead of a
-    /// quantized u32 (see `MASS_FACTOR` in utils.wgsl).
+    /// mass is stored as f32 bits (float-atomic grid) instead of a quantized
+    /// u32 (see `SimSettings::mass_factor`).
     fn grid_mass_encoding(&self) -> (f32, bool) {
-        const MASS_FACTOR: f32 = 10.0;
         let settings = &self.simulation.settings;
         let is_f32 = self.simulation.orchestrator().has_float32_atomic();
-        let mass_factor = if is_f32 { 1.0 } else { MASS_FACTOR };
+        let mass_factor = if is_f32 { 1.0 } else { settings.mass_factor() };
         let thickness =
             1.0 / (mass_factor * settings.density * settings.cell_size * settings.cell_size);
         (thickness, is_f32)
+    }
+
+    /// kg m/s per step of the quantized `GridMomentum` of the integer-atomic
+    /// grid, for the momentum overlay.
+    fn momentum_unit(&self) -> f32 {
+        1.0 / self.simulation.settings.momentum_factor()
     }
 
     fn grid(&self, name: &BufferName) -> &wgpu::Buffer {
@@ -623,6 +630,7 @@ fn write_snapshot(sim: &SimulationView, overlay: Overlay, path: &str) -> anyhow:
         &sim.device,
         overlay,
         overlay.buffer_name().map(|name| sim.grid(&name)),
+        sim.momentum_unit(),
     );
     renderer.set_particles(
         &sim.device,
@@ -790,7 +798,14 @@ impl Viewer {
             return;
         };
         let buffer = self.overlay.buffer_name().map(|name| self.sim.grid(&name));
-        attach_overlay(&mut view.renderer, &self.sim.device, self.overlay, buffer);
+        let momentum_unit = self.sim.momentum_unit();
+        attach_overlay(
+            &mut view.renderer,
+            &self.sim.device,
+            self.overlay,
+            buffer,
+            momentum_unit,
+        );
         self.dirty = true;
         tracing::info!("overlay: {}", self.overlay.label());
     }

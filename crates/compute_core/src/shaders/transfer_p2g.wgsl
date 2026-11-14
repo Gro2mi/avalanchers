@@ -5,13 +5,13 @@ fn quantize_momentum_component(value: f32) -> i32 {
     return i32(round(clamped));
 }
 
-// Quantized mass contribution of the integer grid. A contribution whose mass
-// rounds to zero must not deposit momentum either: mass is quantized 10x
-// coarser than momentum (MASS_FACTOR vs MOMENTUM_FACTOR), so light particles
-// with small stencil weights (thin flow margins, many particles per cell)
-// would leave momentum without mass and an unbounded node velocity.
+// Quantized mass contribution of the integer grid (mass_factor() in
+// utils.wgsl). A contribution whose mass rounds to zero must not deposit
+// momentum either, or it would leave momentum without mass and an unbounded
+// node velocity. With the range-based factors that needs a contribution faster
+// than 2 * MAX_FLOW_VELOCITY, so the guard only protects against misuse.
 fn quantize_mass(value: f32) -> u32 {
-    return u32(round(value * MASS_FACTOR));
+    return u32(round(value * mass_factor()));
 }
 
 fn transfer_p2g(p_idx: u32) {
@@ -47,8 +47,8 @@ fn transfer_p2g_with_affine(p_idx: u32, affine_matrix: mat2x2f) {
             let quantized_mass = quantize_mass(p_mass * weight); // no_atomic_float
             if quantized_mass == 0u { continue; } // no_atomic_float
             atomicAdd(&grid_mass_atomic[idx], quantized_mass); // no_atomic_float
-            let momentum_x = p_mass * affine_velocity.x * weight * MOMENTUM_FACTOR; // no_atomic_float
-            let momentum_y = p_mass * affine_velocity.y * weight * MOMENTUM_FACTOR; // no_atomic_float
+            let momentum_x = p_mass * affine_velocity.x * weight * momentum_factor(); // no_atomic_float
+            let momentum_y = p_mass * affine_velocity.y * weight * momentum_factor(); // no_atomic_float
             // resting particles carry no momentum; skipping zero adds saves most of their atomics
             let quantized_x = quantize_momentum_component(momentum_x); // no_atomic_float
             let quantized_y = quantize_momentum_component(momentum_y); // no_atomic_float

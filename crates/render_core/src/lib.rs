@@ -148,14 +148,17 @@ impl Renderer {
 
     /// Like [`Self::set_grid_overlay`], but for the simulation's current momentum
     /// grid (`BufferName::GridMomentum`): two interleaved `i32` values `(u, v)`
-    /// per cell as quantized by the p2g pass, tinted by their magnitude.
+    /// per cell as quantized by the p2g pass, `momentum_unit` kg·m/s per step
+    /// (`1 / SimSettings::momentum_factor`), tinted by their magnitude.
     pub fn set_grid_momentum_overlay(
         &mut self,
         device: &wgpu::Device,
         buffer: Option<&wgpu::Buffer>,
         range: OverlayRange,
+        momentum_unit: f32,
     ) {
-        self.terrain.set_momentum_overlay(device, buffer, range);
+        self.terrain
+            .set_momentum_overlay(device, buffer, range, momentum_unit);
         self.colorbar.set_enabled_range(buffer.is_some(), range);
     }
 

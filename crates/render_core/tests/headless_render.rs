@@ -234,6 +234,7 @@ fn momentum_overlay_tints_by_the_magnitude_of_interleaved_i32_pairs() {
                 device,
                 Some(&buffer),
                 OverlayRange::new(0.0, 8.0).with_threshold(1.0),
+                1e-2,
             );
         })
     };

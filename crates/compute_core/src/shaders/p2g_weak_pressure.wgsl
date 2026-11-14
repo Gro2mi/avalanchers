@@ -55,7 +55,7 @@ fn p2g_weak_pressure(@builtin(global_invocation_id) id: vec3u) {
 
 fn node_thickness(node: vec2u) -> f32 {
     let J = textureLoad(terrain_geometry_texture, vec2<i32>(node), 0).z;
-    let mass = f32(grid_mass[xy_to_idx(node)]) * INV_MASS_FACTOR; // no_atomic_float
+    let mass = f32(grid_mass[xy_to_idx(node)]) * inv_mass_factor(); // no_atomic_float
     // atomic_float let mass = grid_mass[xy_to_idx(node)];
     return mass / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size * J);
 }
@@ -74,20 +74,49 @@ const g: f32 = 9.81;
 
 // u32 limit is 4 294 967 296
 const MAX_VELOCITY_FACTOR: f32 = 1e7; // u32 limit is 430 m/s
-const MASS_FACTOR: f32 = 1e1; // u32 limit is 4.3t thickness
 const H_FACTOR: f32 = 1e6;
-// Momentum is quantized per particle->node contribution before atomicAdd, so
-// MOMENTUM_FACTOR sets the velocity resolution of that contribution:
-// the smallest non-zero contribution is v = 1 / (particle_mass * weight * MOMENTUM_FACTOR).
-// It must stay far below the slow hydrostatic spreading velocities (~0.01-0.1 m/s)
-// or p2g rounds them to zero every step and the flow never spreads laterally.
-// i32 budget: node sum = node_mass * v_max * MOMENTUM_FACTOR
-//   (rho*cell^2*h*J ~ 6e4 kg * 40 m/s * 1e2 = 2.4e8 < 2.1e9)
-const MOMENTUM_FACTOR: f32 = 1e2;
 const INV_MAX_VELOCITY_FACTOR: f32 = 1 / MAX_VELOCITY_FACTOR; // u32 limit is 430 m/s
-const INV_MASS_FACTOR: f32 = 1 / MASS_FACTOR; // u32 limit is 4.3km thickness
 const INV_H_FACTOR: f32 = 1 / H_FACTOR;
-const INV_MOMENTUM_FACTOR: f32 = 1 / MOMENTUM_FACTOR;
+// Integer-atomic grid (no_atomic_float): node masses and momenta are fixed
+// point numbers in u32 / i32, quantized per particle->node contribution before
+// atomicAdd. The factors fill the integer range with the largest node values a
+// flow can reach: a MAX_FLOW_THICKNESS deep column over a cell
+// (density * thickness * cell_size^2) moving at MAX_FLOW_VELOCITY, times
+// QUANTIZATION_SAFETY (which also covers the slope factor of the node mass).
+// They scale with the cell size like the particle masses, so a particle of a
+// release h_r thick with N particles per cell holds about
+// U32_RANGE * h_r / (N * QUANTIZATION_SAFETY * MAX_FLOW_THICKNESS) mass units
+// (2e6 for 1 m and 64 per cell) at every cell size. Must match settings.rs.
+const MAX_FLOW_THICKNESS: f32 = 30.0;
+const MAX_FLOW_VELOCITY: f32 = 100.0;
+const QUANTIZATION_SAFETY: f32 = 2.0;
+// below 2^32 and 2^31, so a rounded maximum still converts without saturating
+const QUANTIZATION_U32_RANGE: f32 = 4.0e9;
+const QUANTIZATION_I32_RANGE: f32 = 2.0e9;
+fn max_node_mass() -> f32 {
+    return QUANTIZATION_SAFETY * MAX_FLOW_THICKNESS * sim_settings.snow_density
+        * sim_settings.cell_size * sim_settings.cell_size;
+}
+// integer units per kg
+fn mass_factor() -> f32 {
+    return QUANTIZATION_U32_RANGE / max_node_mass();
+}
+fn inv_mass_factor() -> f32 {
+    return max_node_mass() / QUANTIZATION_U32_RANGE;
+}
+// integer units per kg m/s
+fn momentum_factor() -> f32 {
+    return QUANTIZATION_I32_RANGE / (max_node_mass() * MAX_FLOW_VELOCITY);
+}
+fn inv_momentum_factor() -> f32 {
+    return max_node_mass() * MAX_FLOW_VELOCITY / QUANTIZATION_I32_RANGE;
+}
+// Lightest node whose velocity momentum / mass is resolved: one momentum unit
+// changes it by 1 m/s (15 g for 5 m cells and 200 kg/m3). Lighter nodes
+// count as empty.
+fn min_node_mass() -> f32 {
+    return inv_momentum_factor(); // momentum unit / (1 m/s)
+}
 // depth-integrated internal force (h * sigma * grad_w * area, ~1e4..1e5 N per node contribution)
 const FORCE_FACTOR: f32 = 1e-3; // i32 limit is 2.1e6 N per node
 const INV_FORCE_FACTOR: f32 = 1 / FORCE_FACTOR;

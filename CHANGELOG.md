@@ -35,6 +35,15 @@ All notable changes to this project might be documented in this file.
   OpenGL backend caused this.
 
 ### Changed
+- The integer-atomic grid (WebGPU, or `integer_atomics`) sizes its fixed point units per run from
+  the cell size and density instead of fixed 0.1 kg and 0.01 kg m/s: the u32 mass and i32 momentum
+  ranges hold a 30 m deep flow over a cell at 100 m/s with a safety factor of 2. A particle then
+  holds the same number of units at every cell size (about 1.2 million mass units for a 1 m release
+  at 64 particles per cell); 5 m cells resolve 7.5e-5 kg and 0.015 kg m/s, and large cells no
+  longer overflow the momentum range of fast, deep flows. Nodes lighter than one momentum unit per
+  1 m/s count as empty, and the run logs the units a release particle holds. On the float GPU of
+  this machine the integer grid now matches the float grid in all verification tests (similarity
+  solution 3.5 % thickness error at 20 s on both).
 - **Breaking:** `enable_particle_relaxation` is replaced by `particle_placement` (CLI
   `--particle-placement`): `random`, `relaxed`, `uniform-random` or `uniform-relaxed`. The uniform
   placements split every release cell into one equal-area stratum per particle and draw each
@@ -125,6 +134,10 @@ All notable changes to this project might be documented in this file.
   shortened the runout: the energy line benchmark is now 5 m from its reference, not 307 m.
 
 ### Added
+- `integer_atomics` (CLI `--integer-atomics`, verification `run_all_tests.py --integer-atomics`)
+  accumulates the grid with integer atomics also on GPUs with float atomics, to reproduce browser
+  results or test the WebGPU path natively. Switching it on a prepared simulation rebuilds the
+  shader pipelines and prepares the simulation again.
 - The dam break verification test runs on a refined grid: `--refine N` (default 4, cell size
   1.25 m instead of the DEM's 5 m) interpolates the plane DEM and splits every release cell. At 64
   particles per cell the thickness error at 15 s drops from 7.4 % to 2.5 % and the front lag at

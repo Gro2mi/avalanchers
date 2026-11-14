@@ -182,6 +182,10 @@ struct Args {
     enable_weak_pressure: Option<bool>,
     #[arg(long, value_parser = parse_bool)]
     enable_center_of_mass: Option<bool>,
+    /// Integer (fixed point) grid atomics even on GPUs with float atomics;
+    /// `--integer-atomics` alone means true
+    #[arg(long, value_parser = parse_bool, num_args = 0..=1, default_missing_value = "true")]
+    integer_atomics: Option<bool>,
     /// random, relaxed, uniform-random or uniform-relaxed
     #[arg(long, value_parser = parse_particle_placement)]
     particle_placement: Option<ParticlePlacement>,
@@ -235,6 +239,9 @@ impl Args {
         }
         if let Some(value) = self.enable_center_of_mass {
             settings.enable_center_of_mass = Some(value);
+        }
+        if let Some(value) = self.integer_atomics {
+            settings.integer_atomics = Some(value);
         }
         if let Some(value) = self.particle_placement {
             settings.particle_placement = Some(value);
@@ -572,6 +579,7 @@ mod tests {
             release_slope_width: None,
             release_slope_smoothing_length: None,
             enable_center_of_mass: None,
+            integer_atomics: None,
             particle_placement: Some(ParticlePlacement::UniformRelaxed),
         };
 

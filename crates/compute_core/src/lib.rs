@@ -630,6 +630,10 @@ pub struct ComputeOrchestrator {
     simulation_pipelines: Option<SimulationPipelines>,
     simulation_bind_groups: Option<SimulationBindGroups>,
     has_float32_filterable: bool,
+    /// The adapter supports float atomics in storage buffers.
+    float32_atomic_supported: bool,
+    /// The shaders accumulate the grid with float atomics; false on GPUs
+    /// without them and with [`Self::set_integer_atomics`].
     has_float32_atomic: bool,
     pub enable_center_of_mass: bool,
     center_of_mass_biggest_blob: bool,
@@ -905,6 +909,7 @@ impl ComputeOrchestrator {
             particle_sort: None,
             steps_since_particle_sort: 0,
             weak_pressure: None,
+            float32_atomic_supported: has_float32_atomic,
             has_float32_atomic,
             completed_steps: 0,
             enable_center_of_mass: true,
@@ -915,6 +920,45 @@ impl ComputeOrchestrator {
 
     pub fn has_float32_atomic(&self) -> bool {
         self.has_float32_atomic
+    }
+
+    /// Whether the adapter supports float atomics, independent of
+    /// [`Self::set_integer_atomics`].
+    pub fn float32_atomic_supported(&self) -> bool {
+        self.float32_atomic_supported
+    }
+
+    /// Accumulates the grid with integer (fixed point) atomics even on a GPU
+    /// with float atomics, as on WebGPU; `false` returns to float atomics
+    /// where supported. A change rebuilds the shader pipelines and drops
+    /// everything prepared with them (particle sort, weak pressure pass,
+    /// stored initial particles): the simulation has to be prepared again.
+    /// Returns whether the atomic variant changed.
+    pub fn set_integer_atomics(&mut self, integer_atomics: bool) -> Result<bool> {
+        let float_atomics = self.float32_atomic_supported && !integer_atomics;
+        if float_atomics == self.has_float32_atomic {
+            return Ok(false);
+        }
+        info!(
+            "Switching the grid to {} atomics",
+            if float_atomics { "float" } else { "integer" }
+        );
+        self.shader_configs = shaders::create_shader_configs(
+            &self.device,
+            self.max_compute_invocations_per_workgroup,
+            self.has_float32_filterable,
+            float_atomics,
+        )?;
+        self.has_float32_atomic = float_atomics;
+        self.simulation_pipelines = None;
+        self.simulation_bind_groups = None;
+        self.prepared_model = None;
+        self.prepared_max_steps = None;
+        self.particle_sort = None;
+        self.steps_since_particle_sort = 0;
+        self.weak_pressure = None;
+        self.initial_particles = None;
+        Ok(true)
     }
 
     pub fn set_enable_center_of_mass(&mut self, enabled: bool) {
@@ -1652,7 +1696,44 @@ impl ComputeOrchestrator {
             .ok_or_else(|| anyhow!("AtomicValues buffer was empty"))?
             .estimated_release_volume;
         info!("Estimated release volume: {}", estimated_release_volume);
+        if !self.has_float32_atomic && number_release_particles > 0 {
+            // mean seeded mass (the volume estimate rounds every cell to m3)
+            let masses = self.read_buffer::<f32>(BufferName::ParticlesMass).await?;
+            let mean_mass = masses.iter().map(|&m| m as f64).sum::<f64>() / masses.len() as f64;
+            self.log_integer_grid_resolution(sim_settings, mean_mass as f32);
+        }
         Ok(estimated_release_volume)
+    }
+
+    /// Logs how finely the integer-atomic grid resolves a release particle of
+    /// `particle_mass` kg; warns when slow particles lose their momentum to
+    /// rounding (fewer than 100 momentum units at 1 m/s).
+    fn log_integer_grid_resolution(
+        &self,
+        sim_settings: &settings::SimSettings,
+        particle_mass: f32,
+    ) {
+        let mass_units = particle_mass * sim_settings.mass_factor();
+        let momentum_units = particle_mass * sim_settings.momentum_factor();
+        info!(
+            "Integer atomic grid: up to {:.3e} kg and {:.3e} kg m/s per node, units of {:.3e} kg \
+             and {:.3e} kg m/s; a release particle of {:.3} kg holds {:.3e} mass units and \
+             {:.3e} momentum units at 1 m/s",
+            sim_settings.max_node_mass(),
+            sim_settings.max_node_mass() * settings::MAX_FLOW_VELOCITY,
+            1.0 / sim_settings.mass_factor(),
+            1.0 / sim_settings.momentum_factor(),
+            particle_mass,
+            mass_units,
+            momentum_units,
+        );
+        if momentum_units < 100.0 {
+            warn!(
+                "Integer atomic grid: a release particle at 1 m/s holds only {momentum_units:.0} \
+                 momentum units, slow flows are quantized coarsely; use fewer particles per cell \
+                 or float atomics"
+            );
+        }
     }
 
     /// Relaxes the freshly initialized particles with a soft sphere
@@ -3083,11 +3164,15 @@ mod tests {
             )
             .expect("Failed to add texture with data");
         // helper to write decoded masses in both buffer encodings
-        fn write_grid_masses(orchestrator: &mut ComputeOrchestrator, masses: &[f32]) {
+        fn write_grid_masses(
+            orchestrator: &mut ComputeOrchestrator,
+            settings: &settings::SimSettings,
+            masses: &[f32],
+        ) {
             let mass_factor = if orchestrator.has_float32_atomic() {
                 1.0
             } else {
-                10.0
+                settings.mass_factor()
             };
             if orchestrator.has_float32_atomic() {
                 block_on(orchestrator.write_buffer(BufferName::GridMass, masses))
@@ -3102,7 +3187,11 @@ mod tests {
         // Scenario 1: mass split into two disconnected blobs (3x2 grid, 8-connected).
         // Mass 1.0 in cell (0,0) and mass 3.0 in cell (2,1) do not touch, so the
         // biggest blob is the isolated mass 3.0 and the 1.0 blob is ignored.
-        write_grid_masses(&mut orchestrator, &[1.0f32, 0.0, 0.0, 0.0, 0.0, 3.0]);
+        write_grid_masses(
+            &mut orchestrator,
+            &settings,
+            &[1.0f32, 0.0, 0.0, 0.0, 0.0, 3.0],
+        );
 
         let result = block_on(orchestrator.run_compute_center_of_mass(&settings))
             .expect("GPU center of mass failed");
@@ -3132,7 +3221,11 @@ mod tests {
         // into one blob of total mass 5, so all masses contribute.
         // Expected center of mass:
         // ((2.5 + 7.5 + 12.5 * 3) / 5, (2.5 + 2.5 + 7.5 * 3) / 5) = (9.5, 5.5)
-        write_grid_masses(&mut orchestrator, &[1.0f32, 1.0, 0.0, 0.0, 0.0, 3.0]);
+        write_grid_masses(
+            &mut orchestrator,
+            &settings,
+            &[1.0f32, 1.0, 0.0, 0.0, 0.0, 3.0],
+        );
 
         let connected = block_on(orchestrator.run_compute_center_of_mass(&settings))
             .expect("GPU center of mass failed");
@@ -3163,7 +3256,11 @@ mod tests {
         // disconnected blobs give total mass 4 and
         // ((2.5 * 1 + 12.5 * 3) / 4, (2.5 * 1 + 7.5 * 3) / 4) = (10.0, 6.25)
         settings.flags &= !(1u32 << 4);
-        write_grid_masses(&mut orchestrator, &[1.0f32, 0.0, 0.0, 0.0, 0.0, 3.0]);
+        write_grid_masses(
+            &mut orchestrator,
+            &settings,
+            &[1.0f32, 0.0, 0.0, 0.0, 0.0, 3.0],
+        );
 
         let whole_grid = block_on(orchestrator.run_compute_center_of_mass(&settings))
             .expect("GPU center of mass failed");
@@ -3261,7 +3358,7 @@ mod tests {
         let mass_factor = if orchestrator.has_float32_atomic() {
             1.0
         } else {
-            10.0
+            settings.mass_factor()
         };
         if orchestrator.has_float32_atomic() {
             block_on(orchestrator.write_buffer(BufferName::GridMass, &masses))
@@ -4011,7 +4108,11 @@ mod tests {
             if orchestrator.has_float32_atomic() {
                 (1.0, 1.0, 1e-6)
             } else {
-                (10.0, 0.01, 5e-3)
+                (
+                    sim_settings.mass_factor(),
+                    sim_settings.momentum_factor(),
+                    5e-3,
+                )
             };
         let mass_p2g: f32 = test_output.iter().skip(5).take(10).sum::<f32>() / mass_factor;
         info!(
