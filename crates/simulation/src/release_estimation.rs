@@ -26,7 +26,7 @@ use std::collections::BinaryHeap;
 use anyhow::{Result, bail};
 use compute_core::dem::{Dem, smooth_gaussian};
 use compute_core::settings::ReleaseFillMethod;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// 8-neighborhood in clockwise order, starting at the top-left diagonal.
 const NEIGHBOR_OFFSETS: [(isize, isize); 8] = [
@@ -491,13 +491,15 @@ fn filter_crown_components(
         })
         .collect();
     if number_slope_rejected > 0 {
-        info!(
-            "{number_slope_rejected} crown component(s) discarded: flatter than {:.0}°",
+        debug!(
+            "Discarded {number_slope_rejected} crown line segment(s) flatter than {:.0}°",
             config.min_crown_slope_deg
         );
     }
     if kept.is_empty() && !components.is_empty() {
-        warn!("no crown component passed the filters, keeping the largest");
+        warn!(
+            "No crown line segment passed the slope and elevation filters; using the largest one"
+        );
         kept = vec![components.iter().max_by_key(|c| c.len()).unwrap()];
     }
 
@@ -844,8 +846,8 @@ fn detect_crown_line_impl(
     terrain_metrics: Option<&TerrainMetrics<'_>>,
 ) -> Result<CrownDetection> {
     validate_roi(dem, roi)?;
-    info!(
-        "Crown line estimation: filling sinks on {}x{} grid",
+    debug!(
+        "Crown line estimation: filling sinks of the {} x {} cell grid",
         dem.width, dem.height
     );
     let filled = fill_sinks(&dem.data1d, dem.width, dem.height, config.sink_fill_epsilon);
@@ -895,8 +897,9 @@ fn detect_crown_line_by_gradient_step_impl(
     if !(0.0..1.0).contains(&config.crown_exit_distance) {
         bail!("crown exit distance must be in [0, 1) cells");
     }
-    info!(
-        "Crown line estimation: gradient step on {}x{} grid (exit distance {:.2} cells)",
+    debug!(
+        "Crown line estimation: tracing the gradient on the {} x {} cell grid (exit distance \
+         {:.2} cells)",
         dem.width, dem.height, config.crown_exit_distance
     );
     let detection = detect_crown_line_from_gradient(
@@ -1048,8 +1051,8 @@ fn estimate_release_areas_with_crown_impl(
         bail!("release area fraction must be in [0, 1]");
     }
 
-    info!(
-        "Crown line detected: {} cells in {} component(s)",
+    debug!(
+        "Crown line: {} cells in {} segment(s)",
         crown.number_crown_cells, crown.number_components
     );
 
@@ -1094,8 +1097,8 @@ fn estimate_release_areas_with_crown_impl(
     }
 
     if ordered.len() < number_selectable {
-        warn!(
-            "{} of {} {} cells are unreachable from the crown line and can never be selected",
+        info!(
+            "{} of {} {} cells cannot be reached from the crown line and are not released",
             number_selectable - ordered.len(),
             number_selectable,
             if potential.is_some() {
@@ -1108,8 +1111,9 @@ fn estimate_release_areas_with_crown_impl(
     let requested = ((config.fraction * number_roi_cells as f32).round() as usize).max(1);
     if requested > ordered.len() {
         warn!(
-            "release target of {requested} cells exceeds the {} reachable potential release \
-             cells; selecting all of them",
+            "The requested release area ({requested} cells) is larger than the {} potential \
+             release cells reachable from the crown line; releasing all of them. Lower \
+             release_area_fraction",
             ordered.len()
         );
     }
@@ -1149,8 +1153,8 @@ fn estimate_release_areas_with_crown_impl(
         || mean_crown_slope_deg > config.expected_crown_slope_range.1
     {
         warn!(
-            "mean crown slope {:.1}° is outside the expected release window {:.0}°-{:.0}°; \
-             the outline may not include the release zone",
+            "The mean crown line slope ({:.1}°) is outside the usual release range of \
+             {:.0}°-{:.0}°; check that the outline includes the release zone",
             mean_crown_slope_deg,
             config.expected_crown_slope_range.0,
             config.expected_crown_slope_range.1
@@ -1158,7 +1162,8 @@ fn estimate_release_areas_with_crown_impl(
     }
 
     info!(
-        "Release fill ({}): {} of {} outline cells ({:.0}%), mean crown slope {:.1}°",
+        "Estimated release area ({} fill): {} of {} outline cells ({:.0} %), mean crown line \
+         slope {:.1}°",
         config.fill_method,
         target,
         number_roi_cells,
@@ -1169,9 +1174,9 @@ fn estimate_release_areas_with_crown_impl(
         let mean_membership = |cells: &[(f32, usize)]| {
             cells.iter().map(|&(_, idx)| memberships[idx]).sum::<f32>() / cells.len() as f32
         };
-        info!(
-            "Slope-weighted fill (w {:.1}, peak {:.0}°, width {:.0}°): mean release slope \
-             membership {:.2} of the selected cells, {:.2} of all reachable candidates",
+        debug!(
+            "Slope-weighted fill (weight {:.1}, peak {:.0}°, width {:.0}°): mean release slope \
+             membership {:.2} of the selected cells, {:.2} of all reachable cells",
             config.slope_weight,
             config.slope_peak_deg,
             config.slope_width_deg,

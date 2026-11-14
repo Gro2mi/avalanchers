@@ -20,6 +20,10 @@ tracing-subscriber = { workspace = true }
 futures = { workspace = true }
 web-time = { workspace = true }
 
+# browser console output of the logging module
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tracing-wasm = { workspace = true }
+
 
 [dev-dependencies]
 test-log = { workspace = true }

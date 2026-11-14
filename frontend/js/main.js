@@ -1,5 +1,6 @@
-import init, { WasmSimulation, decode_blosc_chunk, decode_zstd_chunk } from "./pkg/avalanchers.js";
+import init, { WasmSimulation, decode_blosc_chunk, decode_zstd_chunk, onLogMessage, setLogLevel } from "./pkg/avalanchers.js";
 import { LiveViewer } from "./viewer.js";
+import { showToast } from "./toasts.js";
 
 window.dem = new Dem();
 window.sim = null;
@@ -56,6 +57,7 @@ const frictionCoefficientSlider = document.getElementById('frictionCoefficientSl
 const dragCoefficientSlider = document.getElementById('dragCoefficientSlider');
 const releasedParticlesPerCellSlider = document.getElementById('releasedParticlesPerCellSlider');
 const internalFrictionAngleSlider = document.getElementById('internalFrictionAngleSlider');
+const referenceSurfaceLengthSlider = document.getElementById('referenceSurfaceLengthSlider');
 
 const runButton = document.getElementById('runSimulation');
 const runButtonLabel = document.getElementById('runButtonLabel');
@@ -290,6 +292,7 @@ bindSlider(frictionCoefficientSlider, 'frictionCoefficientValue', v => parseFloa
 bindSlider(dragCoefficientSlider, 'dragCoefficientValue');
 bindSlider(releasedParticlesPerCellSlider, 'releasedParticlesPerCellValue');
 bindSlider(internalFrictionAngleSlider, 'internalFrictionAngleValue', v => parseFloat(v).toFixed(1));
+bindSlider(referenceSurfaceLengthSlider, 'referenceSurfaceLengthValue', v => parseFloat(v).toFixed(0));
 bindSlider(zoomLevelSlider, 'zoomLevelValue');
 
 function updateFrictionControlsFromModel() {
@@ -332,6 +335,7 @@ function getSettings() {
         particle_placement: document.getElementById('particlePlacementDropdown').value,
         enable_earth_pressure_coefficient: document.getElementById('enable_earth_pressure_coefficient').checked,
         internal_friction_angle: parseFloat(internalFrictionAngleSlider.value),
+        reference_surface_length: parseFloat(referenceSurfaceLengthSlider.value),
     };
     if (releaseThicknessOverride.checked) {
         simSettings.release_thickness = parseFloat(releaseThicknessSlider.value);
@@ -1195,11 +1199,29 @@ function checkWebGPU() {
     }
 }
 
+// Level of the engine messages in the browser console: the `log` URL
+// parameter (off, error, warn, info, debug or trace), e.g. ?log=debug, or
+// setLogLevel("debug") in the console. Release builds default to warn.
+function setUpEngineLogging() {
+    // engine warnings and errors also appear on the page
+    onLogMessage(showToast);
+    window.showToast = showToast;
+    window.setLogLevel = setLogLevel;
+    const level = new URLSearchParams(window.location.search).get('log');
+    if (!level) return;
+    try {
+        setLogLevel(level);
+    } catch (error) {
+        console.warn(`Ignoring the URL parameter log=${level}:`, error);
+    }
+}
+
 async function loadEngine() {
     try {
         setLoadingScreenStatus('Loading engine…', 'Waiting for WASM runtime.');
         statusEl.textContent = "Loading Engine...";
         window.wasm = await init();
+        setUpEngineLogging();
         window.wasmDecoders = { blosc: decode_blosc_chunk, zstd: decode_zstd_chunk };
 
         setLoadingScreenStatus('Creating simulation…', 'Allocating engine resources.');
@@ -1213,7 +1235,7 @@ async function loadEngine() {
         statusEl.textContent = "Engine ready.";
         state.engineReady = true;
     } catch (err) {
-        console.error("WASM init failed:", err);
+        console.error("Could not load the simulation engine:", err);
         const msg = err instanceof Error ? err.message : String(err);
         statusEl.textContent = `Engine load failed: ${msg}, check console for details.`;
         statusEl.style.backgroundColor = "rgba(255, 0, 0, 0.8)";

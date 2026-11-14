@@ -695,9 +695,9 @@ impl ComputeOrchestrator {
                 });
                 if let Some(adapter) = matched {
                     let info = adapter.get_info();
-                    info!(
-                        "Found target GPU: {} [ID: {:#06X}, Vendor: {:#06X}] ({:?})",
-                        info.name, info.device, info.vendor, info.device_type
+                    debug!(
+                        "Found the requested GPU {} (device {:#06X}, vendor {:#06X})",
+                        info.name, info.device, info.vendor
                     );
                     selected = Some((instance, adapter));
                     break;
@@ -705,10 +705,7 @@ impl ComputeOrchestrator {
             }
 
             if selected.is_none() {
-                warn!(
-                    "Requested GPU '{}' not found, falling back to automatic selection.",
-                    target
-                );
+                warn!("GPU '{target}' not found; selecting a GPU automatically");
             }
         }
 
@@ -741,7 +738,7 @@ impl ComputeOrchestrator {
             selected
         } else {
             let instance = create_instance();
-            warn!("High-performance GPU not found, falling back to LowPower/Software.");
+            warn!("No high-performance GPU found; trying a low-power GPU");
             let mut fallback_adapter = instance
                 .request_adapter(&RequestAdapterOptions {
                     power_preference: PowerPreference::LowPower,
@@ -752,7 +749,7 @@ impl ComputeOrchestrator {
                 .await;
 
             if fallback_adapter.is_err() {
-                warn!("Low-performance GPU not found, falling back to Software.");
+                warn!("No low-power GPU found; trying the software renderer");
                 fallback_adapter = instance
                     .request_adapter(&RequestAdapterOptions {
                         power_preference: PowerPreference::LowPower,
@@ -764,7 +761,7 @@ impl ComputeOrchestrator {
             }
 
             let adapter = fallback_adapter
-                .map_err(|error| anyhow!("Failed to find any suitable GPU adapter: {error}"))?;
+                .map_err(|error| anyhow!("No GPU found, not even a software renderer: {error}"))?;
             (instance, adapter)
         };
 
@@ -772,30 +769,29 @@ impl ComputeOrchestrator {
         timer_checkpoint("Get GPU adapter");
 
         let info = adapter.get_info();
+        let kind = match info.device_type {
+            wgpu::DeviceType::DiscreteGpu => "discrete GPU",
+            wgpu::DeviceType::IntegratedGpu => "integrated GPU",
+            wgpu::DeviceType::VirtualGpu => "virtual GPU",
+            wgpu::DeviceType::Cpu => "software renderer",
+            wgpu::DeviceType::Other => "GPU of unknown type",
+        };
+        info!(
+            "Using {} {} ({:?}, driver {} {})",
+            kind, info.name, info.backend, info.driver, info.driver_info
+        );
         match info.device_type {
-            wgpu::DeviceType::DiscreteGpu => info!("Using discrete GPU: {}", info.name),
-            wgpu::DeviceType::IntegratedGpu => warn!(
-                "Using integrated GPU: {}. If performance is poor, consider using a discrete GPU",
+            wgpu::DeviceType::Cpu => warn!(
+                "{} runs on the CPU; simulations will be very slow",
                 info.name
             ),
             wgpu::DeviceType::VirtualGpu => {
-                warn!("Using virtual GPU: {}, performance may be poor", info.name)
+                warn!("{} is a virtual GPU; simulations may be slow", info.name)
             }
-            wgpu::DeviceType::Cpu => warn!(
-                "Using CPU adapter: {}, performance will be very poor",
-                info.name
-            ),
-            wgpu::DeviceType::Other => warn!(
-                "Using unknown device type for adapter: {}, performance may be poor",
-                info.name
-            ),
+            _ => {}
         }
         let limits = adapter.limits();
-        info!("GPU Name    : {}", info.name);
-        debug!("Driver      : {}", info.driver);
-        debug!("Backend     : {:?}", info.backend);
-        debug!("Device Type : {:?}", info.device_type);
-        trace!("Adapter limits: {:?}", limits);
+        trace!("GPU limits: {:?}", limits);
 
         let max_texture_size = limits.max_texture_dimension_2d;
         let max_storage_buffer_binding_size = limits.max_storage_buffer_binding_size;
@@ -805,13 +801,8 @@ impl ComputeOrchestrator {
             limits.max_compute_workgroup_size_x,
         );
         debug!(
-            "Adapter limits: 
-                                    - Max Compute Workgroup Size X: {:?}
-                                    - Max Compute Invocations Per Workgroup: {:?} 
-                                    - Max Storage Buffer Binding Size: {:.2} GB
-                                    - Max Buffer Size: {:.2} GB
-                                    - Max Texture Dimension 2D: {:?}
-                                    - Max Compute Workgroups per Dimension: {:?}",
+            "GPU limits: workgroup size {}, {} invocations per workgroup, storage buffer binding \
+             {:.2} GB, buffer {:.2} GB, 2D texture {} px, {} workgroups per dimension",
             limits.max_compute_workgroup_size_x,
             max_compute_invocations_per_workgroup,
             max_storage_buffer_binding_size as f64 / 1024.0 / 1024.0 / 1024.0,
@@ -819,39 +810,38 @@ impl ComputeOrchestrator {
             max_texture_size,
             limits.max_compute_workgroups_per_dimension
         );
-        let bytes_per_particle = 2 * std::mem::size_of::<[f32; 2]>() // position + velocity
-             + 2 * std::mem::size_of::<f32>() // mass + elevation
-             + std::mem::size_of::<u32>(); // stopped
-        let buffer_limit = max_storage_buffer_binding_size / bytes_per_particle as u64;
-        let compute_limit =
-            limits.max_compute_workgroups_per_dimension * max_compute_invocations_per_workgroup;
-        // TODO estimate the limit based on the number of storage buffers used in the shaders, since each buffer has a limit of max_storage_buffer_binding_size
-        let position_limit = max_storage_buffer_binding_size / size_of::<[f32; 2]>() as u64;
-        let scalar_limit = max_storage_buffer_binding_size / size_of::<f32>() as u64;
-        let affine_limit = max_storage_buffer_binding_size / size_of::<[[f32; 2]; 2]>() as u64;
-        let max_particles = min(
-            min(position_limit, scalar_limit),
-            min(affine_limit, compute_limit as u64),
-        );
-        info!(
-            "Maximum number of particles that can be simulated with current GPU: {} (limited by {})",
-            max_particles,
-            if max_particles == buffer_limit {
-                "storage buffer binding size"
-            } else {
-                "compute shader dispatch limits"
-            }
+        // The particle kernels run one thread per particle in a 1D dispatch of
+        // WG_SIZE_1D (= max_compute_invocations_per_workgroup) threads.
+        let dispatch_limit = u64::from(limits.max_compute_workgroups_per_dimension)
+            * u64::from(max_compute_invocations_per_workgroup);
+        // Every particle array is one storage binding; the largest element is
+        // the 2x2 affine matrix (and the MPMDAC stress), 16 B per particle.
+        let buffer_limit = max_storage_buffer_binding_size / size_of::<[[f32; 2]; 2]>() as u64;
+        let max_particles = min(dispatch_limit, buffer_limit);
+        // position, velocity, mass, elevation, state, affine matrix and the
+        // 3D model's vertical velocity and affine row: the largest set of the
+        // grid models
+        const PARTICLE_BYTES_3D: u64 = 8 + 8 + 4 + 4 + 4 + 16 + 4 + 8;
+        debug!(
+            "The GPU fits up to {max_particles} particles: {} workgroups of {} threads allow \
+             {dispatch_limit}, {:.2} GB per particle buffer allow {buffer_limit}. At the limit, \
+             the particles of the 3D model take {:.1} GB of GPU memory",
+            limits.max_compute_workgroups_per_dimension,
+            max_compute_invocations_per_workgroup,
+            max_storage_buffer_binding_size as f64 / 1024.0 / 1024.0 / 1024.0,
+            (max_particles * PARTICLE_BYTES_3D) as f64 / 1024.0 / 1024.0 / 1024.0
         );
         trace!(
-            "Maximum number of cells that can be simulated with current GPU: {}, every {}th cell can have a single particle",
-            max_texture_size * max_texture_size,
+            "The GPU fits grids of up to {} cells, about one particle per {:.1} cells at the \
+             particle limit",
+            max_texture_size as u64 * max_texture_size as u64,
             (max_texture_size as u64 * max_texture_size as u64) as f32 / max_particles as f32
         );
 
         let mut required_features = Features::empty();
         let mut has_float32_filterable = false;
         let mut has_float32_atomic = false;
-        debug!("Adapter features: {:?}", adapter.features());
+        debug!("GPU features: {:?}", adapter.features());
 
         // Only request timestamps if the runner actually supports them
         if adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
@@ -864,8 +854,9 @@ impl ComputeOrchestrator {
             required_features |= wgpu::Features::SHADER_FLOAT32_ATOMIC;
             has_float32_atomic = true;
         } else {
-            warn!(
-                "GPU does not support SHADER_FLOAT32_ATOMIC, the sim will be less accurate. Consider using a GPU that supports this feature for better results."
+            info!(
+                "The GPU has no 32-bit float atomics; the grid uses integer atomics, which round \
+                 mass and momentum to fixed steps"
             );
         }
         if adapter
@@ -876,7 +867,8 @@ impl ComputeOrchestrator {
             has_float32_filterable = true;
         } else {
             warn!(
-                "GPU does not support FLOAT32_FILTERABLE, the sim will be less accurate. Consider using a GPU that supports this feature for better results."
+                "The GPU cannot interpolate 32-bit float textures; the terrain is sampled at the \
+                 nearest cell center, which makes slopes and curvature less accurate"
             );
         }
 
@@ -902,9 +894,13 @@ impl ComputeOrchestrator {
                 trace: wgpu::Trace::Off,
             })
             .await
-            .context("Failed to create device and queue")?;
-        device.set_device_lost_callback(move |reason, message| {
-            error!("Device lost! Reason: {:?}, Message: {}", reason, message);
+            .context("Could not open the GPU device")?;
+        device.set_device_lost_callback(move |reason, message| match reason {
+            wgpu::DeviceLostReason::Destroyed => debug!("GPU device released"),
+            _ => error!(
+                "Lost the GPU device ({message}); results of the running simulation are lost, \
+                 a new simulation opens the device again"
+            ),
         });
         timer_checkpoint("Request GPU device");
         let buffers = GpuResources::new();
@@ -975,7 +971,7 @@ impl ComputeOrchestrator {
         if float_atomics == self.has_float32_atomic {
             return Ok(false);
         }
-        info!(
+        debug!(
             "Switching the grid to {} atomics",
             if float_atomics { "float" } else { "integer" }
         );
@@ -1176,8 +1172,8 @@ impl ComputeOrchestrator {
         let gully_walls = sim_settings.gully_walls_enabled();
         if !gully_walls && sim_settings.reference_surface_length > 0.0 {
             warn!(
-                "reference_surface_length {} m is below the cell size {} m: no reference \
-                 surface, gully wall friction is off",
+                "reference_surface_length ({} m) is smaller than the cell size ({} m); gully wall \
+                 friction is off. Set it to at least the cell size or to 0",
                 sim_settings.reference_surface_length, sim_settings.cell_size
             );
         }
@@ -1629,19 +1625,17 @@ impl ComputeOrchestrator {
             BufferName::SimSettings,
             seed_settings.as_bytes(),
         )?;
-        info!(
-            "Initializing particles ({placement} placement) with number_release_particles: {}, particle_position_buffer_size: {:.2} MB ({:.1} % of max storage buffer binding size)",
-            number_release_particles,
-            particle_buffer_size_single_value as f64 * 2.0 / 1024.0 / 1024.0,
-            (particle_buffer_size_single_value as f64 * 2.0
-                / self.max_storage_buffer_binding_size as f64)
-                * 100.0
-        );
+        info!("Seeding {number_release_particles} particles ({placement} placement)");
         self.dispatch_number_workgroups_1d =
             number_release_particles.div_ceil(self.max_compute_invocations_per_workgroup);
         debug!(
-            "Running initialize particles shader with number_release_particles: {}, dispatch_number_workgroups_1d: {}",
-            number_release_particles, self.dispatch_number_workgroups_1d
+            "Particle positions take {:.2} MB ({:.1} % of the largest GPU buffer), seeded in {} \
+             workgroups",
+            particle_buffer_size_single_value as f64 * 2.0 / 1024.0 / 1024.0,
+            (particle_buffer_size_single_value as f64 * 2.0
+                / self.max_storage_buffer_binding_size as f64)
+                * 100.0,
+            self.dispatch_number_workgroups_1d
         );
         self.add_buffer_with_data(
             BufferName::ParticleIndex,
@@ -1792,10 +1786,10 @@ impl ComputeOrchestrator {
     ) {
         let mass_units = particle_mass * sim_settings.mass_factor();
         let momentum_units = particle_mass * sim_settings.momentum_factor();
-        info!(
-            "Integer atomic grid: up to {:.3e} kg and {:.3e} kg m/s per node, units of {:.3e} kg \
-             and {:.3e} kg m/s; a release particle of {:.3} kg holds {:.3e} mass units and \
-             {:.3e} momentum units at 1 m/s",
+        debug!(
+            "Integer atomic grid: up to {:.3e} kg and {:.3e} kg m/s per node in steps of {:.3e} kg \
+             and {:.3e} kg m/s; a release particle of {:.3} kg holds {:.3e} mass steps and \
+             {:.3e} momentum steps at 1 m/s",
             sim_settings.max_node_mass(),
             sim_settings.max_node_mass() * settings::MAX_FLOW_VELOCITY,
             1.0 / sim_settings.mass_factor(),
@@ -1806,9 +1800,9 @@ impl ComputeOrchestrator {
         );
         if momentum_units < 100.0 {
             warn!(
-                "Integer atomic grid: a release particle at 1 m/s holds only {momentum_units:.0} \
-                 momentum units, slow flows are quantized coarsely; use fewer particles per cell \
-                 or float atomics"
+                "Slow flow is rounded coarsely on the integer atomic grid: a release particle at \
+                 1 m/s holds only {momentum_units:.0} momentum steps. Use fewer \
+                 released_particles_per_cell or a GPU with float atomics"
             );
         }
     }
@@ -1953,7 +1947,7 @@ impl ComputeOrchestrator {
         number_release_particles: u32,
         minimum_dem_elevation: f32,
     ) -> Result<()> {
-        debug!("Start simulation");
+        debug!("Starting the simulation");
         if sim_settings.max_steps == 0 {
             return Err(anyhow!("max_steps must be greater than zero"));
         }
@@ -2364,7 +2358,9 @@ impl ComputeOrchestrator {
         // also faster there than the tile (no float atomics in workgroup
         // memory).
         if self.has_float32_atomic {
-            debug!("float atomics available: direct P2G without the particle sort");
+            debug!(
+                "Float atomics available; transferring to the grid without sorting the particles"
+            );
             return Ok(());
         }
         // 8x8-cell tiles, see sort_particles.wgsl
@@ -2471,7 +2467,7 @@ impl ComputeOrchestrator {
             steps_run += steps;
             let flags = sim_info.parsed_flags();
             if !flags.is_empty() {
-                debug!("Flags after {} submitted steps: {:?}", steps_run, flags);
+                trace!("Flags after {} submitted steps: {:?}", steps_run, flags);
             }
             if flags.contains(SimInfoFlags::SIM_STOPPED) {
                 break;
@@ -2588,7 +2584,7 @@ impl ComputeOrchestrator {
             steps_run += steps;
             let flags = sim_info.parsed_flags();
             if !flags.is_empty() {
-                debug!("Flags after {} submitted steps: {:?}", steps_run, flags);
+                trace!("Flags after {} submitted steps: {:?}", steps_run, flags);
             }
             if flags.contains(SimInfoFlags::SIM_STOPPED) {
                 break;
@@ -2640,7 +2636,7 @@ impl ComputeOrchestrator {
             steps_run += steps;
             let flags = sim_info.parsed_flags();
             if !flags.is_empty() {
-                debug!("Flags after {} submitted steps: {:?}", steps_run, flags);
+                trace!("Flags after {} submitted steps: {:?}", steps_run, flags);
             }
             if flags.contains(SimInfoFlags::SIM_STOPPED) {
                 break;

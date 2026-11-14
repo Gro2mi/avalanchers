@@ -4,10 +4,10 @@ use js_sys::Float32Array;
 use js_sys::{Array, Object, Reflect, Uint8Array};
 use serde_wasm_bindgen::from_value;
 use simulation::Simulation;
-use simulation::init_logging;
+use simulation::{LogLevel, init_logging};
 use std::sync::OnceLock;
 #[allow(unused_imports)]
-use tracing::{info, trace};
+use tracing::{debug, trace};
 use wasm_bindgen::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use web_sys::window;
@@ -24,18 +24,61 @@ use simulation::SimulationState;
 
 static BASE_URL: OnceLock<String> = OnceLock::new();
 
+/// Sets the level of the engine messages in the browser console: `off`,
+/// `error`, `warn` (default of release builds), `info`, `debug` or `trace`.
+#[wasm_bindgen(js_name = setLogLevel)]
+pub fn set_log_level(level: &str) -> Result<(), JsError> {
+    let level: LogLevel = level
+        .parse()
+        .map_err(|error: String| JsError::new(&error))?;
+    simulation::set_log_level(level);
+    Ok(())
+}
+
+thread_local! {
+    /// The JavaScript callback of [`on_log_message`].
+    static LOG_CALLBACK: std::cell::RefCell<Option<js_sys::Function>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Calls `callback(level, message)` with every engine warning and error
+/// (`level` is `"warn"` or `"error"`), e.g. to show them on the page; `null`
+/// removes the callback. Messages below the log level are not passed on.
+#[wasm_bindgen(js_name = onLogMessage)]
+pub fn on_log_message(callback: Option<js_sys::Function>) {
+    let listening = callback.is_some();
+    LOG_CALLBACK.with(|slot| *slot.borrow_mut() = callback);
+    simulation::set_message_listener(listening.then(|| -> simulation::MessageListener {
+        Box::new(|level, message| {
+            LOG_CALLBACK.with(|slot| {
+                if let Some(callback) = slot.borrow().as_ref() {
+                    // an exception of the page must not stop the engine
+                    let _ = callback.call2(
+                        &JsValue::NULL,
+                        &JsValue::from_str(level.as_str()),
+                        &JsValue::from_str(message),
+                    );
+                }
+            });
+        })
+    }));
+}
+
 #[wasm_bindgen(start)]
 pub fn init() {
-    std::panic::set_hook(Box::new(console_error_panic_hook::hook));
-    tracing_wasm::set_as_global_default();
+    std::panic::set_hook(Box::new(|info| {
+        console_error_panic_hook::hook(info);
+        // also reaches the page through on_log_message
+        tracing::error!("The simulation engine crashed; reload the page. {info}");
+    }));
     init_logging();
     #[cfg(target_arch = "wasm32")]
     {
         let window = window().expect("no global window");
         let location = window.location();
         let origin = location.origin().unwrap_or_default() + "/";
-        trace!("Base URI: {}", origin);
-        trace!("Full URI: {}", location.href().unwrap_or_default());
+        trace!("Page origin: {origin}");
+        trace!("Page URL: {}", location.href().unwrap_or_default());
         BASE_URL.set(location.href().unwrap_or_default()).ok();
     }
 }
@@ -197,7 +240,7 @@ impl WasmSimulation {
     }
     pub async fn create_example(&mut self, dem_path: String) -> Result<(), JsValue> {
         let path = base_url().to_owned() + "data/avaframe/" + &dem_path + ".png";
-        info!("Creating simulation with DEM path: {}", path);
+        debug!("Loading the example DEM {path}");
         self.inner.create_example(&path).await.map_err(to_js_err)?;
         self.invalidate_renderer();
         Ok(())
@@ -269,8 +312,8 @@ impl WasmSimulation {
         source: String,
     ) -> Result<(), JsValue> {
         let dem = data_processor::load_dem_from_bytes(bytes, &ext, &source).map_err(to_js_err)?;
-        info!(
-            "Loaded DEM '{}' from bytes: {}x{} at {}m",
+        debug!(
+            "Read the DEM '{}' ({} x {} cells of {} m)",
             source, dem.width, dem.height, dem.cell_size
         );
         self.inner
@@ -518,7 +561,7 @@ impl WasmSimulation {
             view.renderer.camera.set_aspect(width, height);
         }
         self.view = Some(view);
-        info!("renderer attached to canvas");
+        debug!("Renderer attached to the canvas");
         Ok(())
     }
 

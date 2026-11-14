@@ -619,7 +619,11 @@ impl TileManager {
                     .get(reqwest::header::RETRY_AFTER)
                     .and_then(|value| value.to_str().ok()),
             );
-            warn!("{url}: HTTP {status}, retry {retries}/{MAX_THROTTLE_RETRIES} in {wait:?}");
+            info!(
+                "The tile server answered HTTP {status} for {url}; retry {retries} of \
+                 {MAX_THROTTLE_RETRIES} in {:.1} s",
+                wait.as_secs_f64()
+            );
             std::thread::sleep(wait);
         }
     }
@@ -645,8 +649,8 @@ impl TileManager {
         // other years, newest first, and ask for the export to be refreshed.
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             warn!(
-                "tile {:?}: listed URL {} returned 404; data/swissalti3d_years.bin.xz \
-                 is probably outdated, probing other years",
+                "Tile {:?} is missing at {} (HTTP 404); data/swissalti3d_years.bin.xz is \
+                 probably outdated. Trying the other survey years",
                 id, url
             );
             let mut found = false;
@@ -699,17 +703,17 @@ impl TileManager {
             Ok(mut decoder) => match (decoder.dimensions(), decoder.read_image()) {
                 (Ok((width, height)), Ok(DecodingResult::F32(vec))) => Some((width, height, vec)),
                 (Ok(_), Ok(other)) => {
-                    warn!(
-                        "Unexpected TIFF sample type for {:?}: {:?}",
+                    debug!(
+                        "Tile {:?} has the TIFF sample type {:?}; retrying with the LZW decoder",
                         id,
                         std::mem::discriminant(&other)
                     );
                     None
                 }
                 (_, Err(e)) | (Err(e), _) => {
-                    warn!(
-                        "tiff crate could not decode {:?} (content-type={}, bytes={}): {:?}; \
-                         retrying with the tolerant LZW decoder",
+                    debug!(
+                        "Could not decode tile {:?} (content type {}, {} bytes): {:?}; retrying \
+                         with the tolerant LZW decoder",
                         id,
                         content_type,
                         bytes.len(),
@@ -719,9 +723,9 @@ impl TileManager {
                 }
             },
             Err(e) => {
-                warn!(
-                    "tiff crate could not open {:?} (content-type={}, bytes={}): {:?}; \
-                     retrying with the tolerant LZW decoder",
+                debug!(
+                    "Could not open tile {:?} (content type {}, {} bytes): {:?}; retrying with \
+                     the tolerant LZW decoder",
                     id,
                     content_type,
                     bytes.len(),
@@ -856,12 +860,12 @@ impl TileManager {
 
                 self.dtm
                     .store_chunk(&chunk_indices, resampled.as_slice().unwrap())?;
-                debug!("Cache miss: {:?}", chunk_indices);
+                trace!("Tile cache miss: {:?}", chunk_indices);
                 if !self.download_delay.is_zero() {
                     std::thread::sleep(self.download_delay);
                 }
             }
-            debug!("Cache hit: {:?}", chunk_indices)
+            trace!("Tile cache hit: {:?}", chunk_indices)
         }
 
         //

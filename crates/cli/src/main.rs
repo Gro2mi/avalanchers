@@ -1,19 +1,18 @@
 // compute_cli/src/main.rs
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 use compute_core::settings::{
     ConstitutiveModel, CrownLineMethod, FrictionModel, ParticlePlacement, ReleaseFillMethod,
     Settings, SimModel,
 };
-#[allow(unused_imports)]
-use compute_core::utils::{MaxValue, timer_checkpoint, timer_get_summary, timer_new};
+use compute_core::utils::{MaxValue, timer_checkpoint, timer_new};
 use pollster::block_on;
-use simulation::{Simulation, init_logging};
+use simulation::{LogLevel, Simulation, init_logging, set_log_level};
 #[allow(unused_imports)]
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::{env, time::Instant};
-use tracing::{debug, error, info, warn};
+use tracing::{Level, debug, info};
 
 fn parse_bool(value: &str) -> Result<bool> {
     match value.to_ascii_lowercase().as_str() {
@@ -47,6 +46,10 @@ fn parse_particle_placement(value: &str) -> Result<ParticlePlacement> {
         .map_err(|err| anyhow::anyhow!("invalid particle placement '{value}': {err}"))
 }
 
+fn parse_log_level(value: &str) -> Result<LogLevel> {
+    LogLevel::from_str(value).map_err(|err| anyhow::anyhow!(err))
+}
+
 fn parse_constitutive_model(value: &str) -> Result<ConstitutiveModel> {
     ConstitutiveModel::from_str(value)
         .map_err(|err| anyhow::anyhow!("invalid constitutive model '{value}': {err}"))
@@ -71,6 +74,12 @@ struct Args {
     /// List available GPU devices
     #[arg(long)]
     list_devices: bool,
+
+    /// Log level: off, error, warn, info, debug or trace (default: warn in
+    /// release builds, info in debug builds, or the AVALANCHERS_LOG
+    /// environment variable). Results are printed at every level.
+    #[arg(long, value_parser = parse_log_level, value_name = "LEVEL")]
+    log_level: Option<LogLevel>,
 
     #[arg(long)]
     outlines_path: Option<String>,
@@ -375,9 +384,12 @@ impl Args {
 
 fn main() -> Result<()> {
     timer_new();
-    init_logging();
     let start = Instant::now();
     let args = Args::parse();
+    match args.log_level {
+        Some(level) => set_log_level(level),
+        None => init_logging(),
+    }
     if args.about {
         println!("avalanchers");
         println!("Copyright © 2026 Markus Rampp");
@@ -398,36 +410,26 @@ fn main() -> Result<()> {
         }
         return Ok(());
     }
-    match env::current_dir() {
-        Ok(path) => debug!("Current working directory: {}", path.display()),
-        Err(e) => error!("Failed to get current directory: {}", e),
-    }
     let file_path = match &args.file_path {
-        Some(path) if path.exists() && path.is_file() => {
-            info!("File path: {}", path.display());
-            path.clone()
-        }
-        Some(path) => {
-            error!(
-                "Warning: File does not exist: {}. Using settings.json instead.",
-                path.display()
-            );
-            PathBuf::from("settings.json")
-        }
+        Some(path) if path.is_file() => path.clone(),
+        Some(path) => bail!("Settings file {} does not exist", path.display()),
         None => {
-            warn!(
-                "No file path provided. Using {}/settings.json instead.",
+            let path = PathBuf::from("settings.json");
+            info!(
+                "No settings file given; using {}",
                 env::current_dir()
-                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .map(|dir| dir.join(&path))
+                    .unwrap_or_else(|_| path.clone())
                     .display()
             );
-            PathBuf::from("settings.json")
+            path
         }
     };
+    debug!("Reading settings from {}", file_path.display());
     timer_checkpoint("Startup");
 
     let mut settings = Settings::from_json(&file_path.to_string_lossy())
-        .expect("Failed to load settings from JSON file");
+        .with_context(|| format!("Could not read the settings file {}", file_path.display()))?;
     args.apply_overrides(&mut settings)?;
 
     let mut simulation: Simulation = block_on(Simulation::new_with_settings(settings.clone()))?;
@@ -435,71 +437,291 @@ fn main() -> Result<()> {
     block_on(simulation.run())?;
     timer_checkpoint("Fetch data from GPU");
 
-    block_on(simulation.fetch_peak_velocity()).expect("Failed to get peak velocity");
-
-    block_on(simulation.fetch_peak_flow_thickness()).expect("Failed to get peak flow thickness");
-
+    // caches the peak fields for saving
+    block_on(simulation.fetch_peak_flow_thickness())
+        .context("Could not read the peak flow thickness from the GPU")?;
     let peak_velocity: Vec<f32> = block_on(simulation.fetch_peak_velocity())
-        .expect("Failed to get peak velocity")
+        .context("Could not read the peak velocity from the GPU")?
         .to_vec();
-    info!(
-        "Peak velocity during simulation: {:.2} m/s",
-        peak_velocity.max_value().unwrap(),
+
+    // particle details for diagnosing a run; read back only when shown
+    if tracing::enabled!(Level::DEBUG) {
+        log_particle_details(&mut simulation)?;
+    }
+
+    let saved = block_on(simulation.save()).context("Could not save the results")?;
+    print_summary(&mut simulation, &peak_velocity)?;
+    println!();
+    println!("Saved to {} (run {})", saved.store, saved.run_id);
+    println!("Finished in {:.2} s", start.elapsed().as_secs_f64());
+    Ok(())
+}
+
+/// One line of the summary: a label column and the value.
+fn row(label: &str, value: impl std::fmt::Display) {
+    println!("  {label:<21}{value}");
+}
+
+/// An area in m², or in km² from 0.1 km² on.
+fn format_area(square_metres: f64) -> String {
+    if square_metres >= 1.0e5 {
+        format!("{:.2} km²", square_metres / 1.0e6)
+    } else {
+        format!("{square_metres:.0} m²")
+    }
+}
+
+/// Compass direction of an aspect in degrees (0° = north, clockwise).
+fn compass(aspect_deg: f32) -> &'static str {
+    const POINTS: [&str; 8] = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+    POINTS[((aspect_deg.rem_euclid(360.0) + 22.5) / 45.0) as usize % 8]
+}
+
+/// Angle in degrees of a drop over a horizontal distance (0 if there is none).
+fn angle_deg(drop: f64, distance: f64) -> f64 {
+    if distance > 0.0 {
+        drop.atan2(distance).to_degrees()
+    } else {
+        0.0
+    }
+}
+
+/// Prints the setup and the results of a finished run. Post-processes the
+/// simulation (the avalanche mask), so it runs after saving.
+fn print_summary(simulation: &mut Simulation, peak_velocity: &[f32]) -> Result<()> {
+    let settings = simulation.settings;
+    let cell_area = f64::from(settings.cell_size).powi(2);
+    let sim_info = block_on(simulation.fetch_sim_info())?;
+    let peak_flow_thickness = block_on(simulation.fetch_peak_flow_thickness())?
+        .max_value()
+        .unwrap_or(0.0);
+    let release_cells = block_on(simulation.fetch_release_areas())?
+        .iter()
+        .filter(|&&thickness| thickness > compute_core::RELEASE_THICKNESS_THRESHOLD)
+        .count();
+    let release_terrain = block_on(simulation.release_area_terrain())?;
+    let mass = block_on(simulation.get_total_mass())?;
+    let volume = block_on(simulation.get_total_volume())?;
+    let run = block_on(simulation.run_summary())?;
+    let outline_cells = simulation.roi.iter().filter(|&&inside| inside).count();
+    let has_outline = outline_cells > 0 && outline_cells < simulation.roi.len();
+
+    println!();
+    println!("Setup");
+    let dem = &simulation.dem;
+    let dem_name = if simulation.dem_path.is_empty() {
+        String::new()
+    } else {
+        format!("{}, ", simulation.dem_path)
+    };
+    row(
+        "DEM",
+        format!(
+            "{dem_name}{} x {} cells of {} m",
+            dem.width, dem.height, dem.cell_size
+        ),
     );
+    let model = SimModel::from_int(settings.sim_model)
+        .map_or_else(|| settings.sim_model.to_string(), |model| model.to_string());
+    row("Model", model);
+    let friction = match FrictionModel::from_int(settings.friction_model) {
+        Some(FrictionModel::Coulomb) => format!("coulomb (μ {})", settings.friction_coefficient),
+        Some(model @ (FrictionModel::Voellmy | FrictionModel::VoellmyMinShear)) => format!(
+            "{model} (μ {}, ξ {} m/s²)",
+            settings.friction_coefficient, settings.drag_coefficient
+        ),
+        Some(model) => model.to_string(),
+        None => settings.friction_model.to_string(),
+    };
+    row("Friction", friction);
+    row(
+        "Release",
+        format!(
+            "{release_cells} cells ({}), {volume:.0} m³, {:.0} t of snow",
+            format_area(release_cells as f64 * cell_area),
+            mass / 1000.0
+        ),
+    );
+    row(
+        "Release terrain",
+        format!(
+            "slope {:.1}° (steepest {:.1}°), aspect {:.0}° ({}), elevation {:.0} m",
+            release_terrain.slope_angle,
+            release_terrain.max_slope_angle,
+            release_terrain.slope_aspect,
+            if release_terrain.slope_aspect.is_finite() {
+                compass(release_terrain.slope_aspect)
+            } else {
+                "-"
+            },
+            release_terrain.elevation
+        ),
+    );
+    row(
+        "Particles",
+        format!(
+            "{} ({} per release cell, {})",
+            simulation.number_particles(),
+            settings.released_particles_per_cell,
+            simulation.particle_placement
+        ),
+    );
+    row(
+        "Run",
+        format!(
+            "{} steps, {:.1} s of flow; {}",
+            sim_info.timestep,
+            sim_info.elapsed_time,
+            sim_info
+                .stop_reason()
+                .map_or("stopped at max_steps".to_string(), |reason| format!(
+                    "stopped because {reason}"
+                ))
+        ),
+    );
+    let states = block_on(simulation.fetch_particles_state())?;
+    let count = |test: fn(&compute_core::ParticleState) -> bool| {
+        states.iter().filter(|state| test(state)).count()
+    };
+    let stopped_early = [
+        (
+            count(|s| s.unphysical_speed),
+            format!("faster than {} m/s", compute_core::MAX_PARTICLE_SPEED),
+        ),
+        (
+            count(|s| s.is_nan),
+            "with an invalid (NaN) state".to_string(),
+        ),
+        (
+            count(|s| s.out_of_dem_data && !s.is_nan),
+            "outside the DEM data".to_string(),
+        ),
+        (
+            count(|s| s.out_of_bounds),
+            "at the edge of the DEM".to_string(),
+        ),
+    ]
+    .into_iter()
+    .filter(|(number, _)| *number > 0)
+    .map(|(number, reason)| format!("{number} {reason}"))
+    .collect::<Vec<_>>();
+    if !stopped_early.is_empty() {
+        row("Stopped early", stopped_early.join(", "));
+    }
 
-    // info!("{}", timer_get_summary());
+    println!();
+    println!("Results");
+    row(
+        "Peak velocity",
+        format!("{:.1} m/s", peak_velocity.max_value().unwrap_or(0.0)),
+    );
+    row("Peak flow thickness", format!("{peak_flow_thickness:.2} m"));
 
-    {
-        let vel = block_on(simulation.fetch_particles_velocity())
-            .unwrap()
-            .clone();
-        let pos = block_on(simulation.fetch_particles_position())
-            .unwrap()
-            .clone();
-        let state = block_on(simulation.fetch_particles_state())
-            .unwrap()
-            .clone();
-        let max_speed = vel
-            .iter()
-            .map(|v| (v[0] * v[0] + v[1] * v[1]).sqrt())
-            .fold(0.0f32, f32::max);
-        debug!("DBG max particle speed: {}", max_speed);
-        debug!("DBG first positions: {:?}", &pos[..5.min(pos.len())]);
-        debug!("DBG first velocities: {:?}", &vel[..5.min(vel.len())]);
-        let n_stopped = state.iter().filter(|state| state.stopped).count();
-        let max_stop_step = state.iter().map(|state| state.timestep).max().unwrap_or(0);
-        debug!(
-            "DBG stopped {} / {}, max stop marker {}",
-            n_stopped,
-            state.len(),
-            max_stop_step
+    // the avalanche: the largest connected area above the thickness threshold
+    block_on(simulation.post_process())?;
+    let affected_cells = simulation.ava_mask.iter().filter(|&&set| set).count();
+    row(
+        "Affected area",
+        format!(
+            "{} ({affected_cells} cells with peak flow thickness ≥ {} m)",
+            format_area(affected_cells as f64 * cell_area),
+            settings.peak_flow_thickness_threshold
+        ),
+    );
+    let (runout_distance, runout_drop) = simulation
+        .dem
+        .get_elevation_extrema_distance_and_drop(&simulation.ava_mask)
+        .unwrap_or((0.0, 0.0));
+    row(
+        "Runout",
+        format!(
+            "{runout_distance:.0} m horizontal, {runout_drop:.0} m drop, angle {:.1}° (top to \
+             lowest affected cell)",
+            angle_deg(f64::from(runout_drop), f64::from(runout_distance))
+        ),
+    );
+    if simulation.enable_center_of_mass && run.travel_angle.is_finite() {
+        row(
+            "Center of mass",
+            format!(
+                "travel length {:.0} m (horizontal {:.0} m), drop {:.0} m, travel angle {:.1}°",
+                run.travel_length_3d,
+                run.travel_length_2d,
+                run.travel_vertical_drop,
+                run.travel_angle
+            ),
         );
-        debug!(
-            "DBG sim_info {:?}",
-            block_on(simulation.fetch_sim_info()).unwrap()
-        );
-        debug!(
-            "DBG atomics {:?}",
-            block_on(simulation.fetch_atomic_values()).unwrap()
-        );
-        debug!(
-            "DBG debug buffer {:?}",
-            &block_on(simulation.get_compute_particles_debug()).unwrap()[..20]
+    } else {
+        row(
+            "Center of mass",
+            "not tracked (set enable_center_of_mass to true for the travel length and angle)",
         );
     }
-    info!(
-        "Total mass of particles: {:.2} kg",
-        block_on(simulation.get_total_mass()).unwrap()
-    );
-    info!(
-        "Total release volume: {:.2} m3",
-        block_on(simulation.get_total_volume()).unwrap()
-    );
-    simulation.print_grid(&peak_velocity, 20, 20)?;
-    block_on(simulation.save()).expect("Failed to save simulation");
-    let duration = start.elapsed();
 
-    info!("Time elapsed is: {:?}", duration);
+    if has_outline {
+        let evaluation = block_on(simulation.evaluate())?;
+        println!();
+        println!("Compared with the outline ({outline_cells} cells)");
+        row(
+            "Overlap",
+            format!(
+                "{:.0} % shared (IoU), {:.0} % only simulated, {:.0} % only in the outline \
+                 (of the combined area without the release)",
+                evaluation.intersection * 100.0,
+                evaluation.overshoot * 100.0,
+                evaluation.undershoot * 100.0
+            ),
+        );
+        row(
+            "Runout",
+            format!(
+                "{:.0} m horizontal, {:.0} m drop, angle {:.1}° (outline)",
+                evaluation.horizontal_distance_ref,
+                evaluation.vertical_drop_ref,
+                angle_deg(
+                    evaluation.vertical_drop_ref,
+                    evaluation.horizontal_distance_ref
+                )
+            ),
+        );
+    }
+
+    println!();
+    println!("Peak velocity map (denser characters are faster)");
+    simulation.print_grid(peak_velocity, 40, 20)?;
+    Ok(())
+}
+
+/// Debug output of the particle state at the end of a run.
+fn log_particle_details(simulation: &mut Simulation) -> Result<()> {
+    let velocities = block_on(simulation.fetch_particles_velocity())?.clone();
+    let positions = block_on(simulation.fetch_particles_position())?.clone();
+    let states = block_on(simulation.fetch_particles_state())?.clone();
+    let max_speed = velocities
+        .iter()
+        .map(|v| (v[0] * v[0] + v[1] * v[1]).sqrt())
+        .fold(0.0f32, f32::max);
+    let number_stopped = states.iter().filter(|state| state.stopped).count();
+    let last_stop_step = states.iter().map(|state| state.timestep).max().unwrap_or(0);
+    debug!("Largest particle speed at the end: {max_speed:.2} m/s");
+    debug!(
+        "Stopped particles: {number_stopped} of {}, the last one at step {last_stop_step}",
+        states.len()
+    );
+    debug!(
+        "First particle positions: {:?}",
+        &positions[..5.min(positions.len())]
+    );
+    debug!(
+        "First particle velocities: {:?}",
+        &velocities[..5.min(velocities.len())]
+    );
+    // simulation info and atomic values: logged by the run itself
+    let debug_buffer = block_on(simulation.get_compute_particles_debug())?;
+    debug!(
+        "Particle debug buffer: {:?}",
+        &debug_buffer[..20.min(debug_buffer.len())]
+    );
     Ok(())
 }
 
@@ -523,6 +745,7 @@ mod tests {
             file_path: None,
             about: false,
             list_devices: false,
+            log_level: None,
             max_steps: Some(42),
             sim_model: Some(SimModel::TerrainFollowing),
             friction_model: Some(FrictionModel::Coulomb),

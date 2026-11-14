@@ -159,7 +159,7 @@ pub fn resolve_paths(settings: &Settings) -> Result<(Option<String>, Option<Stri
     {
         release_areas_path = selection.scenario_path();
         match &release_areas_path {
-            Some(path) => info!("Using the release areas of {path}"),
+            Some(path) => info!("Using the release areas stored in {path}"),
             None => {
                 let scenarios = child_groups(&Path::new(&selection.store).join(&selection.site))?;
                 if !scenarios.is_empty() {
@@ -170,8 +170,8 @@ pub fn resolve_paths(settings: &Settings) -> Result<(Option<String>, Option<Stri
                         scenarios.join(", ")
                     )));
                 }
-                warn!(
-                    "Site '{}' has no scenario, so its release areas will be calculated",
+                info!(
+                    "Site '{}' has no stored scenario; estimating its release areas",
                     selection.site
                 );
             }

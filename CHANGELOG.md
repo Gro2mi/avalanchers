@@ -35,6 +35,25 @@ All notable changes to this project might be documented in this file.
   OpenGL backend caused this.
 
 ### Changed
+- Logging reports only warnings and errors in release builds (info in debug builds). The level is
+  set with `--log-level` (command line), `avalanchers.set_log_level()` (Python), the `log` URL
+  parameter or `setLogLevel()` (web app), or the `AVALANCHERS_LOG` environment variable, which
+  also takes filter directives such as `info,compute_core=debug`. It applies to the avalanchers
+  crates; wgpu and other dependencies only report warnings unless `AVALANCHERS_LOG` names them.
+  All messages were reviewed for their level and rewritten in one style: what happened, then what
+  follows or what to change. The duration of every stage of a run (GPU setup, terrain analysis,
+  release, particles, simulation) is logged at info. Native builds log to stderr. The Python
+  module writes to `sys.stderr`, so Jupyter notebooks show the messages in the cell output
+  (before, they only reached the server console); it no longer goes through the Python `logging`
+  module (removes the `pyo3-log` dependency). Messages of GPU and worker threads follow the next
+  message of the calling thread, so logging can no longer deadlock on the GIL.
+- The command line tool prints a summary to stdout at every log level: the setup (DEM, model,
+  friction, release area, volume and mass, release terrain, particles, steps and why the run
+  stopped), the results (peak velocity and flow thickness, affected area, runout distance, drop
+  and angle, center-of-mass travel length (3D, with the horizontal length) and angle) and, with an outline, the overlap and the
+  outline's runout, followed by a peak velocity map. It reads the particle debug data from the
+  GPU only at debug level, and stops with an error when the given settings file does not exist
+  instead of falling back to `settings.json`.
 - The GPU context starts in about 0.25 s instead of 0.5-1.5 s. The adapter is looked up on Vulkan
   alone first (all backends only when Vulkan has no discrete GPU, or as set with `WGPU_BACKEND`),
   which skips starting DX12 on Windows. Shader pipelines are built on first use instead of all 43
@@ -156,6 +175,10 @@ All notable changes to this project might be documented in this file.
   shortened the runout: the energy line benchmark is now 5 m from its reference, not 307 m.
 
 ### Added
+- The web app shows engine warnings as yellow notifications that fade after 5 s and errors (also
+  engine crashes) as red notifications that stay until closed. Repeated messages count up
+  instead of stacking. Programs embedding the web package receive the messages with
+  `onLogMessage(callback)`, Rust programs with `simulation::set_message_listener`.
 - `integer_atomics` (CLI `--integer-atomics`, verification `run_all_tests.py --integer-atomics`)
   accumulates the grid with integer atomics also on GPUs with float atomics, to reproduce browser
   results or test the WebGPU path natively. Switching it on a prepared simulation rebuilds the

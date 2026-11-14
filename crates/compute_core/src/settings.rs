@@ -1223,16 +1223,17 @@ pub struct Settings {
 impl Settings {
     pub fn loads(json_str: &str) -> io::Result<Self> {
         let settings: Settings = serde_json::from_str(json_str).map_err(|e| {
-            error!("Failed to deserialize settings: {e}");
-            io::Error::new(io::ErrorKind::InvalidData, e)
+            io::Error::new(io::ErrorKind::InvalidData, format!("Invalid settings: {e}"))
         })?;
         Ok(settings)
     }
 
     pub fn dumps(&self) -> io::Result<String> {
         let json = serde_json::to_string_pretty(self).map_err(|e| {
-            error!("Failed to serialize settings: {e}");
-            io::Error::new(io::ErrorKind::InvalidData, e)
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Could not convert the settings to JSON: {e}"),
+            )
         })?;
         Ok(json)
     }

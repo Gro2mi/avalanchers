@@ -23,7 +23,7 @@ async function ensureVariableFetched(sim, variable) {
         await fetcher();
         return true;
     } catch (error) {
-        console.warn(`"${variable}" is not available yet.`, error);
+        console.info(`The plot variable "${variable}" is not available yet:`, error);
         return false;
     }
 }
@@ -33,7 +33,7 @@ async function updatePlots(sim, selectedVariable) {
 
     const values = new Float32Array(sim[selectedVariable]);
     if (values.length !== sim.width * sim.height) {
-        console.warn(`"${selectedVariable}" has no data to plot yet.`);
+        console.info(`The plot variable "${selectedVariable}" has no data yet`);
         return;
     }
 
@@ -244,7 +244,7 @@ function restoreTraceVisibility(plotElement, traces) {
     } else {
         // Optionally clear invalid saved visibility
         localStorage.removeItem('traceVisibility');
-        console.warn('Saved trace visibility does not match number of traces. Skipping restore.');
+        console.info('The saved trace visibility does not match the plot; showing all traces');
     }
 }
 

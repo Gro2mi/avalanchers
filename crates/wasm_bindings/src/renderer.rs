@@ -284,7 +284,7 @@ impl RenderView {
                 return; // the next frame draws
             }
             other => {
-                tracing::warn!("Skipping frame: {other:?}");
+                tracing::debug!("Skipping a frame: the canvas surface is {other:?}");
                 return;
             }
         };

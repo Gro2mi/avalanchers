@@ -8,6 +8,11 @@
 //! Distances are in world units (meters), velocities in m/s, and all grid
 //! results are returned as ``(height, width)`` numpy arrays matching the
 //! DEM shape.
+//!
+//! Log messages go to ``sys.stderr``, which notebooks show in the cell
+//! output. Release builds report warnings and errors; [`set_log_level`] or
+//! the ``AVALANCHERS_LOG`` environment variable (read at import) select
+//! another level, see [`simulation::logging`].
 
 use compute_core::{
     SimInfo, TimestepData,
@@ -25,7 +30,7 @@ use pyo3::{
     types::PyDict,
 };
 use pythonize::depythonize;
-use simulation::{Simulation, init_logging};
+use simulation::{LogLevel, Simulation, init_logging};
 
 // A helper trait to make error conversion less verbose
 trait IntoPyResult<T> {
@@ -1563,9 +1568,92 @@ fn build_info(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
     Ok(dict)
 }
 
+/// Sets the level of the log messages written to ``sys.stderr``: ``"off"``,
+/// ``"error"``, ``"warn"`` (default of release builds), ``"info"``,
+/// ``"debug"`` or ``"trace"``. Applies immediately, also to running
+/// simulations, and overrides the ``AVALANCHERS_LOG`` environment variable.
+#[pyfunction]
+fn set_log_level(level: &str) -> PyResult<()> {
+    let level: LogLevel = level.parse().map_err(PyValueError::new_err)?;
+    simulation::set_log_level(level);
+    Ok(())
+}
+
+/// Log lines of threads Python does not know (GPU and worker threads), kept
+/// until a Python thread writes the next line; bounded so a silent program
+/// cannot grow it without limit.
+static PENDING_LOG_LINES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+const MAX_PENDING_LOG_LINES: usize = 1000;
+
+/// Writes a log line to Python's ``sys.stderr``, so that notebooks show it in
+/// the cell output (native stderr only reaches the Jupyter server console).
+///
+/// Only threads that have a Python thread state take the GIL here: the
+/// calling thread of a binding method, also while it released the GIL for a
+/// long computation. Other threads never wait for the GIL, as the caller may
+/// hold it while waiting for them; their lines follow the next line of a
+/// Python thread.
+fn write_log_to_python(line: &str) {
+    // SAFETY: plain queries of the interpreter state, valid on any thread
+    let python_thread = unsafe {
+        pyo3::ffi::Py_IsInitialized() != 0 && !pyo3::ffi::PyGILState_GetThisThreadState().is_null()
+    };
+    if !python_thread {
+        if let Ok(mut pending) = PENDING_LOG_LINES.lock()
+            && pending.len() < MAX_PENDING_LOG_LINES
+        {
+            pending.push(line.to_owned());
+        }
+        return;
+    }
+    let pending = PENDING_LOG_LINES
+        .lock()
+        .map(|mut pending| std::mem::take(&mut *pending))
+        .unwrap_or_default();
+    Python::attach(|py| {
+        let stderr = py
+            .import("sys")
+            .and_then(|sys| sys.getattr("stderr"))
+            .ok()
+            .filter(|stderr| !stderr.is_none());
+        let Some(stderr) = stderr else {
+            // pythonw and similar: no Python stream
+            for text in pending.iter().map(String::as_str).chain([line]) {
+                eprint!("{text}");
+            }
+            return;
+        };
+        for text in pending.iter().map(String::as_str).chain([line]) {
+            let _ = stderr.call_method1("write", (text,));
+        }
+        let _ = stderr.call_method0("flush");
+    });
+}
+
+/// Whether to colour the log lines: in a terminal and in Jupyter, which
+/// renders ANSI colours, but not in redirected output or with ``NO_COLOR``.
+fn python_stderr_shows_colors(py: Python<'_>) -> bool {
+    let Ok(sys) = py.import("sys") else {
+        return false;
+    };
+    let is_tty = sys
+        .getattr("stderr")
+        .and_then(|stderr| stderr.call_method0("isatty"))
+        .and_then(|tty| tty.extract::<bool>())
+        .unwrap_or(false);
+    let in_jupyter = sys
+        .getattr("modules")
+        .and_then(|modules| modules.contains("ipykernel"))
+        .unwrap_or(false);
+    is_tty || in_jupyter
+}
+
 #[pymodule]
 fn _avalanchers(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    pyo3_log::init();
+    simulation::set_log_output(
+        Some(Box::new(write_log_to_python)),
+        python_stderr_shows_colors(m.py()),
+    );
     init_logging();
 
     m.add_class::<PySimulation>()?;
@@ -1577,5 +1665,6 @@ fn _avalanchers(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add_function(wrap_pyfunction!(list_available_gpus, m)?)?;
     m.add_function(wrap_pyfunction!(build_info, m)?)?;
+    m.add_function(wrap_pyfunction!(set_log_level, m)?)?;
     Ok(())
 }

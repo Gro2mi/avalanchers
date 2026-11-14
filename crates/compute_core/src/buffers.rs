@@ -4,7 +4,7 @@ use bytemuck::{Pod, Zeroable};
 use std::borrow::Cow;
 use std::collections::HashMap;
 #[allow(unused_imports)]
-use tracing::{info, trace, warn};
+use tracing::{debug, info, trace, warn};
 use wgpu::{
     Buffer, BufferDescriptor, BufferUsages, COPY_BYTES_PER_ROW_ALIGNMENT, CommandEncoderDescriptor,
     Device, Extent3d, MapMode, Origin3d, Queue, Sampler, TexelCopyBufferInfo,
@@ -875,9 +875,8 @@ pub fn create_buffers_and_texture_descriptions(
     let filter_mode = if has_float32_filterable {
         wgpu::FilterMode::Linear
     } else {
-        warn!(
-            "Device does not support FLOAT32_FILTERABLE, using Nearest filtering for float textures which may reduce accuracy. Consider using a GPU that supports FLOAT32_FILTERABLE for better results."
-        );
+        // reported once at device creation (ComputeOrchestrator::new_with_gpu)
+        debug!("Float textures use nearest sampling");
         wgpu::FilterMode::Nearest
     };
     gpu_resources.samplers.insert(

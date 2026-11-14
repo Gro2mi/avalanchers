@@ -3,7 +3,7 @@ import avalanchers
 
 start = time.time()
 
-
+avalanchers.set_log_level('info')
 # example_case = "avaPyramid45"
 example_case = "avaWog"
 # example_case = "avaMal"
@@ -27,7 +27,7 @@ settings = {
     
     "max_steps": 5000,
     "batch_compute_steps": 300,
-    "sim_model": "terrain-following",
+    "sim_model": "3d",
     "released_particles_per_cell": 4,
     "friction_model": "voellmy",
     "density": 200.0,

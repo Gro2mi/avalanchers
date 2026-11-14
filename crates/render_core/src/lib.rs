@@ -48,7 +48,7 @@ impl GpuContext {
 
         let info = adapter.get_info();
         tracing::info!(
-            "Render adapter: {} ({:?}, {:?})",
+            "Rendering on {} ({:?}, {:?})",
             info.name,
             info.device_type,
             info.backend

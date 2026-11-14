@@ -13,7 +13,6 @@ pyo3 = { workspace = true }
 pythonize = { workspace = true }
 numpy = { workspace = true }
 ndarray = { workspace = true }
-pyo3-log = { workspace = true }
 tracing = { workspace = true }
 pollster = { workspace = true }
 tokio = { workspace = true }

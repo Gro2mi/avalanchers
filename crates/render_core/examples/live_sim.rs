@@ -152,7 +152,7 @@ fn testcase_dir(settings: &Settings) -> String {
 /// is a DEM, `avaFooreleaseTexture.png` is its release areas.
 fn discover_testcases(dir: &str) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(dir) else {
-        tracing::warn!("testcase directory '{dir}' not found; testcase list stays empty");
+        tracing::warn!("Test case directory '{dir}' not found; the test case list stays empty");
         return Vec::new();
     };
     let mut cases = entries
@@ -393,7 +393,7 @@ impl SimulationView {
             }
             Err(error) => {
                 self.failed = true;
-                tracing::error!("simulation step failed: {error}");
+                tracing::error!("Simulation step failed: {error}");
             }
         }
         true
@@ -402,7 +402,7 @@ impl SimulationView {
     fn adjust_speed(&mut self, factor: f32) {
         self.sim_speed = (self.sim_speed * factor).clamp(0.25, 256.0);
         self.next_step_at = Instant::now();
-        tracing::info!("simulation speed: {:.2}x", self.sim_speed);
+        tracing::info!("Simulation speed: {:.2}x", self.sim_speed);
     }
 
     /// Re-clones the GPU buffers after the simulation was reset or rebuilt. Model
@@ -434,7 +434,7 @@ impl SimulationView {
         self.simulation.reset();
         self.info = pollster::block_on(self.simulation.run_n_steps(0))?;
         self.refresh_buffers()?;
-        tracing::info!("simulation restarted");
+        tracing::info!("Simulation restarted");
         Ok(())
     }
 
@@ -468,8 +468,8 @@ impl SimulationView {
                 self.simulation.dem.cell_size,
             );
         if terrain_switched {
-            tracing::info!(
-                "Loaded DEM {}x{} at {} m resolution",
+            tracing::debug!(
+                "Terrain mesh of {} x {} cells of {} m",
                 self.simulation.dem.width,
                 self.simulation.dem.height,
                 self.simulation.dem.cell_size
@@ -494,18 +494,22 @@ impl SimulationView {
         if steps == 0 {
             return;
         }
-        // tracing::info!(
-        //     "simulation step {} (+{}) took {:.3} ms",
-        //     self.info.timestep,
-        //     steps,
-        //     duration.as_secs_f64() * 1000.0
-        // );
+        tracing::trace!(
+            "Simulation step {} (+{steps}) took {:.3} ms",
+            self.info.timestep,
+            duration.as_secs_f64() * 1000.0
+        );
         self.step_timings.push((steps, duration));
     }
 
     fn report_final_info(&mut self) {
         if !self.final_info_reported && self.simulation.get_state() >= SimulationState::Finished {
-            tracing::info!("simulation finished: {:?}", self.info);
+            tracing::info!(
+                "Simulation finished after {} steps ({:.1} s of flow)",
+                self.info.timestep,
+                self.info.elapsed_time
+            );
+            tracing::debug!("Simulation info: {:?}", self.info);
             self.report_timing_summary();
             self.final_info_reported = true;
         }
@@ -513,7 +517,7 @@ impl SimulationView {
 
     fn report_timing_summary(&self) {
         if self.step_timings.is_empty() {
-            tracing::info!("simulation timing summary: no steps completed");
+            tracing::info!("Timing: no steps completed");
             return;
         }
 
@@ -540,7 +544,8 @@ impl SimulationView {
         let steps_per_second = f64::from(total_steps) / total_seconds.max(f64::EPSILON);
 
         tracing::info!(
-            "simulation timing summary: {} steps in {} batches, total {:.3} s, average {:.3} ms/step, min batch {:.3} ms, max batch {:.3} ms, {:.2} steps/s",
+            "Timing: {} steps in {} batches, {:.3} s in total, {:.3} ms per step, batches of \
+             {:.3}-{:.3} ms, {:.2} steps/s",
             total_steps,
             self.step_timings.len(),
             total_seconds,
@@ -554,8 +559,8 @@ impl SimulationView {
 
 fn start_simulation(settings: Settings, exaggeration: f32) -> anyhow::Result<SimulationView> {
     let mut sim: Simulation = pollster::block_on(Simulation::new_with_settings(settings))?;
-    tracing::info!(
-        "Loaded DEM {}x{} at {} m resolution",
+    tracing::debug!(
+        "Terrain mesh of {} x {} cells of {} m",
         sim.dem.width,
         sim.dem.height,
         sim.dem.cell_size
@@ -657,7 +662,7 @@ fn write_snapshot(sim: &SimulationView, overlay: Overlay, path: &str) -> anyhow:
         HEIGHT,
     )?;
     image::save_buffer(path, &pixels, WIDTH, HEIGHT, image::ColorType::Rgba8)?;
-    tracing::info!("wrote {path} with overlay '{}'", overlay.label());
+    tracing::info!("Saved {path} with the overlay '{}'", overlay.label());
     Ok(())
 }
 
@@ -807,7 +812,7 @@ impl Viewer {
             momentum_unit,
         );
         self.dirty = true;
-        tracing::info!("overlay: {}", self.overlay.label());
+        tracing::info!("Overlay: {}", self.overlay.label());
     }
 
     fn apply_particles(&mut self) {
@@ -899,7 +904,7 @@ impl ApplicationHandler for Viewer {
         let icon = match window_icon() {
             Ok(icon) => Some(icon),
             Err(error) => {
-                tracing::warn!("failed to load window icon: {error}");
+                tracing::warn!("Could not load the window icon: {error}");
                 None
             }
         };
@@ -1102,14 +1107,17 @@ impl ApplicationHandler for Viewer {
                     Key::Character("j" | "J") => {
                         self.particle_jitter = !self.particle_jitter;
                         self.apply_particles();
-                        tracing::info!("particle elevation jitter: {}", self.particle_jitter);
+                        tracing::info!(
+                            "Particle elevation jitter: {}",
+                            if self.particle_jitter { "on" } else { "off" }
+                        );
                     }
                     Key::Character("+") => self.sim.adjust_speed(2.0),
                     Key::Character("-") => self.sim.adjust_speed(0.5),
                     Key::Character("r" | "R") => {
                         if let Err(error) = self.sim.restart() {
                             self.sim.failed = true;
-                            tracing::error!("simulation restart failed: {error}");
+                            tracing::error!("Could not restart the simulation: {error}");
                         } else {
                             self.apply_overlay();
                             self.apply_particles();
@@ -1152,7 +1160,7 @@ impl ApplicationHandler for Viewer {
                         return;
                     }
                     other => {
-                        tracing::warn!("Skipping frame: {other:?}");
+                        tracing::debug!("Skipping a frame: the window surface is {other:?}");
                         view.window.request_redraw();
                         return;
                     }
@@ -1563,7 +1571,7 @@ impl ApplicationHandler for Viewer {
         if let Some(settings) = pending_settings
             && let Err(error) = self.rebuild(settings)
         {
-            tracing::error!("simulation rebuild failed: {error}");
+            tracing::error!("Could not apply the new settings: {error}");
         }
     }
 
@@ -1614,20 +1622,15 @@ fn main() -> anyhow::Result<()> {
         .build()
         .expect("failed to build Tokio runtime");
     let _runtime_guard = runtime.enter();
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    // interactive tool: progress messages by default, AVALANCHERS_LOG overrides
+    simulation::init_logging_with_default(simulation::LogLevel::Info);
 
     let mut args = std::env::args().skip(1);
     let settings_path = args.next().unwrap_or_else(|| DEFAULT_SETTINGS.to_string());
     let exaggeration: f32 = args.next().and_then(|v| v.parse().ok()).unwrap_or(1.0);
     let snapshot = std::env::var("LIVE_SIM_SNAPSHOT").ok();
-    println!(
-        "Settings path: {settings_path} exaggeration: {exaggeration} snapshot: {:?}",
-        snapshot
+    tracing::debug!(
+        "Settings {settings_path}, vertical exaggeration {exaggeration}, snapshot {snapshot:?}"
     );
 
     let mut settings = Settings::from_json(&settings_path)

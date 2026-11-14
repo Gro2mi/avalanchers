@@ -52,11 +52,11 @@ class Dem {
 
     async loadTiles(gpx, zoom = 16, boundingBoxMargin = 100) {
         const bbox = await getGPXBoundingBoxWithMargin(gpx, boundingBoxMargin); // 500m margin
-        console.log("GPX Bounding Box:", bbox);
-        console.log("Distance:", haversineDistance(bbox.maxLat, bbox.maxLon, bbox.minLat, bbox.minLon));
-        console.log("Distance X:", haversineDistance(bbox.maxLat, bbox.maxLon, bbox.maxLat, bbox.minLon));
-        console.log("Distance Y:", haversineDistance(bbox.maxLat, bbox.maxLon, bbox.minLat, bbox.maxLon));
-        console.log("Bounding Box:", bbox);
+        console.debug("GPX bounding box with margin:", bbox, {
+            diagonal: haversineDistance(bbox.maxLat, bbox.maxLon, bbox.minLat, bbox.minLon),
+            width: haversineDistance(bbox.maxLat, bbox.maxLon, bbox.maxLat, bbox.minLon),
+            height: haversineDistance(bbox.maxLat, bbox.maxLon, bbox.minLat, bbox.maxLon),
+        });
         const { tiles, nTilesX, nTilesY, bounds } = await fetchAndCacheTiles([bbox.minLat, bbox.minLon, bbox.maxLat, bbox.maxLon], zoom);
         const { data1d, width, height } = await stitchTilesCropped(tiles, 64, nTilesX, nTilesY);
         this.bounds = bounds;
@@ -128,7 +128,7 @@ class Timer {
         const delta = now - this.last;
         this.checkpoints.push({ name, time: now, delta });
         if (log) {
-            console.log(`${this.label} - ${name}: ${delta.toFixed(2)} ms`);
+            console.debug(`${this.label}: ${name} took ${delta.toFixed(2)} ms`);
         }
         this.last = now;
     }
@@ -142,9 +142,9 @@ class Timer {
     }
 
     printSummary() {
-        console.log(`Timer "${this.label}" Summary:`);
+        console.debug(`Timings of ${this.label}:`);
         for (const cp of this.getCheckpoints()) {
-            console.log(`  ${cp.name}: +${cp.delta} ms (total ${cp.timeSinceStart} ms)`);
+            console.debug(`  ${cp.name}: +${cp.delta} ms (total ${cp.timeSinceStart} ms)`);
         }
     }
 }

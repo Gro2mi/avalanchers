@@ -455,7 +455,7 @@ pub fn write_png(
 }
 
 pub async fn read_file(path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    trace!("Reading file: {}", path);
+    trace!("Reading {path}");
     if path.starts_with("http") {
         fetch_from_url(path).await
     } else {
@@ -507,7 +507,7 @@ pub fn f32_to_rgba_bytes(data: &[f32]) -> Vec<u8> {
 }
 
 pub async fn fetch_from_url(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    trace!("Fetching from URL: {}", url);
+    trace!("Downloading {url}");
     let response = reqwest::get(url).await?;
     let bytes = response.bytes().await?;
     Ok(bytes.to_vec())
@@ -568,10 +568,7 @@ pub fn read_geo_tiff_from_reader<R: Read + Seek>(reader: R) -> Result<GeoTiff, G
     let tie_points = decoder
         .get_tag_f64_vec(Tag::Unknown(33922))
         .map_err(|_| GeoTiffError::MissingTiePoints)?;
-    let nodata = decoder
-        .get_tag_f64_vec(Tag::Unknown(42113)) // Try to get the tag
-        .ok() // If it fails (missing or wrong type), return None
-        .and_then(|v| v.first().copied());
+    let nodata = read_gdal_nodata(&mut decoder);
     if tie_points[0] != 0.0 || tie_points[1] != 0.0 || tie_points[2] != 0.0 {
         return Err(GeoTiffError::UnsupportedTiePoint);
     }
@@ -617,8 +614,8 @@ pub fn read_geo_tiff_from_reader<R: Read + Seek>(reader: R) -> Result<GeoTiff, G
         DecodingResult::F32(data) => TiffData::F32(data),
         _ => return Err(GeoTiffError::UnsupportedDataType),
     };
-    info!(
-        "Loaded GeoTIFF: {}x{} cells at {}m resolution",
+    debug!(
+        "Read a GeoTIFF of {} x {} cells of {} m",
         width, height, metadata.pixel_scale[0]
     );
 
@@ -628,7 +625,7 @@ pub fn read_geo_tiff_from_reader<R: Read + Seek>(reader: R) -> Result<GeoTiff, G
 async fn load_png_as_dem(path: &str) -> Result<Dem, DataProcessorError> {
     let (rgba, width, height) = read_png(path).await.expect("Failed to load PNG");
     let mut bounds: Bounds = load_bounds(path).await.expect("Failed to load bounds");
-    debug!("Loaded PNG {}: {} x {}", path, width, height);
+    debug!("Read the PNG {path} of {width} x {height} pixels");
     let cell_size = (bounds.xmax - bounds.xmin) / (width - 1) as f32;
     bounds.xmin -= 0.5 * cell_size;
     bounds.xmax += 0.5 * cell_size;

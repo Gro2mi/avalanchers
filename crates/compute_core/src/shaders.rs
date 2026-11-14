@@ -88,9 +88,9 @@ macro_rules! define_shaders {
                         Ok(source) => source,
                         Err(error) => {
                             tracing::warn!(
-                                ?path,
-                                ?error,
-                                "Shader file was not available on disk; using embedded source"
+                                "Could not read the shader file {} ({error}); using the shader \
+                                 built into the program",
+                                path.display()
                             );
                             match self {
                                 $(ShaderName::$variant => include_str!(concat!("shaders/", $filename, ".wgsl")).to_string()),*
@@ -298,7 +298,7 @@ fn expand_imports(file: &'static str) -> &'static str {
                 .join("src")
                 .join("shaders")
                 .join(format!("{file}.wgsl"));
-            tracing::debug!("Writing the updated imports of {file}.wgsl");
+            tracing::debug!("Updating the import section of {file}.wgsl");
             std::fs::write(path, restore_line_endings(&expanded, &raw_source)).ok();
         }
         expanded
@@ -563,8 +563,8 @@ impl ComputeShaderConfig {
                 }
                 _ => {
                     error!(
-                        "Unsupported binding type for '{}': {:?}",
-                        binding_name, binding_type
+                        "Binding '{binding_name}' has the unsupported type {binding_type:?}; the \
+                         shader runs without it"
                     );
                 }
             }

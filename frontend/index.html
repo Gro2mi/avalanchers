@@ -498,6 +498,94 @@
                 height: auto;
             }
         }
+
+        /* engine warnings and errors (js/toasts.js); above the loading screen.
+           Not named .toast: Bootstrap hides .toast:not(.show) */
+        .notice-stack {
+            position: fixed;
+            top: 1rem;
+            right: 1rem;
+            z-index: 3000;
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+            width: min(26rem, calc(100vw - 2rem));
+            pointer-events: none;
+        }
+
+        .notice {
+            display: flex;
+            align-items: flex-start;
+            gap: 0.5rem;
+            padding: 0.65rem 0.75rem;
+            border-radius: 0.6rem;
+            box-shadow: 0 10px 24px var(--shadow);
+            color: #1a1405;
+            font-size: 0.9rem;
+            line-height: 1.35;
+            overflow-wrap: anywhere;
+            pointer-events: auto;
+            animation: notice-in 0.2s ease-out;
+            transition: opacity 0.4s ease, transform 0.4s ease;
+        }
+
+        .notice-warning {
+            background: var(--warning);
+        }
+
+        .notice-error {
+            background: var(--danger);
+            color: #1f0505;
+        }
+
+        .notice-leaving {
+            opacity: 0;
+            transform: translateX(1rem);
+        }
+
+        .notice-label {
+            flex: none;
+        }
+
+        .notice-message {
+            flex: 1 1 auto;
+            white-space: pre-line;
+        }
+
+        .notice-count {
+            flex: none;
+            font-weight: 600;
+        }
+
+        .notice-close {
+            flex: none;
+            border: 0;
+            background: transparent;
+            color: inherit;
+            font-size: 1.25rem;
+            line-height: 1;
+            padding: 0 0.15rem;
+            cursor: pointer;
+        }
+
+        .notice-close:focus-visible {
+            outline: 2px solid #1f0505;
+            border-radius: 0.25rem;
+        }
+
+        @keyframes notice-in {
+            from {
+                opacity: 0;
+                transform: translateY(-0.5rem);
+            }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            .notice {
+                animation: none;
+                transition: none;
+            }
+        }
     </style>
 </head>
 
@@ -793,8 +881,8 @@
                             <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
                                 <label for="simModelDropdown" class="control-label mb-0">Simulation model:</label>
                                 <select id="simModelDropdown" class="form-select w-auto">
-                                    <option value="terrain-following" selected>Terrain-following</option>
-                                    <option value="3d-depth-averaged">3D depth averaged</option>
+                                    <option value="3d-depth-averaged" selected>3D depth averaged</option>
+                                    <option value="terrain-following">Terrain-following</option>
                                     <option value="curvilinear">Curvilinear</option>
                                     <option value="sliding-block">Sliding block (legacy)</option>
                                 </select>
@@ -881,6 +969,16 @@
                                     step="0.1" class="form-range w-auto" style="max-width:200px;">
                                 <input type="number" id="internalFrictionAngleValue" min="0" max="60" step="0.1"
                                     value="35" class="form-control slider-value-input">
+                            </div>
+                            <div class="mb-3 d-flex align-items-center flex-wrap gap-2"
+                                title="Width of the smoothed terrain the gully walls are measured against. Bed that is inclined against it counts as a gully wall with extra friction. Needs at least the cell size; 0 turns gully wall friction off.">
+                                <label for="referenceSurfaceLengthSlider" class="control-label mb-0">
+                                    Gully wall reference length (m, 0 = off):
+                                </label>
+                                <input type="range" id="referenceSurfaceLengthSlider" min="0" max="200" value="0"
+                                    step="1" class="form-range w-auto" style="max-width:200px;">
+                                <input type="number" id="referenceSurfaceLengthValue" min="0" max="200" step="1"
+                                    value="0" class="form-control slider-value-input">
                             </div>
                         </div>
                     </div>

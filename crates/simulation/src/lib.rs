@@ -51,39 +51,20 @@ use data_processor::store_schema::{Outline, RunRecord, store_path_stem};
 #[cfg(target_arch = "wasm32")]
 use data_processor::zarr_writer::ZarrEntry;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::sync::Once;
 use web_time::{Instant, SystemTime, UNIX_EPOCH};
 
 /// Release-area and crown-line estimation from a DEM and avalanche outline.
 pub mod release_estimation;
-static INIT: Once = Once::new();
+
+/// Log output setup: level, filter and destination.
+pub mod logging;
+pub use logging::{
+    LogLevel, LogOutput, MessageListener, init_logging, init_logging_with_default, set_log_level,
+    set_log_output, set_message_listener,
+};
+
 #[allow(unused_imports)]
 use tracing::{debug, error, info, trace, warn};
-use tracing_subscriber::{EnvFilter, fmt, prelude::*};
-
-/// Initializes the global tracing subscriber; later calls are no-ops.
-///
-/// The filter is fixed per build profile: debug builds log
-/// `compute_core`/`simulation` at `trace` level, release builds only `info`
-/// and above (plus `error` from all other crates).
-pub fn init_logging() {
-    INIT.call_once(|| {
-        #[cfg(debug_assertions)]
-        let filter = EnvFilter::new(
-            "error,simulation=trace,compute_core=trace,data_processor=debug,cli=debug",
-        );
-        #[cfg(not(debug_assertions))]
-        let filter =
-            EnvFilter::new("error,simulation=info,compute_core=info,data_processor=info,cli=info");
-
-        let _ = tracing_subscriber::registry()
-            .with(fmt::layer().with_target(false))
-            .with(filter)
-            .try_init();
-
-        debug!("Avalanchers logging initialized");
-    });
-}
 
 /// Lifecycle of a [`Simulation`], ordered from creation to evaluation so that
 /// `state >= X` means "stage `X` and every stage before it have completed".
@@ -655,10 +636,8 @@ impl Simulation {
         } else {
             self.state = SimulationState::DemLoaded;
 
-            info!(
-                "Updated simulation with DEM path: {:?}\nSettings: {:#?}",
-                self.dem_path, self.settings
-            );
+            info!("Loaded the {}", self.dem_description());
+            debug!("Settings: {:?}", self.settings);
         }
 
         timer_checkpoint("Simulation updated/created");
@@ -873,10 +852,8 @@ impl Simulation {
         self.roi_uploaded = false;
 
         self.state = SimulationState::DemLoaded;
-        info!(
-            "Updated simulation with DEM path: {}\nSettings: {:#?}",
-            self.dem_path, self.settings
-        );
+        info!("Loaded the {}", self.dem_description());
+        debug!("Settings: {:?}", self.settings);
         Ok(())
     }
 
@@ -1155,12 +1132,12 @@ impl Simulation {
         let stage = self.preparation_stage(initial);
         match stage {
             PreparationStage::Terrain => {
-                info!("Settings change the terrain analysis; preparing again");
+                debug!("The new settings change the terrain analysis; preparing again");
                 self.state = SimulationState::DemLoaded;
                 self.store_initial_state().await?;
             }
             PreparationStage::Release => {
-                info!("Settings change the release; seeding the particles again");
+                debug!("The new settings change the release; seeding the particles again");
                 self.state = SimulationState::TerrainAnalyzed;
                 // the release shaders count with atomicAdd
                 self.orchestrator
@@ -1318,6 +1295,19 @@ impl Simulation {
         Ok(self.sim_info)
     }
 
+    /// The DEM for log messages: its path (if any) and size.
+    fn dem_description(&self) -> String {
+        let path = if self.dem_path.is_empty() {
+            String::new()
+        } else {
+            format!("{} ", self.dem_path)
+        };
+        format!(
+            "DEM {path}({} x {} cells of {} m)",
+            self.dem.width, self.dem.height, self.dem.cell_size
+        )
+    }
+
     /// Runs the whole pipeline to completion in one call: terrain analysis,
     /// release areas, particle initialization and the full simulation, ending
     /// in [`SimulationState::Finished`].
@@ -1336,7 +1326,7 @@ impl Simulation {
             let _ = self.load_release_areas().await?;
             timer_checkpoint("Release areas loaded");
             if self.number_particles == 0 {
-                bail!("No particles to simulate! Check if release areas are correctly defined.");
+                bail!("The release areas contain no cells, so there is nothing to simulate");
             }
             self.initialize_particles().await?;
             timer_checkpoint("Particles initialized");
@@ -1345,7 +1335,7 @@ impl Simulation {
         self.state = SimulationState::Finished;
 
         timer_checkpoint("Simulation finished");
-        info!("{}", timer_get_summary());
+        info!("{}", timer_get_summary().trim_end());
         Ok(())
     }
 
@@ -1772,13 +1762,10 @@ impl Simulation {
         detection_sim.run().await?;
 
         let sim_info = detection_sim.fetch_sim_info().await?;
-        if !sim_info.parsed_flags().intersects(
-            SimInfoFlags::ALL_PARTICLES_STOPPED
-                | SimInfoFlags::AT_REST
-                | SimInfoFlags::LOW_MOMENTUM,
-        ) {
+        if sim_info.stop_reason().is_none() {
             warn!(
-                "crown detection simulation stopped at max_steps; entry counts may be incomplete"
+                "The crown line detection run reached max_steps before the flow stopped; the \
+                 crown line may miss cells. Increase max_steps"
             );
         }
 
@@ -1825,10 +1812,10 @@ impl Simulation {
             }
         }
         if entered == 0 {
-            bail!("crown detection simulation: no particles reached the outline");
+            bail!("No particle of the crown line detection run reached the outline");
         }
-        info!(
-            "crown detection simulation: {entered} of {} particles entered the outline",
+        debug!(
+            "Crown line detection: {entered} of {} particles entered the outline",
             positions.len()
         );
 
@@ -1867,7 +1854,7 @@ impl Simulation {
         self.gpu_cache.reset_simulation_result();
         let number_release_cells = match &self.release_areas_path {
             Some(path) => {
-                info!("Loading release areas from path: {}", path);
+                info!("Loading the release areas from {path}");
                 let release_areas = data_processor::load_release_areas(
                     path,
                     &self.dem,
@@ -1891,7 +1878,7 @@ impl Simulation {
             }
             None => match &self.release_areas_array {
                 Some(data) => {
-                    info!("Loading release areas from provided array");
+                    debug!("Using the release areas of the given array");
                     self.validate_release_areas_len(data)?;
                     let data = self.override_release_thickness(data);
                     self.orchestrator
@@ -1904,7 +1891,8 @@ impl Simulation {
                 None => match self.release_area_fraction {
                     Some(fraction) => {
                         info!(
-                            "Estimating release areas from crown line (fraction {fraction:.2}, method {}, fill {})",
+                            "Estimating the release areas from the crown line (fraction \
+                             {fraction:.2}, method {}, fill {})",
                             self.crown_line_method, self.release_fill_method
                         );
                         let defaults = release_estimation::ReleaseEstimationConfig::default();
@@ -1964,7 +1952,7 @@ impl Simulation {
                             gradient_x: &gradient_x,
                             gradient_y: &gradient_y,
                         };
-                        info!(
+                        debug!(
                             "Potential release areas: {number_potential} of {} outline cells",
                             self.roi.iter().filter(|&&inside| inside).count()
                         );
@@ -2014,7 +2002,7 @@ impl Simulation {
                         estimate.number_release_cells as u32
                     }
                     None => {
-                        info!("Computing release areas from DEM");
+                        info!("Estimating the release areas from the terrain");
                         self.orchestrator
                             .run_compute_roughness(&self.settings)
                             .await?;
@@ -2031,7 +2019,7 @@ impl Simulation {
         )?;
         self.state = SimulationState::ReleaseAreasComputed;
         info!(
-            "Number of release cells: {} of {} ({:.1}%)",
+            "Release area: {} of {} cells ({:.1} %)",
             number_release_cells,
             self.dem.width * self.dem.height,
             (number_release_cells as f64 / (self.dem.width * self.dem.height) as f64 * 100.0)
@@ -2983,7 +2971,7 @@ fn test_trajectory() {
         // Call it once
         init_logging();
 
-        // Call it again - it should not panic or error because of .call_once()
+        // Call it again - later calls do nothing
         init_logging();
     }
 
