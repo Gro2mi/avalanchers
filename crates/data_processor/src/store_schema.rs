@@ -5,6 +5,7 @@
 //! <store>.zarr/                  attrs: avalanchers_format, Conventions, ...
 //!   <site>_<dem hash>/           dem, x, y, spatial_ref
 //!     <scenario>_<release hash>/ x, y, spatial_ref, release_area,
+//!                                outline (y, x; optional, attrs: outline_hash),
 //!                                peak_flow_velocity, peak_flow_thickness (run, y, x),
 //!                                center_of_mass_x/y, time (run, timestep),
 //!                                one 1-D array per run value (see RunRecord::columns)
@@ -13,6 +14,10 @@
 //! Row 0 of every grid is the south edge and `x`/`y` are cell centers. The `run`
 //! dimension can be longer than the number of runs: `number_of_runs` in the
 //! scenario attributes is authoritative and is the last thing written per run.
+//!
+//! Runs are told apart by their settings and by `run_label`, an index into the
+//! scenario attribute `run_labels` (e.g. `["", "cma_best", "predicted"]`); the
+//! empty label marks a run saved without one.
 
 use compute_core::SimInfoFlags;
 use compute_core::dem::Dem;
@@ -23,9 +28,31 @@ use serde_json::{Map, Value, json};
 /// Version of the layout. Stores of any other version are rejected on open.
 pub const FORMAT_VERSION: &str = "0.2.0";
 
-/// Identifies the build that wrote a run.
+/// Identifies the build that wrote a run: `<version>+<short commit>`, with
+/// `.dirty` appended when the build sources differed from the commit.
 pub const SOFTWARE_VERSION: &str =
     concat!(env!("CARGO_PKG_VERSION"), "+", env!("AVALANCHERS_GIT_HASH"));
+
+/// Full hash of the commit the build was made from (`unknown` without git).
+pub const GIT_COMMIT: &str = env!("AVALANCHERS_GIT_COMMIT");
+
+/// Whether the build sources differed from [`GIT_COMMIT`].
+pub const GIT_DIRTY: bool = const_str_eq(env!("AVALANCHERS_GIT_DIRTY"), "true");
+
+const fn const_str_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
 
 /// Fill value of integer run columns, where 0 is usually a valid value.
 pub const NO_DATA_U32: u32 = u32::MAX;
@@ -82,6 +109,9 @@ pub fn root_attributes() -> Attributes {
         "Conventions": "CF-1.8",
         "source": "avalanchers",
         "avalanchers_version": env!("CARGO_PKG_VERSION"),
+        "avalanchers_software_version": SOFTWARE_VERSION,
+        "avalanchers_git_commit": GIT_COMMIT,
+        "avalanchers_git_dirty": GIT_DIRTY,
         "avalanchers_repo": "https://github.com/Gro2mi/avalanchers",
         "avalanchers_format": FORMAT_VERSION,
     }))
@@ -106,13 +136,19 @@ pub fn site_attributes(dem: &Dem) -> Attributes {
     }))
 }
 
-/// `software_versions` lists the builds that wrote to the scenario; the
-/// `software_version` run column indexes into it.
-pub fn scenario_attributes(number_of_runs: u64, software_versions: &[&str]) -> Attributes {
+/// `software_versions` lists the builds that wrote to the scenario and
+/// `run_labels` the labels of its runs; the `software_version` and `run_label`
+/// run columns index into them.
+pub fn scenario_attributes(
+    number_of_runs: u64,
+    software_versions: &[&str],
+    run_labels: &[&str],
+) -> Attributes {
     attributes(json!({
         "aspect_release_degrees": null,
         "number_of_runs": number_of_runs,
         "software_versions": software_versions,
+        "run_labels": run_labels,
     }))
 }
 
@@ -180,6 +216,49 @@ pub fn release_area_attributes(dem: &Dem) -> Attributes {
     )
 }
 
+/// The outline (region of interest) the runs of a scenario are evaluated
+/// against, stored as a `uint8` 0/1 mask next to the release area.
+#[derive(Clone, Copy, Debug)]
+pub struct Outline<'a> {
+    /// One entry per DEM cell, `true` inside the outline.
+    pub cells: &'a [bool],
+    /// Where the outline came from, e.g. the stem of its shapefile.
+    pub source: &'a str,
+}
+
+impl Outline<'_> {
+    /// The mask as stored, 1 inside and 0 outside.
+    pub fn to_u8(&self) -> Vec<u8> {
+        self.cells.iter().map(|&inside| inside as u8).collect()
+    }
+
+    /// FNV-1a hash of the mask in hex. It is stable across builds, so a
+    /// scenario can tell whether a later run used the same outline.
+    pub fn hash(&self) -> String {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for &inside in self.cells {
+            hash ^= inside as u64;
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
+        }
+        hash ^= self.cells.len() as u64;
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+        format!("{hash:016x}")
+    }
+}
+
+pub fn outline_attributes(dem: &Dem, source: &str) -> Attributes {
+    with_grid_mapping(
+        dem,
+        attributes(json!({
+            "long_name": "Avalanche outline",
+            "description": "Mapped outline the runs are evaluated against",
+            "flag_values": [0, 1],
+            "flag_meanings": "outside inside",
+            "source": source,
+        })),
+    )
+}
+
 /// A value of one run, stored as one element of a 1-D array along `run`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Scalar {
@@ -210,7 +289,9 @@ pub struct RunRecord {
     pub center_of_mass_y: Vec<f32>,
     pub time: Vec<f32>,
     pub release_volume_m3: f32,
-    pub travel_length: f32,
+    pub travel_length_2d: f32,
+    pub travel_length_3d: f32,
+    pub travel_vertical_drop: f32,
     pub travel_angle: f32,
     pub final_timestep: u32,
     pub simulated_time: f32,
@@ -219,6 +300,8 @@ pub struct RunRecord {
     pub stop_flags: u32,
     /// Unix time in seconds at which the run was saved.
     pub created_at: f64,
+    /// What the run is, e.g. `cma_best` or `predicted`; empty for none.
+    pub label: String,
     pub settings: SimSettings,
 }
 
@@ -267,7 +350,9 @@ impl RunRecord {
     }
 
     /// The `(run)` values: results, provenance and every field of the settings.
-    pub fn columns(&self, software_version: u32) -> Vec<RunColumn> {
+    /// `software_version` and `run_label` are indices into the scenario
+    /// attributes `software_versions` and `run_labels`.
+    pub fn columns(&self, software_version: u32, run_label: u32) -> Vec<RunColumn> {
         let column = |name: &str, value, attributes| RunColumn {
             name: name.to_string(),
             value,
@@ -284,12 +369,30 @@ impl RunRecord {
                 plain("Release volume", "m3"),
             ),
             column(
-                "travel_length",
-                Scalar::F32(self.travel_length),
+                "travel_length_2d",
+                Scalar::F32(self.travel_length_2d),
                 attributes(json!({
-                    "long_name": "Travel length",
+                    "long_name": "2D travel length",
                     "units": "m",
-                    "description": "Length of the path of the center of mass",
+                    "description": "Horizontal length of the path of the center of mass",
+                })),
+            ),
+            column(
+                "travel_length_3d",
+                Scalar::F32(self.travel_length_3d),
+                attributes(json!({
+                    "long_name": "3D travel length",
+                    "units": "m",
+                    "description": "Three-dimensional length of the path of the center of mass",
+                })),
+            ),
+            column(
+                "travel_vertical_drop",
+                Scalar::F32(self.travel_vertical_drop),
+                attributes(json!({
+                    "long_name": "Center-of-mass vertical drop",
+                    "units": "m",
+                    "description": "First minus last valid center-of-mass elevation; negative for a net rise",
                 })),
             ),
             column(
@@ -334,6 +437,14 @@ impl RunRecord {
                 Scalar::U32(software_version),
                 attributes(json!({
                     "long_name": "Index into the software_versions attribute of the scenario",
+                    "units": "1",
+                })),
+            ),
+            column(
+                "run_label",
+                Scalar::U32(run_label),
+                attributes(json!({
+                    "long_name": "Index into the run_labels attribute of the scenario",
                     "units": "1",
                 })),
             ),
@@ -390,7 +501,7 @@ fn setting_attributes(name: &str) -> Attributes {
     match name {
         "sim_model" => result.extend(flag_values(
             &[0, 1, 2, 3, 4],
-            "terrain_following curvilinear mpm_dac sliding_block three_d",
+            "terrain_following curvilinear mpm_dac sliding_block three_d_depth_averaged",
         )),
         "friction_model" => result.extend(flag_values(
             &[0, 1, 2, 3, 5],
@@ -451,13 +562,16 @@ mod tests {
             center_of_mass_y: Vec::new(),
             time: Vec::new(),
             release_volume_m3: 1.0,
-            travel_length: 2.0,
+            travel_length_2d: 2.0,
+            travel_length_3d: 2.5,
+            travel_vertical_drop: 1.5,
             travel_angle: 3.0,
             final_timestep: 4,
             simulated_time: 5.0,
             number_particles: 6,
             stop_flags: 7,
             created_at: 8.0,
+            label: String::new(),
             settings,
         }
     }
@@ -485,6 +599,23 @@ mod tests {
     }
 
     #[test]
+    fn test_travel_length_columns_describe_horizontal_and_3d_paths() {
+        let columns = record(SimSettings::default()).columns(0, 0);
+        assert_eq!(find(&columns, "travel_length_2d"), Scalar::F32(2.0));
+        assert_eq!(find(&columns, "travel_length_3d"), Scalar::F32(2.5));
+        assert_eq!(find(&columns, "travel_vertical_drop"), Scalar::F32(1.5));
+        assert!(columns.iter().all(|column| column.name != "travel_length"));
+        for name in [
+            "travel_length_2d",
+            "travel_length_3d",
+            "travel_vertical_drop",
+        ] {
+            let column = columns.iter().find(|column| column.name == name).unwrap();
+            assert_eq!(column.attributes["units"], "m");
+        }
+    }
+
+    #[test]
     fn test_columns_cover_every_setting() {
         let settings = SimSettings {
             released_particles_per_cell: 4,
@@ -492,7 +623,7 @@ mod tests {
             release_max_elevation: f32::INFINITY,
             ..SimSettings::default()
         };
-        let columns = record(settings).columns(0);
+        let columns = record(settings).columns(0, 0);
 
         assert_eq!(
             find(&columns, "released_particles_per_cell"),

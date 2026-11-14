@@ -7,7 +7,8 @@
 //! re-opened by every reader of the native stores.
 
 use crate::store_schema::{
-    self, Attributes, FORMAT_VERSION, NO_DATA_U32, RunField, RunRecord, SOFTWARE_VERSION, Scalar,
+    self, Attributes, FORMAT_VERSION, NO_DATA_U32, Outline, RunField, RunRecord, SOFTWARE_VERSION,
+    Scalar,
 };
 use compute_core::dem::Dem;
 use half::f16;
@@ -146,6 +147,26 @@ impl ZarrStoreBuilder {
         );
     }
 
+    fn add_u8_array(
+        &mut self,
+        path: &str,
+        shape: &[usize],
+        dimension_names: &[&str],
+        attributes: Attributes,
+        data: Vec<u8>,
+    ) {
+        debug_assert_eq!(shape.iter().product::<usize>(), data.len());
+        self.add_array(
+            path,
+            "uint8",
+            json!(0),
+            shape,
+            dimension_names,
+            attributes,
+            Some(data),
+        );
+    }
+
     fn add_column(&mut self, path: &str, value: Scalar, attributes: Attributes) {
         let (data_type, fill_value, bytes) = match value {
             Scalar::U32(v) => ("uint32", json!(NO_DATA_U32), v.to_le_bytes().to_vec()),
@@ -207,12 +228,14 @@ impl ZarrStoreBuilder {
     }
 }
 
-/// Builds a `<site>/<scenario>` store holding the DEM and a single run.
+/// Builds a `<site>/<scenario>` store holding the DEM, the optional outline
+/// and a single run.
 pub fn build_result_store(
     site_name: &str,
     scenario_name: &str,
     dem: &Dem,
     release_areas: &[f32],
+    outline: Option<Outline<'_>>,
     run: &RunRecord,
 ) -> Vec<ZarrEntry> {
     let mut builder = ZarrStoreBuilder::new();
@@ -236,10 +259,12 @@ pub fn build_result_store(
     );
 
     let scenario_path = format!("{site_name}/{scenario_name}");
-    builder.add_group(
-        &scenario_path,
-        store_schema::scenario_attributes(1, &[SOFTWARE_VERSION]),
-    );
+    let mut scenario_attributes =
+        store_schema::scenario_attributes(1, &[SOFTWARE_VERSION], &[&run.label]);
+    if let Some(outline) = outline {
+        scenario_attributes.insert("outline_hash".to_string(), json!(outline.hash()));
+    }
+    builder.add_group(&scenario_path, scenario_attributes);
     builder.add_coordinates(&scenario_path, dem);
     builder.add_f32_array(
         &format!("{scenario_path}/release_area"),
@@ -249,6 +274,15 @@ pub fn build_result_store(
         store_schema::release_area_attributes(dem),
         release_areas,
     );
+    if let Some(outline) = outline {
+        builder.add_u8_array(
+            &format!("{scenario_path}/outline"),
+            &[height, width],
+            &["y", "x"],
+            store_schema::outline_attributes(dem, outline.source),
+            outline.to_u8(),
+        );
+    }
     for RunField {
         name,
         data,
@@ -278,7 +312,7 @@ pub fn build_result_store(
             data,
         );
     }
-    for column in run.columns(0) {
+    for column in run.columns(0, 0) {
         builder.add_column(
             &format!("{scenario_path}/{}", column.name),
             column.value,
@@ -330,16 +364,19 @@ mod tests {
             center_of_mass_y: vec![f32::NAN, 3.0, 4.0],
             time: vec![f32::NAN, 0.5, 1.0],
             release_volume_m3: 12.0,
-            travel_length: 100.0,
+            travel_length_2d: 100.0,
+            travel_length_3d: 125.0,
+            travel_vertical_drop: 75.0,
             travel_angle: 30.0,
             final_timestep: 2,
             simulated_time: 1.0,
             number_particles: 8,
             stop_flags: 0,
             created_at: 1.0,
+            label: String::new(),
             settings: SimSettings::default(),
         };
-        build_result_store("site-a_1234", "scenario-b_5678", &dem, &release, &run)
+        build_result_store("site-a_1234", "scenario-b_5678", &dem, &release, None, &run)
     }
 
     fn metadata(entries: &[ZarrEntry], path: &str) -> Value {
@@ -365,9 +402,43 @@ mod tests {
             "site-a_1234/scenario-b_5678/peak_flow_thickness/c/0/0/0",
             "site-a_1234/scenario-b_5678/center_of_mass_x/c/0/0",
             "site-a_1234/scenario-b_5678/time/c/0/0",
+            "site-a_1234/scenario-b_5678/travel_length_2d/zarr.json",
+            "site-a_1234/scenario-b_5678/travel_length_2d/c/0",
+            "site-a_1234/scenario-b_5678/travel_length_3d/zarr.json",
+            "site-a_1234/scenario-b_5678/travel_length_3d/c/0",
+            "site-a_1234/scenario-b_5678/travel_vertical_drop/c/0",
             "site-a_1234/scenario-b_5678/released_particles_per_cell/c/0",
         ] {
             assert!(paths.contains(&expected.to_string()), "missing {expected}");
+        }
+    }
+
+    #[test]
+    fn test_travel_lengths_are_stored_as_distinct_metric_columns() {
+        let entries = build();
+        assert!(
+            !entries
+                .iter()
+                .any(|entry| entry.path == "site-a_1234/scenario-b_5678/travel_length/zarr.json")
+        );
+        for (name, expected) in [
+            ("travel_length_2d", 100.0),
+            ("travel_length_3d", 125.0),
+            ("travel_vertical_drop", 75.0),
+        ] {
+            let prefix = format!("site-a_1234/scenario-b_5678/{name}");
+            let parsed = metadata(&entries, &format!("{prefix}/zarr.json"));
+            assert_eq!(parsed["data_type"], "float32");
+            assert_eq!(parsed["dimension_names"], json!(["run"]));
+            assert_eq!(parsed["attributes"]["units"], "m");
+            let chunk = entries
+                .iter()
+                .find(|entry| entry.path == format!("{prefix}/c/0"))
+                .expect("travel length chunk");
+            assert_eq!(
+                f32::from_le_bytes(chunk.bytes[..4].try_into().unwrap()),
+                expected
+            );
         }
     }
 
@@ -390,7 +461,9 @@ mod tests {
 
         let decoded: Vec<f32> = chunk
             .bytes
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
         assert_eq!(decoded, dem.data1d);

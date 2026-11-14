@@ -3,12 +3,16 @@
 // All info: https://data.bev.gv.at/geonetwork/srv/api/records/9a4e3e4f-2cd5-4f73-af51-384beb9331d0
 // 50km x 50 km tiles, 55 pieces
 // doi: https://doi.org/10.48677/9a4e3e4f-2cd5-4f73-af51-384beb9331d0
-//! swissALTI3D fetch and cache. Tries 8 acquisition years per tile (the shipped code hardcoded 2019), falls back to `decode_tiled_lzw_f32` for tiles whose LZW stream lacks an end code, resamples 2 m → 5 m by area weighting, stores into a Zarr array. `get_dem(bbox)` is the entry point.
+//! swissALTI3D fetch and cache. Each tile's acquisition year (part of its URL) comes from
+//! `data/swissalti3d_years.bin.xz`, compressed from swisstopo's link export; falls back to `decode_tiled_lzw_f32` for
+//! tiles whose LZW stream lacks an end code, resamples 2 m → 5 m by area weighting, stores into a
+//! Zarr array. `get_dem(bbox)` is the entry point.
 use ndarray::{Array1, Array2};
 use reqwest::Client;
 use serde_json::json;
 use std::io::Cursor;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 use tiff::decoder::{Decoder, DecodingResult};
 
 #[allow(unused_imports)]
@@ -67,6 +71,40 @@ pub enum TileManagerError {
 
     #[error("Fallback TIFF decode failed: {0}")]
     TiffFallback(String),
+
+    #[error("tile_missing: tile {0:?} is not in the cache and AVALANCHERS_TILES_OFFLINE is set")]
+    TileMissing(TileId),
+}
+
+/// When set to `1`, a tile missing from the cache is an error instead of a
+/// download, so that many concurrent jobs only ever read a prefilled cache.
+pub const OFFLINE_ENV: &str = "AVALANCHERS_TILES_OFFLINE";
+/// Pause in milliseconds after each downloaded tile (default 0). Downloads
+/// are sequential, so this caps the request rate of a bulk prefetch.
+pub const DELAY_ENV: &str = "AVALANCHERS_TILE_DELAY_MS";
+/// Retries of a request the server answered with 429 or 503.
+const MAX_THROTTLE_RETRIES: u32 = 5;
+/// Wait before such a retry when the server sends no `Retry-After`.
+const DEFAULT_THROTTLE_WAIT: Duration = Duration::from_secs(30);
+
+fn tiles_offline() -> bool {
+    std::env::var(OFFLINE_ENV)
+        .is_ok_and(|value| matches!(value.trim().to_lowercase().as_str(), "1" | "true" | "yes"))
+}
+
+fn download_delay() -> Duration {
+    std::env::var(DELAY_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map_or(Duration::ZERO, Duration::from_millis)
+}
+
+/// Wait before retrying a throttled request: the `Retry-After` seconds if the
+/// server sent them, otherwise [`DEFAULT_THROTTLE_WAIT`].
+fn throttle_wait(retry_after: Option<&str>) -> Duration {
+    retry_after
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map_or(DEFAULT_THROTTLE_WAIT, Duration::from_secs)
 }
 
 /// Minimal reader for the exact flavour of GeoTIFF that swisstopo serves for
@@ -243,6 +281,37 @@ pub fn decode_tiled_lzw_f32(bytes: &[u8]) -> Result<(u32, u32, Vec<f32>), TileMa
     Ok((width, height, out))
 }
 
+/// reqwest needs a Tokio reactor, but `get_dem` is driven by whatever executor
+/// the caller has: the CLI and the simulation tests use `pollster`, the Python
+/// bindings Tokio. Every request therefore runs on this dedicated runtime.
+fn http_runtime() -> &'static tokio::runtime::Runtime {
+    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_name("swissalti3d-http")
+            .enable_all()
+            .build()
+            .expect("failed to start the HTTP runtime for swissALTI3D downloads")
+    })
+}
+
+/// Runs `future` on [`http_runtime`] and awaits its result through a channel,
+/// which works from any executor, inside a Tokio runtime or not.
+async fn on_http_runtime<F, T>(future: F) -> Result<T, TileManagerError>
+where
+    F: std::future::Future<Output = Result<T, reqwest::Error>> + Send + 'static,
+    T: Send + 'static,
+{
+    let (tx, rx) = futures::channel::oneshot::channel();
+    http_runtime().spawn(async move {
+        let _ = tx.send(future.await);
+    });
+    rx.await
+        .map_err(|_| TileManagerError::Http("HTTP task was cancelled".into()))?
+        .map_err(TileManagerError::from)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TileId {
     pub northing: u32,
@@ -251,6 +320,88 @@ pub struct TileId {
 
 pub use crate::rasterizer::BBox;
 
+/// Acquisition year of every swissALTI3D tile (2 m, LV95 GeoTIFF) as an xz-compressed grid with
+/// one byte per 1 km tile. Generated from swisstopo's link export by
+/// `data/make_swissalti3d_years.py`, which also documents the layout; to refresh it, export the
+/// links again from <https://www.swisstopo.admin.ch/en/height-model-swissalti3d>
+/// (whole Switzerland, 2 m, GeoTIFF) and rerun the script.
+const SWISSALTI3D_YEARS: &[u8] = include_bytes!("../data/swissalti3d_years.bin.xz");
+
+/// Oldest acquisition year probed when a listed URL has gone stale.
+const OLDEST_YEAR: u32 = 2017;
+
+struct TileIndex {
+    min_easting: u32,
+    min_northing: u32,
+    width: u32,
+    height: u32,
+    /// Row-major by northing, `year - 2000`, 0 = no tile.
+    grid: Vec<u8>,
+    newest_year: u32,
+}
+
+impl TileIndex {
+    fn decode(packed: &[u8]) -> Result<Self, String> {
+        use std::io::Read;
+        let mut raw = Vec::new();
+        xz2::read::XzDecoder::new(packed)
+            .read_to_end(&mut raw)
+            .map_err(|e| format!("xz: {e}"))?;
+        if raw.len() < 12 || &raw[..4] != b"SA3D" {
+            return Err("bad header".into());
+        }
+        let u16at = |o: usize| u16::from_le_bytes([raw[o], raw[o + 1]]) as u32;
+        let (min_easting, min_northing, width, height) = (u16at(4), u16at(6), u16at(8), u16at(10));
+        let grid = raw[12..].to_vec();
+        if grid.len() != (width * height) as usize {
+            return Err(format!(
+                "grid has {} bytes, expected {width}x{height}",
+                grid.len()
+            ));
+        }
+        let newest_year = grid
+            .iter()
+            .map(|&y| 2000 + y as u32)
+            .max()
+            .unwrap_or(OLDEST_YEAR);
+        Ok(Self {
+            min_easting,
+            min_northing,
+            width,
+            height,
+            grid,
+            newest_year,
+        })
+    }
+
+    fn year(&self, id: TileId) -> Option<u32> {
+        let x = id.easting.checked_sub(self.min_easting)?;
+        let y = id.northing.checked_sub(self.min_northing)?;
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        match self.grid[(y * self.width + x) as usize] {
+            0 => None,
+            offset => Some(2000 + offset as u32),
+        }
+    }
+}
+
+fn tile_index() -> &'static TileIndex {
+    static INDEX: OnceLock<TileIndex> = OnceLock::new();
+    INDEX.get_or_init(|| {
+        TileIndex::decode(SWISSALTI3D_YEARS).expect("embedded swissALTI3D year table is corrupt")
+    })
+}
+
+fn tile_url(id: TileId, year: u32) -> String {
+    format!(
+        "https://data.geo.admin.ch/ch.swisstopo.swissalti3d/swissalti3d_{year}_{e}-{n}/swissalti3d_{year}_{e}-{n}_2_2056_5728.tif",
+        e = id.easting,
+        n = id.northing,
+    )
+}
+
 pub struct TileManager {
     client: Client,
     // zarr_storage: Arc<FilesystemStore>,
@@ -258,11 +409,20 @@ pub struct TileManager {
     min_easting_km: u64,
     min_northing_km: u64,
     cell_size: f32,
+    /// See [`OFFLINE_ENV`].
+    offline: bool,
+    /// See [`DELAY_ENV`].
+    download_delay: Duration,
 }
 
 impl TileManager {
     pub fn cell_size(&self) -> f32 {
         self.cell_size
+    }
+
+    /// Overrides [`OFFLINE_ENV`] for this manager.
+    pub fn set_offline(&mut self, offline: bool) {
+        self.offline = offline;
     }
     /// Initializes the Tile Manager with a local Zarr filesystem store
     pub fn new(cache_dir: &str) -> Result<Self, TileManagerError> {
@@ -433,41 +593,87 @@ impl TileManager {
             min_easting_km,
             min_northing_km,
             cell_size,
+            offline: tiles_offline(),
+            download_delay: download_delay(),
             // tile_size,
         })
+    }
+
+    /// GET request that waits and retries while the server throttles (HTTP 429
+    /// or 503), up to [`MAX_THROTTLE_RETRIES`] times. Blocking sleep is fine:
+    /// tiles are downloaded one after another and never concurrently.
+    async fn get(&self, url: &str) -> Result<reqwest::Response, TileManagerError> {
+        let mut retries = 0;
+        loop {
+            let response = on_http_runtime(self.client.get(url).send()).await?;
+            let status = response.status();
+            let throttled = status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                || status == reqwest::StatusCode::SERVICE_UNAVAILABLE;
+            if !throttled || retries == MAX_THROTTLE_RETRIES {
+                return Ok(response);
+            }
+            retries += 1;
+            let wait = throttle_wait(
+                response
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok()),
+            );
+            info!(
+                "The tile server answered HTTP {status} for {url}; retry {retries} of \
+                 {MAX_THROTTLE_RETRIES} in {:.1} s",
+                wait.as_secs_f64()
+            );
+            std::thread::sleep(wait);
+        }
     }
 
     /// Fetches the TIFF from geo.admin.ch and decodes it into a 500x500 f32 array
     async fn fetch_and_parse_tif(&self, id: TileId) -> Result<Array2<f32>, TileManagerError> {
         // swissALTI3D is flown region by region, so the acquisition year in the
-        // asset name is not the same everywhere. Try the most common year first
-        // and fall through the others rather than 404-ing on whole regions.
-        const YEARS: [u32; 8] = [2019, 2020, 2021, 2022, 2023, 2024, 2018, 2017];
-        let mut response = None;
-        let mut url = String::new();
-        let mut last_status = reqwest::StatusCode::NOT_FOUND;
-        for year in YEARS {
-            let candidate = format!(
-                "https://data.geo.admin.ch/ch.swisstopo.swissalti3d/swissalti3d_{year}_{}-{}/swissalti3d_{year}_{}-{}_2_2056_5728.tif",
-                id.easting, id.northing, id.easting, id.northing,
+        // asset name differs between tiles. The embedded year table knows it.
+        let index = tile_index();
+        let Some(known_year) = index.year(id) else {
+            return Err(TileManagerError::Http(format!(
+                "tile {:?} is outside the swissALTI3D coverage",
+                id
+            )));
+        };
+
+        let known_url = tile_url(id, known_year);
+        let mut url = known_url.clone();
+        let mut response = self.get(&url).await?;
+
+        // A tile that has been re-flown since the export was taken is published
+        // under a new year and the old asset can disappear. Only then probe the
+        // other years, newest first, and ask for the export to be refreshed.
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            warn!(
+                "Tile {:?} is missing at {} (HTTP 404); data/swissalti3d_years.bin.xz is \
+                 probably outdated. Trying the other survey years",
+                id, url
             );
-            let r = self.client.get(&candidate).send().await?;
-            last_status = r.status();
-            if r.status().is_success() {
-                url = candidate;
-                response = Some(r);
-                break;
+            let mut found = false;
+            for year in (OLDEST_YEAR..=index.newest_year + 1)
+                .rev()
+                .filter(|&y| y != known_year)
+            {
+                let candidate = tile_url(id, year);
+                let r = self.get(&candidate).await?;
+                if r.status().is_success() {
+                    url = candidate;
+                    response = r;
+                    found = true;
+                    break;
+                }
             }
-        }
-        let response = match response {
-            Some(r) => r,
-            None => {
+            if !found {
                 return Err(TileManagerError::Http(format!(
-                    "tile {:?}: no swissALTI3D asset found (last status {})",
-                    id, last_status
+                    "tile {:?}: no swissALTI3D asset found ({} is 404, no other year matched)",
+                    id, known_url
                 )));
             }
-        };
+        }
 
         let status = response.status();
         let content_type = response
@@ -484,7 +690,7 @@ impl TileManager {
             )));
         }
 
-        let bytes = response.bytes().await?;
+        let bytes = on_http_runtime(response.bytes()).await?;
 
         if bytes.len() < 8 {
             return Err(TileManagerError::InvalidData);
@@ -497,17 +703,17 @@ impl TileManager {
             Ok(mut decoder) => match (decoder.dimensions(), decoder.read_image()) {
                 (Ok((width, height)), Ok(DecodingResult::F32(vec))) => Some((width, height, vec)),
                 (Ok(_), Ok(other)) => {
-                    warn!(
-                        "Unexpected TIFF sample type for {:?}: {:?}",
+                    debug!(
+                        "Tile {:?} has the TIFF sample type {:?}; retrying with the LZW decoder",
                         id,
                         std::mem::discriminant(&other)
                     );
                     None
                 }
                 (_, Err(e)) | (Err(e), _) => {
-                    warn!(
-                        "tiff crate could not decode {:?} (content-type={}, bytes={}): {:?}; \
-                         retrying with the tolerant LZW decoder",
+                    debug!(
+                        "Could not decode tile {:?} (content type {}, {} bytes): {:?}; retrying \
+                         with the tolerant LZW decoder",
                         id,
                         content_type,
                         bytes.len(),
@@ -517,9 +723,9 @@ impl TileManager {
                 }
             },
             Err(e) => {
-                warn!(
-                    "tiff crate could not open {:?} (content-type={}, bytes={}): {:?}; \
-                     retrying with the tolerant LZW decoder",
+                debug!(
+                    "Could not open tile {:?} (content type {}, {} bytes): {:?}; retrying with \
+                     the tolerant LZW decoder",
                     id,
                     content_type,
                     bytes.len(),
@@ -645,14 +851,21 @@ impl TileManager {
                     northing: self.min_northing_km as u32 + chunk_indices[0] as u32,
                 };
 
+                if self.offline {
+                    return Err(TileManagerError::TileMissing(tile));
+                }
+                // One tile at a time, never concurrently (swisstopo fair use).
                 let tif = self.fetch_and_parse_tif(tile).await?;
                 let resampled = Self::resample_2m_to_5m(&tif);
 
                 self.dtm
                     .store_chunk(&chunk_indices, resampled.as_slice().unwrap())?;
-                debug!("Cache miss: {:?}", chunk_indices);
+                trace!("Tile cache miss: {:?}", chunk_indices);
+                if !self.download_delay.is_zero() {
+                    std::thread::sleep(self.download_delay);
+                }
             }
-            debug!("Cache hit: {:?}", chunk_indices)
+            trace!("Tile cache hit: {:?}", chunk_indices)
         }
 
         //
@@ -730,6 +943,51 @@ mod tests {
     use ndarray::{Array2, s};
     use tempfile::tempdir;
 
+    #[test]
+    fn throttle_wait_uses_retry_after_seconds() {
+        assert_eq!(throttle_wait(Some("7")), Duration::from_secs(7));
+        assert_eq!(throttle_wait(Some(" 0 ")), Duration::ZERO);
+        // HTTP dates and garbage fall back to the default.
+        assert_eq!(
+            throttle_wait(Some("Wed, 21 Oct 2015 07:28:00 GMT")),
+            DEFAULT_THROTTLE_WAIT
+        );
+        assert_eq!(throttle_wait(None), DEFAULT_THROTTLE_WAIT);
+    }
+
+    #[test]
+    fn offline_cache_miss_is_an_error() {
+        let dir = tempdir().unwrap();
+        let mut manager = TileManager::new(dir.path().to_str().unwrap()).unwrap();
+        manager.set_offline(true);
+        let bbox = BBox {
+            min_northing: 1159502,
+            max_northing: 1159549,
+            min_easting: 2666100,
+            max_easting: 2666150,
+        };
+        let error = pollster::block_on(manager.get_dem(&bbox)).unwrap_err();
+        assert!(matches!(error, TileManagerError::TileMissing(_)));
+        assert!(error.to_string().starts_with("tile_missing"));
+    }
+
+    /// The CLI and the simulation drive `get_dem` with `pollster`, i.e. outside
+    /// any Tokio runtime; reqwest used to panic there with "no reactor running".
+    #[test]
+    fn fetch_tiles_without_tokio_runtime() {
+        let dir = tempdir().expect("temp dir");
+        let manager = TileManager::new(dir.path().to_str().unwrap()).expect("tile manager");
+        let bbox = BBox {
+            min_northing: 1159502,
+            max_northing: 1159549,
+            min_easting: 2666100,
+            max_easting: 2666150,
+        };
+        let dem = pollster::block_on(manager.get_dem(&bbox)).expect("download outside Tokio");
+        assert_eq!((dem.width, dem.height), (10, 10));
+        assert!(dem.data1d.iter().all(|v| v.is_finite()));
+    }
+
     #[tokio::test]
     async fn fetch_tiles() {
         let manager = TileManager::new("./dtm_cache").expect("msg");
@@ -762,26 +1020,27 @@ mod tests {
             "width {}, height {}, data: {:?}",
             dem.width, dem.height, dem.data1d
         );
+        // swissalti3d_2025_2666-1159 (the acquisition listed in the link export)
         let expected_data: Vec<f32> = vec![
-            2193.765, 2194.0151, 2193.748, 2193.6294, 2193.561, 2193.7139, 2194.2805, 2194.536,
-            2194.9507, 2195.626, 2191.5327, 2191.4226, 2191.3772, 2191.008, 2191.0254, 2191.234,
-            2191.4453, 2191.792, 2192.5737, 2193.5688, 2189.028, 2188.6758, 2188.5618, 2188.2568,
-            2188.1125, 2188.3752, 2188.4995, 2189.215, 2190.123, 2191.464, 2186.6091, 2186.1787,
-            2185.8325, 2185.6245, 2185.6572, 2186.0525, 2186.2058, 2186.8484, 2188.0393, 2189.6365,
-            2183.744, 2183.0432, 2182.8381, 2182.6968, 2182.8113, 2183.2524, 2183.5571, 2184.311,
-            2186.238, 2187.9111, 2181.347, 2180.929, 2180.2715, 2180.165, 2180.377, 2180.5796,
-            2181.1045, 2181.9316, 2183.7107, 2185.0256, 2178.81, 2178.4128, 2177.768, 2177.4077,
-            2177.5413, 2177.7524, 2178.5132, 2179.2224, 2179.8389, 2181.1472, 2176.7634, 2176.1433,
-            2175.3271, 2174.9033, 2174.7737, 2175.0557, 2175.6042, 2176.2063, 2176.9907, 2178.47,
-            2174.459, 2173.519, 2172.7375, 2172.352, 2171.9524, 2172.0044, 2172.642, 2173.3938,
-            2174.9087, 2176.5313, 2171.9233, 2171.021, 2170.148, 2169.5645, 2169.3586, 2169.3037,
-            2170.0542, 2170.9807, 2172.953, 2174.6018,
+            2193.9417, 2194.0571, 2193.8872, 2193.7124, 2193.6594, 2193.8335, 2194.358, 2194.6235,
+            2195.0251, 2195.7737, 2191.6135, 2191.386, 2191.4685, 2191.1738, 2191.0537, 2191.278,
+            2191.662, 2192.0251, 2192.648, 2193.5308, 2188.9172, 2188.7844, 2188.7593, 2188.3552,
+            2188.325, 2188.556, 2188.7834, 2189.2366, 2190.1335, 2191.6125, 2186.4668, 2186.1812,
+            2186.1272, 2185.8232, 2185.757, 2186.131, 2186.3052, 2186.8694, 2188.0347, 2189.9502,
+            2183.8948, 2183.3433, 2183.0554, 2182.8442, 2182.8606, 2183.248, 2183.6804, 2184.5244,
+            2186.2798, 2188.2834, 2181.4624, 2181.0366, 2180.444, 2180.35, 2180.3245, 2180.8633,
+            2181.247, 2181.9211, 2183.9072, 2184.915, 2179.0076, 2178.318, 2177.8428, 2177.5286,
+            2177.5442, 2178.143, 2178.6748, 2179.3853, 2180.0159, 2181.3088, 2176.6655, 2176.0354,
+            2175.3628, 2175.1985, 2175.6504, 2176.1597, 2176.8206, 2177.5706, 2178.0662, 2178.9204,
+            2174.541, 2173.509, 2173.1753, 2173.7898, 2174.2112, 2174.5476, 2175.4053, 2176.0073,
+            2176.6626, 2177.45, 2171.9114, 2171.3594, 2172.1326, 2172.8123, 2173.0383, 2173.3618,
+            2174.1052, 2174.6538, 2175.4678, 2176.0383,
         ];
         assert_eq!(dem.data1d, expected_data);
     }
 
     /// 1. Test the Zarr Cache Initialization
-    /// Ensures that the directory is created and the root Zarr group is written.
+    ///    Ensures that the directory is created and the root Zarr group is written.
     #[test]
     fn test_tile_manager_initialization() {
         // Create a temporary directory that will be automatically deleted
@@ -804,7 +1063,7 @@ mod tests {
     }
 
     /// 2. Test Resampling on Uniform Terrain
-    /// A perfectly flat 2m terrain should result in a perfectly flat 5m terrain.
+    ///    A perfectly flat 2m terrain should result in a perfectly flat 5m terrain.
     #[test]
     fn test_resample_uniform_terrain() {
         // Create a 500x500 array where every point is exactly 1200.5 meters high
@@ -822,7 +1081,7 @@ mod tests {
     }
 
     /// 3. Test Resampling on Step Terrain (Block Mean accuracy)
-    /// Tests that the fractional bounding box logic correctly averages pixels.
+    ///    Tests that the fractional bounding box logic correctly averages pixels.
     #[test]
     fn test_resample_step_terrain() {
         let mut input_dtm = Array2::<f32>::zeros((500, 500));
@@ -952,12 +1211,45 @@ mod tests {
             northing: 1100,
             easting: 2700,
         };
-        let id_clone = id.clone();
+        let id_clone = id;
         assert_eq!(id_clone, id);
 
         let debug_str = format!("{:?}", id);
         assert!(debug_str.contains("1100"));
         assert!(debug_str.contains("2700"));
+    }
+
+    #[test]
+    fn test_tile_url() {
+        let id = TileId {
+            easting: 2774,
+            northing: 1264,
+        };
+        assert_eq!(
+            tile_url(id, 2026),
+            "https://data.geo.admin.ch/ch.swisstopo.swissalti3d/swissalti3d_2026_2774-1264/swissalti3d_2026_2774-1264_2_2056_5728.tif"
+        );
+    }
+
+    #[test]
+    fn test_embedded_tile_index() {
+        let index = tile_index();
+        // The link export this table was generated from had 43 650 tiles.
+        assert_eq!(index.grid.iter().filter(|&&y| y != 0).count(), 43_650);
+        assert_eq!(index.newest_year, 2026);
+        let year = |easting, northing| index.year(TileId { easting, northing });
+        assert_eq!(year(2501, 1120), Some(2019));
+        assert_eq!(year(2666, 1159), Some(2025));
+        assert_eq!(year(2774, 1266), Some(2026));
+        // Inside the grid's bounding box but not a tile, and outside it entirely.
+        assert_eq!(year(2485, 1064), None);
+        assert_eq!(year(2480, 1060), None);
+        assert_eq!(year(9999, 9999), None);
+    }
+
+    #[test]
+    fn test_corrupt_tile_index_is_rejected() {
+        assert!(TileIndex::decode(b"not xz").is_err());
     }
 
     /// 8. Test Resampling with Non-Standard Input Size

@@ -188,8 +188,11 @@ def test_simulation_setters_and_getters():
     assert sim.dem.shape == expected_shape
     assert sim.dem_bounds.shape == (4,)
     np.testing.assert_allclose(sim.dem_bounds, [10.0, 28.0, 20.0, 38.0])
-    with pytest.raises(ValueError, match="Expected: 6x6, got: 0"):
-        _ = sim.roi
+    # Without an outline every cell may release, so the ROI defaults to all True.
+    roi = sim.roi
+    assert roi.shape == expected_shape
+    assert roi.dtype == np.bool_
+    assert roi.all()
     with pytest.raises(ValueError, match="crown line not available"):
         _ = sim.crown_line
     with pytest.raises(ValueError, match="crown candidates not available"):

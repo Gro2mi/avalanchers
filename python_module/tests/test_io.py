@@ -6,7 +6,56 @@ import numpy as np
 import pandas as pd
 import pytest
 import xarray as xr
+import zarr
 from avalanchers import AvalanchersOutput
+
+
+@pytest.mark.parametrize(
+    "model",
+    ["terrain-following", "curvilinear", "mpmdac", "sliding-block", "3d-depth-averaged"],
+)
+@pytest.mark.parametrize("batched", [False, True])
+def test_every_simulation_model_saves_3d_travel_length(tmp_path, model, batched):
+    sim = avalanchers.PySimulation.new()
+    sim.create({
+        "sim_model": model,
+        "max_steps": 20,
+        "cfl": 0.1,
+        "released_particles_per_cell": 4,
+        "enable_center_of_mass": True,
+    })
+    x = np.arange(32, dtype=np.float32) * 4.0
+    dem = np.ascontiguousarray(
+        np.tile(1000.0 + x * np.tan(np.deg2rad(35.0)), (32, 1)), dtype=np.float32
+    )
+    release = np.zeros((32, 32), dtype=np.float32)
+    release[14:18, 14:18] = 1.0
+    sim.set_dem_with_bounds(dem, 4.0, 0.0, 128.0, 0.0, 128.0, 1.0)
+    sim.set_release_areas(release)
+    if batched:
+        info = sim.run_n_steps(3)
+        assert np.isfinite(info.travel_length_3d)
+        while info.timestep < 20 and not info.flags & (1 << 31):
+            info = sim.run_n_steps(5)
+    else:
+        sim.run()
+        info = sim.sim_info
+    summary = sim.run_summary()
+    assert np.isfinite(summary["travel_length_2d"])
+    assert np.isfinite(summary["travel_length_3d"])
+    assert summary["travel_length_3d"] >= summary["travel_length_2d"] - 1e-4
+    for name in ("travel_length_2d", "travel_length_3d", "travel_vertical_drop", "travel_angle"):
+        assert summary[name] == pytest.approx(getattr(info, name))
+        assert info[name] == pytest.approx(summary[name])
+
+    path = str(tmp_path / "run.zarr")
+    saved = sim.save(path)
+    scenario = AvalanchersOutput(path).get_site(saved["site"]).get_scenario(saved["scenario"])
+    stored = scenario.dataset
+    for name in ("travel_length_2d", "travel_length_3d", "travel_vertical_drop", "travel_angle"):
+        assert stored[name].isel(run=0).item() == pytest.approx(summary[name])
+        assert stored[name].attrs["units"] == ("degrees" if name == "travel_angle" else "m")
+    assert "travel_length" not in stored
 
 
 def test_export_calibration_parameters(tmp_path):
@@ -184,8 +233,9 @@ def test_simulation_save():
     assert np.isclose(ds.friction_coefficient.isel(run=1).item(), 0.2)
     assert np.isclose(ds.drag_coefficient.isel(run=1).item(), 2000.0)
     assert ds.released_particles_per_cell.isel(run=1).item() > 0
-    assert np.isfinite(ds.travel_length.isel(run=1).item())
-    assert ds.travel_length.isel(run=1).item() > 0
+    assert np.isfinite(ds.travel_length_2d.isel(run=1).item())
+    assert ds.travel_length_2d.isel(run=1).item() > 0
+    assert "travel_length" not in ds
     assert ds.final_timestep.isel(run=1).item() > 0
     time = ds.time.isel(run=1).values
     time = time[np.isfinite(time)]
@@ -211,6 +261,63 @@ def test_simulation_save():
         shutil.rmtree(path)
 
 
+@pytest.mark.slow
+def test_outline_is_saved_with_the_scenario(tmp_path, monkeypatch):
+    # The Rust tests keep the swissALTI3D tiles of this outline in
+    # crates/simulation/dtm_cache.zarr, which TileManager opens from the cwd.
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    monkeypatch.chdir(os.path.join(repo, "crates", "simulation"))
+    path = str(tmp_path / "outline.zarr")
+
+    sim = avalanchers.PySimulation.new()
+    sim.create(
+        {
+            "outlines_path": "../../data/outline/polygon_10721.shp",
+            "outlines_padding": 50,
+            "max_steps": 20,
+        }
+    )
+    sim.run()
+    summary = sim.run_summary()
+    assert summary["release_volume_m3"] > 0
+    assert np.isfinite(summary["travel_length_2d"])
+    assert np.isfinite(summary["travel_length_3d"])
+    assert "travel_length" not in summary
+    assert np.isfinite(summary["travel_angle"])
+    assert sim.sim_info.timestep > 0
+    assert sim.adapter_info["name"]
+
+    saved = sim.save(path)
+    assert saved["site"].startswith("polygon-10721_")
+    assert saved["run"] == 0
+
+    data = AvalanchersOutput(path)
+    site = data.get_site(saved["site"])
+    ds = site.get_scenario(saved["scenario"]).dataset
+    assert ds.outline.dims == ("y", "x")
+    assert ds.outline.attrs["source"] == "polygon_10721"
+    # Same orientation as the DEM: row 0 is the south edge in both.
+    np.testing.assert_array_equal(ds.outline.values, sim.roi.astype(np.uint8))
+    np.testing.assert_array_equal(site.dem.values, sim.dem)
+
+
+def test_runs_are_told_apart_by_their_label(tmp_path):
+    path = str(tmp_path / "labels.zarr")
+    sim = avalanchers.PySimulation.new()
+    sim.create_example("data/avaframe/avaPfa.png")
+    sim.run()
+    first = sim.save(path, label="cma_best")
+    second = sim.save(path, label="predicted")
+    third = sim.save(path)
+    assert (first["scenario"], second["scenario"]) == (third["scenario"],) * 2
+    assert [first["run"], second["run"], third["run"]] == [0, 1, 2]
+
+    scenario = AvalanchersOutput(path).get_site(first["site"]).get_scenario(first["scenario"])
+    assert scenario.run_labels == ["cma_best", "predicted", ""]
+    assert scenario.labels == ["cma_best", "predicted", ""]
+    assert scenario.runs_labeled("predicted") == [1]
+
+
 def assert_dataarray_shape(
     ds: xr.Dataset,
     variable: str,
@@ -227,3 +334,25 @@ def assert_dataarray_shape(
     assert da.sizes == {"y": y_len, "x": x_len}, (
         f"Unexpected shape for {variable}: {da.sizes}"
     )
+
+
+def test_build_info_names_the_commit_written_to_stores(tmp_path):
+    info = avalanchers.build_info()
+    assert info["version"] == avalanchers.__version__
+    assert info["software_version"].startswith(f"{info['version']}+")
+    assert info["software_version"].endswith(".dirty") == info["git_dirty"]
+    assert avalanchers.__git_commit__ == info["git_commit"]
+    if info["git_commit"] != "unknown":
+        assert len(info["git_commit"]) == 40
+        assert info["software_version"].split("+")[1].startswith(info["git_commit"][:12])
+
+    path = str(tmp_path / "build.zarr")
+    sim = avalanchers.PySimulation.new()
+    sim.create_example("data/avaframe/avaPfa.png")
+    sim.run()
+    saved = sim.save(path)
+    data = AvalanchersOutput(path)
+    root = zarr.open_group(path, mode="r").attrs
+    assert root["avalanchers_git_commit"] == info["git_commit"]
+    scenario = data.get_site(saved["site"]).get_scenario(saved["scenario"])
+    assert scenario.software_versions == [info["software_version"]]

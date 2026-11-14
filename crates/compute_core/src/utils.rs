@@ -336,7 +336,7 @@ pub struct Checkpoint {
 }
 
 pub static GLOBAL_TIMER: LazyLock<Mutex<Timer>> =
-    LazyLock::new(|| Mutex::new(Timer::new("Global Simulation Timer")));
+    LazyLock::new(|| Mutex::new(Timer::new("Stage timings")));
 
 pub fn timer_checkpoint(name: &str) {
     if let Ok(mut timer) = GLOBAL_TIMER.lock() {
@@ -345,7 +345,7 @@ pub fn timer_checkpoint(name: &str) {
 }
 pub fn timer_new() {
     if let Ok(mut timer) = GLOBAL_TIMER.lock() {
-        *timer = Timer::new("Global Simulation Timer");
+        *timer = Timer::new("Stage timings");
     }
 }
 pub fn timer_get_summary() -> String {
@@ -393,7 +393,7 @@ impl Timer {
     }
 
     pub fn get_summary(&mut self) -> String {
-        let mut output = format!("Timer \"{}\" Summary:\n", self.label);
+        let mut output = format!("{}:\n", self.label);
 
         for cp in &self.checkpoints {
             // write! appends to the string and returns a Result;
@@ -919,7 +919,7 @@ mod tests {
 
     #[test]
     fn test_vec_min_max_nested() {
-        let data = vec![vec![10.5, 2.0, 35.7], vec![1.2, 50.0], vec![-5.5]];
+        let data = [vec![10.5, 2.0, 35.7], vec![1.2, 50.0], vec![-5.5]];
 
         // Testing MaxValue for [Vec<T>]
         assert_eq!(data.max_value(), Some(50.0));

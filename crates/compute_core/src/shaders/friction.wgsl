@@ -65,3 +65,15 @@ fn basal_friction_acceleration(g_eff: f32, density: f32, proposed_speed: f32, h:
 
     return shear_stress / max(mass_per_area, 1e-6);
 }
+
+// Gully confinement: snow filling a gully presses its walls (inclined by beta
+// against the smoothed reference surface) with the cross-flow stress
+// k_y sigma_zz of the material beside it. Relative to the bed-normal load of
+// the column above, the wall normal stress grows by 1 + k_y tan^2(beta).
+// The bed-normal h already equals the hydraulic radius, so the
+// velocity-dependent drag needs no wetted-area correction.
+// cos_beta = 1 (no reference surface) gives 1.
+fn gully_wall_load_factor(cos_beta: f32, k_y: f32) -> f32 {
+    let tan2_beta = 1.0 / (cos_beta * cos_beta) - 1.0;
+    return 1.0 + k_y * tan2_beta;
+}

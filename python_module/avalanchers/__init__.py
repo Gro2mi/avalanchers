@@ -10,6 +10,12 @@ from .output import AvalanchersOutput, AvalanchersScenario  # noqa: F401
 
 __version__ = version("avalanchers")
 
+# The commit the native module was built from (see build_info()).
+_build_info = build_info()
+__software_version__ = _build_info["software_version"]
+__git_commit__ = _build_info["git_commit"]
+__git_dirty__ = _build_info["git_dirty"]
+
 
 # Calibration-relevant simulation parameters and the engine defaults used
 # when a key is missing from the settings dictionary. Mirrors
@@ -91,7 +97,8 @@ _ENUM_ALIASES = {
         "sliding-block": "sliding-block",
         "block": "sliding-block",
         "b": "sliding-block",
-        "3d": "3d",
+        "3d-depth-averaged": "3d-depth-averaged",
+        "3d": "3d-depth-averaged",
     },
     "friction_model": {
         "coulomb": "coulomb",

@@ -22,6 +22,7 @@ import pathlib
 
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib import patheffects
 from matplotlib.colors import LinearSegmentedColormap, Normalize
 from matplotlib.transforms import blended_transform_factory
 from matplotlib.patches import Rectangle
@@ -487,7 +488,8 @@ def plot_dam_break_summary(dem, header, frame, dam, samples, errors, t_save,
             f"h0 = {dam['h_l']:.2f}\n"
             f"density = {settings.get('density')}\n"
             f"cfl = {settings.get('cfl')}\n"
-            f"particles/cell = {settings.get('released_particles_per_cell')}\n")
+            f"particles/cell = {settings.get('released_particles_per_cell')}\n"
+            f"cell size = {header['cellsize']:g} m\n")
     ax7.text(0.5, 0.5, text, transform=ax7.transAxes, ha="center", va="center",
              fontsize=FS)
     # extra horizontal room so the rotated error-axis labels do not collide
@@ -547,3 +549,178 @@ def assemble_gif(png_paths, out_path, duration_ms=500, max_width=1500,
             pathlib.Path(path).unlink(missing_ok=True)
     print("animation saved to %s (%d frames)" % (out_path, len(frames)))
     return out_path
+
+
+# ---------------------------------------------------------------------------
+# thesis figures - 15 cm text width, Computer Modern, PDF + PNG
+# ---------------------------------------------------------------------------
+
+def _thesis_dam_profiles(ts, frame, dam, samples, cfg, idx):
+    """h, |u| and h|u| along the profile row at several times against the
+    analytic solution; along-slope coordinate relative to the dam front.
+
+    The analytic curves are drawn only downstream of the material mid-point
+    x_mid (start of the error domain, a labelled dotted line through all
+    panels): upstream, the semi-infinite-dam solution keeps a uniform h_l
+    reservoir the finite dam does not have. Each variable is drawn in a
+    light-to-dark ramp of its hue over time (thesis_style.time_ramp)."""
+    from matplotlib.lines import Line2D
+    from matplotlib.transforms import blended_transform_factory
+
+    row = frame["row_index"]
+    s_row = frame["s_rel_profile"]
+    s_fine = np.linspace(s_row.min(), s_row.max(), 2000)
+    fig, axes = plt.subplots(3, 1, figsize=ts.size(1.0, 0.85), sharex=True,
+                             layout="constrained")
+    for ax in axes[:1]:
+        ax.fill_between([dam["x_back_rel"], 0.0], 0.0, dam["h_l"], color="0.85",
+                        linewidth=0, label="initial dam")
+    occupied_hi = 0.0
+    ramps = [ts.time_ramp(ts.VARIABLE_COLORS[k], len(idx)) for k in ("h", "speed", "norm")]
+    mid_ramp = ts.time_ramp(ts.NEUTRAL, len(idx))
+    label_transform = blended_transform_factory(axes[0].transData, axes[0].transAxes)
+    for n, i in enumerate(idx):
+        t = samples["t"][i]
+        h_ana, u_ana, x_mid = dam_break_solution(frame["phi_deg"], cfg["delta"],
+                                                 dam["h_l"], [t], s_fine, cfg["grav_acc"],
+                                                 x_back_rel=dam["x_back_rel"])
+        behind = s_fine < x_mid[0]
+        for ax in axes:
+            ax.axvline(x_mid[0], color=mid_ramp[n], linestyle=":", linewidth=0.9,
+                       zorder=1)
+        # time label at the bottom of panel (a), below the draining reservoir
+        axes[0].text(x_mid[0], 0.03, r"$%s$ s" % _time_label(t), transform=label_transform,
+                     rotation=90, ha="right", va="bottom", fontsize=7, color="0.25")
+        h_ana = np.where(behind, np.nan, h_ana[0])
+        u_ana = np.where(behind | (h_ana <= 0), np.nan, u_ana[0])
+        h = samples["h"][i][row]
+        speed = np.hypot(samples["u"][i][row], samples["v"][i][row])
+        speed = np.where(h > 0, speed, np.nan)
+        for ax, ramp, sim_v, ana_v in ((axes[0], ramps[0], h, h_ana),
+                                       (axes[1], ramps[1], speed, u_ana),
+                                       (axes[2], ramps[2], h * np.nan_to_num(speed),
+                                        h_ana * u_ana)):
+            ax.plot(s_row, sim_v, color=ramp[n])
+            ax.plot(s_fine, ana_v, color=ramp[n], linestyle="--")
+        front = np.where(h > 1e-3)[0]
+        if len(front):
+            occupied_hi = max(occupied_hi, s_row[front[-1]])
+        occupied_hi = max(occupied_hi, float(np.nanmax(np.where(h_ana > 0, s_fine, np.nan))))
+    handles, labels = ts.time_handles(samples["t"][idx], ramps)
+    pad = 0.04 * (occupied_hi - dam["x_back_rel"])
+    axes[2].set_xlim(dam["x_back_rel"] - pad, occupied_hi + pad)
+    axes[0].set_ylabel(r"$h$ (m)")
+    axes[1].set_ylabel(r"$\Vert\mathbf{u}\Vert$ (m s$^{-1}$)")
+    axes[2].set_ylabel(r"$h\,\Vert\mathbf{u}\Vert$ (m$^2$ s$^{-1}$)")
+    axes[2].set_xlabel(r"along-slope distance from the dam front $s$ (m)")
+    for label, ax in zip("abc", axes):
+        ax.set_ylim(bottom=0.0)
+        ts.panel_label(ax, label, loc=(0.015, 0.93))
+    initial = plt.Rectangle((0, 0), 1, 1, color="0.85", label="initial dam")
+    mid = Line2D([], [], color=ts.NEUTRAL, linestyle=":", linewidth=0.9,
+                 label=r"error domain start $s_\mathrm{m}(t)$")
+    extra = ts.style_handles() + [initial, mid]
+    fig.legend(handles=extra + handles, labels=[e.get_label() for e in extra] + labels,
+               loc="outside lower center", ncol=4, **ts.time_legend_kwargs(len(ramps)))
+    return fig
+
+
+def _time_label(t):
+    """Simulated time for labels, to 0.1 s without a trailing .0 (15.5, 20)."""
+    return "%g" % round(float(t), 1)
+
+
+def _time_tag(t):
+    """Time for file names: t20, t15p5 (no dot, for LaTeX includegraphics)."""
+    return "t" + _time_label(t).replace(".", "p")
+
+
+def _thesis_dam_map(ts, dem, header, frame, dam, samples, cfg, i_t):
+    """Flow thickness at one time in the slope frame of the profile figure:
+    along-slope distance s from the dam front and cross-slope distance from
+    the dam axis, with the error domain, the profile line and the analytical
+    front."""
+    t = samples["t"][i_t]
+    h = samples["h"][i_t]
+    cos_phi = frame["cos_phi"]
+    s = (frame["f"] - dam["f_front"]) / cos_phi
+    q = frame["p"] - dam["p_center"]
+    flowed = h > 1e-3
+    _, _, x_mid = dam_break_solution(frame["phi_deg"], cfg["delta"], dam["h_l"], [t],
+                                     np.zeros(1), cfg["grav_acc"],
+                                     x_back_rel=dam["x_back_rel"])
+    s_mid = x_mid[0]
+    s_end = cfg["x_end"] / cos_phi
+    # analytical front of the dry-bed solution (dam_break_solution: cond2)
+    gz = cfg["grav_acc"] * cos_phi
+    m0 = gz * (math.tan(math.radians(frame["phi_deg"])) - math.tan(math.radians(cfg["delta"])))
+    s_front = (2.0 * math.sqrt(gz * dam["h_l"]) + m0 * t / 2.0) * t
+    half_width = (cfg["y_end"] - cfg["y_start"]) / 2.0
+
+    pad = 15.0
+    s_lo = min(s[flowed].min(), dam["x_back_rel"]) - pad
+    s_hi = max(s[flowed].max(), s_end, s_front) + pad
+    q_lo = min(q[flowed].min(), -half_width) - pad
+    q_hi = max(q[flowed].max(), half_width) + pad
+    aspect = (q_hi - q_lo) / (s_hi - s_lo)
+    fig, ax = plt.subplots(figsize=ts.size(1.0, min(0.9, aspect + 0.14)),
+                           layout="constrained")
+    # plane bed: a hillshade would only show the DEM quantization steps
+    ax.set_facecolor("white")
+    # afmhot_r (light for thin, black for the thickest flow), without its
+    # white end so the thinnest flow stays visible on the white background
+    ft_cmap = LinearSegmentedColormap.from_list(
+        "ft", plt.get_cmap("afmhot_r")(np.linspace(0.12, 1.0, 256)))
+    im = ax.pcolormesh(s, q, np.ma.masked_where(~flowed, h), shading="nearest",
+                       cmap=ft_cmap, zorder=2, rasterized=True)
+    # the lines cross pale, orange and black cells: blue / green / black with
+    # a white halo stay visible on all of them
+    halo = [patheffects.Stroke(linewidth=2.8, foreground="white"), patheffects.Normal()]
+    ax.add_patch(plt.Rectangle((s_mid, -half_width), s_end - s_mid, 2.0 * half_width,
+                               fill=False, edgecolor=ts.BLUE, linestyle="--",
+                               linewidth=1.2, zorder=3, label="error domain",
+                               path_effects=halo))
+    ax.axhline(q[frame["row_index"], 0], color=ts.BLACK, linestyle=":", linewidth=1.2,
+               zorder=3, label="profile line", path_effects=halo)
+    ax.axvline(s_front, color=ts.GREEN, linestyle="-.", linewidth=1.2, zorder=3,
+               label="analytical front", path_effects=halo)
+    ax.set_xlim(s_lo, s_hi)
+    ax.set_ylim(q_lo, q_hi)
+    ax.set_aspect("equal")
+    ax.grid(False)
+    ax.set_xlabel(r"along-slope distance from the dam front $s$ (m)")
+    ax.set_ylabel(r"cross-slope distance (m)")
+    ax.set_title(r"$t = %s$ s" % _time_label(t))
+    fig.colorbar(im, ax=ax, shrink=0.85, pad=0.01, label=r"$h$ (m)")
+    ax.legend(loc="upper right", frameon=True, framealpha=0.85, edgecolor="none")
+    return fig
+
+
+def plot_thesis_figures(dem, header, frame, dam, samples, errors, cfg, out_dir):
+    """Thesis figures of the dam break test (see thesis_style): profiles at
+    several times, flow thickness map at cfg["t_save"], relative errors over
+    time; PDF + PNG in <out_dir>/thesis plus dambreak_errors.csv. Returns the
+    PNG paths."""
+    import thesis_style as ts
+
+    out_dir = pathlib.Path(out_dir) / "thesis"
+    times = np.asarray(samples["t"])
+    i_t = int(np.argmin(np.abs(times - cfg["t_save"])))
+    idx = [i for i in ts.pick_times(times) if times[i] > 0]
+    with ts.style():
+        paths = [
+            ts.save(_thesis_dam_profiles(ts, frame, dam, samples, cfg, idx),
+                    out_dir, "dambreak_profiles"),
+            ts.save(_thesis_dam_map(ts, dem, header, frame, dam, samples, cfg, i_t),
+                    out_dir, "dambreak_map_" + _time_tag(times[i_t])),
+            ts.save(ts.error_figure(times[1:], {k: np.asarray(v)[1:] for k, v in errors.items()},
+                                    momentum_title=r"momentum $h\,\Vert\mathbf{u}\Vert$",
+                                    momentum_symbol=r"h\,\Vert\mathbf{u}\Vert"),
+                    out_dir, "dambreak_errors"),
+        ]
+    keys = [k for k in ("h_l2rel", "h_lmaxrel", "vh_l2rel", "vh_lmaxrel",
+                        "h_l2", "h_lmax", "vh_l2", "vh_lmax") if k in errors]
+    data = np.column_stack([times] + [np.asarray(errors[k]) for k in keys])
+    np.savetxt(out_dir / "dambreak_errors.csv", data, delimiter=",",
+               header=",".join(["t"] + keys), comments="", fmt="%.6g")
+    return paths

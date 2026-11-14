@@ -5,7 +5,8 @@ struct Uniforms {
     view_proj: mat4x4<f32>,
     // width, height, cell_size, vertical exaggeration
     grid: vec4<f32>,
-    // min elevation, max elevation (both already scaled by the exaggeration)
+    // min elevation, max elevation (both already scaled by the exaggeration),
+    // momentum overlay unit (kg m/s per i32 step)
     elevation: vec4<f32>,
     // direction towards the light
     light_dir: vec4<f32>,
@@ -98,12 +99,12 @@ fn sample_overlay(x: i32, y: i32) -> f32 {
     }
     let cell = u32(y) * u32(u.grid.x) + u32(x);
     // Overlay mode 2: interleaved i32 momentum pairs (u, v per cell), as
-    // quantized by MOMENTUM_FACTOR = 1e2 in the simulation's p2g pass. Show
-    // the magnitude in kg·m/s.
+    // quantized by the simulation's p2g pass, u.elevation.z kg m/s per step.
+    // Show the magnitude in kg·m/s.
     if (u.overlay.x > 1.5) {
         let mu = f32(bitcast<i32>(overlay_grid[cell * 2u]));
         let mv = f32(bitcast<i32>(overlay_grid[cell * 2u + 1u]));
-        return length(vec2<f32>(mu, mv)) * 0.01;
+        return length(vec2<f32>(mu, mv)) * u.elevation.z;
     }
     return overlay_grid[cell];
 }

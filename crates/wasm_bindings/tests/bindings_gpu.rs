@@ -71,7 +71,7 @@ async fn simulation_getters_and_timestep_data_are_available_after_run() {
         .await
         .expect("peak flow thickness should be fetched");
 
-    let grid_size = (width * height) as u32;
+    let grid_size = width * height;
     assert_eq!(sim.dem().length(), grid_size);
     assert_eq!(sim.width(), width);
     assert_eq!(sim.height(), height);

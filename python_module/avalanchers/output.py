@@ -173,6 +173,29 @@ class AvalanchersScenario:
         return self.attrs["software_versions"]
 
     @property
+    def run_labels(self):
+        """Labels of the runs of this scenario, indexed by ``run_label``
+        (``""`` for a run saved without one)."""
+        return self.attrs.get("run_labels", [])
+
+    @property
+    def labels(self):
+        """The label of every run, in run order (``""`` where none was given,
+        also for runs of stores written before labels existed)."""
+        names = self.run_labels
+        dataset = self.dataset
+        if "run_label" not in dataset:
+            return [""] * self.number_of_runs
+        return [
+            names[int(i)] if 0 <= int(i) < len(names) else ""
+            for i in dataset["run_label"].values
+        ]
+
+    def runs_labeled(self, label):
+        """Run indices with ``label``, e.g. ``ds.isel(run=s.runs_labeled("predicted"))``."""
+        return [run for run, name in enumerate(self.labels) if name == label]
+
+    @property
     def dataset(self):
         return xr.open_dataset(
             self.path,

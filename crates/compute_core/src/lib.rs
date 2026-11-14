@@ -3,12 +3,11 @@ use crate::buffers::{
     RelaxParams, TextureName, create_buffers_and_texture_descriptions,
 };
 use crate::settings::{SimFlags, SimModel};
-use crate::shaders::{ComputeShaderConfig, ShaderName, generate_shader_report};
+use crate::shaders::{ShaderConfigs, ShaderName, generate_shader_report};
 use crate::utils::timer_checkpoint;
 use anyhow::{Context, Result, anyhow};
 use evaluation::{MassMovementEvaluation, chamfer_from_sums, evaluation_from_counts};
 use std::cmp::min;
-use std::collections::HashMap;
 use std::hash::Hash;
 use std::mem::size_of;
 use wgpu::{
@@ -39,6 +38,8 @@ bitflags! {
         const CFL_EXCEEDED             = 1 << 1;
         const IS_NAN                   = 1 << 2;
         const PARTICLE_OUT_OF_DEM_DATA = 1 << 3;
+        /// A particle exceeded [`MAX_PARTICLE_SPEED`] and was stopped.
+        const UNPHYSICAL_SPEED         = 1 << 4;
         const LOW_MOMENTUM             = 1 << 27;
         const AT_REST                  = 1 << 28;
         const NO_NEW_CELLS             = 1 << 29;
@@ -79,6 +80,7 @@ impl std::fmt::Debug for SimInfoFlags {
     }
 }
 
+const PARTICLE_UNPHYSICAL_SPEED: u32 = 1u32 << 25;
 const PARTICLE_RESTING: u32 = 1u32 << 26;
 const PARTICLE_FLYING: u32 = 1u32 << 27;
 const PARTICLE_OUT_OF_BOUNDS: u32 = 1u32 << 28;
@@ -92,6 +94,8 @@ pub struct ParticleState {
     pub out_of_bounds: bool,
     pub is_nan: bool,
     pub out_of_dem_data: bool,
+    /// Stopped for exceeding [`MAX_PARTICLE_SPEED`].
+    pub unphysical_speed: bool,
     pub stopped: bool,
     /// Reversibly resting at low speed; may still be reactivated.
     pub resting: bool,
@@ -106,10 +110,12 @@ impl From<u32> for ParticleState {
         let is_nan = state & PARTICLE_IS_NAN != 0;
         let out_of_dem_data = state & PARTICLE_OUT_OF_DEM_DATA != 0;
         let out_of_bounds = state & PARTICLE_OUT_OF_BOUNDS == PARTICLE_OUT_OF_BOUNDS;
+        let unphysical_speed = state & PARTICLE_UNPHYSICAL_SPEED != 0;
         let status_flags = PARTICLE_FLYING
             | PARTICLE_OUT_OF_BOUNDS
             | PARTICLE_IS_NAN
             | PARTICLE_OUT_OF_DEM_DATA
+            | PARTICLE_UNPHYSICAL_SPEED
             | PARTICLE_STOPPED
             | PARTICLE_RESTING;
 
@@ -118,9 +124,10 @@ impl From<u32> for ParticleState {
             out_of_bounds,
             is_nan,
             out_of_dem_data,
+            unphysical_speed,
             stopped,
             resting,
-            naturally_stopped: !out_of_bounds && !is_nan && !out_of_dem_data,
+            naturally_stopped: !out_of_bounds && !is_nan && !out_of_dem_data && !unphysical_speed,
             timestep: if stopped || resting {
                 state & !status_flags
             } else {
@@ -153,6 +160,7 @@ pub struct GpuCache {
     pub particles_mass: Option<Vec<f32>>,
     pub grid_mass: Option<Vec<f32>>,
     pub grid_momentum: Option<Vec<f32>>,
+    pub grid_momentum_z: Option<Vec<f32>>,
     pub particles_velocity: Option<Vec<[f32; 2]>>,
     pub particles_velocity_z: Option<Vec<f32>>,
     pub particles_stopped: Option<Vec<ParticleState>>,
@@ -176,6 +184,7 @@ impl GpuCache {
         self.particles_mass = None;
         self.grid_mass = None;
         self.grid_momentum = None;
+        self.grid_momentum_z = None;
         self.particles_velocity = None;
         self.particles_velocity_z = None;
         self.particles_stopped = None;
@@ -198,7 +207,7 @@ impl GpuCache {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct SimInfo {
     pub timestep: u32,
     pub dt: f32,
@@ -209,11 +218,69 @@ pub struct SimInfo {
     pub max_flow_thickness: f32,
     pub flags: u32,
     pub grid_elapsed_time: f32,
+    /// Horizontal center-of-mass path length in metres.
+    pub travel_length_2d: f32,
+    /// Three-dimensional center-of-mass path length in metres.
+    pub travel_length_3d: f32,
+    /// First minus latest valid center-of-mass elevation, in metres.
+    pub travel_vertical_drop: f32,
+    /// atan2(travel_vertical_drop, travel_length_2d), in degrees; zero without horizontal motion.
+    pub travel_angle: f32,
+    pub _first_center_of_mass_timestep: u32,
+    pub _last_center_of_mass_timestep: u32,
+    pub _pad: u32,
 }
+
+impl Default for SimInfo {
+    fn default() -> Self {
+        Self {
+            timestep: 0,
+            dt: 0.0,
+            elapsed_time: 0.0,
+            number_particles: 0,
+            elevation_threshold: 0.0,
+            max_velocity: 0.0,
+            max_flow_thickness: 0.0,
+            flags: 0,
+            grid_elapsed_time: 0.0,
+            travel_length_2d: f32::NAN,
+            travel_length_3d: f32::NAN,
+            travel_vertical_drop: f32::NAN,
+            travel_angle: f32::NAN,
+            _first_center_of_mass_timestep: u32::MAX,
+            _last_center_of_mass_timestep: u32::MAX,
+            _pad: 0,
+        }
+    }
+}
+
+const _: () = assert!(size_of::<SimInfo>() == 64);
 
 impl SimInfo {
     pub fn parsed_flags(&self) -> SimInfoFlags {
         self.flags.into()
+    }
+
+    /// Why the run stopped on its own, for messages; `None` while it runs
+    /// and when it ended at `max_steps` (the shader then never set
+    /// `SIM_STOPPED`).
+    pub fn stop_reason(&self) -> Option<&'static str> {
+        let flags = self.parsed_flags();
+        if !flags.contains(SimInfoFlags::SIM_STOPPED) {
+            return None;
+        }
+        // the order of update_sim_info.wgsl, which sets only the first that holds
+        Some(if flags.contains(SimInfoFlags::ALL_PARTICLES_STOPPED) {
+            "all particles stopped"
+        } else if flags.contains(SimInfoFlags::AT_REST) {
+            "99 % of the particles came to rest"
+        } else if flags.contains(SimInfoFlags::LOW_MOMENTUM) {
+            "the momentum fell below momentum_stop_fraction of its peak"
+        } else if flags.contains(SimInfoFlags::NO_NEW_CELLS) {
+            "the flow stopped reaching new cells"
+        } else {
+            "the simulation was stopped"
+        })
     }
 }
 
@@ -229,6 +296,10 @@ impl std::fmt::Debug for SimInfo {
             .field("elevation_threshold", &self.elevation_threshold)
             .field("max_velocity", &self.max_velocity)
             .field("max_flow_thickness", &self.max_flow_thickness)
+            .field("travel_length_2d", &self.travel_length_2d)
+            .field("travel_length_3d", &self.travel_length_3d)
+            .field("travel_vertical_drop", &self.travel_vertical_drop)
+            .field("travel_angle", &self.travel_angle)
             .field("flags", &self.parsed_flags())
             .finish()
     }
@@ -352,9 +423,31 @@ use wgpu::Backends;
 /// An instance of the primary backends. The OpenGL backend is left out: each
 /// of its instances keeps 16 MB of GPU memory after it is dropped.
 fn create_instance() -> Instance {
+    create_instance_with(Backends::PRIMARY)
+}
+
+fn create_instance_with(backends: Backends) -> Instance {
     let mut descriptor = InstanceDescriptor::new_without_display_handle();
-    descriptor.backends = Backends::PRIMARY;
+    descriptor.backends = backends;
+    // build defaults (validation in debug builds), overridable with wgpu's
+    // environment variables such as WGPU_VALIDATION=0 or WGPU_DEBUG=0
+    descriptor.flags = wgpu::InstanceFlags::from_build_config().with_env();
     Instance::new(descriptor)
+}
+
+/// Backend sets searched for the GPU, in order. Vulkan alone comes first: its
+/// instance starts in ~0.2 s, while the primary set also starts DX12 on
+/// Windows, whose adapter probing adds ~0.3-0.4 s, and the simulation runs on
+/// Vulkan there anyway. WGPU_BACKEND (e.g. `dx12`) replaces the search.
+fn backend_search_order() -> Vec<Backends> {
+    if let Some(backends) = Backends::from_env() {
+        return vec![backends];
+    }
+    if cfg!(target_arch = "wasm32") {
+        vec![Backends::PRIMARY]
+    } else {
+        vec![Backends::VULKAN, Backends::PRIMARY]
+    }
 }
 
 pub async fn list_devices() -> Result<Vec<String>> {
@@ -479,6 +572,14 @@ fn chamfer_flood_steps(max_dimension: u32) -> Vec<ChamferParams> {
 /// relax_particles, evaluate_mass_movement and chamfer (.wgsl).
 pub const RELEASE_THICKNESS_THRESHOLD: f32 = 0.01;
 
+/// Fastest particle speed (m/s) taken as physical; faster particles are
+/// stopped and flag [`SimInfoFlags::UNPHYSICAL_SPEED`]. Dense flow avalanches
+/// reach about 60-80 m/s and the integer atomic grid holds momentum up to
+/// `QUANTIZATION_SAFETY * MAX_FLOW_VELOCITY` = 200 m/s, so a faster particle
+/// comes from a numerical blow-up, e.g. a cliff of no-data elevations.
+/// Mirrors `MAX_PARTICLE_SPEED` in utils.wgsl.
+pub const MAX_PARTICLE_SPEED: f32 = 150.0;
+
 /// Release thickness (m) of release areas that hold none of their own, used
 /// unless `release_thickness` or `release_swe` is set.
 pub const DEFAULT_RELEASE_THICKNESS: f32 = 1.0;
@@ -499,6 +600,7 @@ struct SimulationPipelines {
     update_sim_info: ComputePipeline,
     center_of_mass_seed: ComputePipeline,
     center_of_mass_propagate: ComputePipeline,
+    center_of_mass_partials: ComputePipeline,
     center_of_mass: ComputePipeline,
 }
 
@@ -521,6 +623,7 @@ struct SimulationBindGroups {
     update_sim_info: BindGroup,
     center_of_mass_seed: BindGroup,
     center_of_mass_propagate: BindGroup,
+    center_of_mass_partials: BindGroup,
     center_of_mass: BindGroup,
 }
 
@@ -578,7 +681,7 @@ pub struct ComputeOrchestrator {
     /// when enable_weak_pressure is set.
     weak_pressure: Option<(ComputePipeline, BindGroup)>,
     texture_size: Extent3d,
-    shader_configs: HashMap<ShaderName, ComputeShaderConfig>,
+    shader_configs: ShaderConfigs,
     dispatch_number_workgroups_x_2d: u32,
     dispatch_number_workgroups_y_2d: u32,
     dispatch_number_workgroups_1d: u32,
@@ -588,6 +691,10 @@ pub struct ComputeOrchestrator {
     simulation_pipelines: Option<SimulationPipelines>,
     simulation_bind_groups: Option<SimulationBindGroups>,
     has_float32_filterable: bool,
+    /// The adapter supports float atomics in storage buffers.
+    float32_atomic_supported: bool,
+    /// The shaders accumulate the grid with float atomics; false on GPUs
+    /// without them and with [`Self::set_integer_atomics`].
     has_float32_atomic: bool,
     pub enable_center_of_mass: bool,
     center_of_mass_biggest_blob: bool,
@@ -599,9 +706,8 @@ impl ComputeOrchestrator {
         Self::new_with_gpu(None).await
     }
     pub async fn new_with_gpu(target_gpu: Option<String>) -> Result<Self> {
-        // first search for VULKAN backend to speed up GPU selection, see dev branch
-        let instance = create_instance();
-        let mut selected_adapter = None;
+        let search = backend_search_order();
+        let mut selected = None;
 
         // 1. If a target string was provided, search by Device ID (if numeric) or Name
         if let Some(mut target) = target_gpu {
@@ -611,47 +717,69 @@ impl ComputeOrchestrator {
                 .unwrap_or(&target)
                 .trim()
                 .to_string();
-            let adapters = instance.enumerate_adapters(Backends::PRIMARY).await;
-
             // Try parsing the target string as a number (supports both hex "0x1E84" and decimal)
             let target_id = Self::parse_numeric_id(&target);
-
-            for adapter in adapters {
-                let info = adapter.get_info();
-
-                let matched = if let Some(id) = target_id {
-                    // Match by PCI Device ID
-                    info.device == id
-                } else {
-                    // Match by Name substring (case-insensitive)
-                    info.name.to_lowercase().contains(&target.to_lowercase())
-                };
-
-                if matched {
-                    info!(
-                        "Found target GPU: {} [ID: {:#06X}, Vendor: {:#06X}] ({:?})",
-                        info.name, info.device, info.vendor, info.device_type
+            for backends in &search {
+                let instance = create_instance_with(*backends);
+                let adapters = instance.enumerate_adapters(*backends).await;
+                let matched = adapters.into_iter().find(|adapter| {
+                    let info = adapter.get_info();
+                    match target_id {
+                        // Match by PCI Device ID
+                        Some(id) => info.device == id,
+                        // Match by Name substring (case-insensitive)
+                        None => info.name.to_lowercase().contains(&target.to_lowercase()),
+                    }
+                });
+                if let Some(adapter) = matched {
+                    let info = adapter.get_info();
+                    debug!(
+                        "Found the requested GPU {} (device {:#06X}, vendor {:#06X})",
+                        info.name, info.device, info.vendor
                     );
-                    selected_adapter = Some(adapter);
+                    selected = Some((instance, adapter));
                     break;
                 }
             }
 
-            if selected_adapter.is_none() {
-                warn!(
-                    "Requested GPU '{}' not found, falling back to automatic selection.",
-                    target
-                );
+            if selected.is_none() {
+                warn!("GPU '{target}' not found; selecting a GPU automatically");
             }
         }
 
-        // 2. Fallback logic if no argument was given or the target wasn't found
-        let adapter = if let Some(adapter) = selected_adapter {
-            adapter
+        // 2. Automatic selection: the high-performance adapter of the first
+        // backend set that has a discrete GPU, else of the last set searched
+        if selected.is_none() {
+            for backends in &search {
+                let instance = create_instance_with(*backends);
+                let Ok(adapter) = instance
+                    .request_adapter(&RequestAdapterOptions {
+                        power_preference: PowerPreference::HighPerformance,
+                        compatible_surface: None,
+                        force_fallback_adapter: false,
+                        apply_limit_buckets: false,
+                    })
+                    .await
+                else {
+                    continue;
+                };
+                let discrete = adapter.get_info().device_type == wgpu::DeviceType::DiscreteGpu;
+                selected = Some((instance, adapter));
+                if discrete {
+                    break;
+                }
+            }
+        }
+
+        // 3. Fallback logic if no high-performance adapter was found at all
+        let (instance, adapter) = if let Some(selected) = selected {
+            selected
         } else {
+            let instance = create_instance();
+            warn!("No high-performance GPU found; trying a low-power GPU");
             let mut fallback_adapter = instance
                 .request_adapter(&RequestAdapterOptions {
-                    power_preference: PowerPreference::HighPerformance,
+                    power_preference: PowerPreference::LowPower,
                     compatible_surface: None,
                     force_fallback_adapter: false,
                     apply_limit_buckets: false,
@@ -659,19 +787,7 @@ impl ComputeOrchestrator {
                 .await;
 
             if fallback_adapter.is_err() {
-                warn!("High-performance GPU not found, falling back to LowPower/Software.");
-                fallback_adapter = instance
-                    .request_adapter(&RequestAdapterOptions {
-                        power_preference: PowerPreference::LowPower,
-                        compatible_surface: None,
-                        force_fallback_adapter: false,
-                        apply_limit_buckets: false,
-                    })
-                    .await;
-            }
-
-            if fallback_adapter.is_err() {
-                warn!("Low-performance GPU not found, falling back to Software.");
+                warn!("No low-power GPU found; trying the software renderer");
                 fallback_adapter = instance
                     .request_adapter(&RequestAdapterOptions {
                         power_preference: PowerPreference::LowPower,
@@ -682,38 +798,38 @@ impl ComputeOrchestrator {
                     .await;
             }
 
-            fallback_adapter
-                .map_err(|error| anyhow!("Failed to find any suitable GPU adapter: {error}"))?
+            let adapter = fallback_adapter
+                .map_err(|error| anyhow!("No GPU found, not even a software renderer: {error}"))?;
+            (instance, adapter)
         };
 
         // let adapter = adapter.expect("Failed to find any suitable GPU adapter");
         timer_checkpoint("Get GPU adapter");
 
         let info = adapter.get_info();
+        let kind = match info.device_type {
+            wgpu::DeviceType::DiscreteGpu => "discrete GPU",
+            wgpu::DeviceType::IntegratedGpu => "integrated GPU",
+            wgpu::DeviceType::VirtualGpu => "virtual GPU",
+            wgpu::DeviceType::Cpu => "software renderer",
+            wgpu::DeviceType::Other => "GPU of unknown type",
+        };
+        info!(
+            "Using {} {} ({:?}, driver {} {})",
+            kind, info.name, info.backend, info.driver, info.driver_info
+        );
         match info.device_type {
-            wgpu::DeviceType::DiscreteGpu => info!("Using discrete GPU: {}", info.name),
-            wgpu::DeviceType::IntegratedGpu => warn!(
-                "Using integrated GPU: {}. If performance is poor, consider using a discrete GPU",
+            wgpu::DeviceType::Cpu => warn!(
+                "{} runs on the CPU; simulations will be very slow",
                 info.name
             ),
             wgpu::DeviceType::VirtualGpu => {
-                warn!("Using virtual GPU: {}, performance may be poor", info.name)
+                warn!("{} is a virtual GPU; simulations may be slow", info.name)
             }
-            wgpu::DeviceType::Cpu => warn!(
-                "Using CPU adapter: {}, performance will be very poor",
-                info.name
-            ),
-            wgpu::DeviceType::Other => warn!(
-                "Using unknown device type for adapter: {}, performance may be poor",
-                info.name
-            ),
+            _ => {}
         }
         let limits = adapter.limits();
-        info!("GPU Name    : {}", info.name);
-        debug!("Driver      : {}", info.driver);
-        debug!("Backend     : {:?}", info.backend);
-        debug!("Device Type : {:?}", info.device_type);
-        trace!("Adapter limits: {:?}", limits);
+        trace!("GPU limits: {:?}", limits);
 
         let max_texture_size = limits.max_texture_dimension_2d;
         let max_storage_buffer_binding_size = limits.max_storage_buffer_binding_size;
@@ -723,13 +839,8 @@ impl ComputeOrchestrator {
             limits.max_compute_workgroup_size_x,
         );
         debug!(
-            "Adapter limits: 
-                                    - Max Compute Workgroup Size X: {:?}
-                                    - Max Compute Invocations Per Workgroup: {:?} 
-                                    - Max Storage Buffer Binding Size: {:.2} GB
-                                    - Max Buffer Size: {:.2} GB
-                                    - Max Texture Dimension 2D: {:?}
-                                    - Max Compute Workgroups per Dimension: {:?}",
+            "GPU limits: workgroup size {}, {} invocations per workgroup, storage buffer binding \
+             {:.2} GB, buffer {:.2} GB, 2D texture {} px, {} workgroups per dimension",
             limits.max_compute_workgroup_size_x,
             max_compute_invocations_per_workgroup,
             max_storage_buffer_binding_size as f64 / 1024.0 / 1024.0 / 1024.0,
@@ -737,39 +848,38 @@ impl ComputeOrchestrator {
             max_texture_size,
             limits.max_compute_workgroups_per_dimension
         );
-        let bytes_per_particle = 2 * std::mem::size_of::<[f32; 2]>() // position + velocity
-             + 2 * std::mem::size_of::<f32>() // mass + elevation
-             + std::mem::size_of::<u32>(); // stopped
-        let buffer_limit = max_storage_buffer_binding_size / bytes_per_particle as u64;
-        let compute_limit =
-            limits.max_compute_workgroups_per_dimension * max_compute_invocations_per_workgroup;
-        // TODO estimate the limit based on the number of storage buffers used in the shaders, since each buffer has a limit of max_storage_buffer_binding_size
-        let position_limit = max_storage_buffer_binding_size / size_of::<[f32; 2]>() as u64;
-        let scalar_limit = max_storage_buffer_binding_size / size_of::<f32>() as u64;
-        let affine_limit = max_storage_buffer_binding_size / size_of::<[[f32; 2]; 2]>() as u64;
-        let max_particles = min(
-            min(position_limit, scalar_limit),
-            min(affine_limit, compute_limit as u64),
-        );
-        info!(
-            "Maximum number of particles that can be simulated with current GPU: {} (limited by {})",
-            max_particles,
-            if max_particles == buffer_limit {
-                "storage buffer binding size"
-            } else {
-                "compute shader dispatch limits"
-            }
+        // The particle kernels run one thread per particle in a 1D dispatch of
+        // WG_SIZE_1D (= max_compute_invocations_per_workgroup) threads.
+        let dispatch_limit = u64::from(limits.max_compute_workgroups_per_dimension)
+            * u64::from(max_compute_invocations_per_workgroup);
+        // Every particle array is one storage binding; the largest element is
+        // the 2x2 affine matrix (and the MPMDAC stress), 16 B per particle.
+        let buffer_limit = max_storage_buffer_binding_size / size_of::<[[f32; 2]; 2]>() as u64;
+        let max_particles = min(dispatch_limit, buffer_limit);
+        // position, velocity, mass, elevation, state, affine matrix and the
+        // 3D model's vertical velocity and affine row: the largest set of the
+        // grid models
+        const PARTICLE_BYTES_3D: u64 = 8 + 8 + 4 + 4 + 4 + 16 + 4 + 8;
+        debug!(
+            "The GPU fits up to {max_particles} particles: {} workgroups of {} threads allow \
+             {dispatch_limit}, {:.2} GB per particle buffer allow {buffer_limit}. At the limit, \
+             the particles of the 3D model take {:.1} GB of GPU memory",
+            limits.max_compute_workgroups_per_dimension,
+            max_compute_invocations_per_workgroup,
+            max_storage_buffer_binding_size as f64 / 1024.0 / 1024.0 / 1024.0,
+            (max_particles * PARTICLE_BYTES_3D) as f64 / 1024.0 / 1024.0 / 1024.0
         );
         trace!(
-            "Maximum number of cells that can be simulated with current GPU: {}, every {}th cell can have a single particle",
-            max_texture_size * max_texture_size,
+            "The GPU fits grids of up to {} cells, about one particle per {:.1} cells at the \
+             particle limit",
+            max_texture_size as u64 * max_texture_size as u64,
             (max_texture_size as u64 * max_texture_size as u64) as f32 / max_particles as f32
         );
 
         let mut required_features = Features::empty();
         let mut has_float32_filterable = false;
         let mut has_float32_atomic = false;
-        debug!("Adapter features: {:?}", adapter.features());
+        debug!("GPU features: {:?}", adapter.features());
 
         // Only request timestamps if the runner actually supports them
         if adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
@@ -782,8 +892,9 @@ impl ComputeOrchestrator {
             required_features |= wgpu::Features::SHADER_FLOAT32_ATOMIC;
             has_float32_atomic = true;
         } else {
-            warn!(
-                "GPU does not support SHADER_FLOAT32_ATOMIC, the sim will be less accurate. Consider using a GPU that supports this feature for better results."
+            info!(
+                "The GPU has no 32-bit float atomics; the grid uses integer atomics, which round \
+                 mass and momentum to fixed steps"
             );
         }
         if adapter
@@ -794,7 +905,8 @@ impl ComputeOrchestrator {
             has_float32_filterable = true;
         } else {
             warn!(
-                "GPU does not support FLOAT32_FILTERABLE, the sim will be less accurate. Consider using a GPU that supports this feature for better results."
+                "The GPU cannot interpolate 32-bit float textures; the terrain is sampled at the \
+                 nearest cell center, which makes slopes and curvature less accurate"
             );
         }
 
@@ -820,9 +932,13 @@ impl ComputeOrchestrator {
                 trace: wgpu::Trace::Off,
             })
             .await
-            .context("Failed to create device and queue")?;
-        device.set_device_lost_callback(move |reason, message| {
-            error!("Device lost! Reason: {:?}, Message: {}", reason, message);
+            .context("Could not open the GPU device")?;
+        device.set_device_lost_callback(move |reason, message| match reason {
+            wgpu::DeviceLostReason::Destroyed => debug!("GPU device released"),
+            _ => error!(
+                "Lost the GPU device ({message}); results of the running simulation are lost, \
+                 a new simulation opens the device again"
+            ),
         });
         timer_checkpoint("Request GPU device");
         let buffers = GpuResources::new();
@@ -863,6 +979,7 @@ impl ComputeOrchestrator {
             particle_sort: None,
             steps_since_particle_sort: 0,
             weak_pressure: None,
+            float32_atomic_supported: has_float32_atomic,
             has_float32_atomic,
             completed_steps: 0,
             enable_center_of_mass: true,
@@ -873,6 +990,45 @@ impl ComputeOrchestrator {
 
     pub fn has_float32_atomic(&self) -> bool {
         self.has_float32_atomic
+    }
+
+    /// Whether the adapter supports float atomics, independent of
+    /// [`Self::set_integer_atomics`].
+    pub fn float32_atomic_supported(&self) -> bool {
+        self.float32_atomic_supported
+    }
+
+    /// Accumulates the grid with integer (fixed point) atomics even on a GPU
+    /// with float atomics, as on WebGPU; `false` returns to float atomics
+    /// where supported. A change rebuilds the shader pipelines and drops
+    /// everything prepared with them (particle sort, weak pressure pass,
+    /// stored initial particles): the simulation has to be prepared again.
+    /// Returns whether the atomic variant changed.
+    pub fn set_integer_atomics(&mut self, integer_atomics: bool) -> Result<bool> {
+        let float_atomics = self.float32_atomic_supported && !integer_atomics;
+        if float_atomics == self.has_float32_atomic {
+            return Ok(false);
+        }
+        debug!(
+            "Switching the grid to {} atomics",
+            if float_atomics { "float" } else { "integer" }
+        );
+        self.shader_configs = shaders::create_shader_configs(
+            &self.device,
+            self.max_compute_invocations_per_workgroup,
+            self.has_float32_filterable,
+            float_atomics,
+        )?;
+        self.has_float32_atomic = float_atomics;
+        self.simulation_pipelines = None;
+        self.simulation_bind_groups = None;
+        self.prepared_model = None;
+        self.prepared_max_steps = None;
+        self.particle_sort = None;
+        self.steps_since_particle_sort = 0;
+        self.weak_pressure = None;
+        self.initial_particles = None;
+        Ok(true)
     }
 
     pub fn set_enable_center_of_mass(&mut self, enabled: bool) {
@@ -1046,23 +1202,55 @@ impl ComputeOrchestrator {
             TextureFormat::R32Float,
             texture_usage_input,
         )?;
-        if sim_settings.sim_model == SimModel::Curvilinear.as_int() {
-            // the surface the flow follows; finer terrain becomes basal topography
-            let reference = crate::dem::smooth_gaussian(
-                &dem.data1d,
-                dem.width,
-                dem.height,
-                sim_settings.reference_surface_length / sim_settings.cell_size,
+        let analyze_shader = if sim_settings.sim_model == 1 {
+            ShaderName::AnalyzeTerrainCurvilinear
+        } else {
+            ShaderName::AnalyzeTerrain
+        };
+        let gully_walls = sim_settings.gully_walls_enabled();
+        if !gully_walls && sim_settings.reference_surface_length > 0.0 {
+            warn!(
+                "reference_surface_length ({} m) is smaller than the cell size ({} m); gully wall \
+                 friction is off. Set it to at least the cell size or to 0",
+                sim_settings.reference_surface_length, sim_settings.cell_size
             );
-            self.resources.add_texture_with_data(
-                &self.device,
-                &self.queue,
-                reference.as_slice(),
-                TextureName::DemReference,
-                self.texture_size,
-                TextureFormat::R32Float,
-                texture_usage_input,
-            )?;
+        }
+        // the pipelines of the whole preparation phase, built up front
+        // (smoothing only for gully walls, filtered below)
+        let preparation_shaders = [
+            ShaderName::SmoothReferenceRows,
+            ShaderName::SmoothReferenceColumns,
+            analyze_shader,
+            ShaderName::ComputeRoughness,
+            ShaderName::ComputeReleaseAreas,
+            ShaderName::InitializeParticles,
+            ShaderName::RelaxClearGrid,
+            ShaderName::RelaxBuildGrid,
+            ShaderName::RelaxParticles,
+            ShaderName::RelaxSampleElevation,
+        ];
+        self.shader_configs
+            .prepare(&preparation_shaders[if gully_walls { 0 } else { 2 }..]);
+        // the surface the flow follows, the DEM smoothed with a Gaussian of
+        // width reference_surface_length on the GPU (dem::smooth_gaussian);
+        // finer terrain becomes basal topography (gully walls of the
+        // curvilinear, terrain-following and 3D models)
+        let smoothing_passes: &[ShaderName] = if gully_walls {
+            &[
+                ShaderName::SmoothReferenceRows,
+                ShaderName::SmoothReferenceColumns,
+            ]
+        } else {
+            &[]
+        };
+        for pass in smoothing_passes {
+            self.run_shader(
+                pass,
+                self.dispatch_number_workgroups_x_2d,
+                self.dispatch_number_workgroups_y_2d,
+                1,
+            )
+            .await?;
         }
         match sim_settings.sim_model {
             0 | 2 | 3 | 4 => self.run_shader(
@@ -1122,12 +1310,20 @@ impl ComputeOrchestrator {
             BufferName::SimSettings,
             sim_settings.as_bytes(),
         )?;
-        let mut roi_bits = vec![0u32; roi.len().div_ceil(32)];
-        for (i, &flag) in roi.iter().enumerate() {
-            if flag {
-                roi_bits[i / 32] |= 1 << (i % 32);
+        // an empty mask means no outline: every cell may release
+        let roi_bits = if roi.is_empty() {
+            let number_cells =
+                sim_settings.grid_shape_x as usize * sim_settings.grid_shape_y as usize;
+            vec![u32::MAX; number_cells.div_ceil(32)]
+        } else {
+            let mut roi_bits = vec![0u32; roi.len().div_ceil(32)];
+            for (i, &flag) in roi.iter().enumerate() {
+                if flag {
+                    roi_bits[i / 32] |= 1 << (i % 32);
+                }
             }
-        }
+            roi_bits
+        };
         self.resources
             .write_buffer(&self.queue, BufferName::RegionOfInterest, &roi_bits)?;
         self.run_shader(
@@ -1181,6 +1377,9 @@ impl ComputeOrchestrator {
                 1,
             )
             .await?;
+        } else {
+            self.run_shader(&ShaderName::CenterOfMassPartials, dispatch_x, dispatch_y, 1)
+                .await?;
         }
         self.run_shader(&ShaderName::ComputeCenterOfMass, 1, 1, 1)
             .await?;
@@ -1409,8 +1608,8 @@ impl ComputeOrchestrator {
         &mut self,
         sim_settings: &settings::SimSettings,
         number_release_particles: u32,
-        relax_particles: bool,
-    ) -> Result<u32> {
+        placement: settings::ParticlePlacement,
+    ) -> Result<()> {
         if sim_settings.sim_model > 4 {
             return Err(anyhow!(
                 "Unsupported simulation model: {}",
@@ -1425,6 +1624,16 @@ impl ComputeOrchestrator {
             ));
         }
         self.initial_particles = None;
+        let mut seeding_shaders = vec![ShaderName::InitializeParticles];
+        if placement.is_relaxed() {
+            seeding_shaders.extend([
+                ShaderName::RelaxClearGrid,
+                ShaderName::RelaxBuildGrid,
+                ShaderName::RelaxParticles,
+                ShaderName::RelaxSampleElevation,
+            ]);
+        }
+        self.shader_configs.prepare(&seeding_shaders);
         let particle_count = usize::try_from(number_release_particles)
             .context("Particle count does not fit in usize")?;
         let particle_buffer_size_single_value = particle_count
@@ -1441,24 +1650,30 @@ impl ComputeOrchestrator {
         let grid_buffer_size_vec2 = grid_cell_count
             .checked_mul(size_of::<[f32; 2]>())
             .ok_or_else(|| anyhow!("Grid buffer size overflow"))?;
+        // the seeding shader reads the placement from a flag bit that only this
+        // upload carries; later uploads of the settings clear it again
+        let mut seed_settings = *sim_settings;
+        if placement.is_uniform() {
+            seed_settings.flags |= settings::SimFlags::UNIFORM_PARTICLE_PLACEMENT;
+        } else {
+            seed_settings.flags &= !settings::SimFlags::UNIFORM_PARTICLE_PLACEMENT;
+        }
         self.resources.write_buffer(
             &self.queue,
             BufferName::SimSettings,
-            sim_settings.as_bytes(),
+            seed_settings.as_bytes(),
         )?;
-        info!(
-            "Initializing particles with number_release_particles: {}, particle_position_buffer_size: {:.2} MB ({:.1} % of max storage buffer binding size)",
-            number_release_particles,
-            particle_buffer_size_single_value as f64 * 2.0 / 1024.0 / 1024.0,
-            (particle_buffer_size_single_value as f64 * 2.0
-                / self.max_storage_buffer_binding_size as f64)
-                * 100.0
-        );
+        info!("Seeding {number_release_particles} particles ({placement} placement)");
         self.dispatch_number_workgroups_1d =
             number_release_particles.div_ceil(self.max_compute_invocations_per_workgroup);
         debug!(
-            "Running initialize particles shader with number_release_particles: {}, dispatch_number_workgroups_1d: {}",
-            number_release_particles, self.dispatch_number_workgroups_1d
+            "Particle positions take {:.2} MB ({:.1} % of the largest GPU buffer), seeded in {} \
+             workgroups",
+            particle_buffer_size_single_value as f64 * 2.0 / 1024.0 / 1024.0,
+            (particle_buffer_size_single_value as f64 * 2.0
+                / self.max_storage_buffer_binding_size as f64)
+                * 100.0,
+            self.dispatch_number_workgroups_1d
         );
         self.add_buffer_with_data(
             BufferName::ParticleIndex,
@@ -1583,19 +1798,51 @@ impl ComputeOrchestrator {
         )
         .await?;
 
-        if relax_particles {
+        if placement.is_relaxed() {
             self.relax_particles(sim_settings, number_release_particles)
                 .await?;
         }
 
-        let estimated_release_volume: u32 = self
-            .read_buffer::<AtomicValues>(BufferName::AtomicValues)
-            .await?
-            .first()
-            .ok_or_else(|| anyhow!("AtomicValues buffer was empty"))?
-            .estimated_release_volume;
-        info!("Estimated release volume: {}", estimated_release_volume);
-        Ok(estimated_release_volume)
+        // no readback: the seeding runs on while the CPU prepares the next
+        // stage (AtomicValues holds the estimated release volume)
+        if !self.has_float32_atomic && number_release_particles > 0 {
+            // mean seeded mass (the volume estimate rounds every cell to m3)
+            let masses = self.read_buffer::<f32>(BufferName::ParticlesMass).await?;
+            let mean_mass = masses.iter().map(|&m| m as f64).sum::<f64>() / masses.len() as f64;
+            self.log_integer_grid_resolution(sim_settings, mean_mass as f32);
+        }
+        Ok(())
+    }
+
+    /// Logs how finely the integer-atomic grid resolves a release particle of
+    /// `particle_mass` kg; warns when slow particles lose their momentum to
+    /// rounding (fewer than 100 momentum units at 1 m/s).
+    fn log_integer_grid_resolution(
+        &self,
+        sim_settings: &settings::SimSettings,
+        particle_mass: f32,
+    ) {
+        let mass_units = particle_mass * sim_settings.mass_factor();
+        let momentum_units = particle_mass * sim_settings.momentum_factor();
+        debug!(
+            "Integer atomic grid: up to {:.3e} kg and {:.3e} kg m/s per node in steps of {:.3e} kg \
+             and {:.3e} kg m/s; a release particle of {:.3} kg holds {:.3e} mass steps and \
+             {:.3e} momentum steps at 1 m/s",
+            sim_settings.max_node_mass(),
+            sim_settings.max_node_mass() * settings::MAX_FLOW_VELOCITY,
+            1.0 / sim_settings.mass_factor(),
+            1.0 / sim_settings.momentum_factor(),
+            particle_mass,
+            mass_units,
+            momentum_units,
+        );
+        if momentum_units < 100.0 {
+            warn!(
+                "Slow flow is rounded coarsely on the integer atomic grid: a release particle at \
+                 1 m/s holds only {momentum_units:.0} momentum steps. Use fewer \
+                 released_particles_per_cell or a GPU with float atomics"
+            );
+        }
     }
 
     /// Relaxes the freshly initialized particles with a soft sphere
@@ -1666,6 +1913,50 @@ impl ComputeOrchestrator {
             number_release_particles.div_ceil(self.max_compute_invocations_per_workgroup);
         let dispatch_grid_x = sim_settings.grid_shape_x.div_ceil(WORKGROUP_SIZE_2D);
         let dispatch_grid_y = sim_settings.grid_shape_y.div_ceil(WORKGROUP_SIZE_2D);
+        // the buffers stay the same across the iterations: one bind group
+        // per kernel instead of one per dispatch
+        let kernels = [
+            ShaderName::RelaxClearGrid,
+            ShaderName::RelaxBuildGrid,
+            ShaderName::RelaxParticles,
+            ShaderName::RelaxSampleElevation,
+        ];
+        self.shader_configs.prepare(&kernels);
+        let [clear_grid, build_grid, relax, sample_elevation] = kernels.map(|kernel| {
+            let config = self
+                .shader_configs
+                .get(&kernel)
+                .ok_or_else(|| anyhow!("{} shader config not found", kernel))?;
+            Ok::<_, anyhow::Error>((
+                config.pipeline.clone(),
+                config.create_bind_group(&self.device, &self.resources)?,
+            ))
+        });
+        let (clear_grid, build_grid, relax, sample_elevation) =
+            (clear_grid?, build_grid?, relax?, sample_elevation?);
+        let snapshot_source = self
+            .resources
+            .get_buffer(&BufferName::ParticlesPosition)
+            .ok_or_else(|| anyhow!("ParticlesPosition buffer not found"))?;
+        let snapshot = self
+            .resources
+            .get_buffer(&BufferName::ParticlesPositionRelax)
+            .ok_or_else(|| anyhow!("ParticlesPositionRelax buffer not found"))?;
+        let snapshot_size = snapshot_source.size().min(snapshot.size());
+        // dispatches of one pass are ordered with barriers between them, so
+        // an iteration needs one pass after its snapshot copy
+        let dispatch = |pass: &mut wgpu::ComputePass<'_>,
+                        (pipeline, bind_group): &(ComputePipeline, BindGroup),
+                        x: u32,
+                        y: u32| {
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, bind_group, &[]);
+            pass.dispatch_workgroups(x, y, 1);
+        };
+        let pass_descriptor = ComputePassDescriptor {
+            label: Some("Particle Relaxation Pass"),
+            timestamp_writes: None,
+        };
         // one submission, see evaluate_gpu
         let mut encoder = self
             .device
@@ -1674,41 +1965,16 @@ impl ComputeOrchestrator {
             });
         for _ in 0..RELAXATION_ITERATIONS {
             // all threads read the snapshot of the previous iteration
-            self.encode_copy_buffer(
-                &mut encoder,
-                BufferName::ParticlesPosition,
-                BufferName::ParticlesPositionRelax,
-            )?;
-            self.encode_shader(
-                &mut encoder,
-                &ShaderName::RelaxClearGrid,
-                dispatch_grid_x,
-                dispatch_grid_y,
-                1,
-            )?;
-            self.encode_shader(
-                &mut encoder,
-                &ShaderName::RelaxBuildGrid,
-                dispatch_particles_1d,
-                1,
-                1,
-            )?;
-            self.encode_shader(
-                &mut encoder,
-                &ShaderName::RelaxParticles,
-                dispatch_particles_1d,
-                1,
-                1,
-            )?;
+            encoder.copy_buffer_to_buffer(snapshot_source, 0, snapshot, 0, snapshot_size);
+            let mut pass = encoder.begin_compute_pass(&pass_descriptor);
+            dispatch(&mut pass, &clear_grid, dispatch_grid_x, dispatch_grid_y);
+            dispatch(&mut pass, &build_grid, dispatch_particles_1d, 1);
+            dispatch(&mut pass, &relax, dispatch_particles_1d, 1);
         }
         // the start elevation was sampled at the seed position
-        self.encode_shader(
-            &mut encoder,
-            &ShaderName::RelaxSampleElevation,
-            dispatch_particles_1d,
-            1,
-            1,
-        )?;
+        let mut pass = encoder.begin_compute_pass(&pass_descriptor);
+        dispatch(&mut pass, &sample_elevation, dispatch_particles_1d, 1);
+        drop(pass);
         self.queue.submit(Some(encoder.finish()));
         Ok(())
     }
@@ -1719,7 +1985,7 @@ impl ComputeOrchestrator {
         number_release_particles: u32,
         minimum_dem_elevation: f32,
     ) -> Result<()> {
-        debug!("Start simulation");
+        debug!("Starting the simulation");
         if sim_settings.max_steps == 0 {
             return Err(anyhow!("max_steps must be greater than zero"));
         }
@@ -1813,6 +2079,18 @@ impl ComputeOrchestrator {
             }
         };
 
+        // build the step pipelines up front
+        self.shader_configs.prepare(&[
+            ShaderName::UpdateSimInfo,
+            p2g_shader,
+            grid_physics_shader,
+            particle_update_shader,
+            ShaderName::ComputeCenterOfMass,
+            ShaderName::CenterOfMassSeed,
+            ShaderName::CenterOfMassPropagate,
+            ShaderName::CenterOfMassPartials,
+            ShaderName::ResetGrid,
+        ]);
         let update_sim_info_config = self
             .shader_configs
             .get(&ShaderName::UpdateSimInfo)
@@ -1841,6 +2119,10 @@ impl ComputeOrchestrator {
             .shader_configs
             .get(&ShaderName::CenterOfMassPropagate)
             .ok_or_else(|| anyhow!("CenterOfMassPropagate shader config not found"))?;
+        let center_of_mass_partials_config = self
+            .shader_configs
+            .get(&ShaderName::CenterOfMassPartials)
+            .ok_or_else(|| anyhow!("CenterOfMassPartials shader config not found"))?;
         let reset_grid_config = self
             .shader_configs
             .get(&ShaderName::ResetGrid)
@@ -1854,6 +2136,7 @@ impl ComputeOrchestrator {
             update_sim_info: update_sim_info_config.pipeline.clone(),
             center_of_mass_seed: center_of_mass_seed_config.pipeline.clone(),
             center_of_mass_propagate: center_of_mass_propagate_config.pipeline.clone(),
+            center_of_mass_partials: center_of_mass_partials_config.pipeline.clone(),
             center_of_mass: compute_center_of_mass_config.pipeline.clone(),
         });
         self.simulation_bind_groups = Some(SimulationBindGroups {
@@ -1867,6 +2150,8 @@ impl ComputeOrchestrator {
             center_of_mass_seed: center_of_mass_seed_config
                 .create_bind_group(&self.device, &self.resources)?,
             center_of_mass_propagate: center_of_mass_propagate_config
+                .create_bind_group(&self.device, &self.resources)?,
+            center_of_mass_partials: center_of_mass_partials_config
                 .create_bind_group(&self.device, &self.resources)?,
             center_of_mass: compute_center_of_mass_config
                 .create_bind_group(&self.device, &self.resources)?,
@@ -2062,6 +2347,18 @@ impl ComputeOrchestrator {
                         self.dispatch_number_workgroups_y_2d,
                         1,
                     );
+                } else {
+                    compute_pass.set_pipeline(&simulation_pipelines.center_of_mass_partials);
+                    compute_pass.set_bind_group(
+                        0,
+                        &simulation_bind_groups.center_of_mass_partials,
+                        &[],
+                    );
+                    compute_pass.dispatch_workgroups(
+                        self.dispatch_number_workgroups_x_2d,
+                        self.dispatch_number_workgroups_y_2d,
+                        1,
+                    );
                 }
                 compute_pass.set_pipeline(&simulation_pipelines.center_of_mass);
                 compute_pass.set_bind_group(0, &simulation_bind_groups.center_of_mass, &[]);
@@ -2087,10 +2384,21 @@ impl ComputeOrchestrator {
         self.particle_sort = None;
         let sorted_p2g = match SimModel::from_int(sim_settings.sim_model) {
             Some(SimModel::Curvilinear | SimModel::TerrainFollowing) => ShaderName::P2G2DSorted,
-            Some(SimModel::ThreeD) => ShaderName::P2G3DSorted,
+            Some(SimModel::ThreeDDepthAveraged) => ShaderName::P2G3DSorted,
             _ => return Ok(()),
         };
         if self.particle_sort_interval == 0 {
+            return Ok(());
+        }
+        // The shared tile of the sorted P2G accumulates in integer atomics,
+        // which quantize every contribution (SimSettings::mass_factor);
+        // float-atomic devices deposit exactly with the direct P2G, which is
+        // also faster there than the tile (no float atomics in workgroup
+        // memory).
+        if self.has_float32_atomic {
+            debug!(
+                "Float atomics available; transferring to the grid without sorting the particles"
+            );
             return Ok(());
         }
         // 8x8-cell tiles, see sort_particles.wgsl
@@ -2112,6 +2420,13 @@ impl ComputeOrchestrator {
             &(0..number_release_particles).collect::<Vec<u32>>(),
             usage,
         );
+        self.shader_configs.prepare(&[
+            ShaderName::SortClearBins,
+            ShaderName::SortCountParticles,
+            ShaderName::SortScanBins,
+            ShaderName::SortScatterParticles,
+            sorted_p2g,
+        ]);
         let stage = |shader: ShaderName| -> Result<(ComputePipeline, BindGroup)> {
             let config = self
                 .shader_configs
@@ -2151,7 +2466,8 @@ impl ComputeOrchestrator {
     }
 
     pub async fn step_3d(&mut self, steps: u32) -> Result<SimInfo> {
-        self.step_simulation(steps, SimModel::ThreeD).await
+        self.step_simulation(steps, SimModel::ThreeDDepthAveraged)
+            .await
     }
 
     pub async fn step_sliding_block(&mut self, steps: u32) -> Result<SimInfo> {
@@ -2181,7 +2497,7 @@ impl ComputeOrchestrator {
                 .min(sim_settings.max_steps - steps_run);
             let sim_info = if sim_settings.sim_model == SimModel::SlidingBlock.as_int() {
                 self.step_sliding_block(steps).await?
-            } else if sim_settings.sim_model == SimModel::ThreeD.as_int() {
+            } else if sim_settings.sim_model == SimModel::ThreeDDepthAveraged.as_int() {
                 self.step_3d(steps).await?
             } else {
                 self.step_terrain_following(steps).await?
@@ -2189,7 +2505,7 @@ impl ComputeOrchestrator {
             steps_run += steps;
             let flags = sim_info.parsed_flags();
             if !flags.is_empty() {
-                debug!("Flags after {} submitted steps: {:?}", steps_run, flags);
+                trace!("Flags after {} submitted steps: {:?}", steps_run, flags);
             }
             if flags.contains(SimInfoFlags::SIM_STOPPED) {
                 break;
@@ -2249,15 +2565,69 @@ impl ComputeOrchestrator {
             .first()
             .copied()
             .ok_or_else(|| anyhow!("SimInfo buffer was empty"))?;
-        info!("{:#?}", sim_info);
-        info!("{:#?}", atomic_values);
-        if !sim_info.parsed_flags().intersects(
-            SimInfoFlags::ALL_PARTICLES_STOPPED
-                | SimInfoFlags::AT_REST
-                | SimInfoFlags::LOW_MOMENTUM,
-        ) {
+        debug!("Simulation info: {sim_info:?}");
+        debug!("Atomic values: {atomic_values:?}");
+        self.warn_about_stopped_particles(sim_info.parsed_flags())
+            .await?;
+        match sim_info.stop_reason() {
+            Some(reason) => info!(
+                "Simulation finished after {} steps ({:.1} s of flow): {reason}",
+                sim_info.timestep, sim_info.elapsed_time
+            ),
+            None => warn!(
+                "The simulation reached max_steps ({}) after {:.1} s of flow while the avalanche \
+                 was still moving; the runout may be too short. Increase max_steps",
+                sim_settings.max_steps, sim_info.elapsed_time
+            ),
+        }
+        Ok(())
+    }
+
+    /// Warns about particles the shaders stopped for a numerical or data
+    /// problem, with their number; reads the particle states only if a flag
+    /// is set.
+    async fn warn_about_stopped_particles(&self, flags: SimInfoFlags) -> Result<()> {
+        let problems = SimInfoFlags::UNPHYSICAL_SPEED
+            | SimInfoFlags::PARTICLE_OUT_OF_DEM_DATA
+            | SimInfoFlags::OUT_OF_BOUNDS
+            | SimInfoFlags::IS_NAN;
+        if !flags.intersects(problems) {
+            return Ok(());
+        }
+        let states: Vec<ParticleState> = self
+            .read_buffer::<u32>(BufferName::ParticlesState)
+            .await?
+            .into_iter()
+            .map(ParticleState::from)
+            .collect();
+        let count = |test: fn(&ParticleState) -> bool| states.iter().filter(|s| test(s)).count();
+        let too_fast = count(|s| s.unphysical_speed);
+        if too_fast > 0 {
             warn!(
-                "Simulation reached max steps without all particles stopping. Consider increasing max_steps or checking for issues in the simulation."
+                "{too_fast} particles exceeded {MAX_PARTICLE_SPEED} m/s and were stopped; the \
+                 simulation became numerically unstable and its results are unreliable. Check the \
+                 DEM for no-data cells and cliffs, or lower cfl"
+            );
+        }
+        let is_nan = count(|s| s.is_nan);
+        if is_nan > 0 {
+            warn!(
+                "{is_nan} particles got an invalid (NaN) position or velocity and were stopped; \
+                 the results are unreliable"
+            );
+        }
+        let outside_dem = count(|s| s.out_of_dem_data && !s.is_nan);
+        if outside_dem > 0 {
+            warn!(
+                "{outside_dem} particles reached cells without elevation data and were stopped \
+                 there; the runout may be cut off"
+            );
+        }
+        let out_of_bounds = count(|s| s.out_of_bounds);
+        if out_of_bounds > 0 {
+            warn!(
+                "{out_of_bounds} particles reached the edge of the DEM and were stopped there; \
+                 the runout may be cut off. Use a larger DEM"
             );
         }
         Ok(())
@@ -2306,7 +2676,7 @@ impl ComputeOrchestrator {
             steps_run += steps;
             let flags = sim_info.parsed_flags();
             if !flags.is_empty() {
-                debug!("Flags after {} submitted steps: {:?}", steps_run, flags);
+                trace!("Flags after {} submitted steps: {:?}", steps_run, flags);
             }
             if flags.contains(SimInfoFlags::SIM_STOPPED) {
                 break;
@@ -2358,7 +2728,7 @@ impl ComputeOrchestrator {
             steps_run += steps;
             let flags = sim_info.parsed_flags();
             if !flags.is_empty() {
-                debug!("Flags after {} submitted steps: {:?}", steps_run, flags);
+                trace!("Flags after {} submitted steps: {:?}", steps_run, flags);
             }
             if flags.contains(SimInfoFlags::SIM_STOPPED) {
                 break;
@@ -2450,7 +2820,7 @@ impl ComputeOrchestrator {
         // terrain-following, 3D and sliding-block particles start their step
         // from the stored elevation; the other models resample it from the DEM
         if sim_model == SimModel::TerrainFollowing.as_int()
-            || sim_model == SimModel::ThreeD.as_int()
+            || sim_model == SimModel::ThreeDDepthAveraged.as_int()
             || sim_model == SimModel::SlidingBlock.as_int()
         {
             names.push(BufferName::ParticlesElevation);
@@ -2586,6 +2956,15 @@ mod tests {
     }
 
     #[test]
+    fn particle_state_decodes_unphysical_speed() {
+        let parsed = ParticleState::from(1234u32 | PARTICLE_UNPHYSICAL_SPEED | PARTICLE_STOPPED);
+        assert!(parsed.unphysical_speed);
+        assert!(parsed.stopped);
+        assert!(!parsed.naturally_stopped);
+        assert_eq!(parsed.timestep, 1234);
+    }
+
+    #[test]
     fn particle_state_decodes_resting_start_and_ignores_slow_counter() {
         let resting = ParticleState::from(412u32 | PARTICLE_RESTING);
         assert!(resting.resting);
@@ -2630,6 +3009,33 @@ mod tests {
         };
 
         assert!(format!("{sim_info:#?}").contains("flags: CFL_EXCEEDED | IS_NAN"));
+    }
+
+    #[test]
+    fn sim_info_stop_reason_covers_every_stop_and_max_steps() {
+        let with = |flags: SimInfoFlags| SimInfo {
+            flags: flags.bits(),
+            ..SimInfo::default()
+        };
+        // no SIM_STOPPED: the run ended at max_steps
+        assert_eq!(with(SimInfoFlags::empty()).stop_reason(), None);
+        assert_eq!(with(SimInfoFlags::OUT_OF_BOUNDS).stop_reason(), None);
+        for flag in [
+            SimInfoFlags::ALL_PARTICLES_STOPPED,
+            SimInfoFlags::AT_REST,
+            SimInfoFlags::LOW_MOMENTUM,
+            SimInfoFlags::NO_NEW_CELLS,
+        ] {
+            let reason = with(flag | SimInfoFlags::SIM_STOPPED).stop_reason();
+            assert!(
+                reason.is_some_and(|r| r != "the simulation was stopped"),
+                "{flag}"
+            );
+        }
+        assert_eq!(
+            with(SimInfoFlags::NO_NEW_CELLS | SimInfoFlags::SIM_STOPPED).stop_reason(),
+            Some("the flow stopped reaching new cells")
+        );
     }
 
     #[test_log::test]
@@ -3017,11 +3423,15 @@ mod tests {
             )
             .expect("Failed to add texture with data");
         // helper to write decoded masses in both buffer encodings
-        fn write_grid_masses(orchestrator: &mut ComputeOrchestrator, masses: &[f32]) {
+        fn write_grid_masses(
+            orchestrator: &mut ComputeOrchestrator,
+            settings: &settings::SimSettings,
+            masses: &[f32],
+        ) {
             let mass_factor = if orchestrator.has_float32_atomic() {
                 1.0
             } else {
-                10.0
+                settings.mass_factor()
             };
             if orchestrator.has_float32_atomic() {
                 block_on(orchestrator.write_buffer(BufferName::GridMass, masses))
@@ -3036,7 +3446,11 @@ mod tests {
         // Scenario 1: mass split into two disconnected blobs (3x2 grid, 8-connected).
         // Mass 1.0 in cell (0,0) and mass 3.0 in cell (2,1) do not touch, so the
         // biggest blob is the isolated mass 3.0 and the 1.0 blob is ignored.
-        write_grid_masses(&mut orchestrator, &[1.0f32, 0.0, 0.0, 0.0, 0.0, 3.0]);
+        write_grid_masses(
+            &mut orchestrator,
+            &settings,
+            &[1.0f32, 0.0, 0.0, 0.0, 0.0, 3.0],
+        );
 
         let result = block_on(orchestrator.run_compute_center_of_mass(&settings))
             .expect("GPU center of mass failed");
@@ -3066,7 +3480,11 @@ mod tests {
         // into one blob of total mass 5, so all masses contribute.
         // Expected center of mass:
         // ((2.5 + 7.5 + 12.5 * 3) / 5, (2.5 + 2.5 + 7.5 * 3) / 5) = (9.5, 5.5)
-        write_grid_masses(&mut orchestrator, &[1.0f32, 1.0, 0.0, 0.0, 0.0, 3.0]);
+        write_grid_masses(
+            &mut orchestrator,
+            &settings,
+            &[1.0f32, 1.0, 0.0, 0.0, 0.0, 3.0],
+        );
 
         let connected = block_on(orchestrator.run_compute_center_of_mass(&settings))
             .expect("GPU center of mass failed");
@@ -3097,7 +3515,11 @@ mod tests {
         // disconnected blobs give total mass 4 and
         // ((2.5 * 1 + 12.5 * 3) / 4, (2.5 * 1 + 7.5 * 3) / 4) = (10.0, 6.25)
         settings.flags &= !(1u32 << 4);
-        write_grid_masses(&mut orchestrator, &[1.0f32, 0.0, 0.0, 0.0, 0.0, 3.0]);
+        write_grid_masses(
+            &mut orchestrator,
+            &settings,
+            &[1.0f32, 0.0, 0.0, 0.0, 0.0, 3.0],
+        );
 
         let whole_grid = block_on(orchestrator.run_compute_center_of_mass(&settings))
             .expect("GPU center of mass failed");
@@ -3195,7 +3617,7 @@ mod tests {
         let mass_factor = if orchestrator.has_float32_atomic() {
             1.0
         } else {
-            10.0
+            settings.mass_factor()
         };
         if orchestrator.has_float32_atomic() {
             block_on(orchestrator.write_buffer(BufferName::GridMass, &masses))
@@ -3521,6 +3943,75 @@ mod tests {
         );
     }
 
+    /// The reference surface smoothed on the GPU (smooth_reference.wgsl)
+    /// matches dem::smooth_gaussian, also next to NaN cells and the edges,
+    /// from a reference_surface_length of one cell on.
+    #[test_log::test]
+    fn test_gpu_reference_surface_matches_cpu_smoothing() {
+        const WIDTH: usize = 41;
+        const HEIGHT: usize = 29;
+        const CELL_SIZE: f32 = 5.0;
+        let mut data1d: Vec<f32> = (0..WIDTH * HEIGHT)
+            .map(|idx| {
+                let (x, y) = ((idx % WIDTH) as f32, (idx / WIDTH) as f32);
+                1500.0 + 0.4 * (x - 20.0).powi(2) - 3.0 * y
+                    + 8.0 * (0.7 * x).sin() * (0.5 * y).cos()
+            })
+            .collect();
+        for idx in [
+            0,
+            5 * WIDTH + 7,
+            14 * WIDTH + 20,
+            14 * WIDTH + 21,
+            28 * WIDTH + 40,
+        ] {
+            data1d[idx] = f32::NAN;
+        }
+        let dem = dem::Dem {
+            width: WIDTH,
+            height: HEIGHT,
+            data1d,
+            cell_size: CELL_SIZE,
+            ..Default::default()
+        };
+        let mut orchestrator =
+            block_on(ComputeOrchestrator::new()).expect("Failed to create ComputeOrchestrator");
+        for reference_surface_length in [5.0, 7.5, 20.0] {
+            let settings = settings::SimSettings {
+                grid_shape_x: WIDTH as u32,
+                grid_shape_y: HEIGHT as u32,
+                world_size_x: WIDTH as f32 * CELL_SIZE,
+                world_size_y: HEIGHT as f32 * CELL_SIZE,
+                cell_size: CELL_SIZE,
+                sim_model: 1,
+                reference_surface_length,
+                ..Default::default()
+            };
+            block_on(orchestrator.run_analyze_terrain(&settings, &dem))
+                .expect("Failed to analyze terrain");
+            let gpu: Vec<f32> =
+                block_on(orchestrator.read_texture_single_channel(TextureName::DemReference))
+                    .expect("Failed to read the reference surface");
+            let cpu = dem::smooth_gaussian(
+                &dem.data1d,
+                WIDTH,
+                HEIGHT,
+                reference_surface_length / CELL_SIZE,
+            );
+            assert_eq!(gpu.len(), cpu.len());
+            for (idx, (g, c)) in gpu.iter().zip(&cpu).enumerate() {
+                if c.is_nan() {
+                    assert!(g.is_nan(), "cell {idx}: {g} instead of NaN");
+                } else {
+                    assert!(
+                        (g - c).abs() < 2e-3,
+                        "cell {idx} (length {reference_surface_length}): gpu {g} cpu {c}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test_log::test]
     fn test_shader_transforms() {
         #[repr(C)]
@@ -3583,6 +4074,9 @@ mod tests {
         info!("{:#?}", test_output.iter().take(10).collect::<Vec<_>>());
     }
     #[test_log::test]
+    // The test shader writes marker values such as 3.1415 and 2.71828; they
+    // are compared exactly and are not meant to be the true constants.
+    #[allow(clippy::approx_constant)]
     fn test_shader_utils() {
         let mut orchestrator: ComputeOrchestrator =
             block_on(ComputeOrchestrator::new()).expect("Failed to create ComputeOrchestrator");
@@ -3681,7 +4175,7 @@ mod tests {
             sim_model: samples_per_cell, // for sampling steps per cell
             ..Default::default()
         };
-        let steps = sim_settings.grid_shape_x * samples_per_cell as u32 + 1;
+        let steps = sim_settings.grid_shape_x * samples_per_cell + 1;
         orchestrator
             .create_buffers_and_texture_descriptions(&sim_settings)
             .unwrap();
@@ -3747,7 +4241,7 @@ mod tests {
                 && i < (steps as usize - samples_per_cell as usize / 2)
             {
                 let expected_elevation =
-                    1 as f32 / samples_per_cell as f32 * (i as u32 - samples_per_cell / 2) as f32;
+                    1_f32 / samples_per_cell as f32 * (i as u32 - samples_per_cell / 2) as f32;
                 let elevation_diff = (sampling_data.dem_sampled - expected_elevation).abs();
                 sampling_diffs.push(elevation_diff);
                 assert!(
@@ -3810,7 +4304,7 @@ mod tests {
             .expect("Failed to write simulation settings");
         orchestrator.add_buffer(
             BufferName::TestOutput,
-            400 as usize,
+            400_usize,
             BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
         );
 
@@ -3826,7 +4320,7 @@ mod tests {
 
         for model in 0..6u32 {
             let shear_stress = match model {
-                0 | 1 | 2 => sim_settings.friction_coefficient * normal_stress,
+                0..=2 => sim_settings.friction_coefficient * normal_stress,
                 3 => {
                     let rs0 = 0.222f32;
                     let rs = density * proposed_speed * proposed_speed / (normal_stress + 0.001);
@@ -3924,7 +4418,7 @@ mod tests {
 
         orchestrator.add_buffer(
             BufferName::TestOutput,
-            400 as usize,
+            400_usize,
             BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
         );
         block_on(orchestrator.run_shader(
@@ -3942,7 +4436,11 @@ mod tests {
             if orchestrator.has_float32_atomic() {
                 (1.0, 1.0, 1e-6)
             } else {
-                (10.0, 0.01, 5e-3)
+                (
+                    sim_settings.mass_factor(),
+                    sim_settings.momentum_factor(),
+                    5e-3,
+                )
             };
         let mass_p2g: f32 = test_output.iter().skip(5).take(10).sum::<f32>() / mass_factor;
         info!(

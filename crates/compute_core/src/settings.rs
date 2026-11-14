@@ -19,6 +19,16 @@ pub struct SimFlags {
 }
 
 impl SimFlags {
+    pub const CURVATURE: u32 = 1 << 0;
+    pub const PARTICLE_INTERACTION: u32 = 1 << 1;
+    pub const EARTH_PRESSURE_COEFFICIENT: u32 = 1 << 2;
+    pub const ENTRAINMENT: u32 = 1 << 3;
+    pub const CENTER_OF_MASS_BIGGEST_BLOB: u32 = 1 << 4;
+    pub const WEAK_PRESSURE: u32 = 1 << 5;
+    /// Set only for the particle seeding dispatch, from
+    /// [`ParticlePlacement::is_uniform`]; not a simulation parameter.
+    pub const UNIFORM_PARTICLE_PLACEMENT: u32 = 1 << 6;
+
     pub fn new(
         curvature: bool,
         particle_interaction: bool,
@@ -123,8 +133,10 @@ pub struct SimSettings {
     /// The no-new-cells stop window spans round(travel / cfl) steps, at least
     /// 10: the steps the fastest material needs to travel this many cells.
     pub no_new_cells_travel: f32,
-    /// Curvilinear: Gaussian width (m) of the reference surface that defines
-    /// gully wall inclinations for the confinement friction; 0 disables it.
+    /// Curvilinear, terrain-following and 3D depth averaged: Gaussian width (m)
+    /// of the reference surface that defines gully wall inclinations for the
+    /// confinement friction; below the cell size (e.g. 0) disables it, see
+    /// [`Self::gully_walls_enabled`].
     pub reference_surface_length: f32,
     /// Snow water equivalent (kg/m²) of every release cell, set instead of
     /// `release_thickness`, NaN if unset; read it with
@@ -136,50 +148,101 @@ pub struct SimSettings {
     pub release_swe: f32,
 }
 
+/// Hashes only the fields the selected simulation, friction and constitutive
+/// model read, so a parameter added for one model, or changed while another
+/// model is selected, leaves the hash unchanged. When a model starts reading a
+/// field, add it here under that model.
 impl Hash for SimSettings {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        // Integers
+        let hash_f32 = |value: f32, state: &mut H| value.to_bits().hash(state);
+        let sim_model = SimModel::from_int(self.sim_model);
+        let grid_flow_model = matches!(
+            sim_model,
+            Some(
+                SimModel::TerrainFollowing | SimModel::Curvilinear | SimModel::ThreeDDepthAveraged
+            )
+        );
+
+        // Shared by all models: run length, grid, release and evaluation
         self.max_steps.hash(state);
         self.sim_model.hash(state);
         self.friction_model.hash(state);
         self.released_particles_per_cell.hash(state);
         self.grid_shape_x.hash(state);
         self.grid_shape_y.hash(state);
-        // Floats
-        self.world_size_x.to_bits().hash(state);
-        self.world_size_y.to_bits().hash(state);
-        self.density.to_bits().hash(state);
-        self.release_thickness.to_bits().hash(state);
-        self.release_swe.to_bits().hash(state);
-        self.friction_coefficient.to_bits().hash(state);
-        self.drag_coefficient.to_bits().hash(state);
-        self.n0.to_bits().hash(state);
-        self.i0.to_bits().hash(state);
-        self.mu0.to_bits().hash(state);
-        self.mu2.to_bits().hash(state);
-        self.grain_diameter.to_bits().hash(state);
-        self.internal_friction_angle.to_bits().hash(state);
-        self.basal_friction_angle.to_bits().hash(state);
-        self.cfl.to_bits().hash(state);
-        self.cell_size.to_bits().hash(state);
-        self.min_slope_angle.to_bits().hash(state);
-        self.max_slope_angle.to_bits().hash(state);
-        self.release_min_elevation.to_bits().hash(state);
-        self.velocity_threshold.to_bits().hash(state);
-        self.roughness_threshold.to_bits().hash(state);
-        self.peak_flow_thickness_threshold.to_bits().hash(state);
-        // MPMDAC constitutive model
-        self.constitutive_model.hash(state);
-        self.shear_modulus.to_bits().hash(state);
-        self.hardening_modulus.to_bits().hash(state);
-        // MPMDAC compressibility
-        self.bulk_modulus.to_bits().hash(state);
-        self.compaction_pressure.to_bits().hash(state);
-        self.momentum_stop_fraction.to_bits().hash(state);
-        self.no_new_cells_travel.to_bits().hash(state);
-        self.reference_surface_length.to_bits().hash(state);
-        // Flags
-        self.flags.hash(state);
+        hash_f32(self.world_size_x, state);
+        hash_f32(self.world_size_y, state);
+        hash_f32(self.cell_size, state);
+        hash_f32(self.density, state);
+        hash_f32(self.release_thickness, state);
+        hash_f32(self.release_swe, state);
+        hash_f32(self.min_slope_angle, state);
+        hash_f32(self.max_slope_angle, state);
+        hash_f32(self.release_min_elevation, state);
+        hash_f32(self.release_max_elevation, state);
+        hash_f32(self.roughness_threshold, state);
+        hash_f32(self.cfl, state);
+        hash_f32(self.velocity_threshold, state);
+        hash_f32(self.peak_flow_thickness_threshold, state);
+        hash_f32(self.no_new_cells_travel, state);
+
+        // Basal friction model
+        match FrictionModel::from_int(self.friction_model) {
+            Some(FrictionModel::Coulomb | FrictionModel::SamosAT) => {
+                hash_f32(self.friction_coefficient, state);
+            }
+            Some(FrictionModel::Voellmy | FrictionModel::VoellmyMinShear) => {
+                hash_f32(self.friction_coefficient, state);
+                hash_f32(self.drag_coefficient, state);
+            }
+            Some(FrictionModel::MuI) | None => {}
+        }
+        // mu(I) rheology, as friction model or MPMDAC constitutive law
+        if self.uses_mu_i() {
+            hash_f32(self.i0, state);
+            hash_f32(self.mu0, state);
+            hash_f32(self.mu2, state);
+            hash_f32(self.grain_diameter, state);
+        }
+
+        let mut flags_mask = SimFlags::CENTER_OF_MASS_BIGGEST_BLOB;
+        match sim_model {
+            Some(SimModel::MpmDaC) => {
+                flags_mask |= SimFlags::CURVATURE;
+                self.constitutive_model.hash(state);
+                hash_f32(self.n0, state);
+                hash_f32(self.shear_modulus, state);
+                hash_f32(self.hardening_modulus, state);
+                if self.constitutive_model == ConstitutiveModel::DruckerPrager.as_int() {
+                    hash_f32(self.internal_friction_angle, state);
+                }
+                hash_f32(self.bulk_modulus, state);
+                if self.bulk_modulus > 0.0 {
+                    hash_f32(self.compaction_pressure, state);
+                }
+            }
+            Some(_) => {
+                // depth-averaged hydrostatic pressure with earth pressure
+                // coefficients: all other models
+                flags_mask |= SimFlags::CURVATURE
+                    | SimFlags::PARTICLE_INTERACTION
+                    | SimFlags::EARTH_PRESSURE_COEFFICIENT;
+                if sim_model == Some(SimModel::Curvilinear) {
+                    flags_mask |= SimFlags::WEAK_PRESSURE;
+                }
+                if SimFlags::from_u32(self.flags).is_earth_pressure_coefficient_enabled() {
+                    hash_f32(self.internal_friction_angle, state);
+                    hash_f32(self.basal_friction_angle, state);
+                }
+            }
+            None => {}
+        }
+        if grid_flow_model {
+            hash_f32(self.momentum_stop_fraction, state);
+            hash_f32(self.reference_surface_length, state);
+        }
+
+        (self.flags & flags_mask).hash(state);
     }
 }
 
@@ -204,7 +267,48 @@ impl Default for SimSettings {
     }
 }
 
+/// Integer-atomic grid (GPUs without float atomics, or `integer_atomics`):
+/// node masses and momenta are fixed point numbers in u32 / i32 whose factors
+/// fill the integer range with the largest node values a flow can reach, a
+/// [`MAX_FLOW_THICKNESS`] deep column over a cell moving at
+/// [`MAX_FLOW_VELOCITY`], times [`QUANTIZATION_SAFETY`]. Must match utils.wgsl.
+pub const MAX_FLOW_THICKNESS: f32 = 30.0;
+/// Largest flow speed (m/s) the integer momentum range holds, see
+/// [`MAX_FLOW_THICKNESS`].
+pub const MAX_FLOW_VELOCITY: f32 = 100.0;
+/// Headroom of the integer range above [`MAX_FLOW_THICKNESS`] and
+/// [`MAX_FLOW_VELOCITY`]; also covers the slope factor of the node mass.
+pub const QUANTIZATION_SAFETY: f32 = 2.0;
+/// Integer range used for masses (u32) and momenta (i32): below 2^32 and 2^31
+/// so that a rounded maximum still converts without saturating.
+const QUANTIZATION_U32_RANGE: f32 = 4.0e9;
+const QUANTIZATION_I32_RANGE: f32 = 2.0e9;
+
 impl SimSettings {
+    /// Largest node mass (kg) the integer-atomic grid holds, see
+    /// [`MAX_FLOW_THICKNESS`]; same expression as `max_node_mass` in
+    /// utils.wgsl.
+    pub fn max_node_mass(&self) -> f32 {
+        QUANTIZATION_SAFETY * MAX_FLOW_THICKNESS * self.density * self.cell_size * self.cell_size
+    }
+
+    /// Whether the reference surface and the gully wall friction run: the
+    /// smoothing width must reach the cell size. Same test as
+    /// `gully_walls_enabled` in utils.wgsl.
+    pub fn gully_walls_enabled(&self) -> bool {
+        self.reference_surface_length >= self.cell_size
+    }
+
+    /// Integer units per kg of the integer-atomic grid mass.
+    pub fn mass_factor(&self) -> f32 {
+        QUANTIZATION_U32_RANGE / self.max_node_mass()
+    }
+
+    /// Integer units per kg m/s of the integer-atomic grid momentum.
+    pub fn momentum_factor(&self) -> f32 {
+        QUANTIZATION_I32_RANGE / (self.max_node_mass() * MAX_FLOW_VELOCITY)
+    }
+
     /// Length in steps of the no-new-cells rolling window, see utils.wgsl.
     pub fn no_new_cells_window(&self) -> u32 {
         ((self.no_new_cells_travel / self.cfl).round() as u32).max(10)
@@ -706,8 +810,9 @@ pub enum SimModel {
     MpmDaC,
     /// Legacy per-particle sliding-block model (former model 0).
     SlidingBlock,
-    /// Terrain-following grid model that carries the full 3D Cartesian velocity.
-    ThreeD,
+    /// Depth-averaged terrain-following grid model that carries the full 3D
+    /// Cartesian velocity.
+    ThreeDDepthAveraged,
 }
 
 impl SimModel {
@@ -717,7 +822,7 @@ impl SimModel {
             1 => Some(Self::Curvilinear),
             2 => Some(Self::MpmDaC),
             3 => Some(Self::SlidingBlock),
-            4 => Some(Self::ThreeD),
+            4 => Some(Self::ThreeDDepthAveraged),
             _ => None,
         }
     }
@@ -728,7 +833,7 @@ impl SimModel {
             Self::Curvilinear => 1,
             Self::MpmDaC => 2,
             Self::SlidingBlock => 3,
-            Self::ThreeD => 4,
+            Self::ThreeDDepthAveraged => 4,
         }
     }
 }
@@ -742,7 +847,7 @@ impl FromStr for SimModel {
             "curvilinear" | "curvi" | "c" => Ok(Self::Curvilinear),
             "mpmdac" | "mpm-dac" | "mpm_depth_averaged_curvilinear" => Ok(Self::MpmDaC),
             "sliding-block" | "block" | "b" => Ok(Self::SlidingBlock),
-            "3d" => Ok(Self::ThreeD),
+            "3d-depth-averaged" | "3d" => Ok(Self::ThreeDDepthAveraged),
             _ => Err(format!("unknown simulation model: {value}")),
         }
     }
@@ -755,7 +860,7 @@ impl fmt::Display for SimModel {
             Self::Curvilinear => "curvilinear",
             Self::MpmDaC => "mpmdac",
             Self::SlidingBlock => "sliding-block",
-            Self::ThreeD => "3d",
+            Self::ThreeDDepthAveraged => "3d-depth-averaged",
         })
     }
 }
@@ -840,6 +945,82 @@ impl<'de> Deserialize<'de> for CrownLineMethod {
     }
 }
 
+/// How the particles are placed in a release cell.
+///
+/// `random` draws each particle uniformly in the cell; `uniform-random` splits
+/// the cell into one equal-area stratum per particle and draws each particle
+/// in its own stratum, which removes most of the sampling noise of the grid
+/// thickness. The relaxed variants afterwards push overlapping particles
+/// apart towards the hexagonal packing spacing (soft sphere repulsion).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ParticlePlacement {
+    Random,
+    Relaxed,
+    UniformRandom,
+    #[default]
+    UniformRelaxed,
+}
+
+impl ParticlePlacement {
+    /// Each particle is drawn in its own equal-area stratum of the cell.
+    pub fn is_uniform(self) -> bool {
+        matches!(self, Self::UniformRandom | Self::UniformRelaxed)
+    }
+
+    /// The seeded particles are relaxed before the simulation starts.
+    pub fn is_relaxed(self) -> bool {
+        matches!(self, Self::Relaxed | Self::UniformRelaxed)
+    }
+}
+
+impl FromStr for ParticlePlacement {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_lowercase().replace(['_', ' '], "-").as_str() {
+            "random" => Ok(Self::Random),
+            "relaxed" | "relax" => Ok(Self::Relaxed),
+            "uniform-random" => Ok(Self::UniformRandom),
+            "uniform-relaxed" | "uniform-relax" => Ok(Self::UniformRelaxed),
+            _ => Err(format!(
+                "unknown particle placement: {value} (expected random, relaxed, \
+                 uniform-random or uniform-relaxed)"
+            )),
+        }
+    }
+}
+
+impl fmt::Display for ParticlePlacement {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(match self {
+            Self::Random => "random",
+            Self::Relaxed => "relaxed",
+            Self::UniformRandom => "uniform-random",
+            Self::UniformRelaxed => "uniform-relaxed",
+        })
+    }
+}
+
+impl Serialize for ParticlePlacement {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for ParticlePlacement {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        String::deserialize(deserializer)?
+            .parse::<Self>()
+            .map_err(D::Error::custom)
+    }
+}
+
 /// How the release estimation orders the potential release cells below the
 /// crown line: by geodesic distance alone, or by a geodesic distance whose
 /// steps through unfavourable release slopes count as longer.
@@ -902,7 +1083,8 @@ pub struct Settings {
     pub sim_model: Option<SimModel>,
     pub batch_compute_steps: Option<u32>,
     /// Steps between particle sorts for the tile-sorted P2G of the grid flow models (default 25);
-    /// 0 disables it.
+    /// 0 disables it. Only integer-atomic devices sort: devices with float atomics always use the
+    /// direct P2G, which deposits without quantization.
     pub particle_sort_interval: Option<u32>,
     pub friction_model: Option<FrictionModel>,
     pub released_particles_per_cell: Option<u32>,
@@ -1007,10 +1189,12 @@ pub struct Settings {
     /// the steps the fastest material needs to travel this many cells,
     /// round(travel / cfl) and at least 10 (default 65 cells, 72 steps at CFL 0.9).
     pub no_new_cells_travel: Option<f32>,
-    /// Curvilinear: Gaussian width (m) of the smoothed reference surface.
+    /// Curvilinear, terrain-following and 3D depth averaged: Gaussian width (m)
+    /// of the smoothed reference surface.
     /// Bed inclined by beta against it counts as a gully wall whose normal
     /// load grows by 1 + K tan^2(beta) from the lateral pressure of the snow
-    /// beside it; 0 or unset disables it.
+    /// beside it. Needs at least the cell size; 0, unset or a smaller value
+    /// disables it (a positive value below the cell size logs a warning).
     pub reference_surface_length: Option<f32>,
 
     pub enable_curvature: Option<bool>,
@@ -1023,10 +1207,14 @@ pub struct Settings {
     pub enable_weak_pressure: Option<bool>,
     pub enable_entrainment: Option<bool>,
     pub enable_center_of_mass: Option<bool>,
-    /// Relax freshly initialized particles to the hexagonal packing spacing
-    /// with a soft sphere repulsion before the simulation starts (defaults
-    /// to true).
-    pub enable_particle_relaxation: Option<bool>,
+    /// Accumulate the grid with integer (fixed point) atomics even on GPUs
+    /// with float atomics, as WebGPU does (defaults to false). Masses and
+    /// momenta are then quantized, see [`SimSettings::mass_factor`].
+    pub integer_atomics: Option<bool>,
+    /// How the particles are placed in the release cells: `random`,
+    /// `relaxed`, `uniform-random` or `uniform-relaxed` (defaults to
+    /// `uniform-relaxed`), see [`ParticlePlacement`].
+    pub particle_placement: Option<ParticlePlacement>,
     /// Center the mass of the biggest connected mass blob instead of the
     /// whole grid (defaults to false).
     pub center_of_mass_biggest_blob: Option<bool>,
@@ -1035,16 +1223,17 @@ pub struct Settings {
 impl Settings {
     pub fn loads(json_str: &str) -> io::Result<Self> {
         let settings: Settings = serde_json::from_str(json_str).map_err(|e| {
-            error!("Failed to deserialize settings: {e}");
-            io::Error::new(io::ErrorKind::InvalidData, e)
+            io::Error::new(io::ErrorKind::InvalidData, format!("Invalid settings: {e}"))
         })?;
         Ok(settings)
     }
 
     pub fn dumps(&self) -> io::Result<String> {
         let json = serde_json::to_string_pretty(self).map_err(|e| {
-            error!("Failed to serialize settings: {e}");
-            io::Error::new(io::ErrorKind::InvalidData, e)
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Could not convert the settings to JSON: {e}"),
+            )
         })?;
         Ok(json)
     }
@@ -1087,11 +1276,12 @@ mod tests {
     }
 
     fn create_test_dem() -> Dem {
-        let mut dem = Dem::default();
-        dem.cell_size = 1.0;
-        dem.width = 10;
-        dem.height = 20;
-        dem
+        Dem {
+            cell_size: 1.0,
+            width: 10,
+            height: 20,
+            ..Default::default()
+        }
     }
 
     #[test_log::test]
@@ -1131,6 +1321,43 @@ mod tests {
         assert_eq!(settings.grid_shape_y, dem.height as u32);
         assert_eq!(settings.world_size_x, dem.cell_size * dem.width as f32);
         assert_eq!(settings.world_size_y, dem.cell_size * dem.height as f32);
+    }
+
+    #[test]
+    fn gully_walls_need_a_reference_surface_of_one_cell() {
+        let mut settings = SimSettings {
+            cell_size: 5.0,
+            ..SimSettings::new()
+        };
+        for (length, enabled) in [(0.0, false), (4.9, false), (5.0, true), (20.0, true)] {
+            settings.reference_surface_length = length;
+            assert_eq!(settings.gully_walls_enabled(), enabled, "length {length}");
+        }
+        settings.reference_surface_length = f32::NAN;
+        assert!(!settings.gully_walls_enabled());
+    }
+
+    #[test]
+    fn integer_grid_factors_fill_the_integer_range() {
+        let mut settings = SimSettings {
+            cell_size: 5.0,
+            density: 200.0,
+            ..SimSettings::new()
+        };
+        // 2 x 30 m x 200 kg/m3 x 25 m2
+        assert!((settings.max_node_mass() - 3.0e5).abs() < 1.0);
+        for cell_size in [1.0, 5.0, 25.0] {
+            settings.cell_size = cell_size;
+            let max_mass = settings.max_node_mass() * settings.mass_factor();
+            let max_momentum =
+                settings.max_node_mass() * MAX_FLOW_VELOCITY * settings.momentum_factor();
+            assert!(max_mass <= u32::MAX as f32 && max_mass > 0.9 * u32::MAX as f32);
+            assert!(max_momentum <= i32::MAX as f32 && max_momentum > 0.9 * i32::MAX as f32);
+            // a 1 m release, 64 particles per cell: units per particle do not
+            // depend on the cell size
+            let particle_mass = settings.density * cell_size * cell_size / 64.0;
+            assert!((particle_mass * settings.mass_factor() - 4.0e9 / (64.0 * 60.0)).abs() < 10.0);
+        }
     }
 
     #[test_log::test]
@@ -1194,11 +1421,12 @@ mod tests {
             output_path: Some(String::from("output")),
             enable_curvature: Some(false),
             enable_particle_interaction: Some(false),
-            enable_particle_relaxation: Some(false),
+            particle_placement: Some(ParticlePlacement::UniformRandom),
             enable_earth_pressure_coefficient: Some(false),
             enable_entrainment: Some(false),
             enable_weak_pressure: Some(false),
             enable_center_of_mass: Some(true),
+            integer_atomics: Some(true),
             center_of_mass_biggest_blob: Some(false),
         };
         let dem = create_test_dem();
@@ -1500,7 +1728,7 @@ mod tests {
             SimModel::Curvilinear,
             SimModel::MpmDaC,
             SimModel::SlidingBlock,
-            SimModel::ThreeD,
+            SimModel::ThreeDDepthAveraged,
         ];
 
         for model in models {
@@ -1519,7 +1747,7 @@ mod tests {
 
         assert_eq!(SimModel::from_int(3), Some(SimModel::SlidingBlock));
 
-        assert_eq!(SimModel::from_int(4), Some(SimModel::ThreeD));
+        assert_eq!(SimModel::from_int(4), Some(SimModel::ThreeDDepthAveraged));
         assert_eq!(SimModel::from_int(5), None);
         assert_eq!(SimModel::from_int(u32::MAX), None);
     }
@@ -1804,6 +2032,55 @@ mod tests {
     }
 
     #[test]
+    fn particle_placement_strings_and_modes() {
+        let placements = [
+            (ParticlePlacement::Random, "random", false, false),
+            (ParticlePlacement::Relaxed, "relaxed", false, true),
+            (
+                ParticlePlacement::UniformRandom,
+                "uniform-random",
+                true,
+                false,
+            ),
+            (
+                ParticlePlacement::UniformRelaxed,
+                "uniform-relaxed",
+                true,
+                true,
+            ),
+        ];
+        for (placement, string, uniform, relaxed) in placements {
+            assert_eq!(placement.to_string(), string);
+            assert_eq!(ParticlePlacement::from_str(string), Ok(placement));
+            assert_eq!(placement.is_uniform(), uniform);
+            assert_eq!(placement.is_relaxed(), relaxed);
+            let json = serde_json::to_string(&placement).unwrap();
+            assert_eq!(json, format!("\"{string}\""));
+            assert_eq!(
+                serde_json::from_str::<ParticlePlacement>(&json).unwrap(),
+                placement
+            );
+        }
+        assert_eq!(
+            ParticlePlacement::from_str("relax"),
+            Ok(ParticlePlacement::Relaxed)
+        );
+        assert_eq!(
+            ParticlePlacement::from_str("Uniform Relaxed"),
+            Ok(ParticlePlacement::UniformRelaxed)
+        );
+        assert_eq!(
+            ParticlePlacement::from_str("uniform_random"),
+            Ok(ParticlePlacement::UniformRandom)
+        );
+        assert!(ParticlePlacement::from_str("hexagonal").is_err());
+        assert_eq!(
+            ParticlePlacement::default(),
+            ParticlePlacement::UniformRelaxed
+        );
+    }
+
+    #[test]
     fn test_sim_settings_hash_deterministic() {
         let settings1 = SimSettings::new();
         let settings2 = SimSettings::new();
@@ -1820,5 +2097,57 @@ mod tests {
         let mut settings3 = settings1;
         settings3.friction_coefficient = 0.55;
         assert_ne!(settings1.calculate_hash(), settings3.calculate_hash());
+    }
+
+    #[test]
+    fn test_sim_settings_hash_ignores_parameters_of_other_models() {
+        // terrain following with Voellmy friction
+        let settings = SimSettings::new();
+        let hash = settings.calculate_hash();
+        let unchanged = |change: fn(&mut SimSettings)| {
+            let mut changed = settings;
+            change(&mut changed);
+            changed.calculate_hash() == hash
+        };
+
+        // mu(I) friction, MPMDAC and earth pressure (disabled) parameters
+        assert!(unchanged(|s| s.i0 = 0.5));
+        assert!(unchanged(|s| s.grain_diameter = 0.01));
+        assert!(unchanged(|s| s.n0 = 1.0));
+        assert!(unchanged(|s| s.shear_modulus = 1.0));
+        assert!(unchanged(|s| s.bulk_modulus = 1.0));
+        assert!(unchanged(|s| s.constitutive_model = 1));
+        assert!(unchanged(|s| s.internal_friction_angle = 30.0));
+        assert!(unchanged(|s| s.flags |= SimFlags::WEAK_PRESSURE));
+
+        assert!(!unchanged(|s| s.drag_coefficient = 1000.0));
+        assert!(!unchanged(|s| s.reference_surface_length = 20.0));
+        assert!(!unchanged(
+            |s| s.flags |= SimFlags::EARTH_PRESSURE_COEFFICIENT
+        ));
+        assert!(!unchanged(|s| {
+            s.flags |= SimFlags::EARTH_PRESSURE_COEFFICIENT;
+            s.internal_friction_angle = 30.0;
+        }));
+    }
+
+    #[test]
+    fn test_sim_settings_hash_follows_the_selected_models() {
+        let mut mu_i = SimSettings::new();
+        mu_i.friction_model = FrictionModel::MuI.as_int();
+        let mut changed = mu_i;
+        changed.drag_coefficient = 1000.0;
+        assert_eq!(mu_i.calculate_hash(), changed.calculate_hash());
+        changed.mu0 = 0.3;
+        assert_ne!(mu_i.calculate_hash(), changed.calculate_hash());
+
+        let mut mpmdac = SimSettings::new();
+        mpmdac.sim_model = SimModel::MpmDaC.as_int();
+        let mut changed = mpmdac;
+        changed.reference_surface_length = 20.0;
+        changed.momentum_stop_fraction = 0.01;
+        assert_eq!(mpmdac.calculate_hash(), changed.calculate_hash());
+        changed.internal_friction_angle = 30.0;
+        assert_ne!(mpmdac.calculate_hash(), changed.calculate_hash());
     }
 }

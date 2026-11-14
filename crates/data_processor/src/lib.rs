@@ -53,7 +53,7 @@ pub enum DataProcessorError {
     #[error("No outlines path provided")]
     NoneOutlinesPath,
     #[cfg(not(target_arch = "wasm32"))]
-    #[error("Failed to create tile manager")]
+    #[error("Tile manager: {0}")]
     TileManagerError(#[from] crate::tile_manager::TileManagerError),
     #[cfg(not(target_arch = "wasm32"))]
     #[error(transparent)]
@@ -455,7 +455,7 @@ pub fn write_png(
 }
 
 pub async fn read_file(path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    trace!("Reading file: {}", path);
+    trace!("Reading {path}");
     if path.starts_with("http") {
         fetch_from_url(path).await
     } else {
@@ -507,7 +507,7 @@ pub fn f32_to_rgba_bytes(data: &[f32]) -> Vec<u8> {
 }
 
 pub async fn fetch_from_url(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    trace!("Fetching from URL: {}", url);
+    trace!("Downloading {url}");
     let response = reqwest::get(url).await?;
     let bytes = response.bytes().await?;
     Ok(bytes.to_vec())
@@ -568,10 +568,7 @@ pub fn read_geo_tiff_from_reader<R: Read + Seek>(reader: R) -> Result<GeoTiff, G
     let tie_points = decoder
         .get_tag_f64_vec(Tag::Unknown(33922))
         .map_err(|_| GeoTiffError::MissingTiePoints)?;
-    let nodata = decoder
-        .get_tag_f64_vec(Tag::Unknown(42113)) // Try to get the tag
-        .ok() // If it fails (missing or wrong type), return None
-        .and_then(|v| v.first().copied());
+    let nodata = read_gdal_nodata(&mut decoder);
     if tie_points[0] != 0.0 || tie_points[1] != 0.0 || tie_points[2] != 0.0 {
         return Err(GeoTiffError::UnsupportedTiePoint);
     }
@@ -617,8 +614,8 @@ pub fn read_geo_tiff_from_reader<R: Read + Seek>(reader: R) -> Result<GeoTiff, G
         DecodingResult::F32(data) => TiffData::F32(data),
         _ => return Err(GeoTiffError::UnsupportedDataType),
     };
-    info!(
-        "Loaded GeoTIFF: {}x{} cells at {}m resolution",
+    debug!(
+        "Read a GeoTIFF of {} x {} cells of {} m",
         width, height, metadata.pixel_scale[0]
     );
 
@@ -628,7 +625,7 @@ pub fn read_geo_tiff_from_reader<R: Read + Seek>(reader: R) -> Result<GeoTiff, G
 async fn load_png_as_dem(path: &str) -> Result<Dem, DataProcessorError> {
     let (rgba, width, height) = read_png(path).await.expect("Failed to load PNG");
     let mut bounds: Bounds = load_bounds(path).await.expect("Failed to load bounds");
-    debug!("Loaded PNG {}: {} x {}", path, width, height);
+    debug!("Read the PNG {path} of {width} x {height} pixels");
     let cell_size = (bounds.xmax - bounds.xmin) / (width - 1) as f32;
     bounds.xmin -= 0.5 * cell_size;
     bounds.xmax += 0.5 * cell_size;
@@ -705,9 +702,29 @@ fn load_tiff_as_dem(path: &str) -> Result<Dem, DataProcessorError> {
     Ok(geo_tiff_to_dem(tiff, path))
 }
 
+/// The no-data value of tag 42113 (GDAL_NODATA). GDAL writes it as an ASCII
+/// string such as `"-9999"`; some writers store a number instead.
+fn read_gdal_nodata<R: std::io::Read + std::io::Seek>(decoder: &mut Decoder<R>) -> Option<f64> {
+    if let Ok(text) = decoder.get_tag_ascii_string(Tag::GdalNodata) {
+        return text
+            .trim_matches(|c: char| c == '\0' || c.is_whitespace())
+            .parse::<f64>()
+            .ok();
+    }
+    decoder
+        .get_tag_f64_vec(Tag::GdalNodata)
+        .ok()
+        .and_then(|values| values.first().copied())
+}
+
+/// Elevations below this (m) are no data even without a no-data tag: the
+/// lowest land is about -430 m, and -9999 or -32768 are common markers.
+const LOWEST_VALID_ELEVATION: f32 = -1000.0;
+
 fn geo_tiff_to_dem(mut tiff: GeoTiff, source: &str) -> Dem {
     tiff.flip_y();
     let nodata = tiff.metadata.nodata.map(|value| value as f32);
+    let mut number_untagged_nodata = 0usize;
     let data1d = tiff
         .data
         .as_f32()
@@ -715,11 +732,21 @@ fn geo_tiff_to_dem(mut tiff: GeoTiff, source: &str) -> Dem {
         .map(|value| {
             if nodata.is_some_and(|nodata| value == nodata || nodata.is_nan() && value.is_nan()) {
                 f32::NAN
+            } else if value < LOWEST_VALID_ELEVATION {
+                number_untagged_nodata += 1;
+                f32::NAN
             } else {
                 value
             }
         })
         .collect();
+    if number_untagged_nodata > 0 {
+        warn!(
+            "{source} has {number_untagged_nodata} cells below {LOWEST_VALID_ELEVATION} m but no \
+             no-data value; they are treated as no data. Set the GDAL no-data tag to make this \
+             explicit"
+        );
+    }
     let mut dem = Dem {
         width: tiff.metadata.width as usize,
         height: tiff.metadata.height as usize,
@@ -1079,7 +1106,7 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    use compute_core::settings::{FrictionModel, SimModel};
+    use compute_core::settings::{FrictionModel, ParticlePlacement, SimModel};
 
     const PARABOLA_PATH: &str = "../../data/avaframe/avaParabola.png";
 
@@ -1102,7 +1129,7 @@ mod tests {
 
     #[test_log::test]
     fn test_get_index() {
-        let mut dem: Dem = block_on(load_dem(&PARABOLA_PATH.to_string())).unwrap();
+        let mut dem: Dem = block_on(load_dem(PARABOLA_PATH)).unwrap();
         dem.bounds.xmin = 100.0;
         dem.bounds.xmax = 1000.0;
         dem.bounds.ymin = 300.0;
@@ -1115,8 +1142,8 @@ mod tests {
             z: Some(0.0),
         };
         let (dx, dy) = dem.get_index(&pt).expect("DEM scale should be valid");
-        assert_eq!(dx, 73.3139648);
-        assert_eq!(dy, 146.627930);
+        assert_eq!(dx, 73.313_965);
+        assert_eq!(dy, 146.627_93);
     }
 
     #[test_log::test]
@@ -1131,17 +1158,17 @@ mod tests {
         assert_eq!(dem.bounds.ymax, -2997.5);
         let mut expected: Vec<f32> = vec![
             2200.0,
-            2193.260085,
-            2186.530510,
-            2179.811275,
-            2173.102380,
-            2166.403825,
-            2159.715610,
-            2153.037735,
-            2146.370200,
-            2139.713005,
-            2133.066150,
-            2126.429636,
+            2_193.26,
+            2_186.530_5,
+            2_179.811_3,
+            2_173.102_3,
+            2_166.403_8,
+            2_159.715_6,
+            2_153.037_8,
+            2_146.37,
+            2_139.713,
+            2_133.066_2,
+            2_126.429_7,
         ];
         add(&mut expected, 1.0);
         if dem.data1d[..expected.len()] != expected[..] {
@@ -1179,11 +1206,11 @@ mod tests {
         );
         assert_eq!(tiff.get_f32(500, 500).unwrap(), 1370.8146);
         assert_eq!(tiff.metadata.cell_size, 10.0);
-        assert_eq!(tiff.metadata.bounds.xmin, 684366.3320);
+        assert_eq!(tiff.metadata.bounds.xmin, 684_366.3);
         assert_eq!(tiff.metadata.bounds.ymin, 5205162.1636);
         assert_eq!(
             tiff.metadata.bounds.xmax,
-            684366.3320 + 10.0 * tiff.metadata.width as f32
+            684_366.3 + 10.0 * tiff.metadata.width as f32
         );
         assert_eq!(
             tiff.metadata.bounds.ymax,
@@ -1252,7 +1279,8 @@ mod tests {
             enable_entrainment: Some(true),
             enable_weak_pressure: Some(true),
             enable_particle_interaction: Some(true),
-            enable_particle_relaxation: Some(true),
+            particle_placement: Some(ParticlePlacement::UniformRelaxed),
+            integer_atomics: Some(true),
             enable_earth_pressure_coefficient: Some(true),
             enable_center_of_mass: Some(true),
             center_of_mass_biggest_blob: Some(true),
@@ -1365,7 +1393,7 @@ mod tests {
             .await;
 
         // Act
-        let url = format!("{}/assets/map.png", &mock_server.uri());
+        let url = format!("{}/assets/map.png", mock_server.uri());
         let result = read_png(&url).await;
 
         // Assert
@@ -1898,6 +1926,44 @@ NODATA_value -9999
         assert_eq!(dem.data[1], vec![-3.0, 0.0]);
     }
 
+    /// A 2 x 2 float GeoTIFF of `values` with 10 m cells; `nodata` is written
+    /// as GDAL writes it, an ASCII string.
+    fn geotiff_bytes(values: &[f32; 4], nodata: Option<&str>) -> Vec<u8> {
+        use tiff::encoder::{TiffEncoder, colortype::Gray32Float};
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        let mut encoder = TiffEncoder::new(&mut bytes).unwrap();
+        let mut image = encoder.new_image::<Gray32Float>(2, 2).unwrap();
+        let tags = image.encoder();
+        tags.write_tag(Tag::Unknown(33550), &[10.0f64, 10.0, 0.0][..])
+            .unwrap();
+        tags.write_tag(
+            Tag::Unknown(33922),
+            &[0.0f64, 0.0, 0.0, 1000.0, 2000.0, 0.0][..],
+        )
+        .unwrap();
+        if let Some(nodata) = nodata {
+            tags.write_tag(Tag::GdalNodata, nodata).unwrap();
+        }
+        image.write_data(values).unwrap();
+        bytes.into_inner()
+    }
+
+    #[test]
+    fn test_geotiff_nodata_written_as_ascii_by_gdal_is_masked() {
+        let bytes = geotiff_bytes(&[1500.0, -9999.0, 1510.0, 1520.0], Some("-9999"));
+        let dem = load_dem_from_bytes(&bytes, "tif", "gdal.tif").unwrap();
+        assert_eq!(dem.data1d.iter().filter(|v| v.is_nan()).count(), 1);
+        assert_eq!(dem.minimum_elevation, 1500.0);
+    }
+
+    #[test]
+    fn test_geotiff_without_nodata_tag_masks_impossible_elevations() {
+        let bytes = geotiff_bytes(&[-430.0, -9999.0, 1510.0, -32768.0], None);
+        let dem = load_dem_from_bytes(&bytes, "tif", "untagged.tif").unwrap();
+        assert_eq!(dem.data1d.iter().filter(|v| v.is_nan()).count(), 2);
+        assert_eq!(dem.minimum_elevation, -430.0);
+    }
+
     #[test]
     fn test_load_dem_from_bytes_matches_path_loader() {
         let dir = tempfile::tempdir().unwrap();
@@ -2101,7 +2167,7 @@ NODATA_value  -1
 
         let original_grid = EsriGrid {
             header: original_header,
-            data: vec![1.5, f32::NAN as f32, 3.0, 4.25, 5.0, 6.1],
+            data: vec![1.5, f32::NAN, 3.0, 4.25, 5.0, 6.1],
         };
 
         // 1. Export the struct to a memory vector (Simulating writing a file)
@@ -2276,15 +2342,19 @@ NODATA_value  -999
             for (col_idx, &val) in row.iter().enumerate() {
                 let idx_1d = row_idx * dem.width + col_idx;
                 assert_eq!(
-                    val, dem.data1d[idx_1d],
+                    val.to_bits(),
+                    dem.data1d[idx_1d].to_bits(),
                     "2D data at ({}, {}) should match 1D data at index {}",
-                    row_idx, col_idx, idx_1d
+                    row_idx,
+                    col_idx,
+                    idx_1d
                 );
             }
         }
-        assert_eq!(
-            dem.data1d[0], -9999.0,
-            "First elevation value should be -9999.0"
+        // the file marks no data with the GDAL tag "-9999"
+        assert!(
+            dem.data1d[0].is_nan(),
+            "The first cell holds no data and should be NaN"
         );
         assert_eq!(
             dem.data1d[1701 * 500 + 500],

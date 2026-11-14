@@ -44,7 +44,7 @@ fn load_terrain() -> TerrainData {
             let dem = pollster::block_on(data_processor::load_dem(&path))
                 .unwrap_or_else(|e| panic!("failed to load DEM '{path}': {e}"));
             tracing::info!(
-                "Loaded DEM {}x{} at {} m resolution",
+                "Loaded the DEM {path} ({} x {} cells of {} m)",
                 dem.width,
                 dem.height,
                 dem.cell_size
@@ -58,7 +58,7 @@ fn load_terrain() -> TerrainData {
             .expect("DEM is not a valid terrain grid")
         }
         None => {
-            tracing::info!("No DEM path given, rendering a synthetic terrain");
+            tracing::info!("No DEM given; rendering a synthetic terrain");
             synthetic_terrain()
         }
     };
@@ -229,7 +229,7 @@ impl ApplicationHandler for Viewer {
                         return;
                     }
                     other => {
-                        tracing::warn!("Skipping frame: {other:?}");
+                        tracing::debug!("Skipping a frame: the window surface is {other:?}");
                         view.window.request_redraw();
                         return;
                     }
@@ -257,12 +257,8 @@ fn main() {
         .build()
         .expect("failed to build Tokio runtime");
     let _runtime_guard = runtime.enter();
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    // interactive tool: progress messages by default, AVALANCHERS_LOG overrides
+    simulation::init_logging_with_default(simulation::LogLevel::Info);
 
     let event_loop = EventLoop::new().expect("failed to create event loop");
     event_loop.set_control_flow(ControlFlow::Poll);

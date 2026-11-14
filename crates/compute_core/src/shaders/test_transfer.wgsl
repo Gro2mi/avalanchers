@@ -22,19 +22,19 @@ fn test_transfer(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     for (var i: u32 = 0; i < sim_settings.grid_shape.x * sim_settings.grid_shape.y; i++) {
         // atomic_float let mass = atomicLoad(&grid_mass_atomic[idx]);
-        let mass = f32(atomicLoad(&grid_mass_atomic[idx])) * INV_MASS_FACTOR; // no_atomic_float 
+        let mass = f32(atomicLoad(&grid_mass_atomic[idx])) * inv_mass_factor(); // no_atomic_float 
         // atomic_float let u = atomicLoad(&grid_momentum_atomic[idx * 2]) / (mass + 1e-6);
         // atomic_float let v = atomicLoad(&grid_momentum_atomic[idx * 2 + 1]) / (mass + 1e-6);
-        let u = f32(atomicLoad(&grid_momentum_atomic[idx * 2])) * INV_MOMENTUM_FACTOR / (mass + 1e-6); // no_atomic_float 
-        let v = f32(atomicLoad(&grid_momentum_atomic[idx * 2 + 1])) * INV_MOMENTUM_FACTOR / (mass + 1e-6); // no_atomic_float 
+        let u = f32(atomicLoad(&grid_momentum_atomic[idx * 2])) * inv_momentum_factor() / (mass + 1e-6); // no_atomic_float 
+        let v = f32(atomicLoad(&grid_momentum_atomic[idx * 2 + 1])) * inv_momentum_factor() / (mass + 1e-6); // no_atomic_float 
         grid_velocity[i] = vec2f(u, v);
     }
     // atomic_float let mass = atomicLoad(&grid_mass_atomic[idx]);
-    let mass = f32(atomicLoad(&grid_mass_atomic[idx])) * INV_MASS_FACTOR; // no_atomic_float 
+    let mass = f32(atomicLoad(&grid_mass_atomic[idx])) * inv_mass_factor(); // no_atomic_float 
     // atomic_float var u = atomicLoad(&grid_momentum_atomic[idx * 2]) / (mass + 1e-6);
     // atomic_float var v = atomicLoad(&grid_momentum_atomic[idx * 2 + 1]) / (mass + 1e-6);
-    var u = f32(atomicLoad(&grid_momentum_atomic[idx * 2])) * INV_MOMENTUM_FACTOR / (mass + 1e-6); // no_atomic_float
-    var v = f32(atomicLoad(&grid_momentum_atomic[idx * 2 + 1])) * INV_MOMENTUM_FACTOR / (mass + 1e-6); // no_atomic_float
+    var u = f32(atomicLoad(&grid_momentum_atomic[idx * 2])) * inv_momentum_factor() / (mass + 1e-6); // no_atomic_float
+    var v = f32(atomicLoad(&grid_momentum_atomic[idx * 2 + 1])) * inv_momentum_factor() / (mass + 1e-6); // no_atomic_float
         
 
     let interpolated_velocity = transfer_g2p(0u);
@@ -109,6 +109,15 @@ fn quantize_momentum_component(value: f32) -> i32 {
     return i32(round(clamped));
 }
 
+// Quantized mass contribution of the integer grid (mass_factor() in
+// utils.wgsl). A contribution whose mass rounds to zero must not deposit
+// momentum either, or it would leave momentum without mass and an unbounded
+// node velocity. With the range-based factors that needs a contribution faster
+// than 2 * MAX_FLOW_VELOCITY, so the guard only protects against misuse.
+fn quantize_mass(value: f32) -> u32 {
+    return u32(round(value * mass_factor()));
+}
+
 fn transfer_p2g(p_idx: u32) {
     transfer_p2g_with_affine(p_idx, mat2x2f(vec2f(0.0), vec2f(0.0)));
 }
@@ -133,15 +142,19 @@ fn transfer_p2g_with_affine(p_idx: u32, affine_matrix: mat2x2f) {
             
             
             // atomic_float atomicAdd(&grid_mass_atomic[idx], p_mass * weight);
-            // atomic_float atomicAdd(&grid_momentum_atomic[idx * 2u], p_mass * affine_velocity.x * weight);
-            // atomic_float atomicAdd(&grid_momentum_atomic[idx * 2u + 1u], p_mass * affine_velocity.y * weight);
+            // resting particles carry no momentum: skip their zero adds
+            // atomic_float let momentum = p_mass * weight * affine_velocity;
+            // atomic_float if momentum.x != 0.0 { atomicAdd(&grid_momentum_atomic[idx * 2u], momentum.x); }
+            // atomic_float if momentum.y != 0.0 { atomicAdd(&grid_momentum_atomic[idx * 2u + 1u], momentum.y); }
             // for affine transfer
             // atomicAdd(&grid_momentum_atomic[idx * 2u], p_mass * affine_velocity.x * weight);
             // atomicAdd(&grid_momentum_atomic[idx * 2u + 1u], p_mass * affine_velocity.y * weight);
 
-            atomicAdd(&grid_mass_atomic[idx], u32(round(p_mass * weight * MASS_FACTOR))); // no_atomic_float 
-            let momentum_x = p_mass * affine_velocity.x * weight * MOMENTUM_FACTOR; // no_atomic_float
-            let momentum_y = p_mass * affine_velocity.y * weight * MOMENTUM_FACTOR; // no_atomic_float
+            let quantized_mass = quantize_mass(p_mass * weight); // no_atomic_float
+            if quantized_mass == 0u { continue; } // no_atomic_float
+            atomicAdd(&grid_mass_atomic[idx], quantized_mass); // no_atomic_float
+            let momentum_x = p_mass * affine_velocity.x * weight * momentum_factor(); // no_atomic_float
+            let momentum_y = p_mass * affine_velocity.y * weight * momentum_factor(); // no_atomic_float
             // resting particles carry no momentum; skipping zero adds saves most of their atomics
             let quantized_x = quantize_momentum_component(momentum_x); // no_atomic_float
             let quantized_y = quantize_momentum_component(momentum_y); // no_atomic_float
@@ -181,20 +194,54 @@ const g: f32 = 9.81;
 
 // u32 limit is 4 294 967 296
 const MAX_VELOCITY_FACTOR: f32 = 1e7; // u32 limit is 430 m/s
-const MASS_FACTOR: f32 = 1e1; // u32 limit is 4.3t thickness
 const H_FACTOR: f32 = 1e6;
-// Momentum is quantized per particle->node contribution before atomicAdd, so
-// MOMENTUM_FACTOR sets the velocity resolution of that contribution:
-// the smallest non-zero contribution is v = 1 / (particle_mass * weight * MOMENTUM_FACTOR).
-// It must stay far below the slow hydrostatic spreading velocities (~0.01-0.1 m/s)
-// or p2g rounds them to zero every step and the flow never spreads laterally.
-// i32 budget: node sum = node_mass * v_max * MOMENTUM_FACTOR
-//   (rho*cell^2*h*J ~ 6e4 kg * 40 m/s * 1e2 = 2.4e8 < 2.1e9)
-const MOMENTUM_FACTOR: f32 = 1e2;
 const INV_MAX_VELOCITY_FACTOR: f32 = 1 / MAX_VELOCITY_FACTOR; // u32 limit is 430 m/s
-const INV_MASS_FACTOR: f32 = 1 / MASS_FACTOR; // u32 limit is 4.3km thickness
 const INV_H_FACTOR: f32 = 1 / H_FACTOR;
-const INV_MOMENTUM_FACTOR: f32 = 1 / MOMENTUM_FACTOR;
+// Integer-atomic grid (no_atomic_float): node masses and momenta are fixed
+// point numbers in u32 / i32, quantized per particle->node contribution before
+// atomicAdd. The factors fill the integer range with the largest node values a
+// flow can reach: a MAX_FLOW_THICKNESS deep column over a cell
+// (density * thickness * cell_size^2) moving at MAX_FLOW_VELOCITY, times
+// QUANTIZATION_SAFETY (which also covers the slope factor of the node mass).
+// They scale with the cell size like the particle masses, so a particle of a
+// release h_r thick with N particles per cell holds about
+// U32_RANGE * h_r / (N * QUANTIZATION_SAFETY * MAX_FLOW_THICKNESS) mass units
+// (2e6 for 1 m and 64 per cell) at every cell size. Must match settings.rs.
+const MAX_FLOW_THICKNESS: f32 = 30.0;
+const MAX_FLOW_VELOCITY: f32 = 100.0;
+const QUANTIZATION_SAFETY: f32 = 2.0;
+// below 2^32 and 2^31, so a rounded maximum still converts without saturating
+const QUANTIZATION_U32_RANGE: f32 = 4.0e9;
+const QUANTIZATION_I32_RANGE: f32 = 2.0e9;
+fn max_node_mass() -> f32 {
+    return QUANTIZATION_SAFETY * MAX_FLOW_THICKNESS * sim_settings.snow_density
+        * sim_settings.cell_size * sim_settings.cell_size;
+}
+// integer units per kg
+fn mass_factor() -> f32 {
+    return QUANTIZATION_U32_RANGE / max_node_mass();
+}
+fn inv_mass_factor() -> f32 {
+    return max_node_mass() / QUANTIZATION_U32_RANGE;
+}
+// integer units per kg m/s
+fn momentum_factor() -> f32 {
+    return QUANTIZATION_I32_RANGE / (max_node_mass() * MAX_FLOW_VELOCITY);
+}
+fn inv_momentum_factor() -> f32 {
+    return max_node_mass() * MAX_FLOW_VELOCITY / QUANTIZATION_I32_RANGE;
+}
+// Lightest node whose velocity momentum / mass is resolved: one momentum unit
+// changes it by 1 m/s (15 g for 5 m cells and 200 kg/m3). Lighter nodes
+// count as empty.
+fn min_node_mass() -> f32 {
+    return inv_momentum_factor(); // momentum unit / (1 m/s)
+}
+// Gully walls (reference surface, wall friction) need a reference surface at
+// least one cell wide; must match SimSettings::gully_walls_enabled.
+fn gully_walls_enabled() -> bool {
+    return sim_settings.reference_surface_length >= sim_settings.cell_size;
+}
 // depth-integrated internal force (h * sigma * grad_w * area, ~1e4..1e5 N per node contribution)
 const FORCE_FACTOR: f32 = 1e-3; // i32 limit is 2.1e6 N per node
 const INV_FORCE_FACTOR: f32 = 1 / FORCE_FACTOR;
@@ -216,12 +263,21 @@ struct SimInfo {
     max_flow_thickness: f32,
     flags: u32,
     grid_elapsed_time: f32,
+    travel_length_2d: f32,
+    travel_length_3d: f32,
+    travel_vertical_drop: f32,
+    travel_angle: f32,
+    _first_center_of_mass_timestep: u32,
+    _last_center_of_mass_timestep: u32,
+    _pad: u32,
 };
 
 const SIM_INFO_OUT_OF_BOUNDS: u32 = 1u << 0u;
 const SIM_INFO_CFL_EXCEEDED: u32 = 1u << 1u;
 const SIM_INFO_IS_NAN: u32 = 1u << 2u;
 const SIM_INFO_PARTICLE_OUT_OF_DEM_DATA: u32 = 1u << 3u;
+// a particle exceeded MAX_PARTICLE_SPEED and was stopped
+const SIM_INFO_UNPHYSICAL_SPEED: u32 = 1u << 4u;
 const SIM_INFO_STOPPED: u32 = 1u << 31u;
 const SIM_INFO_ALL_PARTICLES_STOPPED: u32 = 1u << 30u;
 const SIM_INFO_NO_NEW_CELLS: u32 = 1u << 29u;
@@ -230,8 +286,17 @@ const SIM_INFO_AT_REST: u32 = 1u << 28u;
 // total momentum fell below momentum_stop_fraction of its peak
 const SIM_INFO_LOW_MOMENTUM: u32 = 1u << 27u;
 
-// reversible low-speed state; the low bits hold the rest start step while resting
-// and the consecutive slow-step count while moving
+// Fastest particle speed (m/s) taken as physical. Dense flow avalanches reach
+// about 60-80 m/s and the integer atomic grid holds momentum up to
+// QUANTIZATION_SAFETY * MAX_FLOW_VELOCITY = 200 m/s; a faster particle comes from
+// a numerical blow-up (e.g. a cliff of no-data elevations) and is stopped.
+// Mirrors compute_core::MAX_PARTICLE_SPEED.
+const MAX_PARTICLE_SPEED: f32 = 150.0;
+// stopped for exceeding MAX_PARTICLE_SPEED
+const PARTICLE_UNPHYSICAL_SPEED: u32 = 1u << 25u;
+// reversible low-speed state; the low bits (below PARTICLE_UNPHYSICAL_SPEED)
+// hold the rest start step while resting and the consecutive slow-step count
+// while moving
 const PARTICLE_RESTING: u32 = 1u << 26u;
 // consecutive slow steps before a particle rests
 const REST_STEPS: u32 = 20u;
@@ -310,7 +375,7 @@ struct AtomicValues {
 // sub-threshold creep inside deposits. Returns the new state: its low bits hold
 // the slow-step counter while moving and the rest start step while resting.
 fn next_rest_state(previous_state: u32, speed: f32, timestep: u32) -> u32 {
-    let low_mask = PARTICLE_RESTING - 1u;
+    let low_mask = PARTICLE_UNPHYSICAL_SPEED - 1u;
     var resting = (previous_state & PARTICLE_RESTING) != 0u;
     var low_bits = previous_state & low_mask;
     if resting {

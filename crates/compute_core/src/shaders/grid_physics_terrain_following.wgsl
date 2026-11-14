@@ -12,7 +12,8 @@
 @group(0) @binding(8) var<storage, read_write> sim_info: SimInfo;
 @group(0) @binding(9) var<storage, read_write> grid_velocity: array<vec2f>;
 @group(0) @binding(10) var<storage, read_write> grid_peak_velocity: array<f32>;
-// binding 11 (basal topography) is shared with the curvilinear layout, unused here
+// x = cos(beta) between the bed and the smoothed reference surface
+@group(0) @binding(11) var basal_topography_texture: texture_2d<f32>;
 // z components of the 3D model; the terrain-following layout ends at binding 11
 @group(0) @binding(12) var<storage> grid_momentum_z_atomic: array<i32>; // no_atomic_float
 // atomic_float @group(0) @binding(12) var<storage> grid_momentum_z_atomic: array<f32>;
@@ -60,8 +61,8 @@ fn grid_physics_3d(@builtin(global_invocation_id) id: vec3u) {
         return;
     }
     let mass = node_mass(idx);
-    let w = select(f32(grid_momentum_z_atomic[idx]) * INV_MOMENTUM_FACTOR / (mass + 1e-6), 0.0, mass < 1e-2); // no_atomic_float
-    // atomic_float let w = select(grid_momentum_z_atomic[idx] / mass, 0.0, mass < 1e-2);
+    let w = select(f32(grid_momentum_z_atomic[idx]) * inv_momentum_factor() / (mass + 1e-6), 0.0, mass < min_node_mass()); // no_atomic_float
+    // atomic_float let w = select(grid_momentum_z_atomic[idx] / mass, 0.0, mass <= 0.0);
     // particles on differently inclined beds scatter into this node
     let velocity = tangent_project(vec3f(node_velocity_xy(idx, mass), w), n);
     let new_velocity = update_node(id.xy, n, velocity, mass);
@@ -89,16 +90,19 @@ fn neighbourhood_is_empty(xy: vec2u) -> bool {
 }
 
 fn node_mass(idx: u32) -> f32 {
-    return f32(grid_mass_atomic[idx]) * INV_MASS_FACTOR; // no_atomic_float
+    return f32(grid_mass_atomic[idx]) * inv_mass_factor(); // no_atomic_float
     // atomic_float return grid_mass_atomic[idx];
 }
 
-// Nodes holding less mass than the p2g quantization floor carry no meaningful
-// velocity (see grid_physics_curvilinear).
+// On the integer grid, nodes below the p2g mass quantum carry no meaningful
+// velocity (see grid_physics_curvilinear). The float grid is not quantized:
+// momentum / mass is exact for any deposited mass, and treating light margin
+// nodes as empty would drag the particles that gather from them.
 fn node_velocity_xy(idx: u32, mass: f32) -> vec2f {
-    let node_is_empty = mass < 1e-2;
-    let u = select(f32(grid_momentum_atomic[idx * 2]) * INV_MOMENTUM_FACTOR / (mass + 1e-6), 0.0, node_is_empty); // no_atomic_float
-    let v = select(f32(grid_momentum_atomic[idx * 2 + 1]) * INV_MOMENTUM_FACTOR / (mass + 1e-6), 0.0, node_is_empty); // no_atomic_float
+    let node_is_empty = mass < min_node_mass(); // no_atomic_float
+    // atomic_float let node_is_empty = mass <= 0.0;
+    let u = select(f32(grid_momentum_atomic[idx * 2]) * inv_momentum_factor() / (mass + 1e-6), 0.0, node_is_empty); // no_atomic_float
+    let v = select(f32(grid_momentum_atomic[idx * 2 + 1]) * inv_momentum_factor() / (mass + 1e-6), 0.0, node_is_empty); // no_atomic_float
     // atomic_float let u = select(grid_momentum_atomic[idx * 2] / mass, 0.0, node_is_empty);
     // atomic_float let v = select(grid_momentum_atomic[idx * 2 + 1] / mass, 0.0, node_is_empty);
     return vec2f(u, v);
@@ -109,6 +113,7 @@ fn node_velocity_xy(idx: u32, mass: f32) -> vec2f {
 fn update_node(xy: vec2u, n: vec3f, velocity: vec3f, mass: f32) -> vec3f {
     let use_curvature: bool = (sim_settings.flags & (1u << 0u)) != 0u;
     let use_particle_interaction: bool = (sim_settings.flags & (1u << 1u)) != 0u;
+    let use_earth_pressure_coefficient: bool = (sim_settings.flags & (1u << 2u)) != 0u;
 
     let idx = xy_to_idx(xy);
     let hessian = textureLoad(curvature_texture, vec2<i32>(xy), 0).xyz;
@@ -140,8 +145,19 @@ fn update_node(xy: vec2u, n: vec3f, velocity: vec3f, mass: f32) -> vec3f {
         (get_h(xy.x + 1, xy.y) - get_h(xy.x - 1, xy.y)) / (2.0 * sim_settings.cell_size),
         (get_h(xy.x, xy.y + 1) - get_h(xy.x, xy.y - 1)) / (2.0 * sim_settings.cell_size)
     );
-    let k = 1.0;
-    let pressure_acceleration = select(vec3f(0.0), -g_normal * k * surface_gradient(n, grad_h), use_particle_interaction);
+    // Savage-Hutter earth pressure (Hutter et al. 1993): k_x along the fall
+    // line, k_y across it, each active where the flow stretches in that
+    // direction and passive where it is compressed; hydrostatic when disabled
+    var k_grad_h = grad_h;
+    var k_y = 1.0;
+    if use_earth_pressure_coefficient {
+        // horizontal bed gradient from the unit normal
+        let slope = -n.xy / n.z;
+        let earth = earth_pressure(xy, slope, velocity.xy, grad_h);
+        k_grad_h = earth.k_grad_h;
+        k_y = earth.k_y;
+    }
+    let pressure_acceleration = select(vec3f(0.0), -g_normal * surface_gradient(n, k_grad_h), use_particle_interaction);
 
     let proposed = tangent_project(velocity + sim_info.dt * (gravity_acceleration + pressure_acceleration), n);
     let proposed_speed = length(proposed);
@@ -153,7 +169,14 @@ fn update_node(xy: vec2u, n: vec3f, velocity: vec3f, mass: f32) -> vec3f {
     // velocity_threshold keeps the low-speed gate of the shared friction model
     // from switching it off.
     let friction_speed = max(proposed_speed, sim_settings.velocity_threshold);
-    let friction_acceleration = basal_friction_acceleration(g_normal, sim_settings.snow_density, friction_speed, h, sim_settings.friction_model);
+    // gully walls, inclined by beta against the reference surface, carry the
+    // cross-slope lateral stress k_y sigma_zz of the snow beside them
+    var wall_load = g_normal;
+    if gully_walls_enabled() {
+        let cos_beta = textureLoad(basal_topography_texture, vec2<i32>(xy), 0).x;
+        wall_load = g_normal * gully_wall_load_factor(cos_beta, k_y);
+    }
+    let friction_acceleration = basal_friction_acceleration(wall_load, sim_settings.snow_density, friction_speed, h, sim_settings.friction_model);
     var new_velocity = vec3f(0.0);
     if (friction_acceleration * sim_info.dt) < proposed_speed {
         new_velocity = proposed * (1.0 - friction_acceleration * sim_info.dt / proposed_speed);
@@ -191,6 +214,120 @@ fn get_h(x: u32, y: u32) -> f32 {
     return node_mass(x_y_to_idx(x, y)) / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size) * n_z;
 }
 
+// import earth_pressure.wgsl;
+// BEGIN earth_pressure.wgsl
+// Savage-Hutter earth pressure coefficients (Hutter et al. 1993) for the grid
+// physics of the depth-averaged models.
+// Pure library module: it is textually imported and relies on the importing
+// module providing grid_mass_atomic, grid_momentum_atomic and the utils.wgsl
+// symbols (sim_settings, x_y_to_idx, inv_mass_factor(), inv_momentum_factor()).
+
+struct EarthPressure {
+    // pressure gradient weighted with k_x along the fall line, k_y across it
+    k_grad_h: vec2f,
+    // cross-slope coefficient, also the lateral stress loading gully walls
+    k_y: f32,
+}
+
+// Earth pressure at node xy from the horizontal bed gradient `slope`, the
+// horizontal node velocity q and the horizontal gradient of the flow thickness.
+// Each coefficient is active where the flow stretches in its direction and
+// passive where it is compressed. The fall line is an eigenvector of the
+// surface metric, so the weighting commutes with projecting onto the bed.
+fn earth_pressure(xy: vec2u, slope: vec2f, q: vec2f, grad_h: vec2f) -> EarthPressure {
+    let e_x = earth_pressure_axis(slope, q);
+    let e_y = vec2f(-e_x.y, e_x.x);
+    let grad_q = velocity_gradient(xy.x, xy.y);
+    let k = earth_pressure_coefficients(
+        radians(sim_settings.internal_friction_angle),
+        radians(sim_settings.basal_friction_angle),
+        dot(e_x, grad_q * e_x),
+        dot(e_y, grad_q * e_y)
+    );
+    return EarthPressure(k.x * dot(e_x, grad_h) * e_x + k.y * dot(e_y, grad_h) * e_y, k.y);
+}
+
+// Horizontal velocity q of node (x, y) from the node's own mass and momentum;
+// z = 1 when the node holds mass, 0 when it holds none (on the integer grid:
+// below the p2g mass quantum, where q is meaningless).
+fn node_velocity(x: u32, y: u32) -> vec3f {
+    let idx = x_y_to_idx(x, y);
+    let mass = f32(grid_mass_atomic[idx]) * inv_mass_factor(); // no_atomic_float
+    // atomic_float let mass = grid_mass_atomic[idx];
+    let node_is_empty = mass < min_node_mass(); // no_atomic_float
+    // atomic_float let node_is_empty = mass <= 0.0;
+    if node_is_empty {
+        return vec3f(0.0);
+    }
+    let q = vec2f(
+        f32(grid_momentum_atomic[idx * 2]) * inv_momentum_factor(), // no_atomic_float
+        f32(grid_momentum_atomic[idx * 2 + 1]) * inv_momentum_factor() // no_atomic_float
+        // atomic_float grid_momentum_atomic[idx * 2],
+        // atomic_float grid_momentum_atomic[idx * 2 + 1]
+    ) / mass;
+    return vec3f(q, 1.0);
+}
+
+// Derivative of q along one grid axis: central where both neighbours hold
+// mass, one-sided against the centre at the flow edge, zero for an isolated
+// node. Empty nodes carry no velocity, so a spreading front is not mistaken
+// for a compressed one.
+fn edge_aware_derivative(low: vec3f, centre: vec2f, high: vec3f) -> vec2f {
+    let dx = sim_settings.cell_size;
+    if low.z > 0.0 && high.z > 0.0 {
+        return (high.xy - low.xy) / (2.0 * dx);
+    }
+    if high.z > 0.0 {
+        return (high.xy - centre) / dx;
+    }
+    if low.z > 0.0 {
+        return (centre - low.xy) / dx;
+    }
+    return vec2f(0.0);
+}
+
+// Horizontal velocity gradient, columns dq/dx and dq/dy: grad_q * e is the
+// derivative of q along e, dot(e, grad_q * e) the strain rate along e.
+fn velocity_gradient(x: u32, y: u32) -> mat2x2f {
+    let centre = node_velocity(x, y).xy;
+    return mat2x2f(
+        edge_aware_derivative(node_velocity(x - 1u, y), centre, node_velocity(x + 1u, y)),
+        edge_aware_derivative(node_velocity(x, y - 1u), centre, node_velocity(x, y + 1u))
+    );
+}
+
+// Savage-Hutter downslope axis: the fall line, the flow direction on flat
+// ground.
+fn earth_pressure_axis(slope: vec2f, q: vec2f) -> vec2f {
+    if length(slope) > 1e-3 {
+        return -normalize(slope);
+    }
+    if length(q) > 1e-6 {
+        return normalize(q);
+    }
+    return vec2f(1.0, 0.0);
+}
+
+// Earth pressure coefficients (k_x, k_y) of Hutter et al. (1993) from the
+// internal and bed friction angles and the strain rates along and across the
+// downslope axis; >= 0 (stretching) selects the active state.
+fn earth_pressure_coefficients(phi: f32, delta: f32, strain_x: f32, strain_y: f32) -> vec2f {
+    let cos2_phi = cos(phi) * cos(phi);
+    let cos2_delta = cos(delta) * cos(delta);
+    let tan2_delta = tan(delta) * tan(delta);
+    // delta > phi has no Mohr-Coulomb limit state; clamp to the phi = delta case
+    let root = sqrt(max(1.0 - cos2_phi / cos2_delta, 0.0));
+    let k_x = select(
+        2.0 / cos2_phi * (1.0 + root) - 1.0,
+        2.0 / cos2_phi * (1.0 - root) - 1.0,
+        strain_x >= 0.0
+    );
+    let root_y = sqrt((1.0 - k_x) * (1.0 - k_x) + 4.0 * tan2_delta);
+    let k_y = select(0.5 * (k_x + 1.0 + root_y), 0.5 * (k_x + 1.0 - root_y), strain_y >= 0.0);
+    return vec2f(k_x, k_y);
+}
+
+// END earth_pressure.wgsl
 // import cartesian_geometry.wgsl;
 // BEGIN cartesian_geometry.wgsl
 // Cartesian surface geometry for the terrain-following models.
@@ -339,6 +476,18 @@ fn basal_friction_acceleration(g_eff: f32, density: f32, proposed_speed: f32, h:
     return shear_stress / max(mass_per_area, 1e-6);
 }
 
+// Gully confinement: snow filling a gully presses its walls (inclined by beta
+// against the smoothed reference surface) with the cross-flow stress
+// k_y sigma_zz of the material beside it. Relative to the bed-normal load of
+// the column above, the wall normal stress grows by 1 + k_y tan^2(beta).
+// The bed-normal h already equals the hydraulic radius, so the
+// velocity-dependent drag needs no wetted-area correction.
+// cos_beta = 1 (no reference surface) gives 1.
+fn gully_wall_load_factor(cos_beta: f32, k_y: f32) -> f32 {
+    let tan2_beta = 1.0 / (cos_beta * cos_beta) - 1.0;
+    return 1.0 + k_y * tan2_beta;
+}
+
 // END friction.wgsl
 // import utils.wgsl;
 // BEGIN utils.wgsl
@@ -348,20 +497,54 @@ const g: f32 = 9.81;
 
 // u32 limit is 4 294 967 296
 const MAX_VELOCITY_FACTOR: f32 = 1e7; // u32 limit is 430 m/s
-const MASS_FACTOR: f32 = 1e1; // u32 limit is 4.3t thickness
 const H_FACTOR: f32 = 1e6;
-// Momentum is quantized per particle->node contribution before atomicAdd, so
-// MOMENTUM_FACTOR sets the velocity resolution of that contribution:
-// the smallest non-zero contribution is v = 1 / (particle_mass * weight * MOMENTUM_FACTOR).
-// It must stay far below the slow hydrostatic spreading velocities (~0.01-0.1 m/s)
-// or p2g rounds them to zero every step and the flow never spreads laterally.
-// i32 budget: node sum = node_mass * v_max * MOMENTUM_FACTOR
-//   (rho*cell^2*h*J ~ 6e4 kg * 40 m/s * 1e2 = 2.4e8 < 2.1e9)
-const MOMENTUM_FACTOR: f32 = 1e2;
 const INV_MAX_VELOCITY_FACTOR: f32 = 1 / MAX_VELOCITY_FACTOR; // u32 limit is 430 m/s
-const INV_MASS_FACTOR: f32 = 1 / MASS_FACTOR; // u32 limit is 4.3km thickness
 const INV_H_FACTOR: f32 = 1 / H_FACTOR;
-const INV_MOMENTUM_FACTOR: f32 = 1 / MOMENTUM_FACTOR;
+// Integer-atomic grid (no_atomic_float): node masses and momenta are fixed
+// point numbers in u32 / i32, quantized per particle->node contribution before
+// atomicAdd. The factors fill the integer range with the largest node values a
+// flow can reach: a MAX_FLOW_THICKNESS deep column over a cell
+// (density * thickness * cell_size^2) moving at MAX_FLOW_VELOCITY, times
+// QUANTIZATION_SAFETY (which also covers the slope factor of the node mass).
+// They scale with the cell size like the particle masses, so a particle of a
+// release h_r thick with N particles per cell holds about
+// U32_RANGE * h_r / (N * QUANTIZATION_SAFETY * MAX_FLOW_THICKNESS) mass units
+// (2e6 for 1 m and 64 per cell) at every cell size. Must match settings.rs.
+const MAX_FLOW_THICKNESS: f32 = 30.0;
+const MAX_FLOW_VELOCITY: f32 = 100.0;
+const QUANTIZATION_SAFETY: f32 = 2.0;
+// below 2^32 and 2^31, so a rounded maximum still converts without saturating
+const QUANTIZATION_U32_RANGE: f32 = 4.0e9;
+const QUANTIZATION_I32_RANGE: f32 = 2.0e9;
+fn max_node_mass() -> f32 {
+    return QUANTIZATION_SAFETY * MAX_FLOW_THICKNESS * sim_settings.snow_density
+        * sim_settings.cell_size * sim_settings.cell_size;
+}
+// integer units per kg
+fn mass_factor() -> f32 {
+    return QUANTIZATION_U32_RANGE / max_node_mass();
+}
+fn inv_mass_factor() -> f32 {
+    return max_node_mass() / QUANTIZATION_U32_RANGE;
+}
+// integer units per kg m/s
+fn momentum_factor() -> f32 {
+    return QUANTIZATION_I32_RANGE / (max_node_mass() * MAX_FLOW_VELOCITY);
+}
+fn inv_momentum_factor() -> f32 {
+    return max_node_mass() * MAX_FLOW_VELOCITY / QUANTIZATION_I32_RANGE;
+}
+// Lightest node whose velocity momentum / mass is resolved: one momentum unit
+// changes it by 1 m/s (15 g for 5 m cells and 200 kg/m3). Lighter nodes
+// count as empty.
+fn min_node_mass() -> f32 {
+    return inv_momentum_factor(); // momentum unit / (1 m/s)
+}
+// Gully walls (reference surface, wall friction) need a reference surface at
+// least one cell wide; must match SimSettings::gully_walls_enabled.
+fn gully_walls_enabled() -> bool {
+    return sim_settings.reference_surface_length >= sim_settings.cell_size;
+}
 // depth-integrated internal force (h * sigma * grad_w * area, ~1e4..1e5 N per node contribution)
 const FORCE_FACTOR: f32 = 1e-3; // i32 limit is 2.1e6 N per node
 const INV_FORCE_FACTOR: f32 = 1 / FORCE_FACTOR;
@@ -383,12 +566,21 @@ struct SimInfo {
     max_flow_thickness: f32,
     flags: u32,
     grid_elapsed_time: f32,
+    travel_length_2d: f32,
+    travel_length_3d: f32,
+    travel_vertical_drop: f32,
+    travel_angle: f32,
+    _first_center_of_mass_timestep: u32,
+    _last_center_of_mass_timestep: u32,
+    _pad: u32,
 };
 
 const SIM_INFO_OUT_OF_BOUNDS: u32 = 1u << 0u;
 const SIM_INFO_CFL_EXCEEDED: u32 = 1u << 1u;
 const SIM_INFO_IS_NAN: u32 = 1u << 2u;
 const SIM_INFO_PARTICLE_OUT_OF_DEM_DATA: u32 = 1u << 3u;
+// a particle exceeded MAX_PARTICLE_SPEED and was stopped
+const SIM_INFO_UNPHYSICAL_SPEED: u32 = 1u << 4u;
 const SIM_INFO_STOPPED: u32 = 1u << 31u;
 const SIM_INFO_ALL_PARTICLES_STOPPED: u32 = 1u << 30u;
 const SIM_INFO_NO_NEW_CELLS: u32 = 1u << 29u;
@@ -397,8 +589,17 @@ const SIM_INFO_AT_REST: u32 = 1u << 28u;
 // total momentum fell below momentum_stop_fraction of its peak
 const SIM_INFO_LOW_MOMENTUM: u32 = 1u << 27u;
 
-// reversible low-speed state; the low bits hold the rest start step while resting
-// and the consecutive slow-step count while moving
+// Fastest particle speed (m/s) taken as physical. Dense flow avalanches reach
+// about 60-80 m/s and the integer atomic grid holds momentum up to
+// QUANTIZATION_SAFETY * MAX_FLOW_VELOCITY = 200 m/s; a faster particle comes from
+// a numerical blow-up (e.g. a cliff of no-data elevations) and is stopped.
+// Mirrors compute_core::MAX_PARTICLE_SPEED.
+const MAX_PARTICLE_SPEED: f32 = 150.0;
+// stopped for exceeding MAX_PARTICLE_SPEED
+const PARTICLE_UNPHYSICAL_SPEED: u32 = 1u << 25u;
+// reversible low-speed state; the low bits (below PARTICLE_UNPHYSICAL_SPEED)
+// hold the rest start step while resting and the consecutive slow-step count
+// while moving
 const PARTICLE_RESTING: u32 = 1u << 26u;
 // consecutive slow steps before a particle rests
 const REST_STEPS: u32 = 20u;
@@ -477,7 +678,7 @@ struct AtomicValues {
 // sub-threshold creep inside deposits. Returns the new state: its low bits hold
 // the slow-step counter while moving and the rest start step while resting.
 fn next_rest_state(previous_state: u32, speed: f32, timestep: u32) -> u32 {
-    let low_mask = PARTICLE_RESTING - 1u;
+    let low_mask = PARTICLE_UNPHYSICAL_SPEED - 1u;
     var resting = (previous_state & PARTICLE_RESTING) != 0u;
     var low_bits = previous_state & low_mask;
     if resting {

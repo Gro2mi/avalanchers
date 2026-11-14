@@ -8,6 +8,11 @@
 //! Distances are in world units (meters), velocities in m/s, and all grid
 //! results are returned as ``(height, width)`` numpy arrays matching the
 //! DEM shape.
+//!
+//! Log messages go to ``sys.stderr``, which notebooks show in the cell
+//! output. Release builds report warnings and errors; [`set_log_level`] or
+//! the ``AVALANCHERS_LOG`` environment variable (read at import) select
+//! another level, see [`simulation::logging`].
 
 use compute_core::{
     SimInfo, TimestepData,
@@ -22,9 +27,10 @@ use pyo3::{
     IntoPyObjectExt,
     exceptions::{PyIOError, PyKeyError, PyRuntimeError, PyTypeError, PyValueError},
     prelude::*,
+    types::PyDict,
 };
 use pythonize::depythonize;
-use simulation::{Simulation, init_logging};
+use simulation::{LogLevel, Simulation, init_logging};
 
 // A helper trait to make error conversion less verbose
 trait IntoPyResult<T> {
@@ -109,6 +115,30 @@ impl PySimInfo {
         self.inner.max_flow_thickness
     }
 
+    /// Horizontal center-of-mass path length in metres.
+    #[getter]
+    fn travel_length_2d(&self) -> f32 {
+        self.inner.travel_length_2d
+    }
+
+    /// Three-dimensional center-of-mass path length in metres.
+    #[getter]
+    fn travel_length_3d(&self) -> f32 {
+        self.inner.travel_length_3d
+    }
+
+    /// First minus latest valid center-of-mass elevation in metres.
+    #[getter]
+    fn travel_vertical_drop(&self) -> f32 {
+        self.inner.travel_vertical_drop
+    }
+
+    /// Center-of-mass travel angle in degrees, based on horizontal path length.
+    #[getter]
+    fn travel_angle(&self) -> f32 {
+        self.inner.travel_angle
+    }
+
     /// Bitmask of simulation status flags.
     #[getter]
     fn flags(&self) -> u32 {
@@ -126,6 +156,10 @@ impl PySimInfo {
             "elevation_threshold" => self.inner.elevation_threshold.into_py_any(py),
             "max_velocity" => self.inner.max_velocity.into_py_any(py),
             "max_flow_thickness" => self.inner.max_flow_thickness.into_py_any(py),
+            "travel_length_2d" => self.inner.travel_length_2d.into_py_any(py),
+            "travel_length_3d" => self.inner.travel_length_3d.into_py_any(py),
+            "travel_vertical_drop" => self.inner.travel_vertical_drop.into_py_any(py),
+            "travel_angle" => self.inner.travel_angle.into_py_any(py),
             "flags" => self.inner.flags.into_py_any(py),
             other => Err(PyKeyError::new_err(format!(
                 "Unknown sim info field: '{other}'"
@@ -479,8 +513,10 @@ impl PySimulation {
     ///         Defaults to the primary adapter.
     #[staticmethod]
     #[pyo3(signature = (gpu=None))]
-    pub fn new(gpu: Option<String>) -> PyResult<Self> {
-        let inner = Simulation::new_with_gpu(gpu).block_on().map_runtime_err()?;
+    pub fn new(py: Python<'_>, gpu: Option<String>) -> PyResult<Self> {
+        let inner = py
+            .detach(|| Simulation::new_with_gpu(gpu).block_on())
+            .map_runtime_err()?;
         Ok(PySimulation { inner })
     }
 
@@ -492,7 +528,7 @@ impl PySimulation {
     /// Args:
     ///     settings: Dictionary of settings, e.g.
     ///         ``{"peak_flow_thickness_threshold": 0.1}``.
-    pub fn create(&mut self, settings: &Bound<'_, PyAny>) -> PyResult<()> {
+    pub fn create(&mut self, py: Python<'_>, settings: &Bound<'_, PyAny>) -> PyResult<()> {
         let json_value: serde_json::Value =
             depythonize(settings).map_err(|e| PyErr::new::<PyTypeError, _>(e.to_string()))?;
 
@@ -503,8 +539,8 @@ impl PySimulation {
             .enable_all()
             .build()
             .map_runtime_err()?;
-        runtime
-            .block_on(self.inner.create(parsed.clone()))
+        let inner = &mut self.inner;
+        py.detach(|| runtime.block_on(inner.create(parsed)))
             .map_runtime_err()?;
         Ok(())
     }
@@ -523,10 +559,9 @@ impl PySimulation {
     /// Args:
     ///     dem_path: Path to the example DEM, relative to the repository root
     ///         (e.g. ``"data/avaframe/avaParabola.png"``).
-    pub fn create_example(&mut self, dem_path: String) -> PyResult<()> {
-        self.inner
-            .create_example(&dem_path)
-            .block_on()
+    pub fn create_example(&mut self, py: Python<'_>, dem_path: String) -> PyResult<()> {
+        let inner = &mut self.inner;
+        py.detach(|| inner.create_example(&dem_path).block_on())
             .map_runtime_err()
     }
 
@@ -628,8 +663,9 @@ impl PySimulation {
     }
 
     /// Run the simulation to completion (up to ``max_timesteps``).
-    pub fn run(&mut self) -> PyResult<()> {
-        self.inner.run().block_on().map_runtime_err()
+    pub fn run(&mut self, py: Python<'_>) -> PyResult<()> {
+        let inner = &mut self.inner;
+        py.detach(|| inner.run().block_on()).map_runtime_err()
     }
 
     /// Advance the simulation by a fixed number of steps.
@@ -640,8 +676,11 @@ impl PySimulation {
     ///
     /// Returns:
     ///     PySimInfo: Diagnostic state after the executed steps.
-    pub fn run_n_steps(&mut self, steps: u32) -> PyResult<PySimInfo> {
-        let sim_info = self.inner.run_n_steps(steps).block_on().map_runtime_err()?;
+    pub fn run_n_steps(&mut self, py: Python<'_>, steps: u32) -> PyResult<PySimInfo> {
+        let inner = &mut self.inner;
+        let sim_info = py
+            .detach(|| inner.run_n_steps(steps).block_on())
+            .map_runtime_err()?;
         Ok(PySimInfo { inner: sim_info })
     }
 
@@ -682,8 +721,9 @@ impl PySimulation {
     ///
     /// Called automatically by :meth:`run`; only needed when stepping
     /// manually via :meth:`run_n_steps`.
-    pub fn prepare(&mut self) -> PyResult<()> {
-        self.inner.prepare().block_on().map_runtime_err()
+    pub fn prepare(&mut self, py: Python<'_>) -> PyResult<()> {
+        let inner = &mut self.inner;
+        py.detach(|| inner.prepare().block_on()).map_runtime_err()
     }
 
     /// Prepare the simulation (if needed) and keep its initial particles.
@@ -703,10 +743,9 @@ impl PySimulation {
     ///         result = sim.evaluate()
     ///
     /// Must be called before the simulation runs.
-    pub fn store_initial_state(&mut self) -> PyResult<()> {
-        self.inner
-            .store_initial_state()
-            .block_on()
+    pub fn store_initial_state(&mut self, py: Python<'_>) -> PyResult<()> {
+        let inner = &mut self.inner;
+        py.detach(|| inner.store_initial_state().block_on())
             .map_runtime_err()
     }
 
@@ -715,20 +754,20 @@ impl PySimulation {
     /// Settings changed with :meth:`update_settings` take effect, and only
     /// the preparation stages they affect run again:
     ///
-    /// - ``sim_model`` or ``reference_surface_length``: full preparation,
+    /// - ``sim_model``, ``reference_surface_length`` or ``integer_atomics``:
+    ///   full preparation,
     /// - release thresholds (slope, elevation, roughness),
     ///   ``released_particles_per_cell``, ``release_area_fraction``, the
     ///   crown line and release fill settings or
-    ///   ``enable_particle_relaxation``: release areas and particle seeding,
+    ///   ``particle_placement``: release areas and particle seeding,
     /// - ``density`` or a changed ``release_thickness`` or ``release_swe``:
     ///   particle masses are rescaled; setting either on a release with its
     ///   own thickness or switching between them seeds the particles again,
     /// - anything else (friction, drag, cfl, max_steps, flags, ...): the
     ///   stored particles are restored as they are.
-    pub fn restore_initial_state(&mut self) -> PyResult<()> {
-        self.inner
-            .restore_initial_state()
-            .block_on()
+    pub fn restore_initial_state(&mut self, py: Python<'_>) -> PyResult<()> {
+        let inner = &mut self.inner;
+        py.detach(|| inner.restore_initial_state().block_on())
             .map_runtime_err()
     }
 
@@ -744,12 +783,15 @@ impl PySimulation {
     /// Args:
     ///     settings: Dictionary of settings, e.g.
     ///         ``{"friction_coefficient": 0.3, "drag_coefficient": 3000.0}``.
-    pub fn update_settings(&mut self, settings: &Bound<'_, PyAny>) -> PyResult<()> {
+    pub fn update_settings(&mut self, py: Python<'_>, settings: &Bound<'_, PyAny>) -> PyResult<()> {
         let json_value: serde_json::Value =
             depythonize(settings).map_err(|e| PyErr::new::<PyTypeError, _>(e.to_string()))?;
         let json_str = serde_json::to_string(&json_value).map_runtime_err()?;
         let patch = Settings::loads(&json_str).map_runtime_err()?;
-        self.inner.update_settings(&patch).map_runtime_err()
+        // switching integer_atomics rebuilds the shaders on worker threads
+        let inner = &mut self.inner;
+        py.detach(|| inner.update_settings(&patch))
+            .map_runtime_err()
     }
 
     /// Whether :meth:`store_initial_state` holds particles to restore.
@@ -760,18 +802,84 @@ impl PySimulation {
 
     /// Save the current results to disk.
     ///
+    /// The outline (region of interest) is stored with the scenario when the
+    /// simulation was created from one.
+    ///
     /// Args:
     ///     path: Output zarr path. Defaults to ``avalanchers.zarr``.
-    #[pyo3(signature = (path=None))]
-    pub fn save(&mut self, path: Option<String>) -> PyResult<()> {
-        match path {
-            Some(path) => self
-                .inner
-                .save_with_path(&path)
-                .block_on()
-                .map_runtime_err(),
-            None => self.inner.save().block_on().map_runtime_err(),
+    ///     label: What the run is, e.g. ``"cma_best"`` or ``"predicted"``, to
+    ///         tell it apart from the other runs of its scenario. Stored in the
+    ///         scenario attribute ``run_labels``, which the ``run_label``
+    ///         column indexes into. Defaults to ``""``.
+    ///
+    /// Returns:
+    ///     dict: ``store``, ``site`` and ``scenario`` names and the ``run``
+    ///     index the results were stored at.
+    #[pyo3(signature = (path=None, label=None))]
+    pub fn save<'py>(
+        &mut self,
+        py: Python<'py>,
+        path: Option<String>,
+        label: Option<String>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let label = label.unwrap_or_default();
+        let saved = match path {
+            Some(path) => self.inner.save_with_path_labeled(&path, &label).block_on(),
+            None => self.inner.save_labeled(&label).block_on(),
         }
+        .map_runtime_err()?;
+        let dict = PyDict::new(py);
+        dict.set_item("store", saved.store)?;
+        dict.set_item("site", saved.site)?;
+        dict.set_item("scenario", saved.scenario)?;
+        dict.set_item("run", saved.run_id)?;
+        Ok(dict)
+    }
+
+    /// Diagnostic state of the simulation, read from the GPU (timestep,
+    /// simulated time, particle count, stop ``flags``, ...).
+    #[getter]
+    pub fn sim_info(&mut self) -> PyResult<PySimInfo> {
+        let sim_info = self.inner.fetch_sim_info().block_on().map_runtime_err()?;
+        Ok(PySimInfo { inner: sim_info })
+    }
+
+    /// The GPU adapter the simulation runs on.
+    ///
+    /// Returns:
+    ///     dict: ``name``, ``device_type`` (e.g. ``"DiscreteGpu"``, ``"Cpu"``),
+    ///     ``backend`` (e.g. ``"Vulkan"``), ``vendor`` and ``device`` (PCI
+    ///     ids), ``driver`` and ``driver_info``.
+    #[getter]
+    pub fn adapter_info<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let info = self.inner.adapter_info();
+        let dict = PyDict::new(py);
+        dict.set_item("name", info.name)?;
+        dict.set_item("device_type", format!("{:?}", info.device_type))?;
+        dict.set_item("backend", format!("{:?}", info.backend))?;
+        dict.set_item("vendor", info.vendor)?;
+        dict.set_item("device", info.device)?;
+        dict.set_item("driver", info.driver)?;
+        dict.set_item("driver_info", info.driver_info)?;
+        Ok(dict)
+    }
+
+    /// Release volume and center-of-mass trajectory of the finished run,
+    /// without the grid readbacks of :meth:`save`.
+    ///
+    /// Returns:
+    ///     dict: ``release_volume_m3``, horizontal ``travel_length_2d`` (m),
+    ///     ``travel_length_3d`` (m), ``travel_vertical_drop`` (m) and ``travel_angle``
+    ///     (degrees) of the center of mass, accumulated during the simulation.
+    pub fn run_summary<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let summary = self.inner.run_summary().block_on().map_runtime_err()?;
+        let dict = PyDict::new(py);
+        dict.set_item("release_volume_m3", summary.release_volume_m3)?;
+        dict.set_item("travel_length_2d", summary.travel_length_2d)?;
+        dict.set_item("travel_length_3d", summary.travel_length_3d)?;
+        dict.set_item("travel_vertical_drop", summary.travel_vertical_drop)?;
+        dict.set_item("travel_angle", summary.travel_angle)?;
+        Ok(dict)
     }
 
     /// Write a grid to an ESRI ASCII file georeferenced by the DEM.
@@ -1333,6 +1441,19 @@ impl PySimulation {
         Ok(data.to_pyarray(py))
     }
 
+    /// f32 array of the per-cell deposited vertical momentum in kg m/s,
+    /// ``height * width``. Only the 3D depth-averaged model carries it; it is
+    /// zero for the other models.
+    #[getter]
+    fn get_grid_momentum_z<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<f32>>> {
+        let data = self
+            .inner
+            .fetch_grid_momentum_z()
+            .block_on()
+            .map_runtime_err()?;
+        Ok(data.to_pyarray(py))
+    }
+
     /// u32 array of the particle stop timesteps (0 = still moving).
     #[getter]
     fn get_stopped<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<u32>>> {
@@ -1429,9 +1550,110 @@ type PyTexture<'py> = (
 );
 
 /// Python module entry point for the avalanche simulator.
+/// The build of this module, as written to result stores.
+///
+/// Returns:
+///     dict: ``version`` (package version), ``software_version``
+///     (``<version>+<short commit>``, with ``.dirty`` when the build sources
+///     differed from the commit; the entry of a run in ``software_versions``),
+///     ``git_commit`` (full hash, ``"unknown"`` without git) and ``git_dirty``.
+#[pyfunction]
+fn build_info(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
+    use data_processor::store_schema::{GIT_COMMIT, GIT_DIRTY, SOFTWARE_VERSION};
+    let dict = PyDict::new(py);
+    dict.set_item("version", env!("CARGO_PKG_VERSION"))?;
+    dict.set_item("software_version", SOFTWARE_VERSION)?;
+    dict.set_item("git_commit", GIT_COMMIT)?;
+    dict.set_item("git_dirty", GIT_DIRTY)?;
+    Ok(dict)
+}
+
+/// Sets the level of the log messages written to ``sys.stderr``: ``"off"``,
+/// ``"error"``, ``"warn"`` (default of release builds), ``"info"``,
+/// ``"debug"`` or ``"trace"``. Applies immediately, also to running
+/// simulations, and overrides the ``AVALANCHERS_LOG`` environment variable.
+#[pyfunction]
+fn set_log_level(level: &str) -> PyResult<()> {
+    let level: LogLevel = level.parse().map_err(PyValueError::new_err)?;
+    simulation::set_log_level(level);
+    Ok(())
+}
+
+/// Log lines of threads Python does not know (GPU and worker threads), kept
+/// until a Python thread writes the next line; bounded so a silent program
+/// cannot grow it without limit.
+static PENDING_LOG_LINES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+const MAX_PENDING_LOG_LINES: usize = 1000;
+
+/// Writes a log line to Python's ``sys.stderr``, so that notebooks show it in
+/// the cell output (native stderr only reaches the Jupyter server console).
+///
+/// Only threads that have a Python thread state take the GIL here: the
+/// calling thread of a binding method, also while it released the GIL for a
+/// long computation. Other threads never wait for the GIL, as the caller may
+/// hold it while waiting for them; their lines follow the next line of a
+/// Python thread.
+fn write_log_to_python(line: &str) {
+    // SAFETY: plain queries of the interpreter state, valid on any thread
+    let python_thread = unsafe {
+        pyo3::ffi::Py_IsInitialized() != 0 && !pyo3::ffi::PyGILState_GetThisThreadState().is_null()
+    };
+    if !python_thread {
+        if let Ok(mut pending) = PENDING_LOG_LINES.lock()
+            && pending.len() < MAX_PENDING_LOG_LINES
+        {
+            pending.push(line.to_owned());
+        }
+        return;
+    }
+    let pending = PENDING_LOG_LINES
+        .lock()
+        .map(|mut pending| std::mem::take(&mut *pending))
+        .unwrap_or_default();
+    Python::attach(|py| {
+        let stderr = py
+            .import("sys")
+            .and_then(|sys| sys.getattr("stderr"))
+            .ok()
+            .filter(|stderr| !stderr.is_none());
+        let Some(stderr) = stderr else {
+            // pythonw and similar: no Python stream
+            for text in pending.iter().map(String::as_str).chain([line]) {
+                eprint!("{text}");
+            }
+            return;
+        };
+        for text in pending.iter().map(String::as_str).chain([line]) {
+            let _ = stderr.call_method1("write", (text,));
+        }
+        let _ = stderr.call_method0("flush");
+    });
+}
+
+/// Whether to colour the log lines: in a terminal and in Jupyter, which
+/// renders ANSI colours, but not in redirected output or with ``NO_COLOR``.
+fn python_stderr_shows_colors(py: Python<'_>) -> bool {
+    let Ok(sys) = py.import("sys") else {
+        return false;
+    };
+    let is_tty = sys
+        .getattr("stderr")
+        .and_then(|stderr| stderr.call_method0("isatty"))
+        .and_then(|tty| tty.extract::<bool>())
+        .unwrap_or(false);
+    let in_jupyter = sys
+        .getattr("modules")
+        .and_then(|modules| modules.contains("ipykernel"))
+        .unwrap_or(false);
+    is_tty || in_jupyter
+}
+
 #[pymodule]
 fn _avalanchers(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    pyo3_log::init();
+    simulation::set_log_output(
+        Some(Box::new(write_log_to_python)),
+        python_stderr_shows_colors(m.py()),
+    );
     init_logging();
 
     m.add_class::<PySimulation>()?;
@@ -1442,5 +1664,7 @@ fn _avalanchers(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyTimestepData>()?;
 
     m.add_function(wrap_pyfunction!(list_available_gpus, m)?)?;
+    m.add_function(wrap_pyfunction!(build_info, m)?)?;
+    m.add_function(wrap_pyfunction!(set_log_level, m)?)?;
     Ok(())
 }

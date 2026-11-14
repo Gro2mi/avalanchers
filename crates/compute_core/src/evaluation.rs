@@ -536,10 +536,10 @@ mod tests {
         // Helper function to decode a 9-bit integer into a 3x3 boolean grid matrix
         fn integer_to_3x3_grid(bits: u16) -> Vec<Vec<bool>> {
             let mut grid = vec![vec![false; 3]; 3];
-            for i in 0..3 {
-                for j in 0..3 {
+            for (i, row) in grid.iter_mut().enumerate() {
+                for (j, cell) in row.iter_mut().enumerate() {
                     let bit_index = i * 3 + j;
-                    grid[i][j] = (bits & (1 << bit_index)) != 0;
+                    *cell = (bits & (1 << bit_index)) != 0;
                 }
             }
             grid

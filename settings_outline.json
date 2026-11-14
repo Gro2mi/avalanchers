@@ -1,12 +1,13 @@
 {
   "outlines_path": "data/outline/polygon_10720.shp",
-  "outlines_padding": 4000,
-  "sim_model": "terrain-following",
+  "outlines_padding": 200,
+  "sim_model": "3d",
   "friction_model": "voellmy",
   "max_steps": 6000,
   "released_particles_per_cell": 4,
   "release_thickness": 1.0,
   "friction_coefficient": 0.3,
   "drag_coefficient": 2000.0,
-  "velocity_threshold": 0.1
+  "velocity_threshold": 0.1,
+  "enable_center_of_mass": true
 }

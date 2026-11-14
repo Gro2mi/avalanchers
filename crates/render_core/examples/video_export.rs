@@ -380,7 +380,7 @@ fn main() -> anyhow::Result<()> {
             anyhow::bail!("ffmpeg failed while receiving frames ({error}); exit status: {status}");
         }
         frames += 1;
-        if frames % 100 == 0 {
+        if frames.is_multiple_of(100) {
             println!(
                 "frame {frames}: step {} ({:.1} s simulated)",
                 sim.info.timestep, sim.info.elapsed_time

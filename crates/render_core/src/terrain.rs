@@ -271,7 +271,8 @@ struct TerrainUniforms {
     view_proj: [[f32; 4]; 4],
     /// width, height, cell_size, vertical exaggeration
     grid: [f32; 4],
-    /// min elevation, max elevation, unused, unused
+    /// min elevation, max elevation, momentum overlay unit (kg m/s per i32
+    /// step), unused
     elevation: [f32; 4],
     /// direction towards the light
     light_dir: [f32; 4],
@@ -339,8 +340,8 @@ impl OverlayRange {
 enum OverlayMode {
     /// One `f32` per cell, indexed as `y * width + x`.
     Scalar = 1,
-    /// Two interleaved `i32` values `(u, v)` per cell — the p2g momentum pair,
-    /// quantized by `MOMENTUM_FACTOR` (1e2); shown as the magnitude in kg·m/s.
+    /// Two interleaved `i32` values `(u, v)` per cell — the p2g momentum pair
+    /// of the integer-atomic grid; shown as the magnitude in kg·m/s.
     Momentum = 2,
 }
 
@@ -554,14 +555,17 @@ impl TerrainRenderer {
 
     /// Like [`Self::set_overlay`], but for the simulation's momentum grid: two
     /// interleaved `i32` values `(u, v)` per cell, as quantized by the p2g
-    /// pass's `MOMENTUM_FACTOR` (1e2). The terrain is tinted by the magnitude
-    /// of the pair, in kg·m/s.
+    /// pass of the integer-atomic grid, `momentum_unit` kg·m/s per step
+    /// (`1 / SimSettings::momentum_factor`). The terrain is tinted by the
+    /// magnitude of the pair, in kg·m/s.
     pub fn set_momentum_overlay(
         &mut self,
         device: &wgpu::Device,
         buffer: Option<&wgpu::Buffer>,
         range: OverlayRange,
+        momentum_unit: f32,
     ) {
+        self.uniforms.elevation[2] = momentum_unit;
         self.bind_overlay(device, buffer, OverlayMode::Momentum, range);
     }
 

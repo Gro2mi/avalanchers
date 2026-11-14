@@ -1,7 +1,7 @@
 {
   "dem_path": "data/avaframe/avaWog.png",
   "release_areas_path": "data/avaframe/avaWogreleaseTexture.png",
-  "sim_model": "curvilinear",
+  "sim_model": "3d",
   "friction_model": "voellmy",
   "max_steps": 6000,
   "cfl": 0.9,
@@ -9,6 +9,6 @@
   "friction_coefficient": 0.2,
   "drag_coefficient": 2000.0,
   "velocity_threshold": 0.1,
-  "enable_center_of_mass": false,
+  "enable_center_of_mass": true,
   "reference_surface_length": 20.0
 }

@@ -62,7 +62,7 @@ async function fetchAndCacheTile(url) {
             // console.log(`Put successful: ${url}`);
         };
         request.onerror = (e) => {
-            console.error(`Put failed: ${url}`, e);
+            console.warn(`Could not cache the map tile ${url}:`, e);
         };
 
         tx2.oncomplete = () => {
@@ -70,7 +70,7 @@ async function fetchAndCacheTile(url) {
             resolve();
         };
         tx2.onerror = () => {
-            console.error(`Transaction error: ${url}`);
+            console.warn(`Could not store the map tile ${url} in the tile cache`);
             reject(tx2.error);
         };
     });
@@ -117,7 +117,7 @@ async function fetchAndCacheTiles(bbox, zoom) {
     const nTilesX = bottomRight.x - topLeft.x + 1;
     const nTilesY = bottomRight.y - topLeft.y + 1;
 
-    console.log(`Fetching ${nTilesX * nTilesY} tiles simultaneously...`);
+    console.debug(`Fetching ${nTilesX * nTilesY} map tiles`);
 
     // 1. Create an array to store the promises
     const fetchPromises = [];
@@ -128,7 +128,7 @@ async function fetchAndCacheTiles(bbox, zoom) {
             const url = `https://alpinemaps.cg.tuwien.ac.at/tiles/alpine_png/${zoom}/${x}/${yCoord}.png`;
             fetchPromises.push(
                 fetchAndCacheTile(url).catch(e => {
-                    console.error('Failed to fetch', url, e);
+                    console.warn(`Could not fetch the map tile ${url}; it stays empty:`, e);
                     return null; // Return null so Promise.all doesn't fail entirely
                 })
             );

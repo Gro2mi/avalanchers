@@ -5,6 +5,36 @@ All notable changes to this project might be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- GeoTIFF DEMs written by GDAL keep their no-data cells out of the simulation. The no-data tag
+  (42113) is an ASCII string such as `"-9999"`, which was read as a number and ignored, so the
+  cells counted as elevations of -9999 m and the flow fell off a 12 km cliff at the edge of the
+  data (peak velocities up to 10^12 m/s on the Vals DEM). Elevations below -1000 m in a file
+  without the tag are treated as no data too, with a warning.
+- Terrain-following and 3D particles next to no-data cells are stopped there instead of being
+  thrown across the grid. Bilinear sampling of a footprint that holds a NaN texel is undefined
+  and returned NaN or degenerate normals and curvatures. The terrain analysis marks every texel
+  whose normal or curvature touches missing data in the w channel of the terrain geometry
+  texture (the unused profile curvature before), so the normal sample the particle needs anyway
+  tells whether its footprint is valid, at no extra texture reads. Particles stopped at missing
+  data also carry `out_of_dem_data` in every grid model, not only in the sliding block model.
+- Release areas never include cells without elevation data, so the released volume and mass
+  are always finite. The terrain-based release estimation compared NaN slopes, elevations and
+  roughnesses with its thresholds, which is always false, so every no-data cell became a release
+  cell with a NaN mass (62 % of the Vals DEM instead of 16 %). Release areas from files or arrays
+  lose cells with a non-finite thickness or without valid terrain in or next to them, with a
+  warning that gives their number.
+- The flow front no longer stalls behind a steep wall on GPUs with float atomics when particles
+  are light (many particles per cell, thin release margins). The tile-sorted P2G still rounded
+  every contribution to 0.1 kg and dropped those that rounded to zero, and the grid treated nodes
+  below 10 g as empty, so particles at the margin gathered zero velocity from their outer stencil
+  nodes and lost a few percent of their speed every step. Float-atomic devices now use the direct
+  P2G and treat only massless nodes as empty. The similarity solution test of the 3D model at 64
+  particles per cell drops from 15.2 % to 5.1 % thickness error at 20 s, and centre-of-mass
+  runouts no longer depend on the particle count.
+- The Linux wheel imports on systems with an older glibc than the CI runner, e.g. Ubuntu 24.04. It
+  is built in the manylinux_2_28 container and runs from glibc 2.28 on.
+- Errors of the swissALTI3D tile manager now say what went wrong instead of only "Failed to create
+  tile manager", also when the tiles were fetched for an existing manager.
 - The simulation runs in Chrome again. The center of mass shader failed WGSL uniformity validation
   there, which Firefox does not enforce.
 - The biggest-blob center of mass no longer risks reading stale blob labels or masses. Its phases
@@ -23,6 +53,71 @@ All notable changes to this project might be documented in this file.
   OpenGL backend caused this.
 
 ### Changed
+- Logging reports only warnings and errors in release builds (info in debug builds). The level is
+  set with `--log-level` (command line), `avalanchers.set_log_level()` (Python), the `log` URL
+  parameter or `setLogLevel()` (web app), or the `AVALANCHERS_LOG` environment variable, which
+  also takes filter directives such as `info,compute_core=debug`. It applies to the avalanchers
+  crates; wgpu and other dependencies only report warnings unless `AVALANCHERS_LOG` names them.
+  All messages were reviewed for their level and rewritten in one style: what happened, then what
+  follows or what to change. The duration of every stage of a run (GPU setup, terrain analysis,
+  release, particles, simulation) is logged at info. Native builds log to stderr. The Python
+  module writes to `sys.stderr`, so Jupyter notebooks show the messages in the cell output
+  (before, they only reached the server console); it no longer goes through the Python `logging`
+  module (removes the `pyo3-log` dependency). Messages of GPU and worker threads follow the next
+  message of the calling thread, so logging can no longer deadlock on the GIL.
+- Particles faster than 150 m/s are stopped and flag the run with `UNPHYSICAL_SPEED` (dense
+  avalanches reach about 60-80 m/s, so faster particles come from a numerical blow-up). After a
+  run, warnings give the number of particles stopped for an unphysical speed, an invalid (NaN)
+  state, missing elevation data or the DEM edge, and the command line summary lists them.
+- The command line tool prints a summary to stdout at every log level: the setup (DEM, model,
+  friction, release area, volume and mass, release terrain, particles, steps and why the run
+  stopped), the results (peak velocity and flow thickness, affected area, runout distance, drop
+  and angle, center-of-mass travel length (3D, with the horizontal length) and angle) and, with an outline, the overlap and the
+  outline's runout, followed by a peak velocity map. It reads the particle debug data from the
+  GPU only at debug level, and stops with an error when the given settings file does not exist
+  instead of falling back to `settings.json`.
+- The GPU context starts in about 0.25 s instead of 0.5-1.5 s. The adapter is looked up on Vulkan
+  alone first (all backends only when Vulkan has no discrete GPU, or as set with `WGPU_BACKEND`),
+  which skips starting DX12 on Windows. Shader pipelines are built on first use instead of all 43
+  at start, one module per WGSL file; the shader sources are expanded once per process (in
+  parallel) without regular expressions, and
+  debug builds still write changed imports back into the files. Creating the shaders at start
+  takes 2 ms in release and 5 ms in debug (was 108 ms and 990 ms); debug builds compile `naga`
+  optimized. `WGPU_VALIDATION` and `WGPU_DEBUG` now override the wgpu instance flags.
+- Terrain analysis, release areas and particle seeding take 25 ms instead of 52 ms (debug builds
+  47 ms instead of 216 ms). The reference surface is smoothed on the GPU (`smooth_reference.wgsl`,
+  the same Gaussian as before, within 2 mm), the relaxation reuses one bind group per kernel and
+  runs each iteration in one compute pass, and seeding no longer waits for the GPU to read back the
+  estimated release volume.
+- A simulation step of the grid models takes 40-50 % less GPU time (3D depth-averaged model: 0.13
+  instead of 0.22 ms per step with 12 800 particles, 0.21 instead of 0.42 ms with 96 000). The
+  whole-grid center of mass sums the grid per 16x16 tile in parallel before the single-workgroup
+  reduction (15 instead of 100-170 us per step); the 3D model deposits mass, horizontal and
+  vertical momentum in one pass over the stencil; GPUs with float atomics skip the zero momentum
+  of resting particles.
+- The reference surface and the gully wall friction only run when `reference_surface_length` is at
+  least the cell size; a smaller positive value logs a warning and leaves them off.
+- The Python bindings release the GIL while they create, prepare, run or restore a simulation.
+- The integer-atomic grid (WebGPU, or `integer_atomics`) sizes its fixed point units per run from
+  the cell size and density instead of fixed 0.1 kg and 0.01 kg m/s: the u32 mass and i32 momentum
+  ranges hold a 30 m deep flow over a cell at 100 m/s with a safety factor of 2. A particle then
+  holds the same number of units at every cell size (about 1.2 million mass units for a 1 m release
+  at 64 particles per cell); 5 m cells resolve 7.5e-5 kg and 0.015 kg m/s, and large cells no
+  longer overflow the momentum range of fast, deep flows. Nodes lighter than one momentum unit per
+  1 m/s count as empty, and the run logs the units a release particle holds. On the float GPU of
+  this machine the integer grid now matches the float grid in all verification tests (similarity
+  solution 3.5 % thickness error at 20 s on both).
+- **Breaking:** `enable_particle_relaxation` is replaced by `particle_placement` (CLI
+  `--particle-placement`): `random`, `relaxed`, `uniform-random` or `uniform-relaxed`. The uniform
+  placements split every release cell into one equal-area stratum per particle and draw each
+  particle in its own stratum, which removes most of the sampling noise of random seeding in the
+  grid thickness; the relaxed ones run the relaxation afterwards. The default is now
+  `uniform-relaxed` (before: random seeding with relaxation, now `relaxed`), so results change
+  slightly. `enable_particle_relaxation: true` becomes `relaxed`, `false` becomes `random`. At 64
+  particles per cell the thickness error of the similarity solution (3D) drops from 5.1 % to 3.5 %
+  at 20 s, that of the dam break from 2.5 % to 2.0 %, and their profiles no longer wiggle; the
+  energy line, curvature and rotation tests are unchanged. Crown line detection keeps `random`, its
+  entry counts are tuned to it.
 - **Breaking:** `slope_aspect` is now the direction the slope faces (downhill), as in GIS and
   avalanche bulletins: a north-facing slope is 0 degrees. It used to be the uphill bearing, 180
   degrees off. Flat cells stay -1.
@@ -102,6 +197,48 @@ All notable changes to this project might be documented in this file.
   shortened the runout: the energy line benchmark is now 5 m from its reference, not 307 m.
 
 ### Added
+- The web app has a gully wall reference length control (`reference_surface_length`, 0 = off).
+- The web app shows engine warnings as yellow notifications that fade after 5 s and errors (also
+  engine crashes) as red notifications that stay until closed. Repeated messages count up
+  instead of stacking. Programs embedding the web package receive the messages with
+  `onLogMessage(callback)`, Rust programs with `simulation::set_message_listener`.
+- `integer_atomics` (CLI `--integer-atomics`, verification `run_all_tests.py --integer-atomics`)
+  accumulates the grid with integer atomics also on GPUs with float atomics, to reproduce browser
+  results or test the WebGPU path natively. Switching it on a prepared simulation rebuilds the
+  shader pipelines and prepares the simulation again.
+- The dam break verification test runs on a refined grid: `--refine N` (default 4, cell size
+  1.25 m instead of the DEM's 5 m) interpolates the plane DEM and splits every release cell. At 64
+  particles per cell the thickness error at 15 s drops from 7.4 % to 2.5 % and the front lag at
+  h = 1 mm from 25 m to 7 m; the 5 m grid smeared the initial step over 3-4 cells.
+- Every build names its commit: the version string written to result stores and shown by
+  `cli --version` is `<version>+<short commit>`, with `.dirty` when the build sources (`crates/`,
+  `Cargo.toml`, `Cargo.lock`) differed from the commit. New stores also get the full hash in the
+  root attributes `avalanchers_git_commit`, `avalanchers_git_dirty` and
+  `avalanchers_software_version`. Python: `avalanchers.build_info()`, `__git_commit__`,
+  `__software_version__`, `__git_dirty__`. Builds without a git checkout take the commit from
+  the environment variables `AVALANCHERS_GIT_COMMIT` and `AVALANCHERS_GIT_DIRTY`. Release builds
+  track the dirty flag exactly; debug builds only update it on commits, checkouts and staging.
+- Runs can carry a label that tells them apart within a scenario, e.g. a calibrated optimum and a
+  predicted run: `Simulation::save_labeled` / `save_with_path_labeled`, and
+  `PySimulation.save(path, label=...)` in Python. The scenario attribute `run_labels` lists the
+  labels and the new `run_label` column indexes into it, like `software_version`; the empty label
+  marks a run saved without one. `AvalanchersScenario.run_labels`, `.labels` and
+  `.runs_labeled(label)` read them back. The store format stays 0.2.0: older stores have no
+  `run_label` column, and their runs count as unlabeled.
+- Result stores keep the outline: a scenario run from an outline gets an `outline` array (`uint8`,
+  1 inside) and its `outline_hash`. A run with another outline is not appended to that scenario,
+  and a scenario loaded from a store brings its outline back as the region of interest. DEM-only
+  runs store none. The store format stays 0.2.0.
+- A simulation created from an outline with a DEM fetched from swissALTI3D tiles names its site
+  after the outline file (`polygon-10720_<hash>`) instead of `default-site_<hash>`.
+- `save` returns the `store`, `site`, `scenario` and `run` it wrote to. Python also gets the
+  `sim_info` and `adapter_info` getters and `run_summary()`, which gives the release volume and the
+  center-of-mass travel length and angle without the grid readbacks of a save.
+- `AVALANCHERS_TILES_OFFLINE=1` turns a missing swissALTI3D tile into a `tile_missing` error
+  instead of a download, so many concurrent jobs only read a prefilled cache.
+  `AVALANCHERS_TILE_DELAY_MS` pauses after each downloaded tile. Tiles are still downloaded one
+  after another, and a request the server throttles (HTTP 429 or 503) is retried after its
+  `Retry-After`, up to five times.
 - `Simulation::release_area_terrain` and the Python getters `release_mean_slope_angle`,
   `release_max_slope_angle`, `release_mean_aspect` and `release_mean_elevation` give the mean
   terrain and the largest slope angle of the release cells.
@@ -130,24 +267,27 @@ All notable changes to this project might be documented in this file.
 - `run()` no longer repeats terrain analysis, release areas and particle seeding when the
   particles are already initialized (after `prepare()` or `restore_initial_state()`).
 - `sliding-block` (model 3): the previous per-particle terrain-following model.
-- `3d` (model 4): the terrain-following model with a full 3D Cartesian velocity through P2G and G2P.
+- `3d-depth-averaged` (model 4, alias `3d`): the terrain-following model with a full 3D Cartesian velocity through P2G and G2P.
   Slower than `terrain-following` but keeps the z velocity and affine state on the particles.
 - Optional particle elevation jitter in the renderer (live viewer key `J`).
 - `particle_sort_interval` (CLI `--particle-sort-interval`, default 25): curvilinear,
   terrain-following and 3D P2G over particles sorted by 8x8-cell tiles, accumulating each workgroup in shared memory before the
   global atomics; 0 disables it. Results are identical to the direct P2G on the integer-atomic
-  grid; on the float-atomic grid the shared sums keep the integer quantization.
+  grid. Devices with float atomics do not sort and always use the direct P2G, which does not
+  quantize.
 - `momentum_stop_fraction` (CLI `--momentum-stop-fraction`, default 0 = off): stops a curvilinear,
   terrain-following or 3D run once the total grid momentum falls below this fraction of its peak (flag `LOW_MOMENTUM`).
-- `reference_surface_length` (CLI `--reference-surface-length`, default 0 = off): curvilinear
-  gully confinement. Bed inclined by beta against a Gaussian-smoothed reference surface of this
+- `reference_surface_length` (CLI `--reference-surface-length`, default 0 = off): gully
+  confinement in the curvilinear, terrain-following and 3d-depth-averaged models. Bed inclined by beta against a Gaussian-smoothed reference surface of this
   width counts as a gully wall: the snow beside it presses it with its lateral stress, so the
   normal load of the basal friction grows by `1 + K tan^2 beta` (K = 1, or the cross-slope
   earth pressure coefficient when enabled). All other terms stay on the real bed. (Moving the
   metric, gravity and pressure onto the reference surface, as in Gray et al. 1999, made deposits
   creep on gorge floors below steep walls and dropped the centrifugal load of narrow bends.)
   The live viewer exposes the setting under "terrain & release" (0 = off).
-  `verification/run_gully_test.py` checks the V-channel friction factor against the wedge limit.
+  `verification/run_gully_test.py` checks the V-channel friction factor against the wedge limit
+  (`--sim-model` selects the model). All grid models load the walls with the cross-slope earth
+  pressure coefficient when it is enabled, otherwise with K = 1.
 - `enable_earth_pressure_coefficient` is off by default in all models (engine, live viewer, web
   frontend, Python defaults): Voellmy-type parameters are calibrated with hydrostatic pressure.
 - Curvilinear: `enable_earth_pressure_coefficient` now applies the Savage-Hutter
@@ -159,6 +299,10 @@ All notable changes to this project might be documented in this file.
   one-sided at the flow edge. `run_similarity_solution_test.py --earth-pressure` compares it
   with the analytic solution; the dam break, similarity and gully tests pin the flag to match
   their references.
+- Terrain-following and 3d-depth-averaged: the optional earth pressure coefficients (off by
+  default) act on the pressure gradient and the gully wall load like in the curvilinear model.
+  The helpers moved into the shared `earth_pressure.wgsl`. On the similarity solution with earth
+  pressure the relative thickness error at 20 s is 0.075 (0.066 with K = 1).
 - Sliding block: `div_u` for the earth pressure coefficient uses each node's own mass (it divided
   neighbour momentum by the centre mass), turns one-sided at the flow edge and reads float-atomic
   momentum correctly.

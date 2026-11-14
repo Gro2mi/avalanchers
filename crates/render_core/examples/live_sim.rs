@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use compute_core::settings::{FrictionModel, Settings, SimModel};
+use compute_core::settings::{FrictionModel, ParticlePlacement, Settings, SimModel};
 use compute_core::{ComputeOrchestrator, SimInfo, buffers::BufferName};
 use render_core::{OrbitCamera, OverlayRange, ParticleBuffers, Renderer, TerrainData};
 use simulation::{Simulation, SimulationState};
@@ -82,7 +82,7 @@ const DEFAULT_ROUGHNESS_THRESHOLD: f32 = 0.01;
 const DEFAULT_INTERNAL_FRICTION_ANGLE: f32 = 40.0;
 const DEFAULT_RELEASED_PARTICLES_PER_CELL: u32 = 8;
 const DEFAULT_MAX_STEPS: u32 = 6000;
-/// 0 disables the curvilinear reference-surface split (gully confinement)
+/// 0 disables the reference-surface split (gully confinement) of the grid models
 const DEFAULT_REFERENCE_SURFACE_LENGTH: f32 = 0.0;
 
 /// Fills in every field the settings panel edits with the engine defaults from
@@ -129,7 +129,7 @@ fn apply_panel_defaults(settings: &mut Settings) {
         .get_or_insert(FrictionModel::Voellmy);
     settings.enable_curvature.get_or_insert(true);
     settings.enable_particle_interaction.get_or_insert(true);
-    settings.enable_particle_relaxation.get_or_insert(true);
+    settings.particle_placement.get_or_insert_default();
     settings
         .enable_earth_pressure_coefficient
         .get_or_insert(false);
@@ -152,7 +152,7 @@ fn testcase_dir(settings: &Settings) -> String {
 /// is a DEM, `avaFooreleaseTexture.png` is its release areas.
 fn discover_testcases(dir: &str) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(dir) else {
-        tracing::warn!("testcase directory '{dir}' not found; testcase list stays empty");
+        tracing::warn!("Test case directory '{dir}' not found; the test case list stays empty");
         return Vec::new();
     };
     let mut cases = entries
@@ -273,16 +273,18 @@ impl Overlay {
 }
 
 /// Attaches `overlay`'s grid buffer to the renderer. The momentum overlay needs
-/// the interleaved-i32 shader mode; every other grid is a plain scalar field.
+/// the interleaved-i32 shader mode (`momentum_unit` kg m/s per step); every
+/// other grid is a plain scalar field.
 fn attach_overlay(
     renderer: &mut Renderer,
     device: &wgpu::Device,
     overlay: Overlay,
     buffer: Option<&wgpu::Buffer>,
+    momentum_unit: f32,
 ) {
     match overlay {
         Overlay::GridMomentum => {
-            renderer.set_grid_momentum_overlay(device, buffer, overlay.range())
+            renderer.set_grid_momentum_overlay(device, buffer, overlay.range(), momentum_unit)
         }
         _ => renderer.set_grid_overlay(device, buffer, overlay.range()),
     }
@@ -338,16 +340,21 @@ struct SimulationView {
 
 impl SimulationView {
     /// Factor from a raw `GridMass` value to metres of flow, and whether the
-    /// mass is stored as f32 bits (float-atomic adapters) instead of a
-    /// quantized u32 (see `MASS_FACTOR` in utils.wgsl).
+    /// mass is stored as f32 bits (float-atomic grid) instead of a quantized
+    /// u32 (see `SimSettings::mass_factor`).
     fn grid_mass_encoding(&self) -> (f32, bool) {
-        const MASS_FACTOR: f32 = 10.0;
         let settings = &self.simulation.settings;
         let is_f32 = self.simulation.orchestrator().has_float32_atomic();
-        let mass_factor = if is_f32 { 1.0 } else { MASS_FACTOR };
+        let mass_factor = if is_f32 { 1.0 } else { settings.mass_factor() };
         let thickness =
             1.0 / (mass_factor * settings.density * settings.cell_size * settings.cell_size);
         (thickness, is_f32)
+    }
+
+    /// kg m/s per step of the quantized `GridMomentum` of the integer-atomic
+    /// grid, for the momentum overlay.
+    fn momentum_unit(&self) -> f32 {
+        1.0 / self.simulation.settings.momentum_factor()
     }
 
     fn grid(&self, name: &BufferName) -> &wgpu::Buffer {
@@ -386,7 +393,7 @@ impl SimulationView {
             }
             Err(error) => {
                 self.failed = true;
-                tracing::error!("simulation step failed: {error}");
+                tracing::error!("Simulation step failed: {error}");
             }
         }
         true
@@ -395,7 +402,7 @@ impl SimulationView {
     fn adjust_speed(&mut self, factor: f32) {
         self.sim_speed = (self.sim_speed * factor).clamp(0.25, 256.0);
         self.next_step_at = Instant::now();
-        tracing::info!("simulation speed: {:.2}x", self.sim_speed);
+        tracing::info!("Simulation speed: {:.2}x", self.sim_speed);
     }
 
     /// Re-clones the GPU buffers after the simulation was reset or rebuilt. Model
@@ -427,7 +434,7 @@ impl SimulationView {
         self.simulation.reset();
         self.info = pollster::block_on(self.simulation.run_n_steps(0))?;
         self.refresh_buffers()?;
-        tracing::info!("simulation restarted");
+        tracing::info!("Simulation restarted");
         Ok(())
     }
 
@@ -461,8 +468,8 @@ impl SimulationView {
                 self.simulation.dem.cell_size,
             );
         if terrain_switched {
-            tracing::info!(
-                "Loaded DEM {}x{} at {} m resolution",
+            tracing::debug!(
+                "Terrain mesh of {} x {} cells of {} m",
                 self.simulation.dem.width,
                 self.simulation.dem.height,
                 self.simulation.dem.cell_size
@@ -487,18 +494,22 @@ impl SimulationView {
         if steps == 0 {
             return;
         }
-        // tracing::info!(
-        //     "simulation step {} (+{}) took {:.3} ms",
-        //     self.info.timestep,
-        //     steps,
-        //     duration.as_secs_f64() * 1000.0
-        // );
+        tracing::trace!(
+            "Simulation step {} (+{steps}) took {:.3} ms",
+            self.info.timestep,
+            duration.as_secs_f64() * 1000.0
+        );
         self.step_timings.push((steps, duration));
     }
 
     fn report_final_info(&mut self) {
         if !self.final_info_reported && self.simulation.get_state() >= SimulationState::Finished {
-            tracing::info!("simulation finished: {:?}", self.info);
+            tracing::info!(
+                "Simulation finished after {} steps ({:.1} s of flow)",
+                self.info.timestep,
+                self.info.elapsed_time
+            );
+            tracing::debug!("Simulation info: {:?}", self.info);
             self.report_timing_summary();
             self.final_info_reported = true;
         }
@@ -506,7 +517,7 @@ impl SimulationView {
 
     fn report_timing_summary(&self) {
         if self.step_timings.is_empty() {
-            tracing::info!("simulation timing summary: no steps completed");
+            tracing::info!("Timing: no steps completed");
             return;
         }
 
@@ -533,7 +544,8 @@ impl SimulationView {
         let steps_per_second = f64::from(total_steps) / total_seconds.max(f64::EPSILON);
 
         tracing::info!(
-            "simulation timing summary: {} steps in {} batches, total {:.3} s, average {:.3} ms/step, min batch {:.3} ms, max batch {:.3} ms, {:.2} steps/s",
+            "Timing: {} steps in {} batches, {:.3} s in total, {:.3} ms per step, batches of \
+             {:.3}-{:.3} ms, {:.2} steps/s",
             total_steps,
             self.step_timings.len(),
             total_seconds,
@@ -547,8 +559,8 @@ impl SimulationView {
 
 fn start_simulation(settings: Settings, exaggeration: f32) -> anyhow::Result<SimulationView> {
     let mut sim: Simulation = pollster::block_on(Simulation::new_with_settings(settings))?;
-    tracing::info!(
-        "Loaded DEM {}x{} at {} m resolution",
+    tracing::debug!(
+        "Terrain mesh of {} x {} cells of {} m",
         sim.dem.width,
         sim.dem.height,
         sim.dem.cell_size
@@ -623,6 +635,7 @@ fn write_snapshot(sim: &SimulationView, overlay: Overlay, path: &str) -> anyhow:
         &sim.device,
         overlay,
         overlay.buffer_name().map(|name| sim.grid(&name)),
+        sim.momentum_unit(),
     );
     renderer.set_particles(
         &sim.device,
@@ -649,7 +662,7 @@ fn write_snapshot(sim: &SimulationView, overlay: Overlay, path: &str) -> anyhow:
         HEIGHT,
     )?;
     image::save_buffer(path, &pixels, WIDTH, HEIGHT, image::ColorType::Rgba8)?;
-    tracing::info!("wrote {path} with overlay '{}'", overlay.label());
+    tracing::info!("Saved {path} with the overlay '{}'", overlay.label());
     Ok(())
 }
 
@@ -790,9 +803,16 @@ impl Viewer {
             return;
         };
         let buffer = self.overlay.buffer_name().map(|name| self.sim.grid(&name));
-        attach_overlay(&mut view.renderer, &self.sim.device, self.overlay, buffer);
+        let momentum_unit = self.sim.momentum_unit();
+        attach_overlay(
+            &mut view.renderer,
+            &self.sim.device,
+            self.overlay,
+            buffer,
+            momentum_unit,
+        );
         self.dirty = true;
-        tracing::info!("overlay: {}", self.overlay.label());
+        tracing::info!("Overlay: {}", self.overlay.label());
     }
 
     fn apply_particles(&mut self) {
@@ -884,7 +904,7 @@ impl ApplicationHandler for Viewer {
         let icon = match window_icon() {
             Ok(icon) => Some(icon),
             Err(error) => {
-                tracing::warn!("failed to load window icon: {error}");
+                tracing::warn!("Could not load the window icon: {error}");
                 None
             }
         };
@@ -1087,14 +1107,17 @@ impl ApplicationHandler for Viewer {
                     Key::Character("j" | "J") => {
                         self.particle_jitter = !self.particle_jitter;
                         self.apply_particles();
-                        tracing::info!("particle elevation jitter: {}", self.particle_jitter);
+                        tracing::info!(
+                            "Particle elevation jitter: {}",
+                            if self.particle_jitter { "on" } else { "off" }
+                        );
                     }
                     Key::Character("+") => self.sim.adjust_speed(2.0),
                     Key::Character("-") => self.sim.adjust_speed(0.5),
                     Key::Character("r" | "R") => {
                         if let Err(error) = self.sim.restart() {
                             self.sim.failed = true;
-                            tracing::error!("simulation restart failed: {error}");
+                            tracing::error!("Could not restart the simulation: {error}");
                         } else {
                             self.apply_overlay();
                             self.apply_particles();
@@ -1137,7 +1160,7 @@ impl ApplicationHandler for Viewer {
                         return;
                     }
                     other => {
-                        tracing::warn!("Skipping frame: {other:?}");
+                        tracing::debug!("Skipping a frame: the window surface is {other:?}");
                         view.window.request_redraw();
                         return;
                     }
@@ -1226,7 +1249,11 @@ impl ApplicationHandler for Viewer {
                                             SimModel::TerrainFollowing,
                                             "Terrain-following",
                                         );
-                                        ui.selectable_value(&mut model, SimModel::ThreeD, "3D");
+                                        ui.selectable_value(
+                                            &mut model,
+                                            SimModel::ThreeDDepthAveraged,
+                                            "3D depth averaged",
+                                        );
                                         ui.selectable_value(
                                             &mut model,
                                             SimModel::Curvilinear,
@@ -1404,9 +1431,12 @@ impl ApplicationHandler for Viewer {
                                     0.001..=1.0,
                                     0.001,
                                 );
-                                // curvilinear only; 0 disables the gully confinement
+                                // grid flow models only; 0 disables the gully confinement
                                 ui.add_enabled_ui(
-                                    draft.sim_model == Some(SimModel::Curvilinear),
+                                    !matches!(
+                                        draft.sim_model,
+                                        Some(SimModel::MpmDaC | SimModel::SlidingBlock)
+                                    ),
                                     |ui| {
                                         f32_slider(
                                             ui,
@@ -1433,11 +1463,27 @@ impl ApplicationHandler for Viewer {
                                     "particle interaction",
                                     &mut draft.enable_particle_interaction,
                                 );
-                                bool_checkbox(
-                                    ui,
-                                    "particle relaxation",
-                                    &mut draft.enable_particle_relaxation,
-                                );
+                                ui.horizontal(|ui| {
+                                    ui.label("particle placement");
+                                    let placement =
+                                        draft.particle_placement.get_or_insert_default();
+                                    egui::ComboBox::from_id_salt("particle_placement")
+                                        .selected_text(placement.to_string())
+                                        .show_ui(ui, |ui| {
+                                            for option in [
+                                                ParticlePlacement::Random,
+                                                ParticlePlacement::Relaxed,
+                                                ParticlePlacement::UniformRandom,
+                                                ParticlePlacement::UniformRelaxed,
+                                            ] {
+                                                ui.selectable_value(
+                                                    placement,
+                                                    option,
+                                                    option.to_string(),
+                                                );
+                                            }
+                                        });
+                                });
                                 bool_checkbox(
                                     ui,
                                     "earth pressure coefficient",
@@ -1522,10 +1568,10 @@ impl ApplicationHandler for Viewer {
 
         // Panel changes rebuild the simulation; running after the frame means the
         // fresh buffers are only drawn on the next redraw.
-        if let Some(settings) = pending_settings {
-            if let Err(error) = self.rebuild(settings) {
-                tracing::error!("simulation rebuild failed: {error}");
-            }
+        if let Some(settings) = pending_settings
+            && let Err(error) = self.rebuild(settings)
+        {
+            tracing::error!("Could not apply the new settings: {error}");
         }
     }
 
@@ -1576,20 +1622,15 @@ fn main() -> anyhow::Result<()> {
         .build()
         .expect("failed to build Tokio runtime");
     let _runtime_guard = runtime.enter();
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    // interactive tool: progress messages by default, AVALANCHERS_LOG overrides
+    simulation::init_logging_with_default(simulation::LogLevel::Info);
 
     let mut args = std::env::args().skip(1);
     let settings_path = args.next().unwrap_or_else(|| DEFAULT_SETTINGS.to_string());
     let exaggeration: f32 = args.next().and_then(|v| v.parse().ok()).unwrap_or(1.0);
     let snapshot = std::env::var("LIVE_SIM_SNAPSHOT").ok();
-    println!(
-        "Settings path: {settings_path} exaggeration: {exaggeration} snapshot: {:?}",
-        snapshot
+    tracing::debug!(
+        "Settings {settings_path}, vertical exaggeration {exaggeration}, snapshot {snapshot:?}"
     );
 
     let mut settings = Settings::from_json(&settings_path)

@@ -9,6 +9,10 @@
 //   own label points to), which shrinks the remaining label distance
 //   exponentially per round - long, sinuous blobs converge in a handful of
 //   rounds instead of one pass per path length.
+// - center_of_mass_partials: whole-grid mode only, one workgroup per
+//   WG_SIZE_2D x WG_SIZE_2D tile of the grid sums the mass and moment of its
+//   tile into tile_partials, so the final stage reduces a few
+//   hundred partial sums instead of every cell on a single workgroup.
 // - compute_center_of_mass: the final reduction stage, dispatched as exactly
 //   one workgroup after seed and propagate have filled the label buffer
 //   (both early-out when the whole-grid mode is selected).
@@ -60,6 +64,9 @@ const PROPAGATION_ROUNDS: u32 = 16u;
 @group(0) @binding(7) var<storage, read_write> blob_labels: array<u32>;
 @group(0) @binding(8) var<storage, read_write> blob_mass: array<atomic<u32>>; // no_atomic_float
 // atomic_float @group(0) @binding(8) var<storage, read_write> blob_mass: array<atomic<f32>>;
+// per-tile (mass, moment x, moment y, unused) of the whole-grid mode, one per
+// workgroup of center_of_mass_partials in row-major tile order
+@group(0) @binding(9) var<storage, read_write> tile_partials: array<vec4f>;
 
 var<workgroup> wg_mass: array<f32, WG_SIZE>;
 var<workgroup> wg_moment: array<vec2f, WG_SIZE>;
@@ -91,6 +98,87 @@ fn min_neighbor_label(cell: vec2i, label: u32, grid_shape: vec2i) -> u32 {
 fn get_elevation(position_xy: vec2f) -> f32 {
     let uv = position_to_uv(position_xy);
     return textureSampleLevel(dem_texture, tex_sampler, uv, 0).x;
+}
+
+fn trajectory_distance(delta: vec3f) -> f32 {
+    let absolute = abs(delta);
+    let scale = max(max(absolute.x, absolute.y), absolute.z);
+    if scale == 0.0 || !is_finite(scale) {
+        return scale;
+    }
+    // Scale before squaring, like hypot, to avoid overflow and underflow.
+    return scale * length(absolute / scale);
+}
+
+fn update_trajectory(timestep: u32) {
+    let current = center_of_mass[timestep];
+    let mass_bits = bitcast<u32>(current.total_mass);
+    if (mass_bits & 0x80000000u) != 0u || mass_bits == 0u || mass_bits > 0x7f800000u
+        || !is_finite(current.com.x) || !is_finite(current.com.y) || !is_finite(current.com.z) {
+        return;
+    }
+    let previous_timestep = sim_info._last_center_of_mass_timestep;
+    if previous_timestep == 0xffffffffu {
+        sim_info._first_center_of_mass_timestep = timestep;
+        sim_info.travel_length_2d = 0.0;
+        sim_info.travel_length_3d = 0.0;
+    } else {
+        if timestep <= previous_timestep {
+            return;
+        }
+        let delta = current.com - center_of_mass[previous_timestep].com;
+        sim_info.travel_length_2d += trajectory_distance(vec3f(delta.xy, 0.0));
+        sim_info.travel_length_3d += trajectory_distance(delta);
+    }
+    sim_info._last_center_of_mass_timestep = timestep;
+    sim_info.travel_vertical_drop =
+        center_of_mass[sim_info._first_center_of_mass_timestep].com.z - current.com.z;
+    sim_info.travel_angle = 0.0;
+    if sim_info.travel_length_2d > 0.0 {
+        sim_info.travel_angle = degrees(atan2(sim_info.travel_vertical_drop, sim_info.travel_length_2d));
+    }
+}
+
+// Whole-grid mode: mass and moment of one tile of the grid, reduced in
+// workgroup memory (WG_SIZE_2D^2 == WG_SIZE threads). No early return before
+// the barriers: cells outside the grid contribute nothing.
+@compute @workgroup_size(WG_SIZE_2D, WG_SIZE_2D, 1)
+fn center_of_mass_partials(
+    @builtin(global_invocation_id) id: vec3u,
+    @builtin(local_invocation_index) li: u32,
+    @builtin(workgroup_id) tile: vec3u,
+    @builtin(num_workgroups) tiles: vec3u,
+) {
+    var mass = 0.0;
+    var moment = vec2f(0.0, 0.0);
+    if id.x < sim_settings.grid_shape.x && id.y < sim_settings.grid_shape.y {
+        let i = xy_to_idx(id.xy);
+        let m = f32(mass_buffer[i]) * inv_mass_factor(); // no_atomic_float
+        // atomic_float let m = mass_buffer[i];
+        if m > 0.0 && is_finite(m) {
+            mass = m;
+            moment = cell_center_xy(id.xy) * m;
+        }
+    }
+    wg_mass[li] = mass;
+    wg_moment[li] = moment;
+    workgroupBarrier();
+    var stride_size = WG_SIZE / 2u;
+    loop {
+        if li < stride_size {
+            wg_mass[li] = wg_mass[li] + wg_mass[li + stride_size];
+            wg_moment[li] = wg_moment[li] + wg_moment[li + stride_size];
+        }
+        workgroupBarrier();
+        if stride_size == 1u {
+            break;
+        }
+        stride_size = stride_size >> 1u;
+    }
+    if li == 0u {
+        tile_partials[tile.y * tiles.x + tile.x] =
+            vec4f(wg_mass[0], wg_moment[0], 0.0);
+    }
 }
 
 @compute @workgroup_size(WG_SIZE_2D, WG_SIZE_2D, 1)
@@ -196,7 +284,11 @@ fn compute_center_of_mass(@builtin(local_invocation_index) li: u32) {
         storageBarrier();
         for (var i = li; i < num_cells; i = i + WG_SIZE) {
             if blob_labels[i] != NO_BLOB {
-                atomicAdd(&blob_mass[blob_labels[i]], mass_buffer[i]);
+                // whole kg on the integer grid: its mass units resolve a single
+                // node and the sum over a blob would overflow u32 (4.3e9 kg
+                // fit); rounded up so every node with mass counts
+                atomicAdd(&blob_mass[blob_labels[i]], u32(ceil(f32(mass_buffer[i]) * inv_mass_factor()))); // no_atomic_float
+                // atomic_float atomicAdd(&blob_mass[blob_labels[i]], mass_buffer[i]);
             }
         }
         storageBarrier();
@@ -237,7 +329,7 @@ fn compute_center_of_mass(@builtin(local_invocation_index) li: u32) {
         // only the cells of the biggest blob contribute
         for (var i = li; i < num_cells; i = i + WG_SIZE) {
             if blob_labels[i] == biggest_label {
-                let m = f32(mass_buffer[i]) * INV_MASS_FACTOR; // no_atomic_float
+                let m = f32(mass_buffer[i]) * inv_mass_factor(); // no_atomic_float
                 // atomic_float let m = mass_buffer[i];
                 if m > 0.0 && is_finite(m) {
                     let position = cell_center_xy(idx_to_xy(i));
@@ -247,15 +339,13 @@ fn compute_center_of_mass(@builtin(local_invocation_index) li: u32) {
             }
         }
     } else {
-        // whole-grid mode: every mass cell contributes
-        for (var i = li; i < num_cells; i = i + WG_SIZE) {
-            let m = f32(mass_buffer[i]) * INV_MASS_FACTOR; // no_atomic_float
-            // atomic_float let m = mass_buffer[i];
-            if m > 0.0 && is_finite(m) {
-                let position = cell_center_xy(idx_to_xy(i));
-                mass = mass + m;
-                moment = moment + position * m;
-            }
+        // whole-grid mode: every mass cell contributes, summed per tile by
+        // center_of_mass_partials
+        let tiles = (sim_settings.grid_shape + vec2u(WG_SIZE_2D - 1u)) / WG_SIZE_2D;
+        for (var i = li; i < tiles.x * tiles.y; i = i + WG_SIZE) {
+            let partial = tile_partials[i];
+            mass = mass + partial.x;
+            moment = moment + partial.yz;
         }
     }
 
@@ -287,6 +377,7 @@ fn compute_center_of_mass(@builtin(local_invocation_index) li: u32) {
         center_of_mass[timestep].total_mass = total_mass;
         center_of_mass[timestep].time = sim_info.elapsed_time;
         center_of_mass[timestep].com = select(vec3f(0.0, 0.0, 0.0), vec3f(x, y, elevation), total_mass > 0.0);
+        update_trajectory(timestep);
     }
 }
 
@@ -298,20 +389,54 @@ const g: f32 = 9.81;
 
 // u32 limit is 4 294 967 296
 const MAX_VELOCITY_FACTOR: f32 = 1e7; // u32 limit is 430 m/s
-const MASS_FACTOR: f32 = 1e1; // u32 limit is 4.3t thickness
 const H_FACTOR: f32 = 1e6;
-// Momentum is quantized per particle->node contribution before atomicAdd, so
-// MOMENTUM_FACTOR sets the velocity resolution of that contribution:
-// the smallest non-zero contribution is v = 1 / (particle_mass * weight * MOMENTUM_FACTOR).
-// It must stay far below the slow hydrostatic spreading velocities (~0.01-0.1 m/s)
-// or p2g rounds them to zero every step and the flow never spreads laterally.
-// i32 budget: node sum = node_mass * v_max * MOMENTUM_FACTOR
-//   (rho*cell^2*h*J ~ 6e4 kg * 40 m/s * 1e2 = 2.4e8 < 2.1e9)
-const MOMENTUM_FACTOR: f32 = 1e2;
 const INV_MAX_VELOCITY_FACTOR: f32 = 1 / MAX_VELOCITY_FACTOR; // u32 limit is 430 m/s
-const INV_MASS_FACTOR: f32 = 1 / MASS_FACTOR; // u32 limit is 4.3km thickness
 const INV_H_FACTOR: f32 = 1 / H_FACTOR;
-const INV_MOMENTUM_FACTOR: f32 = 1 / MOMENTUM_FACTOR;
+// Integer-atomic grid (no_atomic_float): node masses and momenta are fixed
+// point numbers in u32 / i32, quantized per particle->node contribution before
+// atomicAdd. The factors fill the integer range with the largest node values a
+// flow can reach: a MAX_FLOW_THICKNESS deep column over a cell
+// (density * thickness * cell_size^2) moving at MAX_FLOW_VELOCITY, times
+// QUANTIZATION_SAFETY (which also covers the slope factor of the node mass).
+// They scale with the cell size like the particle masses, so a particle of a
+// release h_r thick with N particles per cell holds about
+// U32_RANGE * h_r / (N * QUANTIZATION_SAFETY * MAX_FLOW_THICKNESS) mass units
+// (2e6 for 1 m and 64 per cell) at every cell size. Must match settings.rs.
+const MAX_FLOW_THICKNESS: f32 = 30.0;
+const MAX_FLOW_VELOCITY: f32 = 100.0;
+const QUANTIZATION_SAFETY: f32 = 2.0;
+// below 2^32 and 2^31, so a rounded maximum still converts without saturating
+const QUANTIZATION_U32_RANGE: f32 = 4.0e9;
+const QUANTIZATION_I32_RANGE: f32 = 2.0e9;
+fn max_node_mass() -> f32 {
+    return QUANTIZATION_SAFETY * MAX_FLOW_THICKNESS * sim_settings.snow_density
+        * sim_settings.cell_size * sim_settings.cell_size;
+}
+// integer units per kg
+fn mass_factor() -> f32 {
+    return QUANTIZATION_U32_RANGE / max_node_mass();
+}
+fn inv_mass_factor() -> f32 {
+    return max_node_mass() / QUANTIZATION_U32_RANGE;
+}
+// integer units per kg m/s
+fn momentum_factor() -> f32 {
+    return QUANTIZATION_I32_RANGE / (max_node_mass() * MAX_FLOW_VELOCITY);
+}
+fn inv_momentum_factor() -> f32 {
+    return max_node_mass() * MAX_FLOW_VELOCITY / QUANTIZATION_I32_RANGE;
+}
+// Lightest node whose velocity momentum / mass is resolved: one momentum unit
+// changes it by 1 m/s (15 g for 5 m cells and 200 kg/m3). Lighter nodes
+// count as empty.
+fn min_node_mass() -> f32 {
+    return inv_momentum_factor(); // momentum unit / (1 m/s)
+}
+// Gully walls (reference surface, wall friction) need a reference surface at
+// least one cell wide; must match SimSettings::gully_walls_enabled.
+fn gully_walls_enabled() -> bool {
+    return sim_settings.reference_surface_length >= sim_settings.cell_size;
+}
 // depth-integrated internal force (h * sigma * grad_w * area, ~1e4..1e5 N per node contribution)
 const FORCE_FACTOR: f32 = 1e-3; // i32 limit is 2.1e6 N per node
 const INV_FORCE_FACTOR: f32 = 1 / FORCE_FACTOR;
@@ -333,12 +458,21 @@ struct SimInfo {
     max_flow_thickness: f32,
     flags: u32,
     grid_elapsed_time: f32,
+    travel_length_2d: f32,
+    travel_length_3d: f32,
+    travel_vertical_drop: f32,
+    travel_angle: f32,
+    _first_center_of_mass_timestep: u32,
+    _last_center_of_mass_timestep: u32,
+    _pad: u32,
 };
 
 const SIM_INFO_OUT_OF_BOUNDS: u32 = 1u << 0u;
 const SIM_INFO_CFL_EXCEEDED: u32 = 1u << 1u;
 const SIM_INFO_IS_NAN: u32 = 1u << 2u;
 const SIM_INFO_PARTICLE_OUT_OF_DEM_DATA: u32 = 1u << 3u;
+// a particle exceeded MAX_PARTICLE_SPEED and was stopped
+const SIM_INFO_UNPHYSICAL_SPEED: u32 = 1u << 4u;
 const SIM_INFO_STOPPED: u32 = 1u << 31u;
 const SIM_INFO_ALL_PARTICLES_STOPPED: u32 = 1u << 30u;
 const SIM_INFO_NO_NEW_CELLS: u32 = 1u << 29u;
@@ -347,8 +481,17 @@ const SIM_INFO_AT_REST: u32 = 1u << 28u;
 // total momentum fell below momentum_stop_fraction of its peak
 const SIM_INFO_LOW_MOMENTUM: u32 = 1u << 27u;
 
-// reversible low-speed state; the low bits hold the rest start step while resting
-// and the consecutive slow-step count while moving
+// Fastest particle speed (m/s) taken as physical. Dense flow avalanches reach
+// about 60-80 m/s and the integer atomic grid holds momentum up to
+// QUANTIZATION_SAFETY * MAX_FLOW_VELOCITY = 200 m/s; a faster particle comes from
+// a numerical blow-up (e.g. a cliff of no-data elevations) and is stopped.
+// Mirrors compute_core::MAX_PARTICLE_SPEED.
+const MAX_PARTICLE_SPEED: f32 = 150.0;
+// stopped for exceeding MAX_PARTICLE_SPEED
+const PARTICLE_UNPHYSICAL_SPEED: u32 = 1u << 25u;
+// reversible low-speed state; the low bits (below PARTICLE_UNPHYSICAL_SPEED)
+// hold the rest start step while resting and the consecutive slow-step count
+// while moving
 const PARTICLE_RESTING: u32 = 1u << 26u;
 // consecutive slow steps before a particle rests
 const REST_STEPS: u32 = 20u;
@@ -427,7 +570,7 @@ struct AtomicValues {
 // sub-threshold creep inside deposits. Returns the new state: its low bits hold
 // the slow-step counter while moving and the rest start step while resting.
 fn next_rest_state(previous_state: u32, speed: f32, timestep: u32) -> u32 {
-    let low_mask = PARTICLE_RESTING - 1u;
+    let low_mask = PARTICLE_UNPHYSICAL_SPEED - 1u;
     var resting = (previous_state & PARTICLE_RESTING) != 0u;
     var low_bits = previous_state & low_mask;
     if resting {

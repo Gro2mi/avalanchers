@@ -124,7 +124,7 @@ fn compute_particles(
                 let node_idx = xy_to_idx(node_coords);
                 interpolated_grad_h += weight * grad_h[node_idx];
                 
-                interpolated_mass += weight * f32(grid_mass_atomic[node_idx]) * INV_MASS_FACTOR; // no_atomic_float
+                interpolated_mass += weight * f32(grid_mass_atomic[node_idx]) * inv_mass_factor(); // no_atomic_float
                 // atomic_float interpolated_mass += weight * grid_mass_atomic[node_idx];
             }
         }
@@ -253,6 +253,14 @@ fn compute_particles(
         return;
     }
 
+    if length(velocity) > MAX_PARTICLE_SPEED {
+        state = sim_info.timestep | PARTICLE_STOPPED | PARTICLE_UNPHYSICAL_SPEED;
+        position.z = elevation;
+        atomicAdd(&atomic_values.stopped_particles, 1u);
+        update_particle(particleId, position, vec3f(0.0), state);
+        sim_info.flags |= SIM_INFO_UNPHYSICAL_SPEED;
+        return;
+    }
     // stop criterion friction
     if (state & PARTICLE_STOPPED) != 0u || length(velocity) < sim_settings.velocity_threshold {
         state = sim_info.timestep;
@@ -485,6 +493,18 @@ fn basal_friction_acceleration(g_eff: f32, density: f32, proposed_speed: f32, h:
     return shear_stress / max(mass_per_area, 1e-6);
 }
 
+// Gully confinement: snow filling a gully presses its walls (inclined by beta
+// against the smoothed reference surface) with the cross-flow stress
+// k_y sigma_zz of the material beside it. Relative to the bed-normal load of
+// the column above, the wall normal stress grows by 1 + k_y tan^2(beta).
+// The bed-normal h already equals the hydraulic radius, so the
+// velocity-dependent drag needs no wetted-area correction.
+// cos_beta = 1 (no reference surface) gives 1.
+fn gully_wall_load_factor(cos_beta: f32, k_y: f32) -> f32 {
+    let tan2_beta = 1.0 / (cos_beta * cos_beta) - 1.0;
+    return 1.0 + k_y * tan2_beta;
+}
+
 // END friction.wgsl
 // import random.wgsl;
 // BEGIN random.wgsl
@@ -527,20 +547,54 @@ const g: f32 = 9.81;
 
 // u32 limit is 4 294 967 296
 const MAX_VELOCITY_FACTOR: f32 = 1e7; // u32 limit is 430 m/s
-const MASS_FACTOR: f32 = 1e1; // u32 limit is 4.3t thickness
 const H_FACTOR: f32 = 1e6;
-// Momentum is quantized per particle->node contribution before atomicAdd, so
-// MOMENTUM_FACTOR sets the velocity resolution of that contribution:
-// the smallest non-zero contribution is v = 1 / (particle_mass * weight * MOMENTUM_FACTOR).
-// It must stay far below the slow hydrostatic spreading velocities (~0.01-0.1 m/s)
-// or p2g rounds them to zero every step and the flow never spreads laterally.
-// i32 budget: node sum = node_mass * v_max * MOMENTUM_FACTOR
-//   (rho*cell^2*h*J ~ 6e4 kg * 40 m/s * 1e2 = 2.4e8 < 2.1e9)
-const MOMENTUM_FACTOR: f32 = 1e2;
 const INV_MAX_VELOCITY_FACTOR: f32 = 1 / MAX_VELOCITY_FACTOR; // u32 limit is 430 m/s
-const INV_MASS_FACTOR: f32 = 1 / MASS_FACTOR; // u32 limit is 4.3km thickness
 const INV_H_FACTOR: f32 = 1 / H_FACTOR;
-const INV_MOMENTUM_FACTOR: f32 = 1 / MOMENTUM_FACTOR;
+// Integer-atomic grid (no_atomic_float): node masses and momenta are fixed
+// point numbers in u32 / i32, quantized per particle->node contribution before
+// atomicAdd. The factors fill the integer range with the largest node values a
+// flow can reach: a MAX_FLOW_THICKNESS deep column over a cell
+// (density * thickness * cell_size^2) moving at MAX_FLOW_VELOCITY, times
+// QUANTIZATION_SAFETY (which also covers the slope factor of the node mass).
+// They scale with the cell size like the particle masses, so a particle of a
+// release h_r thick with N particles per cell holds about
+// U32_RANGE * h_r / (N * QUANTIZATION_SAFETY * MAX_FLOW_THICKNESS) mass units
+// (2e6 for 1 m and 64 per cell) at every cell size. Must match settings.rs.
+const MAX_FLOW_THICKNESS: f32 = 30.0;
+const MAX_FLOW_VELOCITY: f32 = 100.0;
+const QUANTIZATION_SAFETY: f32 = 2.0;
+// below 2^32 and 2^31, so a rounded maximum still converts without saturating
+const QUANTIZATION_U32_RANGE: f32 = 4.0e9;
+const QUANTIZATION_I32_RANGE: f32 = 2.0e9;
+fn max_node_mass() -> f32 {
+    return QUANTIZATION_SAFETY * MAX_FLOW_THICKNESS * sim_settings.snow_density
+        * sim_settings.cell_size * sim_settings.cell_size;
+}
+// integer units per kg
+fn mass_factor() -> f32 {
+    return QUANTIZATION_U32_RANGE / max_node_mass();
+}
+fn inv_mass_factor() -> f32 {
+    return max_node_mass() / QUANTIZATION_U32_RANGE;
+}
+// integer units per kg m/s
+fn momentum_factor() -> f32 {
+    return QUANTIZATION_I32_RANGE / (max_node_mass() * MAX_FLOW_VELOCITY);
+}
+fn inv_momentum_factor() -> f32 {
+    return max_node_mass() * MAX_FLOW_VELOCITY / QUANTIZATION_I32_RANGE;
+}
+// Lightest node whose velocity momentum / mass is resolved: one momentum unit
+// changes it by 1 m/s (15 g for 5 m cells and 200 kg/m3). Lighter nodes
+// count as empty.
+fn min_node_mass() -> f32 {
+    return inv_momentum_factor(); // momentum unit / (1 m/s)
+}
+// Gully walls (reference surface, wall friction) need a reference surface at
+// least one cell wide; must match SimSettings::gully_walls_enabled.
+fn gully_walls_enabled() -> bool {
+    return sim_settings.reference_surface_length >= sim_settings.cell_size;
+}
 // depth-integrated internal force (h * sigma * grad_w * area, ~1e4..1e5 N per node contribution)
 const FORCE_FACTOR: f32 = 1e-3; // i32 limit is 2.1e6 N per node
 const INV_FORCE_FACTOR: f32 = 1 / FORCE_FACTOR;
@@ -562,12 +616,21 @@ struct SimInfo {
     max_flow_thickness: f32,
     flags: u32,
     grid_elapsed_time: f32,
+    travel_length_2d: f32,
+    travel_length_3d: f32,
+    travel_vertical_drop: f32,
+    travel_angle: f32,
+    _first_center_of_mass_timestep: u32,
+    _last_center_of_mass_timestep: u32,
+    _pad: u32,
 };
 
 const SIM_INFO_OUT_OF_BOUNDS: u32 = 1u << 0u;
 const SIM_INFO_CFL_EXCEEDED: u32 = 1u << 1u;
 const SIM_INFO_IS_NAN: u32 = 1u << 2u;
 const SIM_INFO_PARTICLE_OUT_OF_DEM_DATA: u32 = 1u << 3u;
+// a particle exceeded MAX_PARTICLE_SPEED and was stopped
+const SIM_INFO_UNPHYSICAL_SPEED: u32 = 1u << 4u;
 const SIM_INFO_STOPPED: u32 = 1u << 31u;
 const SIM_INFO_ALL_PARTICLES_STOPPED: u32 = 1u << 30u;
 const SIM_INFO_NO_NEW_CELLS: u32 = 1u << 29u;
@@ -576,8 +639,17 @@ const SIM_INFO_AT_REST: u32 = 1u << 28u;
 // total momentum fell below momentum_stop_fraction of its peak
 const SIM_INFO_LOW_MOMENTUM: u32 = 1u << 27u;
 
-// reversible low-speed state; the low bits hold the rest start step while resting
-// and the consecutive slow-step count while moving
+// Fastest particle speed (m/s) taken as physical. Dense flow avalanches reach
+// about 60-80 m/s and the integer atomic grid holds momentum up to
+// QUANTIZATION_SAFETY * MAX_FLOW_VELOCITY = 200 m/s; a faster particle comes from
+// a numerical blow-up (e.g. a cliff of no-data elevations) and is stopped.
+// Mirrors compute_core::MAX_PARTICLE_SPEED.
+const MAX_PARTICLE_SPEED: f32 = 150.0;
+// stopped for exceeding MAX_PARTICLE_SPEED
+const PARTICLE_UNPHYSICAL_SPEED: u32 = 1u << 25u;
+// reversible low-speed state; the low bits (below PARTICLE_UNPHYSICAL_SPEED)
+// hold the rest start step while resting and the consecutive slow-step count
+// while moving
 const PARTICLE_RESTING: u32 = 1u << 26u;
 // consecutive slow steps before a particle rests
 const REST_STEPS: u32 = 20u;
@@ -656,7 +728,7 @@ struct AtomicValues {
 // sub-threshold creep inside deposits. Returns the new state: its low bits hold
 // the slow-step counter while moving and the rest start step while resting.
 fn next_rest_state(previous_state: u32, speed: f32, timestep: u32) -> u32 {
-    let low_mask = PARTICLE_RESTING - 1u;
+    let low_mask = PARTICLE_UNPHYSICAL_SPEED - 1u;
     var resting = (previous_state & PARTICLE_RESTING) != 0u;
     var low_bits = previous_state & low_mask;
     if resting {
