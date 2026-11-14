@@ -702,9 +702,29 @@ fn load_tiff_as_dem(path: &str) -> Result<Dem, DataProcessorError> {
     Ok(geo_tiff_to_dem(tiff, path))
 }
 
+/// The no-data value of tag 42113 (GDAL_NODATA). GDAL writes it as an ASCII
+/// string such as `"-9999"`; some writers store a number instead.
+fn read_gdal_nodata<R: std::io::Read + std::io::Seek>(decoder: &mut Decoder<R>) -> Option<f64> {
+    if let Ok(text) = decoder.get_tag_ascii_string(Tag::GdalNodata) {
+        return text
+            .trim_matches(|c: char| c == '\0' || c.is_whitespace())
+            .parse::<f64>()
+            .ok();
+    }
+    decoder
+        .get_tag_f64_vec(Tag::GdalNodata)
+        .ok()
+        .and_then(|values| values.first().copied())
+}
+
+/// Elevations below this (m) are no data even without a no-data tag: the
+/// lowest land is about -430 m, and -9999 or -32768 are common markers.
+const LOWEST_VALID_ELEVATION: f32 = -1000.0;
+
 fn geo_tiff_to_dem(mut tiff: GeoTiff, source: &str) -> Dem {
     tiff.flip_y();
     let nodata = tiff.metadata.nodata.map(|value| value as f32);
+    let mut number_untagged_nodata = 0usize;
     let data1d = tiff
         .data
         .as_f32()
@@ -712,11 +732,21 @@ fn geo_tiff_to_dem(mut tiff: GeoTiff, source: &str) -> Dem {
         .map(|value| {
             if nodata.is_some_and(|nodata| value == nodata || nodata.is_nan() && value.is_nan()) {
                 f32::NAN
+            } else if value < LOWEST_VALID_ELEVATION {
+                number_untagged_nodata += 1;
+                f32::NAN
             } else {
                 value
             }
         })
         .collect();
+    if number_untagged_nodata > 0 {
+        warn!(
+            "{source} has {number_untagged_nodata} cells below {LOWEST_VALID_ELEVATION} m but no \
+             no-data value; they are treated as no data. Set the GDAL no-data tag to make this \
+             explicit"
+        );
+    }
     let mut dem = Dem {
         width: tiff.metadata.width as usize,
         height: tiff.metadata.height as usize,
@@ -1896,6 +1926,44 @@ NODATA_value -9999
         assert_eq!(dem.data[1], vec![-3.0, 0.0]);
     }
 
+    /// A 2 x 2 float GeoTIFF of `values` with 10 m cells; `nodata` is written
+    /// as GDAL writes it, an ASCII string.
+    fn geotiff_bytes(values: &[f32; 4], nodata: Option<&str>) -> Vec<u8> {
+        use tiff::encoder::{TiffEncoder, colortype::Gray32Float};
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        let mut encoder = TiffEncoder::new(&mut bytes).unwrap();
+        let mut image = encoder.new_image::<Gray32Float>(2, 2).unwrap();
+        let tags = image.encoder();
+        tags.write_tag(Tag::Unknown(33550), &[10.0f64, 10.0, 0.0][..])
+            .unwrap();
+        tags.write_tag(
+            Tag::Unknown(33922),
+            &[0.0f64, 0.0, 0.0, 1000.0, 2000.0, 0.0][..],
+        )
+        .unwrap();
+        if let Some(nodata) = nodata {
+            tags.write_tag(Tag::GdalNodata, nodata).unwrap();
+        }
+        image.write_data(values).unwrap();
+        bytes.into_inner()
+    }
+
+    #[test]
+    fn test_geotiff_nodata_written_as_ascii_by_gdal_is_masked() {
+        let bytes = geotiff_bytes(&[1500.0, -9999.0, 1510.0, 1520.0], Some("-9999"));
+        let dem = load_dem_from_bytes(&bytes, "tif", "gdal.tif").unwrap();
+        assert_eq!(dem.data1d.iter().filter(|v| v.is_nan()).count(), 1);
+        assert_eq!(dem.minimum_elevation, 1500.0);
+    }
+
+    #[test]
+    fn test_geotiff_without_nodata_tag_masks_impossible_elevations() {
+        let bytes = geotiff_bytes(&[-430.0, -9999.0, 1510.0, -32768.0], None);
+        let dem = load_dem_from_bytes(&bytes, "tif", "untagged.tif").unwrap();
+        assert_eq!(dem.data1d.iter().filter(|v| v.is_nan()).count(), 2);
+        assert_eq!(dem.minimum_elevation, -430.0);
+    }
+
     #[test]
     fn test_load_dem_from_bytes_matches_path_loader() {
         let dir = tempfile::tempdir().unwrap();
@@ -2274,15 +2342,19 @@ NODATA_value  -999
             for (col_idx, &val) in row.iter().enumerate() {
                 let idx_1d = row_idx * dem.width + col_idx;
                 assert_eq!(
-                    val, dem.data1d[idx_1d],
+                    val.to_bits(),
+                    dem.data1d[idx_1d].to_bits(),
                     "2D data at ({}, {}) should match 1D data at index {}",
-                    row_idx, col_idx, idx_1d
+                    row_idx,
+                    col_idx,
+                    idx_1d
                 );
             }
         }
-        assert_eq!(
-            dem.data1d[0], -9999.0,
-            "First elevation value should be -9999.0"
+        // the file marks no data with the GDAL tag "-9999"
+        assert!(
+            dem.data1d[0].is_nan(),
+            "The first cell holds no data and should be NaN"
         );
         assert_eq!(
             dem.data1d[1701 * 500 + 500],

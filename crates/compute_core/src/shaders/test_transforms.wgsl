@@ -261,6 +261,8 @@ const SIM_INFO_OUT_OF_BOUNDS: u32 = 1u << 0u;
 const SIM_INFO_CFL_EXCEEDED: u32 = 1u << 1u;
 const SIM_INFO_IS_NAN: u32 = 1u << 2u;
 const SIM_INFO_PARTICLE_OUT_OF_DEM_DATA: u32 = 1u << 3u;
+// a particle exceeded MAX_PARTICLE_SPEED and was stopped
+const SIM_INFO_UNPHYSICAL_SPEED: u32 = 1u << 4u;
 const SIM_INFO_STOPPED: u32 = 1u << 31u;
 const SIM_INFO_ALL_PARTICLES_STOPPED: u32 = 1u << 30u;
 const SIM_INFO_NO_NEW_CELLS: u32 = 1u << 29u;
@@ -269,8 +271,17 @@ const SIM_INFO_AT_REST: u32 = 1u << 28u;
 // total momentum fell below momentum_stop_fraction of its peak
 const SIM_INFO_LOW_MOMENTUM: u32 = 1u << 27u;
 
-// reversible low-speed state; the low bits hold the rest start step while resting
-// and the consecutive slow-step count while moving
+// Fastest particle speed (m/s) taken as physical. Dense flow avalanches reach
+// about 60-80 m/s and the integer atomic grid holds momentum up to
+// QUANTIZATION_SAFETY * MAX_FLOW_VELOCITY = 200 m/s; a faster particle comes from
+// a numerical blow-up (e.g. a cliff of no-data elevations) and is stopped.
+// Mirrors compute_core::MAX_PARTICLE_SPEED.
+const MAX_PARTICLE_SPEED: f32 = 150.0;
+// stopped for exceeding MAX_PARTICLE_SPEED
+const PARTICLE_UNPHYSICAL_SPEED: u32 = 1u << 25u;
+// reversible low-speed state; the low bits (below PARTICLE_UNPHYSICAL_SPEED)
+// hold the rest start step while resting and the consecutive slow-step count
+// while moving
 const PARTICLE_RESTING: u32 = 1u << 26u;
 // consecutive slow steps before a particle rests
 const REST_STEPS: u32 = 20u;
@@ -349,7 +360,7 @@ struct AtomicValues {
 // sub-threshold creep inside deposits. Returns the new state: its low bits hold
 // the slow-step counter while moving and the rest start step while resting.
 fn next_rest_state(previous_state: u32, speed: f32, timestep: u32) -> u32 {
-    let low_mask = PARTICLE_RESTING - 1u;
+    let low_mask = PARTICLE_UNPHYSICAL_SPEED - 1u;
     var resting = (previous_state & PARTICLE_RESTING) != 0u;
     var low_bits = previous_state & low_mask;
     if resting {

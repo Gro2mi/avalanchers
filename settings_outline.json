@@ -8,5 +8,6 @@
   "release_thickness": 1.0,
   "friction_coefficient": 0.3,
   "drag_coefficient": 2000.0,
-  "velocity_threshold": 0.1
+  "velocity_threshold": 0.1,
+  "enable_center_of_mass": true
 }

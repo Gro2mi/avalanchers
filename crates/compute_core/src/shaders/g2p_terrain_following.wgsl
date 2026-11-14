@@ -52,13 +52,17 @@ fn g2p_terrain_following(@builtin(global_invocation_id) pId: vec3<u32>) {
     }
     let position_xy = particles_position[particleId];
     let uv = position_to_uv(position_xy);
-    let normal = get_normal(uv);
-    if is_nan(normal.x) {
+    let terrain = sample_terrain(uv);
+    if !on_valid_terrain(terrain) || is_nan(particles_elevation[particleId]) {
         stop_outside_dem(particleId);
         return;
     }
+    let normal = normalize(terrain.xyz);
 
     let update = transfer_g2p(particleId);
+    if stop_if_too_fast(particleId, length(surface_to_tangent(update.velocity, normal))) {
+        return;
+    }
     if update_rest_state(particleId, length(update.velocity)) {
         particles_velocity[particleId] = vec2f(0.0);
         particles_affine_matrix[particleId] = mat2x2<f32>(vec2f(0.0), vec2f(0.0));
@@ -68,10 +72,13 @@ fn g2p_terrain_following(@builtin(global_invocation_id) pId: vec3<u32>) {
     let velocity = surface_to_tangent(update.velocity, normal);
     let v_prev = surface_to_tangent(particles_velocity[particleId], normal);
     let position = advance_on_bed(particleId, position_xy, uv, normal, v_prev, velocity);
-    let normal_new = get_normal(position_to_uv(position.xy));
+    let uv_new = position_to_uv(position.xy);
+    let terrain_new = sample_terrain(uv_new);
+    let normal_new = normalize(terrain_new.xyz);
     // outside the DEM data the next step flags the particle
-    let new_velocity = select(velocity, tangent_project(velocity, normal_new), is_finite(normal_new.z));
-    let surface_velocity = select(update.velocity, tangent_to_surface(new_velocity, normal_new), is_finite(normal_new.z));
+    let valid_new = on_valid_terrain(terrain_new);
+    let new_velocity = select(velocity, tangent_project(velocity, normal_new), valid_new);
+    let surface_velocity = select(update.velocity, tangent_to_surface(new_velocity, normal_new), valid_new);
     particles_velocity[particleId] = surface_velocity;
     // The gather uses particle-minus-node offsets; C uses node-minus-particle.
     particles_affine_matrix[particleId] = update.affine_matrix * -1.0;
@@ -92,12 +99,13 @@ fn g2p_3d(@builtin(global_invocation_id) pId: vec3<u32>) {
     }
     let position_xy = particles_position[particleId];
     let uv = position_to_uv(position_xy);
-    let normal = get_normal(uv);
-    if is_nan(normal.x) {
+    let terrain = sample_terrain(uv);
+    if !on_valid_terrain(terrain) || is_nan(particles_elevation[particleId]) {
         stop_outside_dem(particleId);
         clear_z(particleId);
         return;
     }
+    let normal = normalize(terrain.xyz);
 
     // the shared xy gather is inlined here because the z component uses the
     // same stencil and weights
@@ -125,6 +133,10 @@ fn g2p_3d(@builtin(global_invocation_id) pId: vec3<u32>) {
         }
     }
     let interpolated_velocity = vec3f(interpolated_velocity_xy, interpolated_velocity_z);
+    if stop_if_too_fast(particleId, length(interpolated_velocity)) {
+        clear_z(particleId);
+        return;
+    }
     if update_rest_state(particleId, length(interpolated_velocity)) {
         particles_velocity[particleId] = vec2f(0.0);
         particles_affine_matrix[particleId] = mat2x2<f32>(vec2f(0.0), vec2f(0.0));
@@ -134,9 +146,11 @@ fn g2p_3d(@builtin(global_invocation_id) pId: vec3<u32>) {
 
     let v_prev = vec3f(particles_velocity[particleId], particles_velocity_z[particleId]);
     let position = advance_on_bed(particleId, position_xy, uv, normal, v_prev, interpolated_velocity);
-    let normal_new = get_normal(position_to_uv(position.xy));
+    let uv_new = position_to_uv(position.xy);
+    let terrain_new = sample_terrain(uv_new);
+    let normal_new = normalize(terrain_new.xyz);
     // outside the DEM data the next step flags the particle
-    let new_velocity = select(interpolated_velocity, tangent_project_preserve_speed(interpolated_velocity, normal_new), is_finite(normal_new.z));
+    let new_velocity = select(interpolated_velocity, tangent_project_preserve_speed(interpolated_velocity, normal_new), on_valid_terrain(terrain_new));
     particles_velocity[particleId] = new_velocity.xy;
     particles_velocity_z[particleId] = new_velocity.z;
 
@@ -171,8 +185,19 @@ fn stop_particle(particleId: u32, state_flags: u32) {
     atomicAdd(&atomic_values.stopped_particles, 1u);
 }
 
+// Stops a particle above MAX_PARTICLE_SPEED and flags the run; returns
+// whether it did.
+fn stop_if_too_fast(particleId: u32, speed: f32) -> bool {
+    if speed <= MAX_PARTICLE_SPEED {
+        return false;
+    }
+    stop_particle(particleId, PARTICLE_UNPHYSICAL_SPEED);
+    sim_info.flags |= SIM_INFO_UNPHYSICAL_SPEED;
+    return true;
+}
+
 fn stop_outside_dem(particleId: u32) {
-    stop_particle(particleId, 0u);
+    stop_particle(particleId, PARTICLE_OUT_OF_DEM_DATA);
     sim_info.flags |= SIM_INFO_PARTICLE_OUT_OF_DEM_DATA;
 }
 
@@ -233,13 +258,13 @@ fn record_output(position: vec3f, velocity: vec3f, normal: vec3f, uv: vec2f) {
 // Stops particles that became invalid or left the grid; returns whether it did.
 fn stop_if_invalid(particleId: u32, position: vec3f, velocity_x: f32) -> bool {
     if is_nan(position.x) {
-        stop_particle(particleId, PARTICLE_OUT_OF_DEM_DATA);
+        stop_particle(particleId, PARTICLE_IS_NAN | PARTICLE_OUT_OF_DEM_DATA);
         sim_info.flags |= SIM_INFO_IS_NAN;
         sim_info.flags |= SIM_INFO_PARTICLE_OUT_OF_DEM_DATA;
         return true;
     }
     if is_nan(velocity_x) {
-        stop_particle(particleId, PARTICLE_OUT_OF_DEM_DATA);
+        stop_particle(particleId, PARTICLE_IS_NAN);
         sim_info.flags |= SIM_INFO_IS_NAN;
         return true;
     }
@@ -263,6 +288,10 @@ fn get_bed_curvature(uv: vec2f, velocity: vec3f) -> f32 {
         return 0.0;
     }
     let hessian = textureSampleLevel(curvature_texture, tex_sampler, uv, 0.0).xyz;
+    // a no-data texel with zero bilinear weight still makes the sample NaN
+    if is_nan(hessian.x) || is_nan(hessian.y) || is_nan(hessian.z) {
+        return 0.0;
+    }
     return hessian_quadratic_form(hessian, velocity.xy / speed);
 }
 
@@ -270,8 +299,24 @@ fn get_elevation(uv: vec2f) -> f32 {
     return textureSampleLevel(dem_texture, tex_sampler, uv, 0).x;
 }
 
-fn get_normal(uv: vec2f) -> vec3f {
-    return normalize(textureSampleLevel(terrain_geometry_texture, tex_sampler, uv, 0).xyz);
+// The filtered terrain geometry (normal, validity in w) at uv.
+fn sample_terrain(uv: vec2f) -> vec4f {
+    return textureSampleLevel(terrain_geometry_texture, tex_sampler, uv, 0);
+}
+
+// Whether a sample of sample_terrain read only valid terrain. Filtering a
+// footprint that holds a NaN texel is undefined: the sample can be NaN or
+// finite garbage, e.g. a normal with n.z <= 0, where surface_to_tangent
+// divides by 1 + n.z ~ 0 and throws the particle across the grid. The normal
+// and curvature are NaN one cell into the data from a no-data cell, so
+// analyze_terrain marks those texels with w = 1 and the valid ones with
+// w = 0; filtered zeros stay exactly zero, so any invalid texel in the
+// footprint makes w > 0. A texel whose bilinear weight rounds to zero adds
+// nothing to w but still turns the filtered normal into NaN (0 * NaN), so
+// the sampled n.z is tested too; on the sampled value, because the compiler
+// may assume arithmetic results are never NaN.
+fn on_valid_terrain(terrain: vec4f) -> bool {
+    return terrain.w == 0.0 && !is_nan(terrain.z) && terrain.z > 0.0;
 }
 
 fn update_output_data(trajectory: u32, timestep: u32, timestep_data: TimestepData) {
@@ -473,6 +518,8 @@ const SIM_INFO_OUT_OF_BOUNDS: u32 = 1u << 0u;
 const SIM_INFO_CFL_EXCEEDED: u32 = 1u << 1u;
 const SIM_INFO_IS_NAN: u32 = 1u << 2u;
 const SIM_INFO_PARTICLE_OUT_OF_DEM_DATA: u32 = 1u << 3u;
+// a particle exceeded MAX_PARTICLE_SPEED and was stopped
+const SIM_INFO_UNPHYSICAL_SPEED: u32 = 1u << 4u;
 const SIM_INFO_STOPPED: u32 = 1u << 31u;
 const SIM_INFO_ALL_PARTICLES_STOPPED: u32 = 1u << 30u;
 const SIM_INFO_NO_NEW_CELLS: u32 = 1u << 29u;
@@ -481,8 +528,17 @@ const SIM_INFO_AT_REST: u32 = 1u << 28u;
 // total momentum fell below momentum_stop_fraction of its peak
 const SIM_INFO_LOW_MOMENTUM: u32 = 1u << 27u;
 
-// reversible low-speed state; the low bits hold the rest start step while resting
-// and the consecutive slow-step count while moving
+// Fastest particle speed (m/s) taken as physical. Dense flow avalanches reach
+// about 60-80 m/s and the integer atomic grid holds momentum up to
+// QUANTIZATION_SAFETY * MAX_FLOW_VELOCITY = 200 m/s; a faster particle comes from
+// a numerical blow-up (e.g. a cliff of no-data elevations) and is stopped.
+// Mirrors compute_core::MAX_PARTICLE_SPEED.
+const MAX_PARTICLE_SPEED: f32 = 150.0;
+// stopped for exceeding MAX_PARTICLE_SPEED
+const PARTICLE_UNPHYSICAL_SPEED: u32 = 1u << 25u;
+// reversible low-speed state; the low bits (below PARTICLE_UNPHYSICAL_SPEED)
+// hold the rest start step while resting and the consecutive slow-step count
+// while moving
 const PARTICLE_RESTING: u32 = 1u << 26u;
 // consecutive slow steps before a particle rests
 const REST_STEPS: u32 = 20u;
@@ -561,7 +617,7 @@ struct AtomicValues {
 // sub-threshold creep inside deposits. Returns the new state: its low bits hold
 // the slow-step counter while moving and the rest start step while resting.
 fn next_rest_state(previous_state: u32, speed: f32, timestep: u32) -> u32 {
-    let low_mask = PARTICLE_RESTING - 1u;
+    let low_mask = PARTICLE_UNPHYSICAL_SPEED - 1u;
     var resting = (previous_state & PARTICLE_RESTING) != 0u;
     var low_bits = previous_state & low_mask;
     if resting {

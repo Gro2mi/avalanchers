@@ -38,6 +38,8 @@ bitflags! {
         const CFL_EXCEEDED             = 1 << 1;
         const IS_NAN                   = 1 << 2;
         const PARTICLE_OUT_OF_DEM_DATA = 1 << 3;
+        /// A particle exceeded [`MAX_PARTICLE_SPEED`] and was stopped.
+        const UNPHYSICAL_SPEED         = 1 << 4;
         const LOW_MOMENTUM             = 1 << 27;
         const AT_REST                  = 1 << 28;
         const NO_NEW_CELLS             = 1 << 29;
@@ -78,6 +80,7 @@ impl std::fmt::Debug for SimInfoFlags {
     }
 }
 
+const PARTICLE_UNPHYSICAL_SPEED: u32 = 1u32 << 25;
 const PARTICLE_RESTING: u32 = 1u32 << 26;
 const PARTICLE_FLYING: u32 = 1u32 << 27;
 const PARTICLE_OUT_OF_BOUNDS: u32 = 1u32 << 28;
@@ -91,6 +94,8 @@ pub struct ParticleState {
     pub out_of_bounds: bool,
     pub is_nan: bool,
     pub out_of_dem_data: bool,
+    /// Stopped for exceeding [`MAX_PARTICLE_SPEED`].
+    pub unphysical_speed: bool,
     pub stopped: bool,
     /// Reversibly resting at low speed; may still be reactivated.
     pub resting: bool,
@@ -105,10 +110,12 @@ impl From<u32> for ParticleState {
         let is_nan = state & PARTICLE_IS_NAN != 0;
         let out_of_dem_data = state & PARTICLE_OUT_OF_DEM_DATA != 0;
         let out_of_bounds = state & PARTICLE_OUT_OF_BOUNDS == PARTICLE_OUT_OF_BOUNDS;
+        let unphysical_speed = state & PARTICLE_UNPHYSICAL_SPEED != 0;
         let status_flags = PARTICLE_FLYING
             | PARTICLE_OUT_OF_BOUNDS
             | PARTICLE_IS_NAN
             | PARTICLE_OUT_OF_DEM_DATA
+            | PARTICLE_UNPHYSICAL_SPEED
             | PARTICLE_STOPPED
             | PARTICLE_RESTING;
 
@@ -117,9 +124,10 @@ impl From<u32> for ParticleState {
             out_of_bounds,
             is_nan,
             out_of_dem_data,
+            unphysical_speed,
             stopped,
             resting,
-            naturally_stopped: !out_of_bounds && !is_nan && !out_of_dem_data,
+            naturally_stopped: !out_of_bounds && !is_nan && !out_of_dem_data && !unphysical_speed,
             timestep: if stopped || resting {
                 state & !status_flags
             } else {
@@ -251,6 +259,28 @@ const _: () = assert!(size_of::<SimInfo>() == 64);
 impl SimInfo {
     pub fn parsed_flags(&self) -> SimInfoFlags {
         self.flags.into()
+    }
+
+    /// Why the run stopped on its own, for messages; `None` while it runs
+    /// and when it ended at `max_steps` (the shader then never set
+    /// `SIM_STOPPED`).
+    pub fn stop_reason(&self) -> Option<&'static str> {
+        let flags = self.parsed_flags();
+        if !flags.contains(SimInfoFlags::SIM_STOPPED) {
+            return None;
+        }
+        // the order of update_sim_info.wgsl, which sets only the first that holds
+        Some(if flags.contains(SimInfoFlags::ALL_PARTICLES_STOPPED) {
+            "all particles stopped"
+        } else if flags.contains(SimInfoFlags::AT_REST) {
+            "99 % of the particles came to rest"
+        } else if flags.contains(SimInfoFlags::LOW_MOMENTUM) {
+            "the momentum fell below momentum_stop_fraction of its peak"
+        } else if flags.contains(SimInfoFlags::NO_NEW_CELLS) {
+            "the flow stopped reaching new cells"
+        } else {
+            "the simulation was stopped"
+        })
     }
 }
 
@@ -541,6 +571,14 @@ fn chamfer_flood_steps(max_dimension: u32) -> Vec<ChamferParams> {
 /// evaluation. Mirrored as a constant in initialize_particles,
 /// relax_particles, evaluate_mass_movement and chamfer (.wgsl).
 pub const RELEASE_THICKNESS_THRESHOLD: f32 = 0.01;
+
+/// Fastest particle speed (m/s) taken as physical; faster particles are
+/// stopped and flag [`SimInfoFlags::UNPHYSICAL_SPEED`]. Dense flow avalanches
+/// reach about 60-80 m/s and the integer atomic grid holds momentum up to
+/// `QUANTIZATION_SAFETY * MAX_FLOW_VELOCITY` = 200 m/s, so a faster particle
+/// comes from a numerical blow-up, e.g. a cliff of no-data elevations.
+/// Mirrors `MAX_PARTICLE_SPEED` in utils.wgsl.
+pub const MAX_PARTICLE_SPEED: f32 = 150.0;
 
 /// Release thickness (m) of release areas that hold none of their own, used
 /// unless `release_thickness` or `release_swe` is set.
@@ -2527,15 +2565,69 @@ impl ComputeOrchestrator {
             .first()
             .copied()
             .ok_or_else(|| anyhow!("SimInfo buffer was empty"))?;
-        info!("{:#?}", sim_info);
-        info!("{:#?}", atomic_values);
-        if !sim_info.parsed_flags().intersects(
-            SimInfoFlags::ALL_PARTICLES_STOPPED
-                | SimInfoFlags::AT_REST
-                | SimInfoFlags::LOW_MOMENTUM,
-        ) {
+        debug!("Simulation info: {sim_info:?}");
+        debug!("Atomic values: {atomic_values:?}");
+        self.warn_about_stopped_particles(sim_info.parsed_flags())
+            .await?;
+        match sim_info.stop_reason() {
+            Some(reason) => info!(
+                "Simulation finished after {} steps ({:.1} s of flow): {reason}",
+                sim_info.timestep, sim_info.elapsed_time
+            ),
+            None => warn!(
+                "The simulation reached max_steps ({}) after {:.1} s of flow while the avalanche \
+                 was still moving; the runout may be too short. Increase max_steps",
+                sim_settings.max_steps, sim_info.elapsed_time
+            ),
+        }
+        Ok(())
+    }
+
+    /// Warns about particles the shaders stopped for a numerical or data
+    /// problem, with their number; reads the particle states only if a flag
+    /// is set.
+    async fn warn_about_stopped_particles(&self, flags: SimInfoFlags) -> Result<()> {
+        let problems = SimInfoFlags::UNPHYSICAL_SPEED
+            | SimInfoFlags::PARTICLE_OUT_OF_DEM_DATA
+            | SimInfoFlags::OUT_OF_BOUNDS
+            | SimInfoFlags::IS_NAN;
+        if !flags.intersects(problems) {
+            return Ok(());
+        }
+        let states: Vec<ParticleState> = self
+            .read_buffer::<u32>(BufferName::ParticlesState)
+            .await?
+            .into_iter()
+            .map(ParticleState::from)
+            .collect();
+        let count = |test: fn(&ParticleState) -> bool| states.iter().filter(|s| test(s)).count();
+        let too_fast = count(|s| s.unphysical_speed);
+        if too_fast > 0 {
             warn!(
-                "Simulation reached max steps without all particles stopping. Consider increasing max_steps or checking for issues in the simulation."
+                "{too_fast} particles exceeded {MAX_PARTICLE_SPEED} m/s and were stopped; the \
+                 simulation became numerically unstable and its results are unreliable. Check the \
+                 DEM for no-data cells and cliffs, or lower cfl"
+            );
+        }
+        let is_nan = count(|s| s.is_nan);
+        if is_nan > 0 {
+            warn!(
+                "{is_nan} particles got an invalid (NaN) position or velocity and were stopped; \
+                 the results are unreliable"
+            );
+        }
+        let outside_dem = count(|s| s.out_of_dem_data && !s.is_nan);
+        if outside_dem > 0 {
+            warn!(
+                "{outside_dem} particles reached cells without elevation data and were stopped \
+                 there; the runout may be cut off"
+            );
+        }
+        let out_of_bounds = count(|s| s.out_of_bounds);
+        if out_of_bounds > 0 {
+            warn!(
+                "{out_of_bounds} particles reached the edge of the DEM and were stopped there; \
+                 the runout may be cut off. Use a larger DEM"
             );
         }
         Ok(())
@@ -2864,6 +2956,15 @@ mod tests {
     }
 
     #[test]
+    fn particle_state_decodes_unphysical_speed() {
+        let parsed = ParticleState::from(1234u32 | PARTICLE_UNPHYSICAL_SPEED | PARTICLE_STOPPED);
+        assert!(parsed.unphysical_speed);
+        assert!(parsed.stopped);
+        assert!(!parsed.naturally_stopped);
+        assert_eq!(parsed.timestep, 1234);
+    }
+
+    #[test]
     fn particle_state_decodes_resting_start_and_ignores_slow_counter() {
         let resting = ParticleState::from(412u32 | PARTICLE_RESTING);
         assert!(resting.resting);
@@ -2908,6 +3009,33 @@ mod tests {
         };
 
         assert!(format!("{sim_info:#?}").contains("flags: CFL_EXCEEDED | IS_NAN"));
+    }
+
+    #[test]
+    fn sim_info_stop_reason_covers_every_stop_and_max_steps() {
+        let with = |flags: SimInfoFlags| SimInfo {
+            flags: flags.bits(),
+            ..SimInfo::default()
+        };
+        // no SIM_STOPPED: the run ended at max_steps
+        assert_eq!(with(SimInfoFlags::empty()).stop_reason(), None);
+        assert_eq!(with(SimInfoFlags::OUT_OF_BOUNDS).stop_reason(), None);
+        for flag in [
+            SimInfoFlags::ALL_PARTICLES_STOPPED,
+            SimInfoFlags::AT_REST,
+            SimInfoFlags::LOW_MOMENTUM,
+            SimInfoFlags::NO_NEW_CELLS,
+        ] {
+            let reason = with(flag | SimInfoFlags::SIM_STOPPED).stop_reason();
+            assert!(
+                reason.is_some_and(|r| r != "the simulation was stopped"),
+                "{flag}"
+            );
+        }
+        assert_eq!(
+            with(SimInfoFlags::NO_NEW_CELLS | SimInfoFlags::SIM_STOPPED).stop_reason(),
+            Some("the flow stopped reaching new cells")
+        );
     }
 
     #[test_log::test]

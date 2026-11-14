@@ -2013,6 +2013,9 @@ impl Simulation {
                 },
             },
         };
+        let number_release_cells = self
+            .drop_invalid_release_cells(number_release_cells)
+            .await?;
         self.number_particles = checked_particle_count(
             number_release_cells,
             self.settings.released_particles_per_cell,
@@ -2027,13 +2030,52 @@ impl Simulation {
         Ok(number_release_cells)
     }
 
+    /// Removes the release cells the particle seeding cannot turn into a
+    /// finite mass and returns the number of release cells left.
+    ///
+    /// The seeding divides the thickness by the cosine of the slope, so a
+    /// cell with a non-finite thickness, or one without elevation data or
+    /// next to it (NaN slope), would give its particles a NaN mass. Such
+    /// cells are set to 0 in the release areas buffer.
+    async fn drop_invalid_release_cells(&mut self, number_release_cells: u32) -> Result<u32> {
+        let release_areas: Vec<f32> = self
+            .orchestrator
+            .read_buffer(BufferName::ReleaseAreas)
+            .await?;
+        // read past the GPU cache, which callers expect to stay empty until
+        // they fetch results themselves
+        let slope_angle: Vec<f32> = match &self.gpu_cache.slope_angle {
+            Some(slope_angle) => slope_angle.clone(),
+            None => {
+                self.orchestrator
+                    .read_buffer(BufferName::SlopeAngle)
+                    .await?
+            }
+        };
+        let (cleaned, dropped) = without_invalid_release_cells(&release_areas, &slope_angle);
+        if dropped == 0 {
+            return Ok(number_release_cells);
+        }
+        warn!(
+            "Removed {dropped} release cells without valid terrain (missing elevation data \
+             or a non-finite thickness); they would release no finite mass"
+        );
+        self.orchestrator
+            .write_buffer(BufferName::ReleaseAreas, &cleaned)
+            .await?;
+        Ok(cleaned
+            .iter()
+            .filter(|&&thickness| thickness > compute_core::RELEASE_THICKNESS_THRESHOLD)
+            .count() as u32)
+    }
+
     /// The release cells of a file or array with the thickness of the
     /// settings, if set.
     fn override_release_thickness(&self, release_areas: &[f32]) -> Vec<f32> {
         let Some(thickness) = self.settings.release_thickness_override() else {
             return release_areas.to_vec();
         };
-        warn!("A release thickness of {thickness} m replaces the thickness of the release source");
+        info!("release_thickness ({thickness} m) replaces the thickness of the release areas");
         release_areas
             .iter()
             .map(|&cell| {
@@ -2071,7 +2113,7 @@ impl Simulation {
             bail!("Release areas must be computed before initializing particles");
         }
         if self.number_particles == 0 {
-            bail!("No particles to initialize! Check if release areas are correctly defined.");
+            bail!("The release areas contain no cells, so there are no particles to seed");
         }
         self.gpu_cache.reset_simulation_result();
         // set parameters that depend on the number of particles
@@ -2103,8 +2145,8 @@ impl Simulation {
             .await?;
         self.sim_info = self.fetch_sim_info().await?;
         self.state = SimulationState::Finished;
-        info!(
-            "Allocated GPU Memory: {:.1} MB",
+        debug!(
+            "GPU memory in use: {:.1} MB",
             self.orchestrator.resources.get_total_allocated_memory_mb()
         );
         Ok(())
@@ -2705,6 +2747,33 @@ fn checked_particle_count(release_cells: u32, particles_per_cell: u32) -> Result
         .ok_or_else(|| anyhow::anyhow!("Particle count exceeds u32 capacity"))
 }
 
+/// The release areas with every cell the seeding would turn into a NaN or
+/// infinite mass set to 0, and the number of such cells. A cell is invalid
+/// if its thickness is NaN or infinite (the seeding skips only cells at or
+/// below [`compute_core::RELEASE_THICKNESS_THRESHOLD`], so it seeds NaN), or if it
+/// would be seeded but its slope is not finite (no elevation data in or
+/// next to the cell).
+fn without_invalid_release_cells(release_areas: &[f32], slope_angle: &[f32]) -> (Vec<f32>, usize) {
+    let mut dropped = 0;
+    let cleaned = release_areas
+        .iter()
+        .zip(slope_angle)
+        .map(|(&thickness, &slope)| {
+            // NaN is seeded too: the seeding skips only cells at or below
+            // the threshold
+            let seeded =
+                thickness.is_nan() || thickness > compute_core::RELEASE_THICKNESS_THRESHOLD;
+            if seeded && !(thickness.is_finite() && slope.is_finite()) {
+                dropped += 1;
+                0.0
+            } else {
+                thickness
+            }
+        })
+        .collect();
+    (cleaned, dropped)
+}
+
 fn hash_release_areas(release_areas: &[f32]) -> u64 {
     let mut hasher = StableHasher::default();
     for value in release_areas {
@@ -3130,6 +3199,82 @@ fn test_trajectory() {
         assert_eq!(info.travel_angle, 0.0);
         assert!((info.travel_length_3d - 12.0).abs() <= 1e-4);
         assert_eq!(info.travel_vertical_drop, 12.0);
+    }
+
+    #[test]
+    fn test_without_invalid_release_cells_drops_cells_without_finite_mass() {
+        let release = [0.0, 1.0, 1.0, f32::NAN, f32::INFINITY, 1.0, 0.005, f32::NAN];
+        let slope = [
+            f32::NAN,
+            30.0,
+            f32::NAN,
+            30.0,
+            30.0,
+            30.0,
+            f32::NAN,
+            f32::NAN,
+        ];
+        let (cleaned, dropped) = without_invalid_release_cells(&release, &slope);
+        assert_eq!(cleaned, [0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.005, 0.0]);
+        assert_eq!(dropped, 4);
+    }
+
+    /// A slope whose right half has no elevation data: whether the release
+    /// areas are estimated from the terrain or given as an array covering the
+    /// whole DEM, only cells with valid terrain are seeded and the released
+    /// mass is finite.
+    #[test]
+    fn test_release_next_to_missing_elevation_data_has_finite_mass() {
+        const N: usize = 32;
+        // above the default minimum release elevation
+        let mut dem: Vec<f32> = create_slope(N, N, 4.0, 35.0)
+            .iter()
+            .map(|elevation| elevation + 2000.0)
+            .collect();
+        for y in 0..N {
+            for x in N / 2..N {
+                dem[y * N + x] = f32::NAN;
+            }
+        }
+        for given_release in [false, true] {
+            let mut sim = block_on(Simulation::new()).unwrap();
+            block_on(sim.create(Settings {
+                sim_model: Some(SimModel::TerrainFollowing),
+                max_steps: Some(5),
+                ..Default::default()
+            }))
+            .unwrap();
+            sim.set_dem(&dem, N, N, 4.0).unwrap();
+            if given_release {
+                sim.set_release_areas(&vec![1.0; N * N]).unwrap();
+            }
+            block_on(sim.run()).expect("Failed to run simulation");
+            let release = block_on(sim.fetch_release_areas()).unwrap().to_vec();
+            let slope = block_on(sim.fetch_slope_angle()).unwrap().to_vec();
+            let seeded = release
+                .iter()
+                .filter(|&&thickness| thickness > compute_core::RELEASE_THICKNESS_THRESHOLD)
+                .count();
+            assert!(seeded > 0, "given release {given_release}: no release cell");
+            for (idx, (&thickness, &slope)) in release.iter().zip(&slope).enumerate() {
+                if thickness.is_nan() || thickness > compute_core::RELEASE_THICKNESS_THRESHOLD {
+                    assert!(
+                        thickness.is_finite() && slope.is_finite(),
+                        "given release {given_release}: cell {idx} seeded with thickness \
+                         {thickness} on slope {slope}"
+                    );
+                }
+            }
+            assert_eq!(
+                sim.number_particles as usize,
+                seeded * sim.settings.released_particles_per_cell as usize
+            );
+            let mass = block_on(sim.get_total_mass()).unwrap();
+            assert!(
+                mass.is_finite() && mass > 0.0,
+                "given release {given_release}: released mass {mass}"
+            );
+        }
     }
 
     fn setup_trajectory_sim() -> Simulation {

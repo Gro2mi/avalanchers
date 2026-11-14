@@ -5,6 +5,24 @@ All notable changes to this project might be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- GeoTIFF DEMs written by GDAL keep their no-data cells out of the simulation. The no-data tag
+  (42113) is an ASCII string such as `"-9999"`, which was read as a number and ignored, so the
+  cells counted as elevations of -9999 m and the flow fell off a 12 km cliff at the edge of the
+  data (peak velocities up to 10^12 m/s on the Vals DEM). Elevations below -1000 m in a file
+  without the tag are treated as no data too, with a warning.
+- Terrain-following and 3D particles next to no-data cells are stopped there instead of being
+  thrown across the grid. Bilinear sampling of a footprint that holds a NaN texel is undefined
+  and returned NaN or degenerate normals and curvatures. The terrain analysis marks every texel
+  whose normal or curvature touches missing data in the w channel of the terrain geometry
+  texture (the unused profile curvature before), so the normal sample the particle needs anyway
+  tells whether its footprint is valid, at no extra texture reads. Particles stopped at missing
+  data also carry `out_of_dem_data` in every grid model, not only in the sliding block model.
+- Release areas never include cells without elevation data, so the released volume and mass
+  are always finite. The terrain-based release estimation compared NaN slopes, elevations and
+  roughnesses with its thresholds, which is always false, so every no-data cell became a release
+  cell with a NaN mass (62 % of the Vals DEM instead of 16 %). Release areas from files or arrays
+  lose cells with a non-finite thickness or without valid terrain in or next to them, with a
+  warning that gives their number.
 - The flow front no longer stalls behind a steep wall on GPUs with float atomics when particles
   are light (many particles per cell, thin release margins). The tile-sorted P2G still rounded
   every contribution to 0.1 kg and dropped those that rounded to zero, and the grid treated nodes
@@ -47,6 +65,10 @@ All notable changes to this project might be documented in this file.
   (before, they only reached the server console); it no longer goes through the Python `logging`
   module (removes the `pyo3-log` dependency). Messages of GPU and worker threads follow the next
   message of the calling thread, so logging can no longer deadlock on the GIL.
+- Particles faster than 150 m/s are stopped and flag the run with `UNPHYSICAL_SPEED` (dense
+  avalanches reach about 60-80 m/s, so faster particles come from a numerical blow-up). After a
+  run, warnings give the number of particles stopped for an unphysical speed, an invalid (NaN)
+  state, missing elevation data or the DEM edge, and the command line summary lists them.
 - The command line tool prints a summary to stdout at every log level: the setup (DEM, model,
   friction, release area, volume and mass, release terrain, particles, steps and why the run
   stopped), the results (peak velocity and flow thickness, affected area, runout distance, drop
@@ -175,6 +197,7 @@ All notable changes to this project might be documented in this file.
   shortened the runout: the energy line benchmark is now 5 m from its reference, not 307 m.
 
 ### Added
+- The web app has a gully wall reference length control (`reference_surface_length`, 0 = off).
 - The web app shows engine warnings as yellow notifications that fade after 5 s and errors (also
   engine crashes) as red notifications that stay until closed. Repeated messages count up
   instead of stacking. Programs embedding the web package receive the messages with

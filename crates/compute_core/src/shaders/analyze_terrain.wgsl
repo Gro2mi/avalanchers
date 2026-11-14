@@ -12,12 +12,21 @@
 // Gully walls steeper than 70 degrees against the reference surface load
 // the flow like 70 degree walls (keeps 1 / cos(beta) bounded at cliffs)
 const MIN_COS_BETA: f32 = 0.34202014;
+// terrain_geometry_texture.w: 0 where the normal and curvature of the texel
+// come from valid elevations only, 1 where any of its 3 x 3 DEM samples is
+// missing (and at the grid border). Bilinear filtering of zeros is exactly
+// zero, so a sampled w == 0 means the whole footprint holds valid terrain;
+// see on_valid_terrain in g2p_terrain_following.wgsl.
+const TERRAIN_INVALID: f32 = 1.0;
 
 
 @compute @workgroup_size(WG_SIZE_2D, WG_SIZE_2D, 1)
 fn analyze_terrain(@builtin(global_invocation_id) cell: vec3<u32>) {
     // boundary guard
     if cell.x < 1 || cell.x >= sim_settings.grid_shape.x - 1 || cell.y < 1 || cell.y >= sim_settings.grid_shape.y - 1 {
+        if cell.x < sim_settings.grid_shape.x && cell.y < sim_settings.grid_shape.y {
+            textureStore(terrain_geometry_texture, vec2<i32>(cell.xy), vec4f(0.0, 0.0, 0.0, TERRAIN_INVALID));
+        }
         return;
     }
 
@@ -58,7 +67,12 @@ fn analyze_terrain(@builtin(global_invocation_id) cell: vec3<u32>) {
     //     f16(normal.x), f16(normal.y), f16(normal.z), f16(1.0)
     // );
     // textureStore(normalsTexture, coord, normal_f16);
-    textureStore(terrain_geometry_texture, coord, vec4f(normal, profile_curvature));
+    // tested on the loaded values: the compiler may assume arithmetic results
+    // are never NaN and drop a test on the derived normal or curvature
+    let valid = is_finite(center) && is_finite(left) && is_finite(right) && is_finite(up)
+        && is_finite(down) && is_finite(up_right) && is_finite(down_right)
+        && is_finite(up_left) && is_finite(down_left);
+    textureStore(terrain_geometry_texture, coord, vec4f(normal, select(TERRAIN_INVALID, 0.0, valid)));
     textureStore(curvature_texture, coord, vec4f(dxx, dxy, dyy, plan_curvature));
 
     // Inclination beta of the bed against the smoothed reference surface, the
@@ -205,6 +219,8 @@ const SIM_INFO_OUT_OF_BOUNDS: u32 = 1u << 0u;
 const SIM_INFO_CFL_EXCEEDED: u32 = 1u << 1u;
 const SIM_INFO_IS_NAN: u32 = 1u << 2u;
 const SIM_INFO_PARTICLE_OUT_OF_DEM_DATA: u32 = 1u << 3u;
+// a particle exceeded MAX_PARTICLE_SPEED and was stopped
+const SIM_INFO_UNPHYSICAL_SPEED: u32 = 1u << 4u;
 const SIM_INFO_STOPPED: u32 = 1u << 31u;
 const SIM_INFO_ALL_PARTICLES_STOPPED: u32 = 1u << 30u;
 const SIM_INFO_NO_NEW_CELLS: u32 = 1u << 29u;
@@ -213,8 +229,17 @@ const SIM_INFO_AT_REST: u32 = 1u << 28u;
 // total momentum fell below momentum_stop_fraction of its peak
 const SIM_INFO_LOW_MOMENTUM: u32 = 1u << 27u;
 
-// reversible low-speed state; the low bits hold the rest start step while resting
-// and the consecutive slow-step count while moving
+// Fastest particle speed (m/s) taken as physical. Dense flow avalanches reach
+// about 60-80 m/s and the integer atomic grid holds momentum up to
+// QUANTIZATION_SAFETY * MAX_FLOW_VELOCITY = 200 m/s; a faster particle comes from
+// a numerical blow-up (e.g. a cliff of no-data elevations) and is stopped.
+// Mirrors compute_core::MAX_PARTICLE_SPEED.
+const MAX_PARTICLE_SPEED: f32 = 150.0;
+// stopped for exceeding MAX_PARTICLE_SPEED
+const PARTICLE_UNPHYSICAL_SPEED: u32 = 1u << 25u;
+// reversible low-speed state; the low bits (below PARTICLE_UNPHYSICAL_SPEED)
+// hold the rest start step while resting and the consecutive slow-step count
+// while moving
 const PARTICLE_RESTING: u32 = 1u << 26u;
 // consecutive slow steps before a particle rests
 const REST_STEPS: u32 = 20u;
@@ -293,7 +318,7 @@ struct AtomicValues {
 // sub-threshold creep inside deposits. Returns the new state: its low bits hold
 // the slow-step counter while moving and the rest start step while resting.
 fn next_rest_state(previous_state: u32, speed: f32, timestep: u32) -> u32 {
-    let low_mask = PARTICLE_RESTING - 1u;
+    let low_mask = PARTICLE_UNPHYSICAL_SPEED - 1u;
     var resting = (previous_state & PARTICLE_RESTING) != 0u;
     var low_bits = previous_state & low_mask;
     if resting {
