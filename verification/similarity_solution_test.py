@@ -648,8 +648,9 @@ def _thesis_profiles(ts, header, field, ana, limits, with_z):
              r"$y$ (m)", r"across flow, $x = %.1f$ m" % ana["x_center"]))
     for c, (coord, sim_c, ana_c, center, width, xlabel, title) in enumerate(cuts):
         ax_h, ax_m = axes[0, c], axes[1, c]
-        ax_h.plot(coord, sim_c["h"], color=ts.BLACK)
-        ax_h.plot(coord, ana_c["h"], color=ts.BLACK, linestyle="--")
+        h_color = ts.VARIABLE_COLORS["h"]
+        ax_h.plot(coord, sim_c["h"], color=h_color)
+        ax_h.plot(coord, ana_c["h"], color=h_color, linestyle="--")
         ax_h.set_title(title)
         for key in ("norm", "x", "y", "z"):
             if key not in sim_c:
@@ -665,35 +666,35 @@ def _thesis_profiles(ts, header, field, ana, limits, with_z):
     axes[0, 0].set_ylim(bottom=0.0)
     for label, ax in zip("abcd", axes.ravel()):
         ts.panel_label(ax, label)
-    comp = [Line2D([], [], color=ts.COMPONENT_COLORS[k], label=_TEX_COMPONENTS[k])
-            for k in ("norm", "x", "y", "z") if k != "z" or with_z]
+    comp = [Line2D([], [], color=ts.VARIABLE_COLORS["h"], label=r"$h$")]
+    comp += [Line2D([], [], color=ts.COMPONENT_COLORS[k], label=_TEX_COMPONENTS[k])
+             for k in ("norm", "x", "y", "z") if k != "z" or with_z]
     fig.legend(handles=ts.style_handles() + comp, loc="outside lower center",
                ncol=len(comp) + 2)
     return fig
 
 
 def _thesis_centerline(ts, header, samples, analytic_at, idx, center_y):
-    from matplotlib.lines import Line2D
     xs, _ = _cell_centers(header)
     row, _ = _center_indices(header, center_y, 0.0)
     fig, axes = plt.subplots(2, 1, figsize=ts.size(1.0, 0.55), sharex=True,
                              layout="constrained")
     x_lo, x_hi = np.inf, -np.inf
-    handles = []
-    for color, i in zip(ts.SERIES_COLORS, idx):
+    ramps = [ts.time_ramp(ts.VARIABLE_COLORS[k], len(idx)) for k in ("h", "norm")]
+    for n, i in enumerate(idx):
         t = samples["t"][i]
         field = sample_field(samples, i)
         ana = analytic_at(t)
-        for ax, sim_v, ana_v in ((axes[0], field["h"], ana["h"]),
-                                 (axes[1], field["h"] * field["speed"],
-                                  ana["h"] * ana["speed"])):
-            ax.plot(xs, sim_v[row], color=color)
-            ax.plot(xs, ana_v[row], color=color, linestyle="--")
+        for ax, ramp, sim_v, ana_v in ((axes[0], ramps[0], field["h"], ana["h"]),
+                                       (axes[1], ramps[1], field["h"] * field["speed"],
+                                        ana["h"] * ana["speed"])):
+            ax.plot(xs, sim_v[row], color=ramp[n])
+            ax.plot(xs, ana_v[row], color=ramp[n], linestyle="--")
         occupied = np.where((field["h"][row] > 0) | (ana["h"][row] > 0))[0]
         if len(occupied):
             x_lo = min(x_lo, xs[occupied[0]])
             x_hi = max(x_hi, xs[occupied[-1]])
-        handles.append(Line2D([], [], color=color, label=r"$t = %.0f$ s" % t))
+    handles, labels = ts.time_handles(samples["t"][idx], ramps)
     if np.isfinite(x_lo):
         pad = 0.03 * (x_hi - x_lo)
         axes[1].set_xlim(x_lo - pad, x_hi + pad)
@@ -704,8 +705,10 @@ def _thesis_centerline(ts, header, samples, analytic_at, idx, center_y):
         ax.set_ylim(bottom=0.0)
     ts.panel_label(axes[0], "a")
     ts.panel_label(axes[1], "b")
-    fig.legend(handles=ts.style_handles() + handles, loc="outside lower center",
-               ncol=len(handles) + 2)
+    style = ts.style_handles()
+    fig.legend(handles=style + handles, labels=[h.get_label() for h in style] + labels,
+               loc="outside lower center", ncol=len(handles) + 2,
+               **ts.time_legend_kwargs(len(ramps)))
     return fig
 
 
@@ -717,7 +720,7 @@ def _thesis_contours(ts, header, samples, analytic_at, idx):
     handles = []
     occupied = np.zeros(x_mesh.shape, dtype=bool)
     fractions = (0.1, 0.6)
-    for color, i in zip(ts.SERIES_COLORS, idx):
+    for color, i in zip(ts.time_ramp(ts.VARIABLE_COLORS["h"], len(idx)), idx):
         t = samples["t"][i]
         h_sim = np.nan_to_num(blur3x3(samples["h"][i]))
         ana = analytic_at(t)
@@ -810,9 +813,11 @@ def plot_thesis_figures(header, samples, analytic_at, errors, t_highlight,
 
     - profiles: h and momentum components along / across the flow at
       t_highlight (h u_z for the 3D model)
-    - centerline_evolution: h and h|u| along y = 0 at several times
+    - centerline_evolution: h and h|u| along y = 0 at several times (one
+      light-to-dark ramp per variable, see thesis_style.time_ramp)
     - contours_evolution: 10 % / 60 % analytic-peak contours at several times
-    - errors: relative L2 / Linf errors vs time
+      (ramp of the h colour)
+    - errors: relative L2 / Lmax errors vs time
     - momentum_maps: momentum components (x, y[, z]) simulation / analytical /
       difference at t_highlight
     plus simisol_errors.csv. Returns the PNG paths (PDFs are written next to

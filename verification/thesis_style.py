@@ -3,8 +3,10 @@
 Matches the thesis layout (12pt book class, Computer Modern, 15 cm text
 width, small captions): figures are sized in centimeters of the text width,
 use Computer Modern for text and math, 9 pt labels and a colour-blind safe
-palette (Okabe & Ito 2008), and are written as vector PDF (for LaTeX) plus a
-300 dpi PNG (for the markdown report).
+palette (Okabe & Ito 2008) with one hue per variable (curves of a variable at
+several times: light-to-dark ramp of that hue, see time_ramp), and are
+written as vector PDF (for LaTeX) plus a 300 dpi PNG (for the markdown
+report). Figures carry no overall title: the LaTeX caption names them.
 
 Usage:
     import thesis_style as ts
@@ -31,9 +33,22 @@ BLUE = "#0072B2"
 VERMILION = "#D55E00"
 PURPLE = "#CC79A7"
 
-# one colour per momentum component, used by every momentum figure
-COMPONENT_COLORS = {"norm": GREEN, "x": VERMILION, "y": BLUE, "z": PURPLE}
-# one colour per time / case in multi-line figures
+# one hue per variable, shared by every figure: a single curve uses the base
+# colour, curves of one variable at several times a light-to-dark ramp of it
+# (time_ramp), so a variable keeps its hue across all figures
+VARIABLE_COLORS = {
+    "h": BLUE,          # flow thickness
+    "speed": ORANGE,    # flow velocity / velocity height
+    "norm": GREEN,      # momentum h|u|
+    "x": VERMILION,     # momentum components
+    "y": PURPLE,
+    "z": BLACK,
+}
+COMPONENT_COLORS = {k: VARIABLE_COLORS[k] for k in ("norm", "x", "y", "z")}
+# neutral colour of the solid/dashed legend entries and of time markers
+# that belong to no variable
+NEUTRAL = "0.45"
+# one colour per case (not per time) in multi-line figures, e.g. rotation angles
 SERIES_COLORS = (BLUE, GREEN, ORANGE, VERMILION, PURPLE, SKY, YELLOW)
 
 RC = {
@@ -89,8 +104,44 @@ def panel_label(ax, label, loc=(0.015, 0.97)):
 def style_handles(sim_label="simulation", ref_label="analytical"):
     """Legend entries for the solid (simulation) / dashed (reference) convention."""
     from matplotlib.lines import Line2D
-    return [Line2D([], [], color=BLACK, linestyle="-", label=sim_label),
-            Line2D([], [], color=BLACK, linestyle="--", label=ref_label)]
+    return [Line2D([], [], color=NEUTRAL, linestyle="-", label=sim_label),
+            Line2D([], [], color=NEUTRAL, linestyle="--", label=ref_label)]
+
+
+def _mix(color, other, amount):
+    import numpy as np
+    from matplotlib.colors import to_rgb
+    return tuple((1.0 - amount) * np.asarray(to_rgb(color)) + amount * np.asarray(to_rgb(other)))
+
+
+def time_ramp(color, n, tint=0.55, shade=0.45):
+    """n colours of one hue on a continuous light-to-dark scale for curves of
+    one variable at n increasing times: from a light tint of `color` (earliest
+    time) through `color` to a dark shade of it (latest time)."""
+    import numpy as np
+    from matplotlib.colors import LinearSegmentedColormap
+    cmap = LinearSegmentedColormap.from_list(
+        "ramp", [_mix(color, "white", tint), color, _mix(color, "black", shade)])
+    return [cmap(v) for v in (np.linspace(0.0, 1.0, n) if n > 1 else [0.5])]
+
+
+def time_handles(times, ramps, linestyle="-"):
+    """Legend handles of the times of a time-ramp figure: one entry per time
+    showing a short segment of each variable's ramp colour (pass the
+    handler_map of time_legend_kwargs to the legend)."""
+    from matplotlib.lines import Line2D
+    handles = [tuple(Line2D([], [], color=ramp[k], linestyle=linestyle) for ramp in ramps)
+               for k in range(len(times))]
+    labels = [r"$t = %g$ s" % round(float(t), 1) for t in times]
+    return handles, labels
+
+
+def time_legend_kwargs(n_variables):
+    """Legend keyword arguments drawing the tuple handles of time_handles side
+    by side; wider handles for several variables."""
+    from matplotlib.legend_handler import HandlerTuple
+    return {"handler_map": {tuple: HandlerTuple(ndivide=None, pad=0.0)},
+            "handlelength": max(2.2, 1.3 * n_variables)}
 
 
 def pick_times(times, wanted=(5.0, 10.0, 15.0, 20.0)):
@@ -106,29 +157,30 @@ def pick_times(times, wanted=(5.0, 10.0, 15.0, 20.0)):
 
 def error_figure(times, errors, with_z=False, momentum_title=r"momentum $h\,\mathbf{u}$",
                  momentum_symbol=r"h\,\mathbf{u}"):
-    """Relative L2 / Linf errors of flow thickness (a) and momentum (b) over
+    """Relative L2 / Lmax errors of flow thickness (a) and momentum (b) over
     time; `errors` holds h_l2rel, h_lmaxrel, vh_l2rel, vh_lmaxrel (and
     vhz_l2rel, vhz_lmaxrel drawn as markers when with_z)."""
     fig, axes = plt.subplots(1, 2, figsize=size(1.0, 0.36), sharey=True,
                              layout="constrained")
-    axes[0].plot(times, errors["h_l2rel"], color=BLACK, label=r"$h$, $L_2$")
-    axes[0].plot(times, errors["h_lmaxrel"], color=BLACK, linestyle="--",
-                 label=r"$h$, $L_\infty$")
+    blue = VARIABLE_COLORS["h"]
+    axes[0].plot(times, errors["h_l2rel"], color=blue, label=r"$h$, $L_2$")
+    axes[0].plot(times, errors["h_lmaxrel"], color=blue, linestyle="--",
+                 label=r"$h$, $L_{\max}$")
     axes[0].set_title(r"flow thickness $h$")
     green = COMPONENT_COLORS["norm"]
     axes[1].plot(times, errors["vh_l2rel"], color=green,
                  label=r"$%s$, $L_2$" % momentum_symbol)
     axes[1].plot(times, errors["vh_lmaxrel"], color=green, linestyle="--",
-                 label=r"$%s$, $L_\infty$" % momentum_symbol)
+                 label=r"$%s$, $L_{\max}$" % momentum_symbol)
     if with_z:
         # h u_z nearly coincides with the 3D norm: markers keep both visible
-        purple = COMPONENT_COLORS["z"]
-        axes[1].plot(times, errors["vhz_l2rel"], color=purple, linestyle="none",
+        z_color = COMPONENT_COLORS["z"]
+        axes[1].plot(times, errors["vhz_l2rel"], color=z_color, linestyle="none",
                      marker="o", markersize=3, markerfacecolor="none",
                      label=r"$h\,u_z$, $L_2$")
-        axes[1].plot(times, errors["vhz_lmaxrel"], color=purple, linestyle="none",
+        axes[1].plot(times, errors["vhz_lmaxrel"], color=z_color, linestyle="none",
                      marker="s", markersize=3, markerfacecolor="none",
-                     label=r"$h\,u_z$, $L_\infty$")
+                     label=r"$h\,u_z$, $L_{\max}$")
     axes[1].set_title(momentum_title)
     axes[0].set_ylabel("relative error")
     for label, ax in zip("ab", axes):

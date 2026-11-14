@@ -86,7 +86,7 @@ SIMI_SOL_CFG = {
     "flag_earth": False,  # earth pressure coefficients (ini: False)
     "t_end": 20.0,        # simulated end time [s]
     "save_interval": 1.0, # field sampling interval [s]
-    "t_save": 5.0,        # time highlighted in the plots [s]
+    "t_save": 15.0,       # time highlighted in the plots [s]
     "relative_error": True,  # ini: relativError = True
     "scale_coef": 1.02,      # ini: scaleCoef = 1.02
     "plot_sequence": False,  # ini: plotSequence - per-time-step figures

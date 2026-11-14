@@ -95,7 +95,7 @@ TEST_DESCRIPTIONS = {
         "Parabolic heap spreading on a 35 deg plane with 25 deg Coulomb bed friction, "
         "compared to the similarity solution of Hutter, Siegel & Savage (1993). Flow "
         "thickness h and momentum h*u are compared on the grid at every second "
-        "(relative L2 and Linf norms, AvaFrame simiSol)."),
+        "(relative L2 and Lmax norms, AvaFrame simiSol)."),
     "dam_break": (
         "Dry-bed dam break on an inclined plane with Coulomb friction, compared to the "
         "analytic solution of Faccanoni & Mangeney (2012, test 2, case 1.2). The 5 m "
@@ -141,7 +141,7 @@ REPORT_PLOTS = {
          "Flow thickness contours at 10 % (thick) and 60 % (thin) of the analytic "
          "peak thickness at several times; + marks the analytic heap center."),
         ("thesis/simisol_errors.png",
-         "Relative L2 and Linf errors of flow thickness (a) and momentum (b) over "
+         "Relative L2 and Lmax errors of flow thickness (a) and momentum (b) over "
          "time; for the 3D model the momentum error is the 3D vector norm, markers "
          "show the vertical component h*u_z."),
         ("*SimiSolTest.png", "AvaFrame-style summary (simiSol) at the highlighted time."),
@@ -159,7 +159,7 @@ REPORT_PLOTS = {
          "(along-slope distance s from the dam front, cross-slope distance from the dam "
          "axis) with the error domain, the profile line and the analytical front."),
         ("thesis/dambreak_errors.png",
-         "Relative L2 and Linf errors of flow thickness (a) and momentum |h u| (b) "
+         "Relative L2 and Lmax errors of flow thickness (a) and momentum |h u| (b) "
          "within the error domain over time."),
         ("*DamBreakTest.png", "AvaFrame-style dam break summary at the highlighted time."),
         ("*_compare.gif", "Animated dam break comparison."),
@@ -402,7 +402,7 @@ def _with_z(name, args):
 
 
 def _similarity_rows(ret, args, with_z=None):
-    """Error table rows at SIMILARITY_TABLE_TIMES: (t, hL2, hLinf, huL2, huLinf[, huzL2, huzLinf]).
+    """Error table rows at SIMILARITY_TABLE_TIMES: (t, hL2, hLmax, huL2, huLmax[, huzL2, huzLmax]).
 
     Used for the similarity solution and the dam break test (same error keys)."""
     samples, errors = ret
@@ -422,9 +422,9 @@ def _similarity_rows(ret, args, with_z=None):
 
 
 def _similarity_header(args, with_z=None):
-    header = ["t [s]", "h L2", "h Linf", "hu L2", "hu Linf"]
+    header = ["t [s]", "h L2", "h Lmax", "hu L2", "hu Lmax"]
     if (_is_three_d(args) if with_z is None else with_z):
-        header += ["hu_z L2", "hu_z Linf"]
+        header += ["hu_z L2", "hu_z Lmax"]
     return header
 
 
@@ -571,10 +571,10 @@ def _error_table_rows(rows):
 
 
 def _error_table_header(with_z, momentum=r"h\mathbf{u}"):
-    head = [r"$t$ (s)", r"$h$, $L_2$", r"$h$, $L_\infty$",
-            rf"${momentum}$, $L_2$", rf"${momentum}$, $L_\infty$"]
+    head = [r"$t$ (s)", r"$h$, $L_2$", r"$h$, $L_{\max}$",
+            rf"${momentum}$, $L_2$", rf"${momentum}$, $L_{{\max}}$"]
     if with_z:
-        head += [r"$hu_z$, $L_2$", r"$hu_z$, $L_\infty$"]
+        head += [r"$hu_z$, $L_2$", r"$hu_z$, $L_{\max}$"]
     return head
 
 

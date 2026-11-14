@@ -22,6 +22,7 @@ import pathlib
 
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib import patheffects
 from matplotlib.colors import LinearSegmentedColormap, Normalize
 from matplotlib.transforms import blended_transform_factory
 from matplotlib.patches import Rectangle
@@ -559,9 +560,12 @@ def _thesis_dam_profiles(ts, frame, dam, samples, cfg, idx):
     analytic solution; along-slope coordinate relative to the dam front.
 
     The analytic curves are drawn only downstream of the material mid-point
-    x_mid (start of the error domain): upstream, the semi-infinite-dam
-    solution keeps a uniform h_l reservoir the finite dam does not have."""
+    x_mid (start of the error domain, a labelled dotted line through all
+    panels): upstream, the semi-infinite-dam solution keeps a uniform h_l
+    reservoir the finite dam does not have. Each variable is drawn in a
+    light-to-dark ramp of its hue over time (thesis_style.time_ramp)."""
     from matplotlib.lines import Line2D
+    from matplotlib.transforms import blended_transform_factory
 
     row = frame["row_index"]
     s_row = frame["s_rel_profile"]
@@ -571,29 +575,38 @@ def _thesis_dam_profiles(ts, frame, dam, samples, cfg, idx):
     for ax in axes[:1]:
         ax.fill_between([dam["x_back_rel"], 0.0], 0.0, dam["h_l"], color="0.85",
                         linewidth=0, label="initial dam")
-    handles = []
     occupied_hi = 0.0
-    for color, i in zip(ts.SERIES_COLORS, idx):
+    ramps = [ts.time_ramp(ts.VARIABLE_COLORS[k], len(idx)) for k in ("h", "speed", "norm")]
+    mid_ramp = ts.time_ramp(ts.NEUTRAL, len(idx))
+    label_transform = blended_transform_factory(axes[0].transData, axes[0].transAxes)
+    for n, i in enumerate(idx):
         t = samples["t"][i]
         h_ana, u_ana, x_mid = dam_break_solution(frame["phi_deg"], cfg["delta"],
                                                  dam["h_l"], [t], s_fine, cfg["grav_acc"],
                                                  x_back_rel=dam["x_back_rel"])
         behind = s_fine < x_mid[0]
-        axes[0].plot(x_mid[0], 0.0, marker="|", markersize=8, color=color)
+        for ax in axes:
+            ax.axvline(x_mid[0], color=mid_ramp[n], linestyle=":", linewidth=0.9,
+                       zorder=1)
+        # time label at the bottom of panel (a), below the draining reservoir
+        axes[0].text(x_mid[0], 0.03, r"$%s$ s" % _time_label(t), transform=label_transform,
+                     rotation=90, ha="right", va="bottom", fontsize=7, color="0.25")
         h_ana = np.where(behind, np.nan, h_ana[0])
         u_ana = np.where(behind | (h_ana <= 0), np.nan, u_ana[0])
         h = samples["h"][i][row]
         speed = np.hypot(samples["u"][i][row], samples["v"][i][row])
         speed = np.where(h > 0, speed, np.nan)
-        for ax, sim_v, ana_v in ((axes[0], h, h_ana), (axes[1], speed, u_ana),
-                                 (axes[2], h * np.nan_to_num(speed), h_ana * u_ana)):
-            ax.plot(s_row, sim_v, color=color)
-            ax.plot(s_fine, ana_v, color=color, linestyle="--")
+        for ax, ramp, sim_v, ana_v in ((axes[0], ramps[0], h, h_ana),
+                                       (axes[1], ramps[1], speed, u_ana),
+                                       (axes[2], ramps[2], h * np.nan_to_num(speed),
+                                        h_ana * u_ana)):
+            ax.plot(s_row, sim_v, color=ramp[n])
+            ax.plot(s_fine, ana_v, color=ramp[n], linestyle="--")
         front = np.where(h > 1e-3)[0]
         if len(front):
             occupied_hi = max(occupied_hi, s_row[front[-1]])
         occupied_hi = max(occupied_hi, float(np.nanmax(np.where(h_ana > 0, s_fine, np.nan))))
-        handles.append(Line2D([], [], color=color, label=r"$t = %s$ s" % _time_label(t)))
+    handles, labels = ts.time_handles(samples["t"][idx], ramps)
     pad = 0.04 * (occupied_hi - dam["x_back_rel"])
     axes[2].set_xlim(dam["x_back_rel"] - pad, occupied_hi + pad)
     axes[0].set_ylabel(r"$h$ (m)")
@@ -604,8 +617,11 @@ def _thesis_dam_profiles(ts, frame, dam, samples, cfg, idx):
         ax.set_ylim(bottom=0.0)
         ts.panel_label(ax, label, loc=(0.015, 0.93))
     initial = plt.Rectangle((0, 0), 1, 1, color="0.85", label="initial dam")
-    fig.legend(handles=ts.style_handles() + [initial] + handles,
-               loc="outside lower center", ncol=4)
+    mid = Line2D([], [], color=ts.NEUTRAL, linestyle=":", linewidth=0.9,
+                 label=r"error domain start $s_\mathrm{m}(t)$")
+    extra = ts.style_handles() + [initial, mid]
+    fig.legend(handles=extra + handles, labels=[e.get_label() for e in extra] + labels,
+               loc="outside lower center", ncol=4, **ts.time_legend_kwargs(len(ramps)))
     return fig
 
 
@@ -650,16 +666,24 @@ def _thesis_dam_map(ts, dem, header, frame, dam, samples, cfg, i_t):
     fig, ax = plt.subplots(figsize=ts.size(1.0, min(0.9, aspect + 0.14)),
                            layout="constrained")
     # plane bed: a hillshade would only show the DEM quantization steps
-    ax.set_facecolor("0.93")
+    ax.set_facecolor("white")
+    # afmhot_r (light for thin, black for the thickest flow), without its
+    # white end so the thinnest flow stays visible on the white background
+    ft_cmap = LinearSegmentedColormap.from_list(
+        "ft", plt.get_cmap("afmhot_r")(np.linspace(0.12, 1.0, 256)))
     im = ax.pcolormesh(s, q, np.ma.masked_where(~flowed, h), shading="nearest",
-                       cmap="viridis", zorder=2, rasterized=True)
+                       cmap=ft_cmap, zorder=2, rasterized=True)
+    # the lines cross pale, orange and black cells: blue / green / black with
+    # a white halo stay visible on all of them
+    halo = [patheffects.Stroke(linewidth=2.8, foreground="white"), patheffects.Normal()]
     ax.add_patch(plt.Rectangle((s_mid, -half_width), s_end - s_mid, 2.0 * half_width,
-                               fill=False, edgecolor=ts.VERMILION, linestyle="--",
-                               linewidth=1.0, zorder=3, label="error domain"))
-    ax.axhline(q[frame["row_index"], 0], color=ts.BLACK, linestyle=":", linewidth=0.9,
-               zorder=3, label="profile line")
-    ax.axvline(s_front, color=ts.BLACK, linestyle="-.", linewidth=0.9, zorder=3,
-               label="analytical front")
+                               fill=False, edgecolor=ts.BLUE, linestyle="--",
+                               linewidth=1.2, zorder=3, label="error domain",
+                               path_effects=halo))
+    ax.axhline(q[frame["row_index"], 0], color=ts.BLACK, linestyle=":", linewidth=1.2,
+               zorder=3, label="profile line", path_effects=halo)
+    ax.axvline(s_front, color=ts.GREEN, linestyle="-.", linewidth=1.2, zorder=3,
+               label="analytical front", path_effects=halo)
     ax.set_xlim(s_lo, s_hi)
     ax.set_ylim(q_lo, q_hi)
     ax.set_aspect("equal")
