@@ -15,6 +15,9 @@ const RELEASE_THICKNESS_THRESHOLD: f32 = 0.01;
 // keeps the random offsets this fraction of a cell away from the cell edges,
 // so f32 rounding cannot place a particle in a neighboring cell
 const CELL_EDGE_MARGIN: f32 = 1e-3;
+// uniform particle placement; must match SimFlags::UNIFORM_PARTICLE_PLACEMENT
+// in settings.rs (set only for this dispatch)
+const UNIFORM_PARTICLE_PLACEMENT: u32 = 1u << 6u;
 // @group(0) @binding(13) var<uniform> tracked_particle_relative_positions: array<Particle>;
 // @group(0) @binding(14) var<storage, read_write> tracked_particle_ids: array<u32>;
 
@@ -42,10 +45,34 @@ fn initialize_particles(@builtin(global_invocation_id) cell: vec3<u32>) {
     let cell_volume = snow_thickness * sim_settings.cell_size * sim_settings.cell_size * factor;
     let cell_mass = cell_volume * sim_settings.snow_density;
     atomicAdd(&atomic_values.release_volume, u32(round(cell_volume)));
-    let atomicParticleIndex = atomicAdd(&atomic_values.number_release_particles, sim_settings.released_particles_per_cell);
-    for (var n: u32 = 0; n < sim_settings.released_particles_per_cell; n++) {
+    let count = sim_settings.released_particles_per_cell;
+    let atomicParticleIndex = atomicAdd(&atomic_values.number_release_particles, count);
+    // Uniform placement: one equal-area stratum per particle, each particle
+    // drawn in its own stratum. The cell is cut into round(sqrt(count)) rows;
+    // row j holds the particles [j * count / rows, (j + 1) * count / rows)
+    // side by side and is as high as its share of the particles, so every
+    // stratum covers 1 / count of the cell (a k x k grid for count = k^2).
+    let uniform_placement = (sim_settings.flags & UNIFORM_PARTICLE_PLACEMENT) != 0u;
+    let rows = max(1u, u32(round(sqrt(f32(count)))));
+    var row = 0u;
+    var row_start = 0u;
+    var row_end = count / rows;
+    for (var n: u32 = 0; n < count; n++) {
         let particleIndex = atomicParticleIndex + n;
-        let r = mix(vec2f(CELL_EDGE_MARGIN), vec2f(1.0 - CELL_EDGE_MARGIN), rand2(&rng_seed));
+        var r = mix(vec2f(CELL_EDGE_MARGIN), vec2f(1.0 - CELL_EDGE_MARGIN), rand2(&rng_seed));
+        if uniform_placement {
+            while n >= row_end {
+                row += 1u;
+                row_start = row_end;
+                row_end = (row + 1u) * count / rows;
+            }
+            let row_count = f32(row_end - row_start);
+            let stratum = vec2f(
+                (f32(n - row_start) + r.x) / row_count,
+                (f32(row_start) + r.y * row_count) / f32(count),
+            );
+            r = clamp(stratum, vec2f(CELL_EDGE_MARGIN), vec2f(1.0 - CELL_EDGE_MARGIN));
+        }
         // cell i covers [i, i + 1) * cell_size, as in position_to_cell
         let particle_position = (vec2f(cell.xy) + r) * sim_settings.cell_size;
 

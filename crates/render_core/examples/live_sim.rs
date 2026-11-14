@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use compute_core::settings::{FrictionModel, Settings, SimModel};
+use compute_core::settings::{FrictionModel, ParticlePlacement, Settings, SimModel};
 use compute_core::{ComputeOrchestrator, SimInfo, buffers::BufferName};
 use render_core::{OrbitCamera, OverlayRange, ParticleBuffers, Renderer, TerrainData};
 use simulation::{Simulation, SimulationState};
@@ -129,7 +129,7 @@ fn apply_panel_defaults(settings: &mut Settings) {
         .get_or_insert(FrictionModel::Voellmy);
     settings.enable_curvature.get_or_insert(true);
     settings.enable_particle_interaction.get_or_insert(true);
-    settings.enable_particle_relaxation.get_or_insert(true);
+    settings.particle_placement.get_or_insert_default();
     settings
         .enable_earth_pressure_coefficient
         .get_or_insert(false);
@@ -1440,11 +1440,27 @@ impl ApplicationHandler for Viewer {
                                     "particle interaction",
                                     &mut draft.enable_particle_interaction,
                                 );
-                                bool_checkbox(
-                                    ui,
-                                    "particle relaxation",
-                                    &mut draft.enable_particle_relaxation,
-                                );
+                                ui.horizontal(|ui| {
+                                    ui.label("particle placement");
+                                    let placement =
+                                        draft.particle_placement.get_or_insert_default();
+                                    egui::ComboBox::from_id_salt("particle_placement")
+                                        .selected_text(placement.to_string())
+                                        .show_ui(ui, |ui| {
+                                            for option in [
+                                                ParticlePlacement::Random,
+                                                ParticlePlacement::Relaxed,
+                                                ParticlePlacement::UniformRandom,
+                                                ParticlePlacement::UniformRelaxed,
+                                            ] {
+                                                ui.selectable_value(
+                                                    placement,
+                                                    option,
+                                                    option.to_string(),
+                                                );
+                                            }
+                                        });
+                                });
                                 bool_checkbox(
                                     ui,
                                     "earth pressure coefficient",

@@ -1079,7 +1079,7 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    use compute_core::settings::{FrictionModel, SimModel};
+    use compute_core::settings::{FrictionModel, ParticlePlacement, SimModel};
 
     const PARABOLA_PATH: &str = "../../data/avaframe/avaParabola.png";
 
@@ -1252,7 +1252,7 @@ mod tests {
             enable_entrainment: Some(true),
             enable_weak_pressure: Some(true),
             enable_particle_interaction: Some(true),
-            enable_particle_relaxation: Some(true),
+            particle_placement: Some(ParticlePlacement::UniformRelaxed),
             enable_earth_pressure_coefficient: Some(true),
             enable_center_of_mass: Some(true),
             center_of_mass_biggest_blob: Some(true),

@@ -487,7 +487,8 @@ def plot_dam_break_summary(dem, header, frame, dam, samples, errors, t_save,
             f"h0 = {dam['h_l']:.2f}\n"
             f"density = {settings.get('density')}\n"
             f"cfl = {settings.get('cfl')}\n"
-            f"particles/cell = {settings.get('released_particles_per_cell')}\n")
+            f"particles/cell = {settings.get('released_particles_per_cell')}\n"
+            f"cell size = {header['cellsize']:g} m\n")
     ax7.text(0.5, 0.5, text, transform=ax7.transAxes, ha="center", va="center",
              fontsize=FS)
     # extra horizontal room so the rotated error-axis labels do not collide

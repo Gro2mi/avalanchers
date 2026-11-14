@@ -11,6 +11,9 @@ use tracing::{info, trace};
 use wasm_bindgen::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use web_sys::window;
+// only enables the wasm_js backend of getrandom 0.3 (see Cargo.toml)
+#[cfg(target_arch = "wasm32")]
+use getrandom03 as _;
 
 #[cfg(target_arch = "wasm32")]
 mod renderer;

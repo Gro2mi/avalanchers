@@ -4,9 +4,10 @@
 // accumulates the quantized contributions in workgroup memory and flushes
 // each non-zero node sum with one global atomic; otherwise it falls back to
 // direct global atomics. On the integer-atomic grid both paths give identical
-// grids. On the float-atomic grid the shared path keeps the integer
-// quantization and converts each node sum once, so it deviates from the
-// unquantized direct float deposit by at most the quantization step per node.
+// grids. Float-atomic devices never run this shader (see prepare_particle_sort):
+// the shared tile quantizes, naga allows atomic<f32> only in storage memory,
+// and an f32 compare-exchange tile was ~3x slower than the direct float P2G.
+// Its float variant still has to compile, because every pipeline is built.
 @group(0) @binding(1) var<storage, read_write> sim_info: SimInfo;
 @group(0) @binding(2) var<storage> particles_position: array<vec2<f32>>;
 @group(0) @binding(3) var<storage> particles_velocity: array<vec2<f32>>;

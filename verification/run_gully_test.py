@@ -47,7 +47,7 @@ SETTINGS = {
     "enable_particle_interaction": True,
     # the wedge reference assumes hydrostatic lateral stress (K = 1)
     "enable_earth_pressure_coefficient": False,
-    "enable_particle_relaxation": False,
+    "particle_placement": "uniform-relaxed",
     # window of 3000 steps: a stalling flow must not end the run early
     "no_new_cells_travel": 600.0,
     "max_steps": 20000,

@@ -24,7 +24,6 @@ test-log = { version = "0.2", features = ["trace"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0" 
 anyhow = "1.0" # General-purpose error handling
-env_logger = "0.11"
 pollster = "0.4" # For async execution in native
 
 simulation = { path = "crates/simulation" }
@@ -49,8 +48,6 @@ zarrs = "0.23"
 zarrs_filesystem = "0.3"
 zarrs_plugin = "0.4"
 zarrs_data_type = "0.9"
-lz4_flex = "0.11"
-bincode = "2.0"
 image = "0.25" 
 half = "2.6"
 reqwest = { version = "0.13", default-features = false, features = ["json", "default-tls"] }

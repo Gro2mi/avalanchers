@@ -65,11 +65,13 @@ fn grid_physics_curvilinear(@builtin(global_invocation_id) id: vec3u) {
     // 1. Decode height and velocity
     let mass = f32(grid_mass_atomic[idx]) * INV_MASS_FACTOR; // no_atomic_float
     // atomic_float let mass = grid_mass_atomic[idx];
-    // Nodes holding less mass than the p2g quantization floor carry no
-    // meaningful velocity: their mass can round to 0 while the momentum
-    // quantization still survives, and momentum/mass then explodes (this
-    // feeds straight into the PIC transfer). Treat such nodes as empty.
-    let node_is_empty = mass < 1e-2;
+    // On the integer grid, nodes below the p2g mass quantum carry no
+    // meaningful velocity (this feeds straight into the PIC transfer); treat
+    // them as empty. The float grid is not quantized: momentum / mass is
+    // exact for any deposited mass, and treating light margin nodes as empty
+    // would drag the particles that gather from them.
+    let node_is_empty = mass < 1e-2; // no_atomic_float
+    // atomic_float let node_is_empty = mass <= 0.0;
     var u = select(f32(grid_momentum_atomic[idx * 2]) * INV_MOMENTUM_FACTOR / (mass + 1e-6), 0.0, node_is_empty); // no_atomic_float
     var v = select(f32(grid_momentum_atomic[idx * 2 + 1]) * INV_MOMENTUM_FACTOR / (mass + 1e-6), 0.0, node_is_empty); // no_atomic_float
     // atomic_float var u = select(grid_momentum_atomic[idx * 2] / mass, 0.0, node_is_empty);
@@ -222,11 +224,6 @@ fn get_h(x: u32, y: u32) -> f32 {
     return select(0.0, mass / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size * J), J > 0.0);
 }
 
-fn get_h2_atomic_u32(x: u32, y: u32) -> f32 {
-    let idx = x_y_to_idx(x, y);
-    return pow(f32(grid_mass_atomic[idx]) * INV_MASS_FACTOR / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size), 2.0);
-}
-
 fn minmod(a: f32, b: f32) -> f32 {
     // Returns the smallest magnitude slope if signs match, otherwise 0.0
     return 0.5 * (sign(a) + sign(b)) * min(abs(a), abs(b));
@@ -266,13 +263,15 @@ fn earth_pressure(xy: vec2u, slope: vec2f, q: vec2f, grad_h: vec2f) -> EarthPres
 }
 
 // Horizontal velocity q of node (x, y) from the node's own mass and momentum;
-// z = 1 when the node holds mass, 0 below the p2g mass floor where q is
-// meaningless.
+// z = 1 when the node holds mass, 0 when it holds none (on the integer grid:
+// below the p2g mass quantum, where q is meaningless).
 fn node_velocity(x: u32, y: u32) -> vec3f {
     let idx = x_y_to_idx(x, y);
     let mass = f32(grid_mass_atomic[idx]) * INV_MASS_FACTOR; // no_atomic_float
     // atomic_float let mass = grid_mass_atomic[idx];
-    if mass < 1e-2 {
+    let node_is_empty = mass < 1e-2; // no_atomic_float
+    // atomic_float let node_is_empty = mass <= 0.0;
+    if node_is_empty {
         return vec3f(0.0);
     }
     let q = vec2f(

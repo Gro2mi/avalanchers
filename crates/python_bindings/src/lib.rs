@@ -748,7 +748,7 @@ impl PySimulation {
     /// - release thresholds (slope, elevation, roughness),
     ///   ``released_particles_per_cell``, ``release_area_fraction``, the
     ///   crown line and release fill settings or
-    ///   ``enable_particle_relaxation``: release areas and particle seeding,
+    ///   ``particle_placement``: release areas and particle seeding,
     /// - ``density`` or a changed ``release_thickness`` or ``release_swe``:
     ///   particle masses are rescaled; setting either on a release with its
     ///   own thickness or switching between them seeds the particles again,

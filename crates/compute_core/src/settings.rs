@@ -25,6 +25,9 @@ impl SimFlags {
     pub const ENTRAINMENT: u32 = 1 << 3;
     pub const CENTER_OF_MASS_BIGGEST_BLOB: u32 = 1 << 4;
     pub const WEAK_PRESSURE: u32 = 1 << 5;
+    /// Set only for the particle seeding dispatch, from
+    /// [`ParticlePlacement::is_uniform`]; not a simulation parameter.
+    pub const UNIFORM_PARTICLE_PLACEMENT: u32 = 1 << 6;
 
     pub fn new(
         curvature: bool,
@@ -900,6 +903,82 @@ impl<'de> Deserialize<'de> for CrownLineMethod {
     }
 }
 
+/// How the particles are placed in a release cell.
+///
+/// `random` draws each particle uniformly in the cell; `uniform-random` splits
+/// the cell into one equal-area stratum per particle and draws each particle
+/// in its own stratum, which removes most of the sampling noise of the grid
+/// thickness. The relaxed variants afterwards push overlapping particles
+/// apart towards the hexagonal packing spacing (soft sphere repulsion).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ParticlePlacement {
+    Random,
+    Relaxed,
+    UniformRandom,
+    #[default]
+    UniformRelaxed,
+}
+
+impl ParticlePlacement {
+    /// Each particle is drawn in its own equal-area stratum of the cell.
+    pub fn is_uniform(self) -> bool {
+        matches!(self, Self::UniformRandom | Self::UniformRelaxed)
+    }
+
+    /// The seeded particles are relaxed before the simulation starts.
+    pub fn is_relaxed(self) -> bool {
+        matches!(self, Self::Relaxed | Self::UniformRelaxed)
+    }
+}
+
+impl FromStr for ParticlePlacement {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_lowercase().replace(['_', ' '], "-").as_str() {
+            "random" => Ok(Self::Random),
+            "relaxed" | "relax" => Ok(Self::Relaxed),
+            "uniform-random" => Ok(Self::UniformRandom),
+            "uniform-relaxed" | "uniform-relax" => Ok(Self::UniformRelaxed),
+            _ => Err(format!(
+                "unknown particle placement: {value} (expected random, relaxed, \
+                 uniform-random or uniform-relaxed)"
+            )),
+        }
+    }
+}
+
+impl fmt::Display for ParticlePlacement {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(match self {
+            Self::Random => "random",
+            Self::Relaxed => "relaxed",
+            Self::UniformRandom => "uniform-random",
+            Self::UniformRelaxed => "uniform-relaxed",
+        })
+    }
+}
+
+impl Serialize for ParticlePlacement {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for ParticlePlacement {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        String::deserialize(deserializer)?
+            .parse::<Self>()
+            .map_err(D::Error::custom)
+    }
+}
+
 /// How the release estimation orders the potential release cells below the
 /// crown line: by geodesic distance alone, or by a geodesic distance whose
 /// steps through unfavourable release slopes count as longer.
@@ -962,7 +1041,8 @@ pub struct Settings {
     pub sim_model: Option<SimModel>,
     pub batch_compute_steps: Option<u32>,
     /// Steps between particle sorts for the tile-sorted P2G of the grid flow models (default 25);
-    /// 0 disables it.
+    /// 0 disables it. Only integer-atomic devices sort: devices with float atomics always use the
+    /// direct P2G, which deposits without quantization.
     pub particle_sort_interval: Option<u32>,
     pub friction_model: Option<FrictionModel>,
     pub released_particles_per_cell: Option<u32>,
@@ -1084,10 +1164,10 @@ pub struct Settings {
     pub enable_weak_pressure: Option<bool>,
     pub enable_entrainment: Option<bool>,
     pub enable_center_of_mass: Option<bool>,
-    /// Relax freshly initialized particles to the hexagonal packing spacing
-    /// with a soft sphere repulsion before the simulation starts (defaults
-    /// to true).
-    pub enable_particle_relaxation: Option<bool>,
+    /// How the particles are placed in the release cells: `random`,
+    /// `relaxed`, `uniform-random` or `uniform-relaxed` (defaults to
+    /// `uniform-relaxed`), see [`ParticlePlacement`].
+    pub particle_placement: Option<ParticlePlacement>,
     /// Center the mass of the biggest connected mass blob instead of the
     /// whole grid (defaults to false).
     pub center_of_mass_biggest_blob: Option<bool>,
@@ -1256,7 +1336,7 @@ mod tests {
             output_path: Some(String::from("output")),
             enable_curvature: Some(false),
             enable_particle_interaction: Some(false),
-            enable_particle_relaxation: Some(false),
+            particle_placement: Some(ParticlePlacement::UniformRandom),
             enable_earth_pressure_coefficient: Some(false),
             enable_entrainment: Some(false),
             enable_weak_pressure: Some(false),
@@ -1863,6 +1943,55 @@ mod tests {
     fn release_fill_method_invalid_string() {
         assert!(ReleaseFillMethod::from_str("invalid").is_err());
         assert!(ReleaseFillMethod::from_str("").is_err());
+    }
+
+    #[test]
+    fn particle_placement_strings_and_modes() {
+        let placements = [
+            (ParticlePlacement::Random, "random", false, false),
+            (ParticlePlacement::Relaxed, "relaxed", false, true),
+            (
+                ParticlePlacement::UniformRandom,
+                "uniform-random",
+                true,
+                false,
+            ),
+            (
+                ParticlePlacement::UniformRelaxed,
+                "uniform-relaxed",
+                true,
+                true,
+            ),
+        ];
+        for (placement, string, uniform, relaxed) in placements {
+            assert_eq!(placement.to_string(), string);
+            assert_eq!(ParticlePlacement::from_str(string), Ok(placement));
+            assert_eq!(placement.is_uniform(), uniform);
+            assert_eq!(placement.is_relaxed(), relaxed);
+            let json = serde_json::to_string(&placement).unwrap();
+            assert_eq!(json, format!("\"{string}\""));
+            assert_eq!(
+                serde_json::from_str::<ParticlePlacement>(&json).unwrap(),
+                placement
+            );
+        }
+        assert_eq!(
+            ParticlePlacement::from_str("relax"),
+            Ok(ParticlePlacement::Relaxed)
+        );
+        assert_eq!(
+            ParticlePlacement::from_str("Uniform Relaxed"),
+            Ok(ParticlePlacement::UniformRelaxed)
+        );
+        assert_eq!(
+            ParticlePlacement::from_str("uniform_random"),
+            Ok(ParticlePlacement::UniformRandom)
+        );
+        assert!(ParticlePlacement::from_str("hexagonal").is_err());
+        assert_eq!(
+            ParticlePlacement::default(),
+            ParticlePlacement::UniformRelaxed
+        );
     }
 
     #[test]

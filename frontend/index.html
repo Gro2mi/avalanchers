@@ -810,10 +810,14 @@
                                     checked>
                             </div>
                             <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
-                                <label for="enable_particle_relaxation" class="control-label mb-0">Particle
-                                    relaxation:</label>
-                                <input type="checkbox" id="enable_particle_relaxation" class="form-check-input mt-0"
-                                    checked>
+                                <label for="particlePlacementDropdown" class="control-label mb-0">Particle
+                                    placement:</label>
+                                <select id="particlePlacementDropdown" class="form-select w-auto">
+                                    <option value="random">Random</option>
+                                    <option value="relaxed">Relaxed</option>
+                                    <option value="uniform-random">Uniform random</option>
+                                    <option value="uniform-relaxed" selected>Uniform relaxed</option>
+                                </select>
                             </div>
                             <div class="mb-3 d-flex align-items-center flex-wrap gap-2">
                                 <label for="enable_earth_pressure_coefficient" class="control-label mb-0">

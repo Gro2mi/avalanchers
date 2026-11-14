@@ -64,9 +64,10 @@ SETTINGS = {
     "cfl": 0.05,
     "velocity_threshold": 0.01,
     "enable_particle_interaction": True,
-    # hexagonal-packing relaxation of freshly initialized particles
-    # (pinned so the validation runs are independent of the default)
-    "enable_particle_relaxation": True,
+    # one particle per equal-area stratum of the cell, then relaxed to the
+    # hexagonal packing spacing: removes most of the sampling noise of the
+    # grid thickness (pinned so the runs are independent of the default)
+    "particle_placement": "uniform-relaxed",
     "max_steps": 20000,
 }
 

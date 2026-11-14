@@ -58,7 +58,7 @@ SETTINGS = {
     "cfl": 0.1,
     "velocity_threshold": 0.1,
     "enable_particle_interaction": True,
-    "enable_particle_relaxation": True,
+    "particle_placement": "uniform-relaxed",
     # Match the alpha-line reference used for each rotated run.
     "enable_curvature": False,
 }

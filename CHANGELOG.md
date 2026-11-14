@@ -5,6 +5,14 @@ All notable changes to this project might be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- The flow front no longer stalls behind a steep wall on GPUs with float atomics when particles
+  are light (many particles per cell, thin release margins). The tile-sorted P2G still rounded
+  every contribution to 0.1 kg and dropped those that rounded to zero, and the grid treated nodes
+  below 10 g as empty, so particles at the margin gathered zero velocity from their outer stencil
+  nodes and lost a few percent of their speed every step. Float-atomic devices now use the direct
+  P2G and treat only massless nodes as empty. The similarity solution test of the 3D model at 64
+  particles per cell drops from 15.2 % to 5.1 % thickness error at 20 s, and centre-of-mass
+  runouts no longer depend on the particle count.
 - The Linux wheel imports on systems with an older glibc than the CI runner, e.g. Ubuntu 24.04. It
   is built in the manylinux_2_28 container and runs from glibc 2.28 on.
 - Errors of the swissALTI3D tile manager now say what went wrong instead of only "Failed to create
@@ -27,6 +35,17 @@ All notable changes to this project might be documented in this file.
   OpenGL backend caused this.
 
 ### Changed
+- **Breaking:** `enable_particle_relaxation` is replaced by `particle_placement` (CLI
+  `--particle-placement`): `random`, `relaxed`, `uniform-random` or `uniform-relaxed`. The uniform
+  placements split every release cell into one equal-area stratum per particle and draw each
+  particle in its own stratum, which removes most of the sampling noise of random seeding in the
+  grid thickness; the relaxed ones run the relaxation afterwards. The default is now
+  `uniform-relaxed` (before: random seeding with relaxation, now `relaxed`), so results change
+  slightly. `enable_particle_relaxation: true` becomes `relaxed`, `false` becomes `random`. At 64
+  particles per cell the thickness error of the similarity solution (3D) drops from 5.1 % to 3.5 %
+  at 20 s, that of the dam break from 2.5 % to 2.0 %, and their profiles no longer wiggle; the
+  energy line, curvature and rotation tests are unchanged. Crown line detection keeps `random`, its
+  entry counts are tuned to it.
 - **Breaking:** `slope_aspect` is now the direction the slope faces (downhill), as in GIS and
   avalanche bulletins: a north-facing slope is 0 degrees. It used to be the uphill bearing, 180
   degrees off. Flat cells stay -1.
@@ -106,6 +125,10 @@ All notable changes to this project might be documented in this file.
   shortened the runout: the energy line benchmark is now 5 m from its reference, not 307 m.
 
 ### Added
+- The dam break verification test runs on a refined grid: `--refine N` (default 4, cell size
+  1.25 m instead of the DEM's 5 m) interpolates the plane DEM and splits every release cell. At 64
+  particles per cell the thickness error at 15 s drops from 7.4 % to 2.5 % and the front lag at
+  h = 1 mm from 25 m to 7 m; the 5 m grid smeared the initial step over 3-4 cells.
 - Every build names its commit: the version string written to result stores and shown by
   `cli --version` is `<version>+<short commit>`, with `.dirty` when the build sources (`crates/`,
   `Cargo.toml`, `Cargo.lock`) differed from the commit. New stores also get the full hash in the
@@ -169,7 +192,8 @@ All notable changes to this project might be documented in this file.
 - `particle_sort_interval` (CLI `--particle-sort-interval`, default 25): curvilinear,
   terrain-following and 3D P2G over particles sorted by 8x8-cell tiles, accumulating each workgroup in shared memory before the
   global atomics; 0 disables it. Results are identical to the direct P2G on the integer-atomic
-  grid; on the float-atomic grid the shared sums keep the integer quantization.
+  grid. Devices with float atomics do not sort and always use the direct P2G, which does not
+  quantize.
 - `momentum_stop_fraction` (CLI `--momentum-stop-fraction`, default 0 = off): stops a curvilinear,
   terrain-following or 3D run once the total grid momentum falls below this fraction of its peak (flag `LOW_MOMENTUM`).
 - `reference_surface_length` (CLI `--reference-surface-length`, default 0 = off): gully

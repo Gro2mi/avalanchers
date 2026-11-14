@@ -62,7 +62,7 @@ fn grid_physics_3d(@builtin(global_invocation_id) id: vec3u) {
     }
     let mass = node_mass(idx);
     let w = select(f32(grid_momentum_z_atomic[idx]) * INV_MOMENTUM_FACTOR / (mass + 1e-6), 0.0, mass < 1e-2); // no_atomic_float
-    // atomic_float let w = select(grid_momentum_z_atomic[idx] / mass, 0.0, mass < 1e-2);
+    // atomic_float let w = select(grid_momentum_z_atomic[idx] / mass, 0.0, mass <= 0.0);
     // particles on differently inclined beds scatter into this node
     let velocity = tangent_project(vec3f(node_velocity_xy(idx, mass), w), n);
     let new_velocity = update_node(id.xy, n, velocity, mass);
@@ -94,10 +94,13 @@ fn node_mass(idx: u32) -> f32 {
     // atomic_float return grid_mass_atomic[idx];
 }
 
-// Nodes holding less mass than the p2g quantization floor carry no meaningful
-// velocity (see grid_physics_curvilinear).
+// On the integer grid, nodes below the p2g mass quantum carry no meaningful
+// velocity (see grid_physics_curvilinear). The float grid is not quantized:
+// momentum / mass is exact for any deposited mass, and treating light margin
+// nodes as empty would drag the particles that gather from them.
 fn node_velocity_xy(idx: u32, mass: f32) -> vec2f {
-    let node_is_empty = mass < 1e-2;
+    let node_is_empty = mass < 1e-2; // no_atomic_float
+    // atomic_float let node_is_empty = mass <= 0.0;
     let u = select(f32(grid_momentum_atomic[idx * 2]) * INV_MOMENTUM_FACTOR / (mass + 1e-6), 0.0, node_is_empty); // no_atomic_float
     let v = select(f32(grid_momentum_atomic[idx * 2 + 1]) * INV_MOMENTUM_FACTOR / (mass + 1e-6), 0.0, node_is_empty); // no_atomic_float
     // atomic_float let u = select(grid_momentum_atomic[idx * 2] / mass, 0.0, node_is_empty);
@@ -242,13 +245,15 @@ fn earth_pressure(xy: vec2u, slope: vec2f, q: vec2f, grad_h: vec2f) -> EarthPres
 }
 
 // Horizontal velocity q of node (x, y) from the node's own mass and momentum;
-// z = 1 when the node holds mass, 0 below the p2g mass floor where q is
-// meaningless.
+// z = 1 when the node holds mass, 0 when it holds none (on the integer grid:
+// below the p2g mass quantum, where q is meaningless).
 fn node_velocity(x: u32, y: u32) -> vec3f {
     let idx = x_y_to_idx(x, y);
     let mass = f32(grid_mass_atomic[idx]) * INV_MASS_FACTOR; // no_atomic_float
     // atomic_float let mass = grid_mass_atomic[idx];
-    if mass < 1e-2 {
+    let node_is_empty = mass < 1e-2; // no_atomic_float
+    // atomic_float let node_is_empty = mass <= 0.0;
+    if node_is_empty {
         return vec3f(0.0);
     }
     let q = vec2f(

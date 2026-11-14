@@ -30,13 +30,15 @@ fn earth_pressure(xy: vec2u, slope: vec2f, q: vec2f, grad_h: vec2f) -> EarthPres
 }
 
 // Horizontal velocity q of node (x, y) from the node's own mass and momentum;
-// z = 1 when the node holds mass, 0 below the p2g mass floor where q is
-// meaningless.
+// z = 1 when the node holds mass, 0 when it holds none (on the integer grid:
+// below the p2g mass quantum, where q is meaningless).
 fn node_velocity(x: u32, y: u32) -> vec3f {
     let idx = x_y_to_idx(x, y);
     let mass = f32(grid_mass_atomic[idx]) * INV_MASS_FACTOR; // no_atomic_float
     // atomic_float let mass = grid_mass_atomic[idx];
-    if mass < 1e-2 {
+    let node_is_empty = mass < 1e-2; // no_atomic_float
+    // atomic_float let node_is_empty = mass <= 0.0;
+    if node_is_empty {
         return vec3f(0.0);
     }
     let q = vec2f(

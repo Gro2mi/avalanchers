@@ -2,7 +2,8 @@
 use anyhow::Result;
 use clap::Parser;
 use compute_core::settings::{
-    ConstitutiveModel, CrownLineMethod, FrictionModel, ReleaseFillMethod, Settings, SimModel,
+    ConstitutiveModel, CrownLineMethod, FrictionModel, ParticlePlacement, ReleaseFillMethod,
+    Settings, SimModel,
 };
 #[allow(unused_imports)]
 use compute_core::utils::{MaxValue, timer_checkpoint, timer_get_summary, timer_new};
@@ -39,6 +40,11 @@ fn parse_crown_line_method(value: &str) -> Result<CrownLineMethod> {
 fn parse_release_fill_method(value: &str) -> Result<ReleaseFillMethod> {
     ReleaseFillMethod::from_str(value)
         .map_err(|err| anyhow::anyhow!("invalid release fill method '{value}': {err}"))
+}
+
+fn parse_particle_placement(value: &str) -> Result<ParticlePlacement> {
+    ParticlePlacement::from_str(value)
+        .map_err(|err| anyhow::anyhow!("invalid particle placement '{value}': {err}"))
 }
 
 fn parse_constitutive_model(value: &str) -> Result<ConstitutiveModel> {
@@ -176,8 +182,9 @@ struct Args {
     enable_weak_pressure: Option<bool>,
     #[arg(long, value_parser = parse_bool)]
     enable_center_of_mass: Option<bool>,
-    #[arg(long, value_parser = parse_bool)]
-    enable_particle_relaxation: Option<bool>,
+    /// random, relaxed, uniform-random or uniform-relaxed
+    #[arg(long, value_parser = parse_particle_placement)]
+    particle_placement: Option<ParticlePlacement>,
     #[arg(long, value_parser = parse_bool)]
     center_of_mass_biggest_blob: Option<bool>,
 }
@@ -229,8 +236,8 @@ impl Args {
         if let Some(value) = self.enable_center_of_mass {
             settings.enable_center_of_mass = Some(value);
         }
-        if let Some(value) = self.enable_particle_relaxation {
-            settings.enable_particle_relaxation = Some(value);
+        if let Some(value) = self.particle_placement {
+            settings.particle_placement = Some(value);
         }
         if let Some(value) = self.output_path.clone() {
             settings.output_path = Some(value);
@@ -565,7 +572,7 @@ mod tests {
             release_slope_width: None,
             release_slope_smoothing_length: None,
             enable_center_of_mass: None,
-            enable_particle_relaxation: Some(false),
+            particle_placement: Some(ParticlePlacement::UniformRelaxed),
         };
 
         args.apply_overrides(&mut settings)
@@ -577,6 +584,9 @@ mod tests {
         assert_eq!(settings.friction_model, Some(FrictionModel::Coulomb));
         assert_eq!(settings.enable_curvature, Some(true));
         assert_eq!(settings.release_max_elevation, Some(3000.0));
-        assert_eq!(settings.enable_particle_relaxation, Some(false));
+        assert_eq!(
+            settings.particle_placement,
+            Some(ParticlePlacement::UniformRelaxed)
+        );
     }
 }

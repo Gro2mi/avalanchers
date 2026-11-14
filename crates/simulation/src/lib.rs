@@ -42,7 +42,9 @@ use compute_core::{
     dem::{Bounds, Dem, StableHasher},
     evaluation::MassMovementEvaluation,
     post_processing::*,
-    settings::{CrownLineMethod, ReleaseFillMethod, Settings, SimModel, SimSettings},
+    settings::{
+        CrownLineMethod, ParticlePlacement, ReleaseFillMethod, Settings, SimModel, SimSettings,
+    },
     utils::*,
 };
 use data_processor::store_schema::{Outline, RunRecord, store_path_stem};
@@ -133,7 +135,7 @@ struct ReleaseConfig {
     release_slope_peak: Option<f32>,
     release_slope_width: Option<f32>,
     release_slope_smoothing_length: Option<f32>,
-    enable_particle_relaxation: bool,
+    particle_placement: ParticlePlacement,
 }
 
 /// Settings the stored initial particles were prepared with.
@@ -169,9 +171,8 @@ pub struct SimulationLoadResult {
     pub settings: SimSettings,
     /// Whether to track the center of mass during the run.
     pub enable_center_of_mass: bool,
-    /// Whether freshly initialized particles are relaxed to the hexagonal
-    /// packing spacing before the run.
-    pub enable_particle_relaxation: bool,
+    /// How the particles are placed in the release cells.
+    pub particle_placement: ParticlePlacement,
     /// Loaded digital elevation model.
     pub dem: Dem,
     /// Region-of-interest (area that should be considered for release areas, e.g. avalanche outline) cell mask, `width * height` long.
@@ -236,11 +237,12 @@ pub struct Simulation {
     pub settings: SimSettings,
     /// Whether the center-of-mass trajectory is tracked on the GPU.
     pub enable_center_of_mass: bool,
-    /// Whether freshly initialized particles are relaxed to the hexagonal
-    /// packing spacing with a soft sphere repulsion before the simulation
-    /// starts. Measurement sims (e.g. crown line detection) keep the plain
-    /// random initialization for comparable counts.
-    pub enable_particle_relaxation: bool,
+    /// How the particles are placed in the release cells: random or
+    /// stratified (uniform), optionally relaxed to the hexagonal packing
+    /// spacing with a soft sphere repulsion before the simulation starts.
+    /// Measurement sims (e.g. crown line detection) keep the plain random
+    /// placement for comparable counts.
+    pub particle_placement: ParticlePlacement,
     /// Path the DEM was loaded from; empty when set programmatically.
     pub dem_path: String,
     /// The digital elevation model the simulation runs on.
@@ -425,7 +427,7 @@ impl Simulation {
             orchestrator,
             settings: SimSettings::default(),
             enable_center_of_mass: true,
-            enable_particle_relaxation: true,
+            particle_placement: ParticlePlacement::default(),
             output_path: "avalanchers".to_string(),
             dem_path: String::new(),
             dem: Dem::default(),
@@ -562,7 +564,7 @@ impl Simulation {
         Ok(SimulationLoadResult {
             settings: settings_result,
             enable_center_of_mass: settings.enable_center_of_mass.unwrap_or(true),
-            enable_particle_relaxation: settings.enable_particle_relaxation.unwrap_or(true),
+            particle_placement: settings.particle_placement.unwrap_or_default(),
             dem: dem_result,
             roi: outline,
             outline_source,
@@ -591,7 +593,7 @@ impl Simulation {
     pub fn apply_data(&mut self, data: SimulationLoadResult) {
         self.settings = data.settings;
         self.enable_center_of_mass = data.enable_center_of_mass;
-        self.enable_particle_relaxation = data.enable_particle_relaxation;
+        self.particle_placement = data.particle_placement;
         self.orchestrator
             .set_enable_center_of_mass(self.enable_center_of_mass);
         if let Some(batch_steps) = data.batch_compute_steps {
@@ -968,8 +970,8 @@ impl Simulation {
             self.enable_center_of_mass = enable;
             self.orchestrator.set_enable_center_of_mass(enable);
         }
-        if let Some(enable) = patch.enable_particle_relaxation {
-            self.enable_particle_relaxation = enable;
+        if let Some(placement) = patch.particle_placement {
+            self.particle_placement = placement;
         }
         if let Some(fraction) = patch.release_area_fraction {
             self.release_area_fraction = Some(fraction);
@@ -1021,7 +1023,7 @@ impl Simulation {
             release_slope_peak: self.release_slope_peak,
             release_slope_width: self.release_slope_width,
             release_slope_smoothing_length: self.release_slope_smoothing_length,
-            enable_particle_relaxation: self.enable_particle_relaxation,
+            particle_placement: self.particle_placement,
         }
     }
 
@@ -1734,9 +1736,9 @@ impl Simulation {
 
         let mut detection_sim = Simulation::new().await?;
         detection_sim.create(settings).await?;
-        // keep the plain random particle initialization so the entry counts
-        // stay comparable with the tuned crown line thresholds
-        detection_sim.enable_particle_relaxation = false;
+        // keep the plain random particle placement so the entry counts stay
+        // comparable with the tuned crown line thresholds
+        detection_sim.particle_placement = ParticlePlacement::Random;
         detection_sim.set_dem(
             &masked_dem,
             self.dem.width,
@@ -2067,7 +2069,7 @@ impl Simulation {
             .run_initialize_particles(
                 &self.settings,
                 self.number_particles,
-                self.enable_particle_relaxation,
+                self.particle_placement,
             )
             .await?;
         self.state = SimulationState::ParticlesInitialized;
@@ -4264,8 +4266,15 @@ fn test_trajectory() {
         );
 
         // velocity X should be above 30.0 after step 500
-        for i in 500..tracked_steps {
-            let vel_x = timestep_data.velocity[i][0];
+        assert!(timestep_data.velocity.len() >= tracked_steps);
+        for (i, velocity) in timestep_data
+            .velocity
+            .iter()
+            .enumerate()
+            .take(tracked_steps)
+            .skip(500)
+        {
+            let vel_x = velocity[0];
             assert!(
                 vel_x > 30.0,
                 "Velocity X dropped below 30.0 (value: {}) at step {}",
@@ -4745,7 +4754,7 @@ fn test_trajectory() {
         info!("Read number_release_cells: {:?}", number_release_cells);
     }
 
-    /// Seeded and relaxed particles must lie in release cells under the
+    /// Particles of every placement must lie in release cells under the
     /// floor(position / cell_size) convention of the simulation kernels.
     /// The L-shaped release has concave and convex edges on all four
     /// sides, and one cell below RELEASE_THICKNESS_THRESHOLD that must
@@ -4772,14 +4781,19 @@ fn test_trajectory() {
             .count();
         assert_eq!(release_cells, 27);
 
-        for relax in [false, true] {
+        for placement in [
+            ParticlePlacement::Random,
+            ParticlePlacement::Relaxed,
+            ParticlePlacement::UniformRandom,
+            ParticlePlacement::UniformRelaxed,
+        ] {
             let mut sim = block_on(Simulation::new()).expect("Failed to create Simulation");
             sim.set_dem(&dem, WIDTH, HEIGHT, CELL_SIZE)
                 .expect("Failed to set DEM");
             sim.set_release_areas(&release)
                 .expect("Failed to set release areas");
             sim.settings.released_particles_per_cell = PARTICLES_PER_CELL;
-            sim.enable_particle_relaxation = relax;
+            sim.particle_placement = placement;
             block_on(sim.prepare()).expect("Failed to prepare simulation");
             assert_eq!(
                 sim.number_particles as usize,
@@ -4798,11 +4812,11 @@ fn test_trajectory() {
                     cell_x >= 0.0
                         && cell_y >= 0.0
                         && is_release_cell(cell_x as usize, cell_y as usize),
-                    "particle ({x}, {y}) outside the release cells (relax: {relax})"
+                    "particle ({x}, {y}) outside the release cells ({placement})"
                 );
                 particles_per_cell[cell_y as usize * WIDTH + cell_x as usize] += 1;
             }
-            if !relax {
+            if !placement.is_relaxed() {
                 for (idx, &count) in particles_per_cell.iter().enumerate() {
                     let expected = if is_release_cell(idx % WIDTH, idx / WIDTH) {
                         PARTICLES_PER_CELL
@@ -4810,6 +4824,27 @@ fn test_trajectory() {
                         0
                     };
                     assert_eq!(count, expected, "seeded particles in cell {idx}");
+                }
+            }
+            if placement == ParticlePlacement::UniformRandom {
+                // seeding order: particle n of a cell lies in stratum n; 8 per
+                // cell are 3 rows of 2, 3 and 3 equal-area strata
+                let count = PARTICLES_PER_CELL as usize;
+                let rows = (count as f32).sqrt().round() as usize;
+                let row_start = |row: usize| row * count / rows;
+                for (index, &[x, y]) in positions.iter().enumerate() {
+                    let local_x = x / CELL_SIZE - (x / CELL_SIZE).floor();
+                    let local_y = y / CELL_SIZE - (y / CELL_SIZE).floor();
+                    let row = (0..rows)
+                        .find(|&row| local_y * (count as f32) < row_start(row + 1) as f32)
+                        .expect("particle above the last stratum row");
+                    let row_count = row_start(row + 1) - row_start(row);
+                    let column = ((local_x * row_count as f32) as usize).min(row_count - 1);
+                    assert_eq!(
+                        row_start(row) + column,
+                        index % count,
+                        "particle {index} at ({x}, {y}) outside its stratum"
+                    );
                 }
             }
         }
@@ -4834,7 +4869,7 @@ fn test_trajectory() {
         let estimated_release_volume = block_on(sim.orchestrator.run_initialize_particles(
             &sim.settings,
             number_release_cells * sim.settings.released_particles_per_cell,
-            true,
+            ParticlePlacement::Relaxed,
         ))
         .expect("Failed to run initialize_particles shader");
         info!("Estimated release volume: {}", estimated_release_volume);
@@ -4982,8 +5017,8 @@ fn test_trajectory() {
     #[test_log::test]
     fn test_sorted_p2g_matches_direct_p2g() {
         // integer grid sums do not depend on the deposit order, so the
-        // tile-sorted P2G must reproduce the direct P2G exactly; float atomics
-        // do, and the sorted path quantizes per tile, so they only agree closely
+        // tile-sorted P2G must reproduce the direct P2G exactly; float-atomic
+        // devices never sort, their direct P2G deposits without quantization
         for model in [
             SimModel::Curvilinear,
             SimModel::TerrainFollowing,
@@ -4997,7 +5032,7 @@ fn test_trajectory() {
         let run = |sort_interval: u32| {
             let mut sim = setup_simple_sim(30.0, 5.0);
             sim.settings.sim_model = model.as_int();
-            sim.enable_particle_relaxation = false;
+            sim.particle_placement = ParticlePlacement::Random;
             sim.orchestrator.particle_sort_interval = sort_interval;
             sim.set_dem(&create_slope(40, 40, 5.0, 30.0), 40, 40, 5.0)
                 .expect("Failed to set DEM");
@@ -5010,52 +5045,33 @@ fn test_trajectory() {
             sim.set_release_areas(&release)
                 .expect("Failed to set release");
             block_on(sim.run_n_steps(40)).expect("Failed to run");
-            assert_eq!(sim.orchestrator.particle_sort_enabled(), sort_interval > 0);
+            let float_atomics = sim.orchestrator.has_float32_atomic();
+            assert_eq!(
+                sim.orchestrator.particle_sort_enabled(),
+                sort_interval > 0 && !float_atomics,
+                "{model}: float-atomic devices must deposit without the quantizing tile"
+            );
             let mut positions = block_on(sim.fetch_particles_position())
                 .expect("Failed to fetch positions")
                 .clone();
             positions.sort_by(|a, b| a.partial_cmp(b).unwrap());
             let grid_mass: Vec<u32> = block_on(sim.orchestrator.read_buffer(BufferName::GridMass))
                 .expect("Failed to read grid mass");
-            (positions, grid_mass, sim.orchestrator.has_float32_atomic())
+            let grid_momentum: Vec<u32> =
+                block_on(sim.orchestrator.read_buffer(BufferName::GridMomentum))
+                    .expect("Failed to read grid momentum");
+            (positions, grid_mass, grid_momentum, float_atomics)
         };
-        let (direct_positions, direct_mass, float_atomics) = run(0);
-        let (sorted_positions, sorted_mass, _) = run(3);
+        let (direct_positions, direct_mass, direct_momentum, float_atomics) = run(0);
         assert!(direct_mass.iter().any(|mass| *mass > 0));
-        if !float_atomics {
-            assert_eq!(direct_mass, sorted_mass);
-            assert_eq!(direct_positions, sorted_positions);
+        let (sorted_positions, sorted_mass, sorted_momentum, _) = run(3);
+        if float_atomics {
+            // both runs used the direct P2G, whose f32 sums depend on the order
             return;
         }
-
-        let max_mass = direct_mass
-            .iter()
-            .map(|bits| f32::from_bits(*bits))
-            .fold(0.0, f32::max);
-        let mass_error = direct_mass
-            .iter()
-            .zip(&sorted_mass)
-            .map(|(a, b)| (f32::from_bits(*a) - f32::from_bits(*b)).abs())
-            .fold(0.0, f32::max);
-        let centroid = |positions: &[[f32; 2]]| {
-            let sum = positions.iter().fold([0.0f64; 2], |sum, p| {
-                [sum[0] + p[0] as f64, sum[1] + p[1] as f64]
-            });
-            [
-                sum[0] / positions.len() as f64,
-                sum[1] / positions.len() as f64,
-            ]
-        };
-        let (direct_centroid, sorted_centroid) =
-            (centroid(&direct_positions), centroid(&sorted_positions));
-        let centroid_error = (direct_centroid[0] - sorted_centroid[0])
-            .hypot(direct_centroid[1] - sorted_centroid[1]);
-        info!(
-            "sorted vs direct P2G: mass error {mass_error} of {max_mass}, centroid error {centroid_error}"
-        );
-        assert_eq!(direct_positions.len(), sorted_positions.len());
-        assert!(mass_error < 5e-3 * max_mass);
-        assert!(centroid_error < 1e-2);
+        assert_eq!(direct_mass, sorted_mass);
+        assert_eq!(direct_momentum, sorted_momentum);
+        assert_eq!(direct_positions, sorted_positions);
     }
 
     /// Wall time of a full run per grid model on one scenario. Run with
@@ -5110,7 +5126,7 @@ fn test_trajectory() {
                     ..Default::default()
                 };
                 block_on(sim.create(settings)).expect("Failed to create simulation");
-                sim.enable_particle_relaxation = false;
+                sim.particle_placement = ParticlePlacement::Random;
                 sim.set_dem(&dem, COLS, ROWS, CELL)
                     .expect("Failed to set DEM");
                 sim.set_release_areas(release)
@@ -5231,7 +5247,7 @@ fn test_trajectory() {
         // the front reaches the outermost nodes, whose zero metrics must not give NaN
         let mut sim = setup_simple_sim(30.0, 5.0);
         sim.settings.sim_model = SimModel::Curvilinear.as_int();
-        sim.enable_particle_relaxation = false;
+        sim.particle_placement = ParticlePlacement::Random;
         sim.set_dem(&create_slope(40, 40, 5.0, 30.0), 40, 40, 5.0)
             .expect("Failed to set DEM");
         let mut release = vec![0.0; 40 * 40];
@@ -5397,7 +5413,7 @@ fn test_trajectory() {
             sim.settings.friction_coefficient = 0.05;
             sim.settings.momentum_stop_fraction = fraction;
             sim.settings.max_steps = 2000;
-            sim.enable_particle_relaxation = false;
+            sim.particle_placement = ParticlePlacement::Random;
             sim.set_dem(&create_slope(40, 40, 5.0, 0.0), 40, 40, 5.0)
                 .expect("Failed to set DEM");
             let mut release = vec![0.0; 40 * 40];
@@ -5898,6 +5914,85 @@ fn test_trajectory() {
                     assert!((actual - expected).abs() < 5e-4);
                 }
             }
+        }
+    }
+
+    /// Light particles at the flow margin deposit tiny masses on their outer
+    /// stencil nodes. On the float-atomic grid none of these deposits may be
+    /// rounded away or treated as an empty node: a uniform flow without forces
+    /// must keep its velocity everywhere, also at the margin, where G2P gathers
+    /// from nodes that only this flow's lightest particles reached.
+    #[test_log::test]
+    fn test_light_flow_margin_keeps_its_velocity() {
+        const N: usize = 24;
+        const CELL_SIZE: f32 = 5.0;
+        const VELOCITY: [f32; 2] = [1.5, 0.5];
+        for model in [
+            SimModel::Curvilinear,
+            SimModel::TerrainFollowing,
+            SimModel::ThreeDDepthAveraged,
+        ] {
+            let mut sim = setup_simple_sim(0.0, CELL_SIZE);
+            sim.settings.sim_model = model.as_int();
+            sim.settings.flags = 0;
+            sim.settings.velocity_threshold = 0.0;
+            sim.settings.friction_model = 0;
+            sim.settings.friction_coefficient = 0.0;
+            // 0.02 m at 64 particles per cell: 1.6 kg particles, whose outer
+            // stencil weights deposit less than the integer grid's 0.05 kg
+            sim.settings.released_particles_per_cell = 64;
+            sim.set_dem(&create_slope(N, N, CELL_SIZE, 0.0), N, N, CELL_SIZE)
+                .expect("Failed to set flat DEM");
+            let mut release = vec![0.0; N * N];
+            for y in 9..15 {
+                for x in 9..15 {
+                    release[y * N + x] = 0.02;
+                }
+            }
+            sim.set_release_areas(&release)
+                .expect("Failed to set release");
+            block_on(sim.prepare()).expect("Failed to prepare margin test");
+            if !sim.orchestrator.has_float32_atomic() {
+                info!("{model}: no float atomics, the integer grid quantizes light deposits");
+                return;
+            }
+            let count = sim.number_particles as usize;
+            block_on(
+                sim.orchestrator
+                    .write_buffer(BufferName::ParticlesVelocity, &vec![VELOCITY; count]),
+            )
+            .expect("Failed to seed velocities");
+            block_on(
+                sim.orchestrator
+                    .write_buffer(BufferName::ParticlesAffineMatrix, &vec![[0.0f32; 4]; count]),
+            )
+            .expect("Failed to seed affine matrices");
+            if model == SimModel::ThreeDDepthAveraged {
+                block_on(
+                    sim.orchestrator
+                        .write_buffer(BufferName::ParticlesVelocityZ, &vec![0.0f32; count]),
+                )
+                .expect("Failed to seed vertical velocities");
+                block_on(
+                    sim.orchestrator
+                        .write_buffer(BufferName::ParticlesAffineZ, &vec![[0.0f32; 2]; count]),
+                )
+                .expect("Failed to seed vertical affine vectors");
+            }
+            block_on(sim.run_n_steps(5)).expect("Failed to advance margin test");
+            // the quantizing sorted tile is for integer-atomic devices only
+            assert!(!sim.orchestrator.particle_sort_enabled());
+            let speed = VELOCITY[0].hypot(VELOCITY[1]);
+            let velocities =
+                block_on(sim.fetch_particles_velocity()).expect("Failed to read velocities");
+            let worst = velocities
+                .iter()
+                .map(|v| (v[0] - VELOCITY[0]).hypot(v[1] - VELOCITY[1]))
+                .fold(0.0f32, f32::max);
+            assert!(
+                worst <= 1e-3 * speed,
+                "{model}: a particle lost {worst} m/s of its uniform {speed} m/s"
+            );
         }
     }
 

@@ -1458,7 +1458,7 @@ impl ComputeOrchestrator {
         &mut self,
         sim_settings: &settings::SimSettings,
         number_release_particles: u32,
-        relax_particles: bool,
+        placement: settings::ParticlePlacement,
     ) -> Result<u32> {
         if sim_settings.sim_model > 4 {
             return Err(anyhow!(
@@ -1490,13 +1490,21 @@ impl ComputeOrchestrator {
         let grid_buffer_size_vec2 = grid_cell_count
             .checked_mul(size_of::<[f32; 2]>())
             .ok_or_else(|| anyhow!("Grid buffer size overflow"))?;
+        // the seeding shader reads the placement from a flag bit that only this
+        // upload carries; later uploads of the settings clear it again
+        let mut seed_settings = *sim_settings;
+        if placement.is_uniform() {
+            seed_settings.flags |= settings::SimFlags::UNIFORM_PARTICLE_PLACEMENT;
+        } else {
+            seed_settings.flags &= !settings::SimFlags::UNIFORM_PARTICLE_PLACEMENT;
+        }
         self.resources.write_buffer(
             &self.queue,
             BufferName::SimSettings,
-            sim_settings.as_bytes(),
+            seed_settings.as_bytes(),
         )?;
         info!(
-            "Initializing particles with number_release_particles: {}, particle_position_buffer_size: {:.2} MB ({:.1} % of max storage buffer binding size)",
+            "Initializing particles ({placement} placement) with number_release_particles: {}, particle_position_buffer_size: {:.2} MB ({:.1} % of max storage buffer binding size)",
             number_release_particles,
             particle_buffer_size_single_value as f64 * 2.0 / 1024.0 / 1024.0,
             (particle_buffer_size_single_value as f64 * 2.0
@@ -1632,7 +1640,7 @@ impl ComputeOrchestrator {
         )
         .await?;
 
-        if relax_particles {
+        if placement.is_relaxed() {
             self.relax_particles(sim_settings, number_release_particles)
                 .await?;
         }
@@ -2140,6 +2148,14 @@ impl ComputeOrchestrator {
             _ => return Ok(()),
         };
         if self.particle_sort_interval == 0 {
+            return Ok(());
+        }
+        // The shared tile of the sorted P2G accumulates in integer atomics,
+        // which quantize every contribution (0.1 kg); light particles at the
+        // flow margin then lose their outer stencil nodes and the front
+        // stalls. Float-atomic devices deposit exactly with the direct P2G.
+        if self.has_float32_atomic {
+            debug!("float atomics available: direct P2G without the particle sort");
             return Ok(());
         }
         // 8x8-cell tiles, see sort_particles.wgsl

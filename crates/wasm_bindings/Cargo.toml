@@ -13,20 +13,24 @@ console_error_panic_hook = { workspace = true }
 compute_core = { workspace = true }
 simulation = { workspace = true }
 data_processor = { workspace = true }
-render_core = { workspace = true }
 wgpu = { workspace = true }
 bytemuck = { workspace = true }
 wasm-bindgen = { workspace = true }
 wasm-bindgen-futures = { workspace = true }
 js-sys = { workspace = true }
-web-sys = { workspace = true, features = ["HtmlCanvasElement"] }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
-getrandom03 = { version = "0.3", features = ["wasm_js"], package = "getrandom" }
 getrandom = { version = "0.4", features = ["wasm_js"] }
 tracing-wasm = { workspace = true }
 tracing = { workspace = true }
 serde-wasm-bindgen = { workspace = true }
+
+# only the browser build renders to a canvas and needs the js entropy source
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+render_core = { workspace = true }
+web-sys = { workspace = true, features = ["HtmlCanvasElement"] }
+# enables the wasm_js backend of getrandom 0.3, which dependencies pull in
+getrandom03 = { version = "0.3", features = ["wasm_js"], package = "getrandom" }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"

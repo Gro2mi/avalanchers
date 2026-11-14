@@ -10,11 +10,9 @@ crate-type = ["cdylib", "rlib"] # This is essential for Python bindings
 
 [dependencies]
 compute_core = { workspace = true }
-bincode = { workspace = true}
 half = { workspace = true}
 image = { workspace = true}
 tracing = { workspace = true}
-lz4_flex = { workspace = true }
 reqwest = { workspace = true }
 tiff = { workspace = true }
 shapefile = { workspace = true }

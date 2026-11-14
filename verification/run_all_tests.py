@@ -98,7 +98,8 @@ TEST_DESCRIPTIONS = {
         "(relative L2 and Linf norms, AvaFrame simiSol)."),
     "dam_break": (
         "Dry-bed dam break on an inclined plane with Coulomb friction, compared to the "
-        "analytic solution of Faccanoni & Mangeney (2012, test 2, case 1.2)."),
+        "analytic solution of Faccanoni & Mangeney (2012, test 2, case 1.2). The 5 m "
+        "DEM is refined 4x (1.25 m cells) so that the initial step is resolved."),
     "rotation": (
         "AvaFrame rotation test: DEM and release are rotated by several angles, every "
         "run gets the energy line analysis and its peak fields are rotated back; "

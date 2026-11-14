@@ -50,7 +50,7 @@ def plane_simulation(angle, friction=0.0, **overrides):
         "velocity_threshold": 0.0,
         "enable_curvature": False,
         "enable_particle_interaction": True,
-        "enable_particle_relaxation": False,
+        "particle_placement": "uniform-relaxed",
         **overrides,
     })
     sim.set_dem_with_bounds(dem, cell_size, 0.0, n * cell_size, 0.0, n * cell_size, 1.0)
@@ -208,7 +208,7 @@ def rest_simulation(dem, release, **overrides):
         "velocity_threshold": 0.1,
         "enable_curvature": False,
         "enable_particle_interaction": True,
-        "enable_particle_relaxation": False,
+        "particle_placement": "uniform-relaxed",
         **overrides,
     })
     sim.set_dem_with_bounds(np.ascontiguousarray(dem.astype(np.float32)), 5.0, 0.0, 320.0, 0.0, 320.0, 1.0)
