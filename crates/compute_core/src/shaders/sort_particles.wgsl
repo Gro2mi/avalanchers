@@ -141,6 +141,11 @@ fn inv_momentum_factor() -> f32 {
 fn min_node_mass() -> f32 {
     return inv_momentum_factor(); // momentum unit / (1 m/s)
 }
+// Gully walls (reference surface, wall friction) need a reference surface at
+// least one cell wide; must match SimSettings::gully_walls_enabled.
+fn gully_walls_enabled() -> bool {
+    return sim_settings.reference_surface_length >= sim_settings.cell_size;
+}
 // depth-integrated internal force (h * sigma * grad_w * area, ~1e4..1e5 N per node contribution)
 const FORCE_FACTOR: f32 = 1e-3; // i32 limit is 2.1e6 N per node
 const INV_FORCE_FACTOR: f32 = 1 / FORCE_FACTOR;

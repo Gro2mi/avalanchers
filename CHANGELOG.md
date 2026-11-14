@@ -38,11 +38,24 @@ All notable changes to this project might be documented in this file.
 - The GPU context starts in about 0.25 s instead of 0.5-1.5 s. The adapter is looked up on Vulkan
   alone first (all backends only when Vulkan has no discrete GPU, or as set with `WGPU_BACKEND`),
   which skips starting DX12 on Windows. Shader pipelines are built on first use instead of all 43
-  at start, one module per WGSL file, and the pipelines a stage needs together are built in
-  parallel; the shader sources are expanded once per process without regular expressions, and
+  at start, one module per WGSL file; the shader sources are expanded once per process (in
+  parallel) without regular expressions, and
   debug builds still write changed imports back into the files. Creating the shaders at start
   takes 2 ms in release and 5 ms in debug (was 108 ms and 990 ms); debug builds compile `naga`
   optimized. `WGPU_VALIDATION` and `WGPU_DEBUG` now override the wgpu instance flags.
+- Terrain analysis, release areas and particle seeding take 25 ms instead of 52 ms (debug builds
+  47 ms instead of 216 ms). The reference surface is smoothed on the GPU (`smooth_reference.wgsl`,
+  the same Gaussian as before, within 2 mm), the relaxation reuses one bind group per kernel and
+  runs each iteration in one compute pass, and seeding no longer waits for the GPU to read back the
+  estimated release volume.
+- A simulation step of the grid models takes 40-50 % less GPU time (3D depth-averaged model: 0.13
+  instead of 0.22 ms per step with 12 800 particles, 0.21 instead of 0.42 ms with 96 000). The
+  whole-grid center of mass sums the grid per 16x16 tile in parallel before the single-workgroup
+  reduction (15 instead of 100-170 us per step); the 3D model deposits mass, horizontal and
+  vertical momentum in one pass over the stencil; GPUs with float atomics skip the zero momentum
+  of resting particles.
+- The reference surface and the gully wall friction only run when `reference_surface_length` is at
+  least the cell size; a smaller positive value logs a warning and leaves them off.
 - The Python bindings release the GIL while they create, prepare, run or restore a simulation.
 - The integer-atomic grid (WebGPU, or `integer_atomics`) sizes its fixed point units per run from
   the cell size and density instead of fixed 0.1 kg and 0.01 kg m/s: the u32 mass and i32 momentum

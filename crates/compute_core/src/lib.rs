@@ -562,6 +562,7 @@ struct SimulationPipelines {
     update_sim_info: ComputePipeline,
     center_of_mass_seed: ComputePipeline,
     center_of_mass_propagate: ComputePipeline,
+    center_of_mass_partials: ComputePipeline,
     center_of_mass: ComputePipeline,
 }
 
@@ -584,6 +585,7 @@ struct SimulationBindGroups {
     update_sim_info: BindGroup,
     center_of_mass_seed: BindGroup,
     center_of_mass_propagate: BindGroup,
+    center_of_mass_partials: BindGroup,
     center_of_mass: BindGroup,
 }
 
@@ -1166,23 +1168,56 @@ impl ComputeOrchestrator {
             TextureFormat::R32Float,
             texture_usage_input,
         )?;
-        // the surface the flow follows; finer terrain becomes basal topography
-        // (gully walls of the curvilinear, terrain-following and 3D models)
-        let reference = crate::dem::smooth_gaussian(
-            &dem.data1d,
-            dem.width,
-            dem.height,
-            sim_settings.reference_surface_length / sim_settings.cell_size,
-        );
-        self.resources.add_texture_with_data(
-            &self.device,
-            &self.queue,
-            reference.as_slice(),
-            TextureName::DemReference,
-            self.texture_size,
-            TextureFormat::R32Float,
-            texture_usage_input,
-        )?;
+        let analyze_shader = if sim_settings.sim_model == 1 {
+            ShaderName::AnalyzeTerrainCurvilinear
+        } else {
+            ShaderName::AnalyzeTerrain
+        };
+        let gully_walls = sim_settings.gully_walls_enabled();
+        if !gully_walls && sim_settings.reference_surface_length > 0.0 {
+            warn!(
+                "reference_surface_length {} m is below the cell size {} m: no reference \
+                 surface, gully wall friction is off",
+                sim_settings.reference_surface_length, sim_settings.cell_size
+            );
+        }
+        // the pipelines of the whole preparation phase, built up front
+        // (smoothing only for gully walls, filtered below)
+        let preparation_shaders = [
+            ShaderName::SmoothReferenceRows,
+            ShaderName::SmoothReferenceColumns,
+            analyze_shader,
+            ShaderName::ComputeRoughness,
+            ShaderName::ComputeReleaseAreas,
+            ShaderName::InitializeParticles,
+            ShaderName::RelaxClearGrid,
+            ShaderName::RelaxBuildGrid,
+            ShaderName::RelaxParticles,
+            ShaderName::RelaxSampleElevation,
+        ];
+        self.shader_configs
+            .prepare(&preparation_shaders[if gully_walls { 0 } else { 2 }..]);
+        // the surface the flow follows, the DEM smoothed with a Gaussian of
+        // width reference_surface_length on the GPU (dem::smooth_gaussian);
+        // finer terrain becomes basal topography (gully walls of the
+        // curvilinear, terrain-following and 3D models)
+        let smoothing_passes: &[ShaderName] = if gully_walls {
+            &[
+                ShaderName::SmoothReferenceRows,
+                ShaderName::SmoothReferenceColumns,
+            ]
+        } else {
+            &[]
+        };
+        for pass in smoothing_passes {
+            self.run_shader(
+                pass,
+                self.dispatch_number_workgroups_x_2d,
+                self.dispatch_number_workgroups_y_2d,
+                1,
+            )
+            .await?;
+        }
         match sim_settings.sim_model {
             0 | 2 | 3 | 4 => self.run_shader(
                 &ShaderName::AnalyzeTerrain,
@@ -1308,6 +1343,9 @@ impl ComputeOrchestrator {
                 1,
             )
             .await?;
+        } else {
+            self.run_shader(&ShaderName::CenterOfMassPartials, dispatch_x, dispatch_y, 1)
+                .await?;
         }
         self.run_shader(&ShaderName::ComputeCenterOfMass, 1, 1, 1)
             .await?;
@@ -1537,7 +1575,7 @@ impl ComputeOrchestrator {
         sim_settings: &settings::SimSettings,
         number_release_particles: u32,
         placement: settings::ParticlePlacement,
-    ) -> Result<u32> {
+    ) -> Result<()> {
         if sim_settings.sim_model > 4 {
             return Err(anyhow!(
                 "Unsupported simulation model: {}",
@@ -1552,6 +1590,16 @@ impl ComputeOrchestrator {
             ));
         }
         self.initial_particles = None;
+        let mut seeding_shaders = vec![ShaderName::InitializeParticles];
+        if placement.is_relaxed() {
+            seeding_shaders.extend([
+                ShaderName::RelaxClearGrid,
+                ShaderName::RelaxBuildGrid,
+                ShaderName::RelaxParticles,
+                ShaderName::RelaxSampleElevation,
+            ]);
+        }
+        self.shader_configs.prepare(&seeding_shaders);
         let particle_count = usize::try_from(number_release_particles)
             .context("Particle count does not fit in usize")?;
         let particle_buffer_size_single_value = particle_count
@@ -1723,20 +1771,15 @@ impl ComputeOrchestrator {
                 .await?;
         }
 
-        let estimated_release_volume: u32 = self
-            .read_buffer::<AtomicValues>(BufferName::AtomicValues)
-            .await?
-            .first()
-            .ok_or_else(|| anyhow!("AtomicValues buffer was empty"))?
-            .estimated_release_volume;
-        info!("Estimated release volume: {}", estimated_release_volume);
+        // no readback: the seeding runs on while the CPU prepares the next
+        // stage (AtomicValues holds the estimated release volume)
         if !self.has_float32_atomic && number_release_particles > 0 {
             // mean seeded mass (the volume estimate rounds every cell to m3)
             let masses = self.read_buffer::<f32>(BufferName::ParticlesMass).await?;
             let mean_mass = masses.iter().map(|&m| m as f64).sum::<f64>() / masses.len() as f64;
             self.log_integer_grid_resolution(sim_settings, mean_mass as f32);
         }
-        Ok(estimated_release_volume)
+        Ok(())
     }
 
     /// Logs how finely the integer-atomic grid resolves a release particle of
@@ -1838,6 +1881,50 @@ impl ComputeOrchestrator {
             number_release_particles.div_ceil(self.max_compute_invocations_per_workgroup);
         let dispatch_grid_x = sim_settings.grid_shape_x.div_ceil(WORKGROUP_SIZE_2D);
         let dispatch_grid_y = sim_settings.grid_shape_y.div_ceil(WORKGROUP_SIZE_2D);
+        // the buffers stay the same across the iterations: one bind group
+        // per kernel instead of one per dispatch
+        let kernels = [
+            ShaderName::RelaxClearGrid,
+            ShaderName::RelaxBuildGrid,
+            ShaderName::RelaxParticles,
+            ShaderName::RelaxSampleElevation,
+        ];
+        self.shader_configs.prepare(&kernels);
+        let [clear_grid, build_grid, relax, sample_elevation] = kernels.map(|kernel| {
+            let config = self
+                .shader_configs
+                .get(&kernel)
+                .ok_or_else(|| anyhow!("{} shader config not found", kernel))?;
+            Ok::<_, anyhow::Error>((
+                config.pipeline.clone(),
+                config.create_bind_group(&self.device, &self.resources)?,
+            ))
+        });
+        let (clear_grid, build_grid, relax, sample_elevation) =
+            (clear_grid?, build_grid?, relax?, sample_elevation?);
+        let snapshot_source = self
+            .resources
+            .get_buffer(&BufferName::ParticlesPosition)
+            .ok_or_else(|| anyhow!("ParticlesPosition buffer not found"))?;
+        let snapshot = self
+            .resources
+            .get_buffer(&BufferName::ParticlesPositionRelax)
+            .ok_or_else(|| anyhow!("ParticlesPositionRelax buffer not found"))?;
+        let snapshot_size = snapshot_source.size().min(snapshot.size());
+        // dispatches of one pass are ordered with barriers between them, so
+        // an iteration needs one pass after its snapshot copy
+        let dispatch = |pass: &mut wgpu::ComputePass<'_>,
+                        (pipeline, bind_group): &(ComputePipeline, BindGroup),
+                        x: u32,
+                        y: u32| {
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, bind_group, &[]);
+            pass.dispatch_workgroups(x, y, 1);
+        };
+        let pass_descriptor = ComputePassDescriptor {
+            label: Some("Particle Relaxation Pass"),
+            timestamp_writes: None,
+        };
         // one submission, see evaluate_gpu
         let mut encoder = self
             .device
@@ -1846,41 +1933,16 @@ impl ComputeOrchestrator {
             });
         for _ in 0..RELAXATION_ITERATIONS {
             // all threads read the snapshot of the previous iteration
-            self.encode_copy_buffer(
-                &mut encoder,
-                BufferName::ParticlesPosition,
-                BufferName::ParticlesPositionRelax,
-            )?;
-            self.encode_shader(
-                &mut encoder,
-                &ShaderName::RelaxClearGrid,
-                dispatch_grid_x,
-                dispatch_grid_y,
-                1,
-            )?;
-            self.encode_shader(
-                &mut encoder,
-                &ShaderName::RelaxBuildGrid,
-                dispatch_particles_1d,
-                1,
-                1,
-            )?;
-            self.encode_shader(
-                &mut encoder,
-                &ShaderName::RelaxParticles,
-                dispatch_particles_1d,
-                1,
-                1,
-            )?;
+            encoder.copy_buffer_to_buffer(snapshot_source, 0, snapshot, 0, snapshot_size);
+            let mut pass = encoder.begin_compute_pass(&pass_descriptor);
+            dispatch(&mut pass, &clear_grid, dispatch_grid_x, dispatch_grid_y);
+            dispatch(&mut pass, &build_grid, dispatch_particles_1d, 1);
+            dispatch(&mut pass, &relax, dispatch_particles_1d, 1);
         }
         // the start elevation was sampled at the seed position
-        self.encode_shader(
-            &mut encoder,
-            &ShaderName::RelaxSampleElevation,
-            dispatch_particles_1d,
-            1,
-            1,
-        )?;
+        let mut pass = encoder.begin_compute_pass(&pass_descriptor);
+        dispatch(&mut pass, &sample_elevation, dispatch_particles_1d, 1);
+        drop(pass);
         self.queue.submit(Some(encoder.finish()));
         Ok(())
     }
@@ -1985,7 +2047,7 @@ impl ComputeOrchestrator {
             }
         };
 
-        // build the step pipelines together (in parallel on native)
+        // build the step pipelines up front
         self.shader_configs.prepare(&[
             ShaderName::UpdateSimInfo,
             p2g_shader,
@@ -1994,6 +2056,7 @@ impl ComputeOrchestrator {
             ShaderName::ComputeCenterOfMass,
             ShaderName::CenterOfMassSeed,
             ShaderName::CenterOfMassPropagate,
+            ShaderName::CenterOfMassPartials,
             ShaderName::ResetGrid,
         ]);
         let update_sim_info_config = self
@@ -2024,6 +2087,10 @@ impl ComputeOrchestrator {
             .shader_configs
             .get(&ShaderName::CenterOfMassPropagate)
             .ok_or_else(|| anyhow!("CenterOfMassPropagate shader config not found"))?;
+        let center_of_mass_partials_config = self
+            .shader_configs
+            .get(&ShaderName::CenterOfMassPartials)
+            .ok_or_else(|| anyhow!("CenterOfMassPartials shader config not found"))?;
         let reset_grid_config = self
             .shader_configs
             .get(&ShaderName::ResetGrid)
@@ -2037,6 +2104,7 @@ impl ComputeOrchestrator {
             update_sim_info: update_sim_info_config.pipeline.clone(),
             center_of_mass_seed: center_of_mass_seed_config.pipeline.clone(),
             center_of_mass_propagate: center_of_mass_propagate_config.pipeline.clone(),
+            center_of_mass_partials: center_of_mass_partials_config.pipeline.clone(),
             center_of_mass: compute_center_of_mass_config.pipeline.clone(),
         });
         self.simulation_bind_groups = Some(SimulationBindGroups {
@@ -2050,6 +2118,8 @@ impl ComputeOrchestrator {
             center_of_mass_seed: center_of_mass_seed_config
                 .create_bind_group(&self.device, &self.resources)?,
             center_of_mass_propagate: center_of_mass_propagate_config
+                .create_bind_group(&self.device, &self.resources)?,
+            center_of_mass_partials: center_of_mass_partials_config
                 .create_bind_group(&self.device, &self.resources)?,
             center_of_mass: compute_center_of_mass_config
                 .create_bind_group(&self.device, &self.resources)?,
@@ -2245,6 +2315,18 @@ impl ComputeOrchestrator {
                         self.dispatch_number_workgroups_y_2d,
                         1,
                     );
+                } else {
+                    compute_pass.set_pipeline(&simulation_pipelines.center_of_mass_partials);
+                    compute_pass.set_bind_group(
+                        0,
+                        &simulation_bind_groups.center_of_mass_partials,
+                        &[],
+                    );
+                    compute_pass.dispatch_workgroups(
+                        self.dispatch_number_workgroups_x_2d,
+                        self.dispatch_number_workgroups_y_2d,
+                        1,
+                    );
                 }
                 compute_pass.set_pipeline(&simulation_pipelines.center_of_mass);
                 compute_pass.set_bind_group(0, &simulation_bind_groups.center_of_mass, &[]);
@@ -2277,9 +2359,10 @@ impl ComputeOrchestrator {
             return Ok(());
         }
         // The shared tile of the sorted P2G accumulates in integer atomics,
-        // which quantize every contribution (0.1 kg); light particles at the
-        // flow margin then lose their outer stencil nodes and the front
-        // stalls. Float-atomic devices deposit exactly with the direct P2G.
+        // which quantize every contribution (SimSettings::mass_factor);
+        // float-atomic devices deposit exactly with the direct P2G, which is
+        // also faster there than the tile (no float atomics in workgroup
+        // memory).
         if self.has_float32_atomic {
             debug!("float atomics available: direct P2G without the particle sort");
             return Ok(());
@@ -3734,6 +3817,75 @@ mod tests {
             "sim_to_roi was {}",
             smaller.sim_to_roi
         );
+    }
+
+    /// The reference surface smoothed on the GPU (smooth_reference.wgsl)
+    /// matches dem::smooth_gaussian, also next to NaN cells and the edges,
+    /// from a reference_surface_length of one cell on.
+    #[test_log::test]
+    fn test_gpu_reference_surface_matches_cpu_smoothing() {
+        const WIDTH: usize = 41;
+        const HEIGHT: usize = 29;
+        const CELL_SIZE: f32 = 5.0;
+        let mut data1d: Vec<f32> = (0..WIDTH * HEIGHT)
+            .map(|idx| {
+                let (x, y) = ((idx % WIDTH) as f32, (idx / WIDTH) as f32);
+                1500.0 + 0.4 * (x - 20.0).powi(2) - 3.0 * y
+                    + 8.0 * (0.7 * x).sin() * (0.5 * y).cos()
+            })
+            .collect();
+        for idx in [
+            0,
+            5 * WIDTH + 7,
+            14 * WIDTH + 20,
+            14 * WIDTH + 21,
+            28 * WIDTH + 40,
+        ] {
+            data1d[idx] = f32::NAN;
+        }
+        let dem = dem::Dem {
+            width: WIDTH,
+            height: HEIGHT,
+            data1d,
+            cell_size: CELL_SIZE,
+            ..Default::default()
+        };
+        let mut orchestrator =
+            block_on(ComputeOrchestrator::new()).expect("Failed to create ComputeOrchestrator");
+        for reference_surface_length in [5.0, 7.5, 20.0] {
+            let settings = settings::SimSettings {
+                grid_shape_x: WIDTH as u32,
+                grid_shape_y: HEIGHT as u32,
+                world_size_x: WIDTH as f32 * CELL_SIZE,
+                world_size_y: HEIGHT as f32 * CELL_SIZE,
+                cell_size: CELL_SIZE,
+                sim_model: 1,
+                reference_surface_length,
+                ..Default::default()
+            };
+            block_on(orchestrator.run_analyze_terrain(&settings, &dem))
+                .expect("Failed to analyze terrain");
+            let gpu: Vec<f32> =
+                block_on(orchestrator.read_texture_single_channel(TextureName::DemReference))
+                    .expect("Failed to read the reference surface");
+            let cpu = dem::smooth_gaussian(
+                &dem.data1d,
+                WIDTH,
+                HEIGHT,
+                reference_surface_length / CELL_SIZE,
+            );
+            assert_eq!(gpu.len(), cpu.len());
+            for (idx, (g, c)) in gpu.iter().zip(&cpu).enumerate() {
+                if c.is_nan() {
+                    assert!(g.is_nan(), "cell {idx}: {g} instead of NaN");
+                } else {
+                    assert!(
+                        (g - c).abs() < 2e-3,
+                        "cell {idx} (length {reference_surface_length}): gpu {g} cpu {c}"
+                    );
+                }
+            }
+        }
     }
 
     #[test_log::test]

@@ -9,6 +9,10 @@
 //   own label points to), which shrinks the remaining label distance
 //   exponentially per round - long, sinuous blobs converge in a handful of
 //   rounds instead of one pass per path length.
+// - center_of_mass_partials: whole-grid mode only, one workgroup per
+//   WG_SIZE_2D x WG_SIZE_2D tile of the grid sums the mass and moment of its
+//   tile into tile_partials, so the final stage reduces a few
+//   hundred partial sums instead of every cell on a single workgroup.
 // - compute_center_of_mass: the final reduction stage, dispatched as exactly
 //   one workgroup after seed and propagate have filled the label buffer
 //   (both early-out when the whole-grid mode is selected).
@@ -60,6 +64,9 @@ const PROPAGATION_ROUNDS: u32 = 16u;
 @group(0) @binding(7) var<storage, read_write> blob_labels: array<u32>;
 @group(0) @binding(8) var<storage, read_write> blob_mass: array<atomic<u32>>; // no_atomic_float
 // atomic_float @group(0) @binding(8) var<storage, read_write> blob_mass: array<atomic<f32>>;
+// per-tile (mass, moment x, moment y, unused) of the whole-grid mode, one per
+// workgroup of center_of_mass_partials in row-major tile order
+@group(0) @binding(9) var<storage, read_write> tile_partials: array<vec4f>;
 
 var<workgroup> wg_mass: array<f32, WG_SIZE>;
 var<workgroup> wg_moment: array<vec2f, WG_SIZE>;
@@ -129,6 +136,48 @@ fn update_trajectory(timestep: u32) {
     sim_info.travel_angle = 0.0;
     if sim_info.travel_length_2d > 0.0 {
         sim_info.travel_angle = degrees(atan2(sim_info.travel_vertical_drop, sim_info.travel_length_2d));
+    }
+}
+
+// Whole-grid mode: mass and moment of one tile of the grid, reduced in
+// workgroup memory (WG_SIZE_2D^2 == WG_SIZE threads). No early return before
+// the barriers: cells outside the grid contribute nothing.
+@compute @workgroup_size(WG_SIZE_2D, WG_SIZE_2D, 1)
+fn center_of_mass_partials(
+    @builtin(global_invocation_id) id: vec3u,
+    @builtin(local_invocation_index) li: u32,
+    @builtin(workgroup_id) tile: vec3u,
+    @builtin(num_workgroups) tiles: vec3u,
+) {
+    var mass = 0.0;
+    var moment = vec2f(0.0, 0.0);
+    if id.x < sim_settings.grid_shape.x && id.y < sim_settings.grid_shape.y {
+        let i = xy_to_idx(id.xy);
+        let m = f32(mass_buffer[i]) * inv_mass_factor(); // no_atomic_float
+        // atomic_float let m = mass_buffer[i];
+        if m > 0.0 && is_finite(m) {
+            mass = m;
+            moment = cell_center_xy(id.xy) * m;
+        }
+    }
+    wg_mass[li] = mass;
+    wg_moment[li] = moment;
+    workgroupBarrier();
+    var stride_size = WG_SIZE / 2u;
+    loop {
+        if li < stride_size {
+            wg_mass[li] = wg_mass[li] + wg_mass[li + stride_size];
+            wg_moment[li] = wg_moment[li] + wg_moment[li + stride_size];
+        }
+        workgroupBarrier();
+        if stride_size == 1u {
+            break;
+        }
+        stride_size = stride_size >> 1u;
+    }
+    if li == 0u {
+        tile_partials[tile.y * tiles.x + tile.x] =
+            vec4f(wg_mass[0], wg_moment[0], 0.0);
     }
 }
 
@@ -290,15 +339,13 @@ fn compute_center_of_mass(@builtin(local_invocation_index) li: u32) {
             }
         }
     } else {
-        // whole-grid mode: every mass cell contributes
-        for (var i = li; i < num_cells; i = i + WG_SIZE) {
-            let m = f32(mass_buffer[i]) * inv_mass_factor(); // no_atomic_float
-            // atomic_float let m = mass_buffer[i];
-            if m > 0.0 && is_finite(m) {
-                let position = cell_center_xy(idx_to_xy(i));
-                mass = mass + m;
-                moment = moment + position * m;
-            }
+        // whole-grid mode: every mass cell contributes, summed per tile by
+        // center_of_mass_partials
+        let tiles = (sim_settings.grid_shape + vec2u(WG_SIZE_2D - 1u)) / WG_SIZE_2D;
+        for (var i = li; i < tiles.x * tiles.y; i = i + WG_SIZE) {
+            let partial = tile_partials[i];
+            mass = mass + partial.x;
+            moment = moment + partial.yz;
         }
     }
 
@@ -384,6 +431,11 @@ fn inv_momentum_factor() -> f32 {
 // count as empty.
 fn min_node_mass() -> f32 {
     return inv_momentum_factor(); // momentum unit / (1 m/s)
+}
+// Gully walls (reference surface, wall friction) need a reference surface at
+// least one cell wide; must match SimSettings::gully_walls_enabled.
+fn gully_walls_enabled() -> bool {
+    return sim_settings.reference_surface_length >= sim_settings.cell_size;
 }
 // depth-integrated internal force (h * sigma * grad_w * area, ~1e4..1e5 N per node contribution)
 const FORCE_FACTOR: f32 = 1e-3; // i32 limit is 2.1e6 N per node

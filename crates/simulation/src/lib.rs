@@ -4885,13 +4885,12 @@ fn test_trajectory() {
         .thickness;
         let number_release_cells: u32 =
             block_on(sim.load_release_areas()).expect("Failed to load_release_areas");
-        let estimated_release_volume = block_on(sim.orchestrator.run_initialize_particles(
+        block_on(sim.orchestrator.run_initialize_particles(
             &sim.settings,
             number_release_cells * sim.settings.released_particles_per_cell,
             ParticlePlacement::Relaxed,
         ))
         .expect("Failed to run initialize_particles shader");
-        info!("Estimated release volume: {}", estimated_release_volume);
         let atomic_values = block_on(
             sim.orchestrator
                 .read_buffer::<AtomicValues>(BufferName::AtomicValues),

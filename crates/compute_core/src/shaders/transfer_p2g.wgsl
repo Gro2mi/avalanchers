@@ -38,8 +38,10 @@ fn transfer_p2g_with_affine(p_idx: u32, affine_matrix: mat2x2f) {
             
             
             // atomic_float atomicAdd(&grid_mass_atomic[idx], p_mass * weight);
-            // atomic_float atomicAdd(&grid_momentum_atomic[idx * 2u], p_mass * affine_velocity.x * weight);
-            // atomic_float atomicAdd(&grid_momentum_atomic[idx * 2u + 1u], p_mass * affine_velocity.y * weight);
+            // resting particles carry no momentum: skip their zero adds
+            // atomic_float let momentum = p_mass * weight * affine_velocity;
+            // atomic_float if momentum.x != 0.0 { atomicAdd(&grid_momentum_atomic[idx * 2u], momentum.x); }
+            // atomic_float if momentum.y != 0.0 { atomicAdd(&grid_momentum_atomic[idx * 2u + 1u], momentum.y); }
             // for affine transfer
             // atomicAdd(&grid_momentum_atomic[idx * 2u], p_mass * affine_velocity.x * weight);
             // atomicAdd(&grid_momentum_atomic[idx * 2u + 1u], p_mass * affine_velocity.y * weight);

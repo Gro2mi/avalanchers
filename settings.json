@@ -1,7 +1,7 @@
 {
   "dem_path": "data/avaframe/avaWog.png",
   "release_areas_path": "data/avaframe/avaWogreleaseTexture.png",
-  "sim_model": "curvilinear",
+  "sim_model": "3d",
   "friction_model": "voellmy",
   "max_steps": 6000,
   "cfl": 0.9,

@@ -6,7 +6,7 @@
 @group(0) @binding(4) var<storage, read_write> slope_angle_buffer: array<f32>;
 @group(0) @binding(5) var<storage, read_write> slope_aspect_buffer: array<f32>;
 @group(0) @binding(6) var<storage, read_write> debug: array<f32>;
-// Gaussian-smoothed DEM (a copy of the DEM when reference_surface_length is 0)
+// Gaussian-smoothed DEM, written only when gully_walls_enabled()
 @group(0) @binding(7) var dem_reference_texture: texture_2d<f32>;
 // x = cos(beta) between the bed and reference surface normals
 @group(0) @binding(8) var basal_topography_texture: texture_storage_2d<rgba32float, write>;
@@ -87,7 +87,7 @@ fn analyze_terrain_curvilinear(@builtin(global_invocation_id) id: vec3<u32>) {
     // 9. Inclination beta of the bed against the smoothed reference surface,
     //    the gully wall angle (cos(beta) = 1 exactly when disabled)
     var basal_topography = vec4f(1.0, 0.0, 0.0, 0.0);
-    if sim_settings.reference_surface_length > 0.0 {
+    if gully_walls_enabled() {
         let ref_dx = (textureLoad(dem_reference_texture, coords + vec2<i32>(1, 0), 0).r
             - textureLoad(dem_reference_texture, coords + vec2<i32>(-1, 0), 0).r) / (2.0 * dx);
         let ref_dy = (textureLoad(dem_reference_texture, coords + vec2<i32>(0, 1), 0).r
@@ -184,6 +184,11 @@ fn inv_momentum_factor() -> f32 {
 // count as empty.
 fn min_node_mass() -> f32 {
     return inv_momentum_factor(); // momentum unit / (1 m/s)
+}
+// Gully walls (reference surface, wall friction) need a reference surface at
+// least one cell wide; must match SimSettings::gully_walls_enabled.
+fn gully_walls_enabled() -> bool {
+    return sim_settings.reference_surface_length >= sim_settings.cell_size;
 }
 // depth-integrated internal force (h * sigma * grad_w * area, ~1e4..1e5 N per node contribution)
 const FORCE_FACTOR: f32 = 1e-3; // i32 limit is 2.1e6 N per node

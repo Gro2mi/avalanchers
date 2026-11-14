@@ -56,19 +56,22 @@ fn p2g_3d(@builtin(global_invocation_id) id: vec3u) {
     if cell.x < 3 || cell.x >= sim_settings.grid_shape.x - 3 || cell.y < 3 || cell.y >= sim_settings.grid_shape.y - 3 {
         return;
     }
-    transfer_p2g_with_affine(id.x, particles_affine_matrix[id.x]);
-    transfer_p2g_z(id.x);
+    transfer_p2g_3d(id.x, particles_affine_matrix[id.x]);
 }
 
 // import transfer_p2g_z.wgsl;
 // BEGIN transfer_p2g_z.wgsl
-// z row of the 3D APIC transfer, on the stencil of transfer_p2g_with_affine.
-// Pure library module: the importing module provides particles_velocity_z,
-// particles_affine_z and grid_momentum_z_atomic.
-fn transfer_p2g_z(p_idx: u32) {
+// 3D APIC transfer: mass, xy momentum and the z momentum (with the z row of
+// the affine matrix) in one pass over the stencil, so the 3D model computes
+// the weights once. Pure library module: the importing module provides the
+// particle buffers, grid_mass_atomic, grid_momentum_atomic and
+// grid_momentum_z_atomic, and imports transfer_p2g.wgsl (quantize_*).
+fn transfer_p2g_3d(p_idx: u32, affine_matrix: mat2x2f) {
+    // the stencil is offset by half a cell as it is in the middle of the cell
     let grid_pos = particles_position[p_idx] / sim_settings.cell_size - vec2f(0.5);
     let base_node = vec2u(floor(grid_pos - vec2f(0.5)));
     let p_mass = particles_mass[p_idx];
+    let p_velocity = particles_velocity[p_idx];
     let p_velocity_z = particles_velocity_z[p_idx];
     let affine_z = particles_affine_z[p_idx];
     for (var i: u32 = 0; i < 3; i++) {
@@ -77,10 +80,23 @@ fn transfer_p2g_z(p_idx: u32) {
             let distance = calculate_distance_to_node(grid_pos, node_coords);
             let weight = calculate_weight(distance);
             let idx = xy_to_idx(node_coords);
+            let affine_velocity = p_velocity - affine_matrix * distance;
             let affine_velocity_z = p_velocity_z - dot(affine_z, distance);
-            if quantize_mass(p_mass * weight) == 0u { continue; } // no_atomic_float
-            // atomic_float atomicAdd(&grid_momentum_z_atomic[idx], p_mass * affine_velocity_z * weight);
-            let quantized_z = quantize_momentum_component(p_mass * affine_velocity_z * weight * momentum_factor()); // no_atomic_float
+            let node_mass = p_mass * weight;
+            // atomic_float atomicAdd(&grid_mass_atomic[idx], node_mass);
+            // resting particles carry no momentum: skip their zero adds
+            // atomic_float let momentum = node_mass * vec3f(affine_velocity, affine_velocity_z);
+            // atomic_float if momentum.x != 0.0 { atomicAdd(&grid_momentum_atomic[idx * 2u], momentum.x); }
+            // atomic_float if momentum.y != 0.0 { atomicAdd(&grid_momentum_atomic[idx * 2u + 1u], momentum.y); }
+            // atomic_float if momentum.z != 0.0 { atomicAdd(&grid_momentum_z_atomic[idx], momentum.z); }
+            let quantized_mass = quantize_mass(node_mass); // no_atomic_float
+            if quantized_mass == 0u { continue; } // no momentum without mass, see quantize_mass // no_atomic_float
+            atomicAdd(&grid_mass_atomic[idx], quantized_mass); // no_atomic_float
+            let quantized_x = quantize_momentum_component(node_mass * affine_velocity.x * momentum_factor()); // no_atomic_float
+            let quantized_y = quantize_momentum_component(node_mass * affine_velocity.y * momentum_factor()); // no_atomic_float
+            let quantized_z = quantize_momentum_component(node_mass * affine_velocity_z * momentum_factor()); // no_atomic_float
+            if quantized_x != 0 { atomicAdd(&grid_momentum_atomic[idx * 2u], quantized_x); } // no_atomic_float
+            if quantized_y != 0 { atomicAdd(&grid_momentum_atomic[idx * 2u + 1u], quantized_y); } // no_atomic_float
             if quantized_z != 0 { atomicAdd(&grid_momentum_z_atomic[idx], quantized_z); } // no_atomic_float
         }
     }
@@ -129,8 +145,10 @@ fn transfer_p2g_with_affine(p_idx: u32, affine_matrix: mat2x2f) {
             
             
             // atomic_float atomicAdd(&grid_mass_atomic[idx], p_mass * weight);
-            // atomic_float atomicAdd(&grid_momentum_atomic[idx * 2u], p_mass * affine_velocity.x * weight);
-            // atomic_float atomicAdd(&grid_momentum_atomic[idx * 2u + 1u], p_mass * affine_velocity.y * weight);
+            // resting particles carry no momentum: skip their zero adds
+            // atomic_float let momentum = p_mass * weight * affine_velocity;
+            // atomic_float if momentum.x != 0.0 { atomicAdd(&grid_momentum_atomic[idx * 2u], momentum.x); }
+            // atomic_float if momentum.y != 0.0 { atomicAdd(&grid_momentum_atomic[idx * 2u + 1u], momentum.y); }
             // for affine transfer
             // atomicAdd(&grid_momentum_atomic[idx * 2u], p_mass * affine_velocity.x * weight);
             // atomicAdd(&grid_momentum_atomic[idx * 2u + 1u], p_mass * affine_velocity.y * weight);
@@ -200,6 +218,11 @@ fn inv_momentum_factor() -> f32 {
 // count as empty.
 fn min_node_mass() -> f32 {
     return inv_momentum_factor(); // momentum unit / (1 m/s)
+}
+// Gully walls (reference surface, wall friction) need a reference surface at
+// least one cell wide; must match SimSettings::gully_walls_enabled.
+fn gully_walls_enabled() -> bool {
+    return sim_settings.reference_surface_length >= sim_settings.cell_size;
 }
 // depth-integrated internal force (h * sigma * grad_w * area, ~1e4..1e5 N per node contribution)
 const FORCE_FACTOR: f32 = 1e-3; // i32 limit is 2.1e6 N per node

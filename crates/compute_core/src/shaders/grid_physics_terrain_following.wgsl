@@ -171,8 +171,11 @@ fn update_node(xy: vec2u, n: vec3f, velocity: vec3f, mass: f32) -> vec3f {
     let friction_speed = max(proposed_speed, sim_settings.velocity_threshold);
     // gully walls, inclined by beta against the reference surface, carry the
     // cross-slope lateral stress k_y sigma_zz of the snow beside them
-    let cos_beta = textureLoad(basal_topography_texture, vec2<i32>(xy), 0).x;
-    let wall_load = g_normal * gully_wall_load_factor(cos_beta, k_y);
+    var wall_load = g_normal;
+    if gully_walls_enabled() {
+        let cos_beta = textureLoad(basal_topography_texture, vec2<i32>(xy), 0).x;
+        wall_load = g_normal * gully_wall_load_factor(cos_beta, k_y);
+    }
     let friction_acceleration = basal_friction_acceleration(wall_load, sim_settings.snow_density, friction_speed, h, sim_settings.friction_model);
     var new_velocity = vec3f(0.0);
     if (friction_acceleration * sim_info.dt) < proposed_speed {
@@ -536,6 +539,11 @@ fn inv_momentum_factor() -> f32 {
 // count as empty.
 fn min_node_mass() -> f32 {
     return inv_momentum_factor(); // momentum unit / (1 m/s)
+}
+// Gully walls (reference surface, wall friction) need a reference surface at
+// least one cell wide; must match SimSettings::gully_walls_enabled.
+fn gully_walls_enabled() -> bool {
+    return sim_settings.reference_surface_length >= sim_settings.cell_size;
 }
 // depth-integrated internal force (h * sigma * grad_w * area, ~1e4..1e5 N per node contribution)
 const FORCE_FACTOR: f32 = 1e-3; // i32 limit is 2.1e6 N per node

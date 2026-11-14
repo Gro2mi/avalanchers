@@ -135,7 +135,8 @@ pub struct SimSettings {
     pub no_new_cells_travel: f32,
     /// Curvilinear, terrain-following and 3D depth averaged: Gaussian width (m)
     /// of the reference surface that defines gully wall inclinations for the
-    /// confinement friction; 0 disables it.
+    /// confinement friction; below the cell size (e.g. 0) disables it, see
+    /// [`Self::gully_walls_enabled`].
     pub reference_surface_length: f32,
     /// Snow water equivalent (kg/m²) of every release cell, set instead of
     /// `release_thickness`, NaN if unset; read it with
@@ -289,6 +290,13 @@ impl SimSettings {
     /// utils.wgsl.
     pub fn max_node_mass(&self) -> f32 {
         QUANTIZATION_SAFETY * MAX_FLOW_THICKNESS * self.density * self.cell_size * self.cell_size
+    }
+
+    /// Whether the reference surface and the gully wall friction run: the
+    /// smoothing width must reach the cell size. Same test as
+    /// `gully_walls_enabled` in utils.wgsl.
+    pub fn gully_walls_enabled(&self) -> bool {
+        self.reference_surface_length >= self.cell_size
     }
 
     /// Integer units per kg of the integer-atomic grid mass.
@@ -1185,7 +1193,8 @@ pub struct Settings {
     /// of the smoothed reference surface.
     /// Bed inclined by beta against it counts as a gully wall whose normal
     /// load grows by 1 + K tan^2(beta) from the lateral pressure of the snow
-    /// beside it; 0 or unset disables it.
+    /// beside it. Needs at least the cell size; 0, unset or a smaller value
+    /// disables it (a positive value below the cell size logs a warning).
     pub reference_surface_length: Option<f32>,
 
     pub enable_curvature: Option<bool>,
@@ -1311,6 +1320,20 @@ mod tests {
         assert_eq!(settings.grid_shape_y, dem.height as u32);
         assert_eq!(settings.world_size_x, dem.cell_size * dem.width as f32);
         assert_eq!(settings.world_size_y, dem.cell_size * dem.height as f32);
+    }
+
+    #[test]
+    fn gully_walls_need_a_reference_surface_of_one_cell() {
+        let mut settings = SimSettings {
+            cell_size: 5.0,
+            ..SimSettings::new()
+        };
+        for (length, enabled) in [(0.0, false), (4.9, false), (5.0, true), (20.0, true)] {
+            settings.reference_surface_length = length;
+            assert_eq!(settings.gully_walls_enabled(), enabled, "length {length}");
+        }
+        settings.reference_surface_length = f32::NAN;
+        assert!(!settings.gully_walls_enabled());
     }
 
     #[test]

@@ -131,6 +131,11 @@ pub enum BufferName {
     /// snapshot of the previous step's GridMass, used by the MPMDAC
     /// model to derive a smooth clump-aware particle depth
     GridMassPrevious,
+    /// DEM smoothed along the rows, between the two passes of
+    /// smooth_reference.wgsl
+    ReferenceRows,
+    /// per-tile mass and moment of the whole-grid center of mass
+    CenterOfMassPartials,
     GridMomentum,
     /// z component of the grid momentum (terrain-following model), kept
     /// separate so GridMomentum stays interleaved (u, v)
@@ -232,6 +237,8 @@ impl BufferName {
             BufferName::TimestepData => "timestep_data",
             BufferName::GridMass => "grid_mass",
             BufferName::GridMassPrevious => "grid_mass_previous",
+            BufferName::ReferenceRows => "reference_rows",
+            BufferName::CenterOfMassPartials => "center_of_mass_partials",
             BufferName::GridMomentum => "grid_momentum",
             BufferName::GridMomentumZ => "grid_momentum_z",
             BufferName::GridVelocity => "grid_velocity",
@@ -297,6 +304,8 @@ impl std::str::FromStr for BufferName {
             "timestep_data" => Ok(BufferName::TimestepData),
             "grid_mass" => Ok(BufferName::GridMass),
             "grid_mass_previous" => Ok(BufferName::GridMassPrevious),
+            "reference_rows" => Ok(BufferName::ReferenceRows),
+            "center_of_mass_partials" => Ok(BufferName::CenterOfMassPartials),
             "grid_momentum" => Ok(BufferName::GridMomentum),
             "grid_momentum_z" => Ok(BufferName::GridMomentumZ),
             "grid_velocity" => Ok(BufferName::GridVelocity),
@@ -983,6 +992,29 @@ pub fn create_buffers_and_texture_descriptions(
         BufferName::GridMassPrevious,
         grid_bytes_size,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+    );
+    // reference surface: the row pass result, and the smoothed DEM itself
+    // (written by smooth_reference.wgsl, sampled by the terrain analysis)
+    gpu_resources.add_buffer(
+        device,
+        BufferName::ReferenceRows,
+        grid_bytes_size,
+        BufferUsages::STORAGE,
+    );
+    gpu_resources.add_texture(
+        device,
+        TextureName::DemReference,
+        texture_size,
+        TextureFormat::R32Float,
+        texture_usage_default,
+    );
+    // one (mass, moment) partial sum per 16x16 tile, see center_of_mass.wgsl
+    gpu_resources.add_buffer(
+        device,
+        BufferName::CenterOfMassPartials,
+        (texture_size.width.div_ceil(16) * texture_size.height.div_ceil(16)) as usize
+            * size_of::<[f32; 4]>(),
+        BufferUsages::STORAGE,
     );
     // scratch for the biggest-blob detection in compute_center_of_mass
     gpu_resources.add_buffer(

@@ -2,7 +2,6 @@ use crate::buffers::AtomicValues;
 use crate::buffers::{BufferName, GpuResources, TextureName};
 use anyhow::Result;
 use core::panic;
-use regex::Regex;
 use std::num::NonZero;
 use tracing::error;
 use wgpu::{
@@ -59,6 +58,11 @@ macro_rules! define_shaders {
                 }
             }
 
+            /// The first shader whose source file is `file`.
+            pub fn from_source_file(file: &str) -> Option<ShaderName> {
+                Self::ALL.iter().copied().find(|shader| shader.source_file() == file)
+            }
+
             /// The WGSL source file providing this shader's entry point.
             /// Several entry points can share one file (see `entry_point` in
             /// [`define_shaders!`]).
@@ -78,7 +82,6 @@ macro_rules! define_shaders {
 
                 #[cfg(all(not(target_arch = "wasm32"), debug_assertions))]
                 {
-                    tracing::debug!("Loading shader source for {:?} from disk", self);
                     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                         .join("src").join("shaders").join(format!("{}.wgsl", self.source_file()));
                     match std::fs::read_to_string(&path) {
@@ -103,6 +106,9 @@ macro_rules! define_shaders {
 define_shaders! {
     AnalyzeTerrainCurvilinear => "analyze_terrain_curvilinear",
     AnalyzeTerrain => "analyze_terrain",
+    // the reference surface passes share one source file
+    SmoothReferenceRows => "smooth_reference" entry_point "smooth_reference_rows",
+    SmoothReferenceColumns => "smooth_reference" entry_point "smooth_reference_columns",
     ResetGrid => "reset_grid",
     ComputeRoughness => "compute_roughness",
     ComputeReleaseAreas => "compute_release_areas",
@@ -110,6 +116,7 @@ define_shaders! {
     ComputeCenterOfMass => "center_of_mass" entry_point "compute_center_of_mass",
     CenterOfMassSeed => "center_of_mass" entry_point "center_of_mass_seed",
     CenterOfMassPropagate => "center_of_mass" entry_point "center_of_mass_propagate",
+    CenterOfMassPartials => "center_of_mass" entry_point "center_of_mass_partials",
     // the three chamfer kernels share one source file
     ChamferPrepare => "chamfer" entry_point "chamfer_prepare",
     ChamferFlood => "chamfer" entry_point "chamfer_flood",
@@ -171,11 +178,13 @@ impl std::fmt::Display for ShaderName {
     }
 }
 
-use std::sync::OnceLock;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 
-// Using OnceLock for Regex is faster than Re-compiling every call
-static STRIP_RE: OnceLock<Regex> = OnceLock::new();
-static IMPORT_RE: OnceLock<Regex> = OnceLock::new();
+/// Expanded sources per (source file, float atomics), built once per
+/// process: entry points that share a file share one `&'static str`, which
+/// [`create_shader_configs`] uses to compile one module per source.
+static SOURCES: OnceLock<Mutex<HashMap<(&'static str, bool), &'static str>>> = OnceLock::new();
 
 /// `source` (LF) with the line endings of `original`, so that the debug
 /// write-back of expanded imports only ever changes the inlined content.
@@ -188,75 +197,169 @@ fn restore_line_endings(source: &str, original: &str) -> String {
     }
 }
 
-fn load_shader_source_string(name_str: &str, atomic_float_support: bool) -> &'static str {
-    // Get the enum variant from the string
-    let shader_enum: ShaderName = name_str
-        .parse()
-        .unwrap_or_else(|_| panic!("Unknown shader name: {}", name_str));
+/// Removes every inlined import block (`// BEGIN x.wgsl` .. `// END x.wgsl`)
+/// together with the whitespace before it, leaving the bare import lines.
+fn strip_import_blocks(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut rest = source;
+    while let Some(begin) = rest.find("// BEGIN ") {
+        out.push_str(rest[..begin].trim_end());
+        let block = &rest[begin..];
+        let Some(end) = block.find("// END ") else {
+            // unterminated block: keep it as it is
+            out.push_str(block);
+            return out;
+        };
+        let end_marker = &block[end..];
+        let marker_len = end_marker
+            .find(".wgsl")
+            .map_or(end_marker.len(), |index| index + ".wgsl".len());
+        rest = &end_marker[marker_len..];
+    }
+    out.push_str(rest);
+    out
+}
 
-    // Step 0: Get the raw source (from Disk or Binary)
-    let raw_source = shader_enum.read_source();
-    // CRLF working copies must not count as a change or leak into the imports
-    let shader_source = raw_source.replace("\r\n", "\n");
+/// The import of `line` (`// import name.wgsl;`): the matched directive and
+/// the imported file name.
+fn parse_import(line: &str) -> Option<(&str, &str)> {
+    let after_slashes = line.strip_prefix("//")?;
+    let after_space = after_slashes.trim_start();
+    if after_space.len() == after_slashes.len() {
+        return None;
+    }
+    let after_keyword = after_space.strip_prefix("import")?;
+    let name_start = after_keyword.trim_start();
+    if name_start.len() == after_keyword.len() {
+        return None;
+    }
+    let token_len = name_start
+        .find(|c: char| !(c.is_ascii_alphanumeric() || "_./-".contains(c)))
+        .unwrap_or(name_start.len());
+    let name = name_start[..token_len].strip_suffix(".wgsl")?;
+    if name.is_empty() {
+        return None;
+    }
+    let mut matched_len = line.len() - name_start.len() + token_len;
+    if line[matched_len..].starts_with(';') {
+        matched_len += 1;
+    }
+    Some((&line[..matched_len], name))
+}
 
-    let strip_re = STRIP_RE.get_or_init(|| {
-        Regex::new(r#"(?m)\s*// BEGIN [a-zA-Z0-9_./-]+\.wgsl[\s\S]*?// END [a-zA-Z0-9_./-]+\.wgsl"#)
-            .unwrap()
-    });
+/// Source of `file` with every `// import x.wgsl;` followed by the expanded
+/// content of `x.wgsl` between `// BEGIN` / `// END` markers (both atomic
+/// variants kept), LF line endings. Debug builds read the files from disk and
+/// write a source back whose inlined imports changed, so the files always
+/// carry the current imports.
+fn expand_imports(file: &'static str) -> &'static str {
+    cached_source(file, false, || {
+        let shader = ShaderName::from_source_file(file)
+            .unwrap_or_else(|| panic!("Unknown shader source: {file}"));
+        let raw_source = shader.read_source();
+        // CRLF working copies must not count as a change or leak into the imports
+        let shader_source = raw_source.replace("\r\n", "\n");
+        let clean_source = strip_import_blocks(&shader_source);
+        let mut expanded = String::with_capacity(shader_source.len() + 1024);
+        // jump between the few `import` occurrences (str::find stays fast in
+        // unoptimized builds) instead of walking every line
+        let mut copied = 0;
+        let mut search = 0;
+        while let Some(found) = clean_source[search..].find("import") {
+            let at = search + found;
+            let line_start = clean_source[..at].rfind('\n').map_or(0, |index| index + 1);
+            let line_end = clean_source[at..]
+                .find('\n')
+                .map_or(clean_source.len(), |index| at + index);
+            search = line_end;
+            let line = &clean_source[line_start..line_end];
+            let Some((directive, name)) = parse_import(line) else {
+                continue;
+            };
+            let import_file = ShaderName::from_source_file(name)
+                .unwrap_or_else(|| panic!("{file}.wgsl imports unknown {name}.wgsl"))
+                .source_file();
+            expanded.push_str(&clean_source[copied..line_start]);
+            expanded.push_str(directive);
+            expanded.push_str("\n// BEGIN ");
+            expanded.push_str(name);
+            expanded.push_str(".wgsl\n");
+            expanded.push_str(expand_imports(import_file));
+            expanded.push_str("\n// END ");
+            expanded.push_str(name);
+            expanded.push_str(".wgsl");
+            copied = line_start + directive.len();
+        }
+        expanded.push_str(&clean_source[copied..]);
 
-    let import_re = IMPORT_RE
-        .get_or_init(|| Regex::new(r#"(?m)^//\s+import\s+([a-zA-Z0-9_./-]+)\.wgsl;?"#).unwrap());
-
-    // Step 1: Strip
-    let clean_source = strip_re.replace_all(&shader_source, "");
-
-    // Step 2: Recursive Import
-    let mut source_with_imports = import_re
-        .replace_all(&clean_source, |caps: &regex::Captures| {
-            let import_name = &caps[1];
-            let import_line = &caps[0];
-
-            // unfiltered, the variant filter below covers the imports as well
-            // and the debug write-back must keep both variants on disk
-            let imported_content = load_shader_source_string(import_name, false);
-
-            format!(
-                "{}\n// BEGIN {}.wgsl\n{}\n// END {}.wgsl",
-                import_line, import_name, imported_content, import_name
-            )
-        })
-        .into_owned();
-
-    #[cfg(all(not(target_arch = "wasm32"), debug_assertions))]
-    {
-        if shader_source != source_with_imports {
+        #[cfg(all(not(target_arch = "wasm32"), debug_assertions))]
+        if shader_source != expanded {
             let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("src")
                 .join("shaders")
-                .join(format!("{}.wgsl", shader_enum.source_file()));
-            std::fs::write(
-                path,
-                restore_line_endings(&source_with_imports, &raw_source),
-            )
-            .ok();
+                .join(format!("{file}.wgsl"));
+            tracing::debug!("Writing the updated imports of {file}.wgsl");
+            std::fs::write(path, restore_line_endings(&expanded, &raw_source)).ok();
         }
-    }
-    if atomic_float_support {
-        // remove all lines containing '// no_atomic_float'
-        source_with_imports = source_with_imports
-            .lines()
-            .filter(|line| !line.contains("// no_atomic_float"))
-            .map(|line| line.replace("// atomic_float", ""))
-            .collect::<Vec<_>>()
-            .join("\n");
-    }
-
-    Box::leak(source_with_imports.into_boxed_str())
+        expanded
+    })
 }
 
-// The clean entry point
+/// The cached source of (`file`, `float_atomics`), built by `build` on first use.
+fn cached_source(
+    file: &'static str,
+    float_atomics: bool,
+    build: impl FnOnce() -> String,
+) -> &'static str {
+    let sources = SOURCES.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(source) = sources.lock().unwrap().get(&(file, float_atomics)) {
+        return source;
+    }
+    // built outside the lock: expanding a file loads its imports recursively
+    let source: &'static str = Box::leak(build().into_boxed_str());
+    sources
+        .lock()
+        .unwrap()
+        .entry((file, float_atomics))
+        .or_insert(source)
+}
+
+/// Source of `name`'s file with its imports expanded and, for float-atomic
+/// devices, the `// no_atomic_float` lines removed and the `// atomic_float`
+/// lines enabled. Every entry point of a file returns the same string.
 pub fn load_shader_source(name: ShaderName, has_float32_atomic: bool) -> &'static str {
-    load_shader_source_string(name.to_str(), has_float32_atomic)
+    let file = name.source_file();
+    let expanded = expand_imports(file);
+    if !has_float32_atomic {
+        return expanded;
+    }
+    cached_source(file, true, || {
+        // only the marked lines change: jump between them with str::find
+        const MARKER: &str = "atomic_float";
+        let mut filtered = String::with_capacity(expanded.len());
+        let mut copied = 0;
+        let mut search = 0;
+        while let Some(found) = expanded[search..].find(MARKER) {
+            let at = search + found;
+            let line_start = expanded[..at].rfind('\n').map_or(0, |index| index + 1);
+            let line_end = expanded[at..]
+                .find('\n')
+                .map_or(expanded.len(), |index| at + index);
+            search = line_end;
+            let line = &expanded[line_start..line_end];
+            if line.contains("// no_atomic_float") {
+                // drop the line with its line break
+                filtered.push_str(&expanded[copied..line_start]);
+                copied = (line_end + 1).min(expanded.len());
+                search = copied;
+            } else if let Some(marker) = line.find("// atomic_float") {
+                filtered.push_str(&expanded[copied..line_start + marker]);
+                copied = line_start + marker + "// atomic_float".len();
+            }
+        }
+        filtered.push_str(&expanded[copied..]);
+        filtered
+    })
 }
 
 // pub const SHADER_COMPUTE_NORMALS: &str = concat!(
@@ -286,6 +389,93 @@ pub struct ComputeShaderConfig {
     pub binding_types: Vec<BindingType>,
 }
 
+/// A compute shader collected by [`create_shader_configs`] before its
+/// pipeline is built: name, source and bindings.
+pub struct PendingShader {
+    pub name: ShaderName,
+    pub shader_src: &'static str,
+    pub binding_names: Vec<String>,
+    pub binding_types: Vec<BindingType>,
+    constants: Vec<(String, f64)>,
+}
+
+impl PendingShader {
+    pub fn new(
+        name: ShaderName,
+        shader_src: &'static str,
+        bindings: &[(String, BindingType)],
+    ) -> Result<Self> {
+        Self::new_with_constants(name, shader_src, bindings, &[])
+    }
+
+    pub fn new_with_constants(
+        name: ShaderName,
+        shader_src: &'static str,
+        bindings: &[(String, BindingType)],
+        constants: &[(&str, f64)],
+    ) -> Result<Self> {
+        Ok(Self {
+            name,
+            shader_src,
+            binding_names: bindings.iter().map(|(name, _)| name.clone()).collect(),
+            binding_types: bindings.iter().map(|(_, ty)| *ty).collect(),
+            constants: constants
+                .iter()
+                .map(|(name, value)| (name.to_string(), *value))
+                .collect(),
+        })
+    }
+
+    /// Bind group layout and pipeline of this entry point in `module`.
+    fn build(&self, device: &Device, module: &wgpu::ShaderModule) -> ComputeShaderConfig {
+        let name = self.name;
+        let binding_group_layout_entries: Vec<_> = self
+            .binding_types
+            .iter()
+            .enumerate()
+            .map(|(i, binding_type)| BindGroupLayoutEntry {
+                binding: i as u32,
+                visibility: ShaderStages::COMPUTE,
+                ty: *binding_type,
+                count: None,
+            })
+            .collect();
+        let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some(&format!("{} Bind Group Layout", name)),
+            entries: &binding_group_layout_entries,
+        });
+        let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: Some(&format!("{} Pipeline Layout", name)),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        });
+        let constants: Vec<(&str, f64)> = self
+            .constants
+            .iter()
+            .map(|(name, value)| (name.as_str(), *value))
+            .collect();
+        let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some(&format!("{} Compute Pipeline", name)),
+            layout: Some(&pipeline_layout),
+            module,
+            entry_point: Some(name.to_str()),
+            compilation_options: wgpu::PipelineCompilationOptions {
+                constants: &constants,
+                zero_initialize_workgroup_memory: true,
+            },
+            cache: None,
+        });
+        ComputeShaderConfig {
+            name,
+            shader_src: self.shader_src,
+            bind_group_layout,
+            pipeline,
+            binding_names: self.binding_names.clone(),
+            binding_types: self.binding_types.clone(),
+        }
+    }
+}
+
 impl ComputeShaderConfig {
     pub fn new(
         device: &Device,
@@ -303,57 +493,14 @@ impl ComputeShaderConfig {
         bindings: &[(String, BindingType)],
         constants: &[(&str, f64)],
     ) -> Result<Self> {
-        let mut binding_names = Vec::new();
-        let mut binding_types = Vec::new();
-        let mut binding_group_layout_entries = Vec::new();
-        for (i, (binding_name, binding_type)) in bindings.iter().enumerate() {
-            binding_names.push(binding_name.clone());
-            binding_types.push(*binding_type);
-
-            binding_group_layout_entries.push(BindGroupLayoutEntry {
-                binding: i as u32,
-                visibility: ShaderStages::COMPUTE,
-                ty: *binding_type, // Clone BindingType
-                count: None,
-            });
-        }
-
-        let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: Some(&format!("{} Bind Group Layout", name)),
-            entries: &binding_group_layout_entries,
-        });
-
-        let shader_module = device.create_shader_module(ShaderModuleDescriptor {
+        let module = device.create_shader_module(ShaderModuleDescriptor {
             label: Some(&format!("{} Shader", name)),
             source: ShaderSource::Wgsl(shader_src.into()),
         });
-
-        let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
-            label: Some(&format!("{} Pipeline Layout", name)),
-            bind_group_layouts: &[Some(&bind_group_layout)],
-            immediate_size: 0,
-        });
-
-        let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
-            label: Some(&format!("{} Compute Pipeline", name)),
-            layout: Some(&pipeline_layout),
-            module: &shader_module,
-            entry_point: Some(name.to_str()),
-            compilation_options: wgpu::PipelineCompilationOptions {
-                constants,
-                zero_initialize_workgroup_memory: true,
-            },
-            cache: None,
-        });
-
-        Ok(Self {
-            name,
-            shader_src,
-            bind_group_layout,
-            pipeline,
-            binding_names,
-            binding_types,
-        })
+        Ok(
+            PendingShader::new_with_constants(name, shader_src, bindings, constants)?
+                .build(device, &module),
+        )
     }
 
     pub fn create_bind_group(
@@ -426,17 +573,65 @@ impl ComputeShaderConfig {
     }
 }
 
-pub fn create_shader_configs(
-    device: &Device,
+fn collect_shader_configs(
     max_compute_invocations_per_workgroup: u32,
     has_float32_filterable: bool,
     has_float32_atomic: bool,
-) -> Result<std::collections::HashMap<ShaderName, ComputeShaderConfig>> {
-    let mut shader_configs = std::collections::HashMap::new();
+) -> Result<HashMap<ShaderName, PendingShader>> {
+    let mut shader_configs = HashMap::new();
+    // reference surface: Gaussian-smoothed DEM, a row and a column pass
+    let smooth_reference_bindings = [
+        (
+            BufferName::SimSettings.to_string(),
+            BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+        ),
+        (
+            TextureName::Dem.to_string(),
+            BindingType::Texture {
+                multisampled: false,
+                view_dimension: wgpu::TextureViewDimension::D2,
+                sample_type: wgpu::TextureSampleType::Float {
+                    filterable: has_float32_filterable,
+                },
+            },
+        ),
+        (
+            BufferName::ReferenceRows.to_string(),
+            BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: false },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+        ),
+        (
+            TextureName::DemReference.to_string(),
+            BindingType::StorageTexture {
+                access: StorageTextureAccess::WriteOnly,
+                format: TextureFormat::R32Float,
+                view_dimension: TextureViewDimension::D2,
+            },
+        ),
+    ];
+    for shader in [
+        ShaderName::SmoothReferenceRows,
+        ShaderName::SmoothReferenceColumns,
+    ] {
+        shader_configs.insert(
+            shader,
+            PendingShader::new(
+                shader,
+                load_shader_source(shader, has_float32_atomic),
+                &smooth_reference_bindings,
+            )?,
+        );
+    }
     shader_configs.insert(
         ShaderName::AnalyzeTerrain,
-        ComputeShaderConfig::new(
-            device,
+        PendingShader::new(
             ShaderName::AnalyzeTerrain,
             load_shader_source(ShaderName::AnalyzeTerrain, has_float32_atomic),
             &[
@@ -530,8 +725,7 @@ pub fn create_shader_configs(
     );
     shader_configs.insert(
         ShaderName::AnalyzeTerrainCurvilinear,
-        ComputeShaderConfig::new(
-            device,
+        PendingShader::new(
             ShaderName::AnalyzeTerrainCurvilinear,
             load_shader_source(ShaderName::AnalyzeTerrainCurvilinear, has_float32_atomic),
             &[
@@ -626,8 +820,7 @@ pub fn create_shader_configs(
 
     shader_configs.insert(
         ShaderName::ComputeRoughness,
-        ComputeShaderConfig::new(
-            device,
+        PendingShader::new(
             ShaderName::ComputeRoughness,
             load_shader_source(ShaderName::ComputeRoughness, has_float32_atomic),
             &[
@@ -718,8 +911,7 @@ pub fn create_shader_configs(
     ];
     shader_configs.insert(
         ShaderName::EvaluateMassMovement,
-        ComputeShaderConfig::new(
-            device,
+        PendingShader::new(
             ShaderName::EvaluateMassMovement,
             load_shader_source(ShaderName::EvaluateMassMovement, has_float32_atomic),
             &evaluation_bindings,
@@ -808,20 +1000,35 @@ pub fn create_shader_configs(
                 min_binding_size: None,
             },
         ),
+        // Binding 9:
+        (
+            BufferName::CenterOfMassPartials.to_string(),
+            BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: false },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+        ),
     ];
     shader_configs.insert(
         ShaderName::ComputeCenterOfMass,
-        ComputeShaderConfig::new(
-            device,
+        PendingShader::new(
             ShaderName::ComputeCenterOfMass,
             load_shader_source(ShaderName::ComputeCenterOfMass, has_float32_atomic),
             &center_of_mass_bindings,
         )?,
     );
     shader_configs.insert(
+        ShaderName::CenterOfMassPartials,
+        PendingShader::new(
+            ShaderName::CenterOfMassPartials,
+            load_shader_source(ShaderName::CenterOfMassPartials, has_float32_atomic),
+            &center_of_mass_bindings,
+        )?,
+    );
+    shader_configs.insert(
         ShaderName::CenterOfMassSeed,
-        ComputeShaderConfig::new(
-            device,
+        PendingShader::new(
             ShaderName::CenterOfMassSeed,
             load_shader_source(ShaderName::CenterOfMassSeed, has_float32_atomic),
             &center_of_mass_bindings,
@@ -829,8 +1036,7 @@ pub fn create_shader_configs(
     );
     shader_configs.insert(
         ShaderName::CenterOfMassPropagate,
-        ComputeShaderConfig::new(
-            device,
+        PendingShader::new(
             ShaderName::CenterOfMassPropagate,
             load_shader_source(ShaderName::CenterOfMassPropagate, has_float32_atomic),
             &center_of_mass_bindings,
@@ -838,8 +1044,7 @@ pub fn create_shader_configs(
     );
     shader_configs.insert(
         ShaderName::ComputeBeelineDistance,
-        ComputeShaderConfig::new(
-            device,
+        PendingShader::new(
             ShaderName::ComputeBeelineDistance,
             load_shader_source(ShaderName::ComputeBeelineDistance, has_float32_atomic),
             &[
@@ -981,8 +1186,7 @@ pub fn create_shader_configs(
     ];
     shader_configs.insert(
         ShaderName::ChamferPrepare,
-        ComputeShaderConfig::new(
-            device,
+        PendingShader::new(
             ShaderName::ChamferPrepare,
             load_shader_source(ShaderName::ChamferPrepare, has_float32_atomic),
             &chamfer_bindings,
@@ -990,8 +1194,7 @@ pub fn create_shader_configs(
     );
     shader_configs.insert(
         ShaderName::ChamferFlood,
-        ComputeShaderConfig::new(
-            device,
+        PendingShader::new(
             ShaderName::ChamferFlood,
             load_shader_source(ShaderName::ChamferFlood, has_float32_atomic),
             &chamfer_bindings,
@@ -999,8 +1202,7 @@ pub fn create_shader_configs(
     );
     shader_configs.insert(
         ShaderName::ChamferReduce,
-        ComputeShaderConfig::new(
-            device,
+        PendingShader::new(
             ShaderName::ChamferReduce,
             load_shader_source(ShaderName::ChamferReduce, has_float32_atomic),
             &chamfer_bindings,
@@ -1009,8 +1211,7 @@ pub fn create_shader_configs(
 
     shader_configs.insert(
         ShaderName::ComputeReleaseAreas,
-        ComputeShaderConfig::new(
-            device,
+        PendingShader::new(
             ShaderName::ComputeReleaseAreas,
             load_shader_source(ShaderName::ComputeReleaseAreas, has_float32_atomic),
             &[
@@ -1094,8 +1295,7 @@ pub fn create_shader_configs(
 
     shader_configs.insert(
         ShaderName::InitializeParticles,
-        ComputeShaderConfig::new(
-            device,
+        PendingShader::new(
             ShaderName::InitializeParticles,
             load_shader_source(ShaderName::InitializeParticles, has_float32_atomic),
             &[
@@ -1305,8 +1505,7 @@ pub fn create_shader_configs(
     ];
     shader_configs.insert(
         ShaderName::RelaxParticles,
-        ComputeShaderConfig::new_with_constants(
-            device,
+        PendingShader::new_with_constants(
             ShaderName::RelaxParticles,
             load_shader_source(ShaderName::RelaxParticles, has_float32_atomic),
             &relax_bindings,
@@ -1315,8 +1514,7 @@ pub fn create_shader_configs(
     );
     shader_configs.insert(
         ShaderName::RelaxClearGrid,
-        ComputeShaderConfig::new(
-            device,
+        PendingShader::new(
             ShaderName::RelaxClearGrid,
             load_shader_source(ShaderName::RelaxClearGrid, has_float32_atomic),
             &relax_bindings,
@@ -1324,8 +1522,7 @@ pub fn create_shader_configs(
     );
     shader_configs.insert(
         ShaderName::RelaxBuildGrid,
-        ComputeShaderConfig::new_with_constants(
-            device,
+        PendingShader::new_with_constants(
             ShaderName::RelaxBuildGrid,
             load_shader_source(ShaderName::RelaxBuildGrid, has_float32_atomic),
             &relax_bindings,
@@ -1334,8 +1531,7 @@ pub fn create_shader_configs(
     );
     shader_configs.insert(
         ShaderName::RelaxSampleElevation,
-        ComputeShaderConfig::new_with_constants(
-            device,
+        PendingShader::new_with_constants(
             ShaderName::RelaxSampleElevation,
             load_shader_source(ShaderName::RelaxSampleElevation, has_float32_atomic),
             &relax_bindings,
@@ -1344,8 +1540,7 @@ pub fn create_shader_configs(
     );
     shader_configs.insert(
         ShaderName::G2P,
-        ComputeShaderConfig::new_with_constants(
-            device,
+        PendingShader::new_with_constants(
             ShaderName::G2P,
             load_shader_source(ShaderName::G2P, has_float32_atomic),
             &[
@@ -1489,8 +1684,7 @@ pub fn create_shader_configs(
     );
     shader_configs.insert(
         ShaderName::G2PMPMDAC,
-        ComputeShaderConfig::new_with_constants(
-            device,
+        PendingShader::new_with_constants(
             ShaderName::G2PMPMDAC,
             load_shader_source(ShaderName::G2PMPMDAC, has_float32_atomic),
             &[
@@ -1626,8 +1820,7 @@ pub fn create_shader_configs(
     );
     shader_configs.insert(
         ShaderName::ComputeParticles,
-        ComputeShaderConfig::new_with_constants(
-            device,
+        PendingShader::new_with_constants(
             ShaderName::ComputeParticles,
             load_shader_source(ShaderName::ComputeParticles, has_float32_atomic),
             &[
@@ -1810,8 +2003,7 @@ pub fn create_shader_configs(
     );
     shader_configs.insert(
         ShaderName::ResetGrid,
-        ComputeShaderConfig::new(
-            device,
+        PendingShader::new(
             ShaderName::ResetGrid,
             load_shader_source(ShaderName::ResetGrid, has_float32_atomic),
             &[
@@ -1881,8 +2073,7 @@ pub fn create_shader_configs(
     );
     shader_configs.insert(
         ShaderName::UpdateSimInfo,
-        ComputeShaderConfig::new(
-            device,
+        PendingShader::new(
             ShaderName::UpdateSimInfo,
             load_shader_source(ShaderName::UpdateSimInfo, has_float32_atomic),
             &[
@@ -1927,8 +2118,7 @@ pub fn create_shader_configs(
     );
     shader_configs.insert(
         ShaderName::P2G,
-        ComputeShaderConfig::new_with_constants(
-            device,
+        PendingShader::new_with_constants(
             ShaderName::P2G,
             load_shader_source(ShaderName::P2G, has_float32_atomic),
             &[
@@ -2018,8 +2208,7 @@ pub fn create_shader_configs(
     ));
     shader_configs.insert(
         ShaderName::P2G2D,
-        ComputeShaderConfig::new_with_constants(
-            device,
+        PendingShader::new_with_constants(
             ShaderName::P2G2D,
             load_shader_source(ShaderName::P2G2D, has_float32_atomic),
             &curvilinear_p2g_bindings,
@@ -2041,8 +2230,7 @@ pub fn create_shader_configs(
     ));
     shader_configs.insert(
         ShaderName::P2G2DSorted,
-        ComputeShaderConfig::new(
-            device,
+        PendingShader::new(
             ShaderName::P2G2DSorted,
             load_shader_source(ShaderName::P2G2DSorted, has_float32_atomic),
             &sorted_p2g_bindings,
@@ -2051,8 +2239,7 @@ pub fn create_shader_configs(
     // curvilinear weak-form pressure, a particle pass after either P2G
     shader_configs.insert(
         ShaderName::P2GWeakPressure,
-        ComputeShaderConfig::new_with_constants(
-            device,
+        PendingShader::new_with_constants(
             ShaderName::P2GWeakPressure,
             load_shader_source(ShaderName::P2GWeakPressure, has_float32_atomic),
             &[
@@ -2130,8 +2317,7 @@ pub fn create_shader_configs(
     ] {
         shader_configs.insert(
             shader,
-            ComputeShaderConfig::new_with_constants(
-                device,
+            PendingShader::new_with_constants(
                 shader,
                 load_shader_source(shader, has_float32_atomic),
                 &sort_bindings,
@@ -2141,8 +2327,7 @@ pub fn create_shader_configs(
     }
     shader_configs.insert(
         ShaderName::SortScanBins,
-        ComputeShaderConfig::new(
-            device,
+        PendingShader::new(
             ShaderName::SortScanBins,
             load_shader_source(ShaderName::SortScanBins, has_float32_atomic),
             &sort_bindings,
@@ -2150,8 +2335,7 @@ pub fn create_shader_configs(
     );
     shader_configs.insert(
         ShaderName::GridPhysics,
-        ComputeShaderConfig::new(
-            device,
+        PendingShader::new(
             ShaderName::GridPhysics,
             load_shader_source(ShaderName::GridPhysics, has_float32_atomic),
             &[
@@ -2263,8 +2447,7 @@ pub fn create_shader_configs(
     );
     shader_configs.insert(
         ShaderName::GridPhysicsCurvilinear,
-        ComputeShaderConfig::new(
-            device,
+        PendingShader::new(
             ShaderName::GridPhysicsCurvilinear,
             load_shader_source(ShaderName::GridPhysicsCurvilinear, has_float32_atomic),
             &[
@@ -2487,8 +2670,7 @@ pub fn create_shader_configs(
     ]);
     shader_configs.insert(
         ShaderName::GridPhysicsTerrainFollowing,
-        ComputeShaderConfig::new(
-            device,
+        PendingShader::new(
             ShaderName::GridPhysicsTerrainFollowing,
             load_shader_source(ShaderName::GridPhysicsTerrainFollowing, has_float32_atomic),
             &terrain_following_grid_physics_bindings,
@@ -2496,8 +2678,7 @@ pub fn create_shader_configs(
     );
     shader_configs.insert(
         ShaderName::G2PTerrainFollowing,
-        ComputeShaderConfig::new_with_constants(
-            device,
+        PendingShader::new_with_constants(
             ShaderName::G2PTerrainFollowing,
             load_shader_source(ShaderName::G2PTerrainFollowing, has_float32_atomic),
             &terrain_following_g2p_bindings,
@@ -2506,8 +2687,7 @@ pub fn create_shader_configs(
     );
     shader_configs.insert(
         ShaderName::P2G3D,
-        ComputeShaderConfig::new_with_constants(
-            device,
+        PendingShader::new_with_constants(
             ShaderName::P2G3D,
             load_shader_source(ShaderName::P2G3D, has_float32_atomic),
             &three_d_p2g_bindings,
@@ -2516,8 +2696,7 @@ pub fn create_shader_configs(
     );
     shader_configs.insert(
         ShaderName::P2G3DSorted,
-        ComputeShaderConfig::new(
-            device,
+        PendingShader::new(
             ShaderName::P2G3DSorted,
             load_shader_source(ShaderName::P2G3DSorted, has_float32_atomic),
             &three_d_sorted_p2g_bindings,
@@ -2525,8 +2704,7 @@ pub fn create_shader_configs(
     );
     shader_configs.insert(
         ShaderName::GridPhysics3D,
-        ComputeShaderConfig::new(
-            device,
+        PendingShader::new(
             ShaderName::GridPhysics3D,
             load_shader_source(ShaderName::GridPhysics3D, has_float32_atomic),
             &three_d_grid_physics_bindings,
@@ -2534,8 +2712,7 @@ pub fn create_shader_configs(
     );
     shader_configs.insert(
         ShaderName::G2P3D,
-        ComputeShaderConfig::new_with_constants(
-            device,
+        PendingShader::new_with_constants(
             ShaderName::G2P3D,
             load_shader_source(ShaderName::G2P3D, has_float32_atomic),
             &three_d_g2p_bindings,
@@ -2544,8 +2721,7 @@ pub fn create_shader_configs(
     );
     shader_configs.insert(
         ShaderName::P2GMPMDAC,
-        ComputeShaderConfig::new_with_constants(
-            device,
+        PendingShader::new_with_constants(
             ShaderName::P2GMPMDAC,
             load_shader_source(ShaderName::P2GMPMDAC, has_float32_atomic),
             &[
@@ -2685,8 +2861,7 @@ pub fn create_shader_configs(
     );
     shader_configs.insert(
         ShaderName::GridPhysicsMPMDAC,
-        ComputeShaderConfig::new(
-            device,
+        PendingShader::new(
             ShaderName::GridPhysicsMPMDAC,
             load_shader_source(ShaderName::GridPhysicsMPMDAC, has_float32_atomic),
             &[
@@ -2798,7 +2973,6 @@ pub fn create_shader_configs(
     #[cfg(test)]
     {
         shader_configs.extend(create_test_shader_configs(
-            device,
             has_float32_filterable,
             has_float32_atomic,
         )?);
@@ -2807,18 +2981,152 @@ pub fn create_shader_configs(
     Ok(shader_configs)
 }
 
-#[cfg(test)]
-fn create_test_shader_configs(
+/// Collects every compute shader of the orchestrator. The WGSL sources are
+/// expanded up front (in parallel; debug builds write changed imports back),
+/// the pipelines are built on first use, see [`ShaderConfigs`].
+pub fn create_shader_configs(
     device: &Device,
+    max_compute_invocations_per_workgroup: u32,
     has_float32_filterable: bool,
     has_float32_atomic: bool,
-) -> Result<std::collections::HashMap<ShaderName, ComputeShaderConfig>> {
-    let mut shader_configs = std::collections::HashMap::new();
+) -> Result<ShaderConfigs> {
+    // expand every source file once, in parallel
+    let mut files: Vec<ShaderName> = Vec::new();
+    for shader in ShaderName::ALL {
+        if !files
+            .iter()
+            .any(|file| file.source_file() == shader.source_file())
+        {
+            files.push(*shader);
+        }
+    }
+    build_in_parallel(files, |shader| {
+        load_shader_source(shader, has_float32_atomic)
+    });
+    let pending = collect_shader_configs(
+        max_compute_invocations_per_workgroup,
+        has_float32_filterable,
+        has_float32_atomic,
+    )?;
+    Ok(ShaderConfigs {
+        device: device.clone(),
+        shaders: pending
+            .into_iter()
+            .map(|(name, shader)| (name, (shader, OnceLock::new())))
+            .collect(),
+        modules: Mutex::new(HashMap::new()),
+    })
+}
+
+/// The compute shaders of an orchestrator, each pipeline built on first use:
+/// a run compiles only the shaders it dispatches, and the entry points of one
+/// source file share one shader module (parsed and validated by naga once).
+/// Pipelines are built on the calling thread (see [`Self::prepare`]); only
+/// the WGSL sources are expanded in parallel.
+pub struct ShaderConfigs {
+    device: Device,
+    shaders: HashMap<ShaderName, (PendingShader, OnceLock<ComputeShaderConfig>)>,
+    /// Shader modules by the address of their (cached, shared) source.
+    modules: Mutex<HashMap<usize, wgpu::ShaderModule>>,
+}
+
+impl ShaderConfigs {
+    /// The pipeline of `name`, built now if it is not yet.
+    pub fn get(&self, name: &ShaderName) -> Option<&ComputeShaderConfig> {
+        let (shader, config) = self.shaders.get(name)?;
+        Some(config.get_or_init(|| shader.build(&self.device, &self.module(shader))))
+    }
+
+    /// Builds the pipelines of `names` that do not exist yet, one after
+    /// another: creating pipelines of one device on several threads crashed
+    /// the process (access violation) in about 7 % of the test runs on an
+    /// NVIDIA Vulkan driver, none in 36 runs when built sequentially.
+    pub fn prepare(&self, names: &[ShaderName]) {
+        for name in names {
+            self.get(name);
+        }
+    }
+
+    /// Whether a shader named `name` exists (built or not).
+    pub fn contains(&self, name: &ShaderName) -> bool {
+        self.shaders.contains_key(name)
+    }
+
+    /// Every shader name.
+    pub fn names(&self) -> impl Iterator<Item = &ShaderName> {
+        self.shaders.keys()
+    }
+
+    /// Name, source and bindings of `name`, without building its pipeline.
+    pub fn pending(&self, name: &ShaderName) -> Option<&PendingShader> {
+        self.shaders.get(name).map(|(shader, _)| shader)
+    }
+
+    /// The shader module of `shader`'s source, shared by its file's entry points.
+    fn module(&self, shader: &PendingShader) -> wgpu::ShaderModule {
+        let key = shader.shader_src.as_ptr() as usize;
+        if let Some(module) = self.modules.lock().unwrap().get(&key) {
+            return module.clone();
+        }
+        // parsed outside the lock, so other sources build meanwhile
+        let module = self.device.create_shader_module(ShaderModuleDescriptor {
+            label: Some(&format!("{} Shader", shader.name.source_file())),
+            source: ShaderSource::Wgsl(shader.shader_src.into()),
+        });
+        self.modules
+            .lock()
+            .unwrap()
+            .entry(key)
+            .or_insert(module)
+            .clone()
+    }
+}
+
+/// Maps `items` with `build` on all cores (popping from the end, results in
+/// completion order).
+#[cfg(not(target_arch = "wasm32"))]
+fn build_in_parallel<T: Send, R: Send>(items: Vec<T>, build: impl Fn(T) -> R + Sync) -> Vec<R> {
+    let threads = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(items.len());
+    if threads <= 1 {
+        return items.into_iter().map(build).collect();
+    }
+    let queue = Mutex::new(items);
+    let results = Mutex::new(Vec::new());
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|| {
+                loop {
+                    let Some(item) = queue.lock().unwrap().pop() else {
+                        break;
+                    };
+                    let result = build(item);
+                    results.lock().unwrap().push(result);
+                }
+            });
+        }
+    });
+    results.into_inner().unwrap()
+}
+
+/// Maps `items` with `build` in order: wasm has no threads here, and its
+/// wgpu handles are not `Sync`.
+#[cfg(target_arch = "wasm32")]
+fn build_in_parallel<T, R>(items: Vec<T>, build: impl Fn(T) -> R) -> Vec<R> {
+    items.into_iter().map(build).collect()
+}
+
+#[cfg(test)]
+fn create_test_shader_configs(
+    has_float32_filterable: bool,
+    has_float32_atomic: bool,
+) -> Result<HashMap<ShaderName, PendingShader>> {
+    let mut shader_configs = HashMap::new();
 
     shader_configs.insert(
         ShaderName::TestTransforms,
-        ComputeShaderConfig::new(
-            device,
+        PendingShader::new(
             ShaderName::TestTransforms,
             load_shader_source(ShaderName::TestTransforms, has_float32_atomic),
             &[
@@ -2846,8 +3154,7 @@ fn create_test_shader_configs(
 
     shader_configs.insert(
         ShaderName::TestSampling,
-        ComputeShaderConfig::new(
-            device,
+        PendingShader::new(
             ShaderName::TestSampling,
             load_shader_source(ShaderName::TestSampling, has_float32_atomic),
             &[
@@ -2890,8 +3197,7 @@ fn create_test_shader_configs(
     );
     shader_configs.insert(
         ShaderName::TestUtils,
-        ComputeShaderConfig::new(
-            device,
+        PendingShader::new(
             ShaderName::TestUtils,
             load_shader_source(ShaderName::TestUtils, has_float32_atomic),
             &[
@@ -2927,8 +3233,7 @@ fn create_test_shader_configs(
     );
     shader_configs.insert(
         ShaderName::TestTransfer,
-        ComputeShaderConfig::new(
-            device,
+        PendingShader::new(
             ShaderName::TestTransfer,
             load_shader_source(ShaderName::TestTransfer, has_float32_atomic),
             &[
@@ -3018,8 +3323,7 @@ fn create_test_shader_configs(
     );
     shader_configs.insert(
         ShaderName::TestFriction,
-        ComputeShaderConfig::new(
-            device,
+        PendingShader::new(
             ShaderName::TestFriction,
             load_shader_source(ShaderName::TestFriction, has_float32_atomic),
             &[
@@ -3049,7 +3353,7 @@ fn create_test_shader_configs(
 
 pub fn generate_shader_report(
     filename: Option<&str>,
-    configs: &std::collections::HashMap<ShaderName, ComputeShaderConfig>,
+    configs: &ShaderConfigs,
     custom_order: Option<&[ShaderName]>,
 ) -> String {
     let mut html = String::from(
@@ -3119,16 +3423,18 @@ pub fn generate_shader_report(
 
     // Determine key iteration order
     let ordered_keys: Vec<&ShaderName> = match custom_order {
-        Some(order) => order.iter().filter(|k| configs.contains_key(k)).collect(),
+        Some(order) => order.iter().filter(|k| configs.contains(k)).collect(),
         None => {
-            let mut keys: Vec<&ShaderName> = configs.keys().collect();
+            let mut keys: Vec<&ShaderName> = configs.names().collect();
             keys.sort_by_key(|k| k.to_str());
             keys
         }
     };
 
     for name in ordered_keys {
-        let config = &configs[name];
+        let config = configs
+            .pending(name)
+            .expect("the report lists existing shaders");
 
         html.push_str(&format!(
             r#"<table class="shader-table">
@@ -3291,6 +3597,46 @@ mod tests {
         let sorted = workgroup_memory(ShaderName::P2G3DSorted);
         let bytes = sorted.iter().find(|(name, _)| name == "p2g_3d_sorted");
         assert_eq!(bytes.map(|(_, bytes)| *bytes), Some(4 * 31 * 31 * 4 + 32));
+    }
+
+    #[test]
+    fn parse_import_reads_the_directive_and_the_file() {
+        assert_eq!(
+            parse_import("// import utils.wgsl;\n"),
+            Some(("// import utils.wgsl;", "utils"))
+        );
+        assert_eq!(
+            parse_import("//  import transfer_p2g.wgsl"),
+            Some(("//  import transfer_p2g.wgsl", "transfer_p2g"))
+        );
+        assert_eq!(parse_import("// imports utils.wgsl;"), None);
+        assert_eq!(parse_import("//import utils.wgsl;"), None);
+        assert_eq!(parse_import("let x = 1; // import utils.wgsl;"), None);
+        assert_eq!(parse_import("// import utils;"), None);
+    }
+
+    #[test]
+    fn strip_import_blocks_leaves_the_import_lines() {
+        let source = "a\n// import x.wgsl;\n// BEGIN x.wgsl\nfn x() {}\n// END x.wgsl\nb\n";
+        assert_eq!(strip_import_blocks(source), "a\n// import x.wgsl;\nb\n");
+    }
+
+    /// The files on disk carry their expanded imports, so expanding them again
+    /// must reproduce them (the debug write-back keeps them current).
+    #[test]
+    fn shader_files_are_expanded_and_share_one_source_per_file() {
+        for shader in ShaderName::ALL {
+            let source = load_shader_source(*shader, false);
+            let on_disk = shader.read_source().replace("\r\n", "\n");
+            assert_eq!(source, on_disk, "{shader}: stale inlined imports");
+            let first = ShaderName::from_source_file(shader.source_file()).unwrap();
+            assert!(std::ptr::eq(source, load_shader_source(first, false)));
+            assert!(std::ptr::eq(
+                load_shader_source(*shader, true),
+                load_shader_source(first, true)
+            ));
+            assert!(!load_shader_source(*shader, true).contains("// no_atomic_float"));
+        }
     }
 
     #[test]

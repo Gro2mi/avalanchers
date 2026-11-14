@@ -59,8 +59,6 @@ fn grid_physics_curvilinear(@builtin(global_invocation_id) id: vec3u) {
     let K_xy = curvature_texture_data.z;
     let g_x = curvature_texture_data.w;
     let slope = -vec2f(g_x * l_x, g_y * l_y) / g;
-    // inclination of the bed against the smoothed reference surface (gully walls)
-    let cos_beta = textureLoad(basal_topography_texture, vec2<i32>(id.xy), 0).x;
 
     // 1. Decode height and velocity
     let mass = f32(grid_mass_atomic[idx]) * inv_mass_factor(); // no_atomic_float
@@ -147,7 +145,12 @@ fn grid_physics_curvilinear(@builtin(global_invocation_id) id: vec3u) {
     // no less than velocity_threshold keeps the low-speed gate of the shared
     // friction model from switching it off.
     let friction_speed = max(proposed_V_mag, sim_settings.velocity_threshold);
-    let wall_load_factor = gully_wall_load_factor(cos_beta, k_y);
+    // gully walls, inclined by beta against the smoothed reference surface
+    var wall_load_factor = 1.0;
+    if gully_walls_enabled() {
+        let cos_beta = textureLoad(basal_topography_texture, vec2<i32>(id.xy), 0).x;
+        wall_load_factor = gully_wall_load_factor(cos_beta, k_y);
+    }
     let friction_acceleration = basal_friction_acceleration(g_eff * wall_load_factor, sim_settings.snow_density, friction_speed, h, sim_settings.friction_model);
 
     // If friction would reverse or completely zero out the momentum this step
@@ -503,6 +506,11 @@ fn inv_momentum_factor() -> f32 {
 // count as empty.
 fn min_node_mass() -> f32 {
     return inv_momentum_factor(); // momentum unit / (1 m/s)
+}
+// Gully walls (reference surface, wall friction) need a reference surface at
+// least one cell wide; must match SimSettings::gully_walls_enabled.
+fn gully_walls_enabled() -> bool {
+    return sim_settings.reference_surface_length >= sim_settings.cell_size;
 }
 // depth-integrated internal force (h * sigma * grad_w * area, ~1e4..1e5 N per node contribution)
 const FORCE_FACTOR: f32 = 1e-3; // i32 limit is 2.1e6 N per node
