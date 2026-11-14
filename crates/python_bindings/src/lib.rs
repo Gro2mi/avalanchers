@@ -508,8 +508,10 @@ impl PySimulation {
     ///         Defaults to the primary adapter.
     #[staticmethod]
     #[pyo3(signature = (gpu=None))]
-    pub fn new(gpu: Option<String>) -> PyResult<Self> {
-        let inner = Simulation::new_with_gpu(gpu).block_on().map_runtime_err()?;
+    pub fn new(py: Python<'_>, gpu: Option<String>) -> PyResult<Self> {
+        let inner = py
+            .detach(|| Simulation::new_with_gpu(gpu).block_on())
+            .map_runtime_err()?;
         Ok(PySimulation { inner })
     }
 
@@ -521,7 +523,7 @@ impl PySimulation {
     /// Args:
     ///     settings: Dictionary of settings, e.g.
     ///         ``{"peak_flow_thickness_threshold": 0.1}``.
-    pub fn create(&mut self, settings: &Bound<'_, PyAny>) -> PyResult<()> {
+    pub fn create(&mut self, py: Python<'_>, settings: &Bound<'_, PyAny>) -> PyResult<()> {
         let json_value: serde_json::Value =
             depythonize(settings).map_err(|e| PyErr::new::<PyTypeError, _>(e.to_string()))?;
 
@@ -532,8 +534,8 @@ impl PySimulation {
             .enable_all()
             .build()
             .map_runtime_err()?;
-        runtime
-            .block_on(self.inner.create(parsed.clone()))
+        let inner = &mut self.inner;
+        py.detach(|| runtime.block_on(inner.create(parsed)))
             .map_runtime_err()?;
         Ok(())
     }
@@ -552,10 +554,9 @@ impl PySimulation {
     /// Args:
     ///     dem_path: Path to the example DEM, relative to the repository root
     ///         (e.g. ``"data/avaframe/avaParabola.png"``).
-    pub fn create_example(&mut self, dem_path: String) -> PyResult<()> {
-        self.inner
-            .create_example(&dem_path)
-            .block_on()
+    pub fn create_example(&mut self, py: Python<'_>, dem_path: String) -> PyResult<()> {
+        let inner = &mut self.inner;
+        py.detach(|| inner.create_example(&dem_path).block_on())
             .map_runtime_err()
     }
 
@@ -657,8 +658,9 @@ impl PySimulation {
     }
 
     /// Run the simulation to completion (up to ``max_timesteps``).
-    pub fn run(&mut self) -> PyResult<()> {
-        self.inner.run().block_on().map_runtime_err()
+    pub fn run(&mut self, py: Python<'_>) -> PyResult<()> {
+        let inner = &mut self.inner;
+        py.detach(|| inner.run().block_on()).map_runtime_err()
     }
 
     /// Advance the simulation by a fixed number of steps.
@@ -669,8 +671,11 @@ impl PySimulation {
     ///
     /// Returns:
     ///     PySimInfo: Diagnostic state after the executed steps.
-    pub fn run_n_steps(&mut self, steps: u32) -> PyResult<PySimInfo> {
-        let sim_info = self.inner.run_n_steps(steps).block_on().map_runtime_err()?;
+    pub fn run_n_steps(&mut self, py: Python<'_>, steps: u32) -> PyResult<PySimInfo> {
+        let inner = &mut self.inner;
+        let sim_info = py
+            .detach(|| inner.run_n_steps(steps).block_on())
+            .map_runtime_err()?;
         Ok(PySimInfo { inner: sim_info })
     }
 
@@ -711,8 +716,9 @@ impl PySimulation {
     ///
     /// Called automatically by :meth:`run`; only needed when stepping
     /// manually via :meth:`run_n_steps`.
-    pub fn prepare(&mut self) -> PyResult<()> {
-        self.inner.prepare().block_on().map_runtime_err()
+    pub fn prepare(&mut self, py: Python<'_>) -> PyResult<()> {
+        let inner = &mut self.inner;
+        py.detach(|| inner.prepare().block_on()).map_runtime_err()
     }
 
     /// Prepare the simulation (if needed) and keep its initial particles.
@@ -732,10 +738,9 @@ impl PySimulation {
     ///         result = sim.evaluate()
     ///
     /// Must be called before the simulation runs.
-    pub fn store_initial_state(&mut self) -> PyResult<()> {
-        self.inner
-            .store_initial_state()
-            .block_on()
+    pub fn store_initial_state(&mut self, py: Python<'_>) -> PyResult<()> {
+        let inner = &mut self.inner;
+        py.detach(|| inner.store_initial_state().block_on())
             .map_runtime_err()
     }
 
@@ -755,10 +760,9 @@ impl PySimulation {
     ///   own thickness or switching between them seeds the particles again,
     /// - anything else (friction, drag, cfl, max_steps, flags, ...): the
     ///   stored particles are restored as they are.
-    pub fn restore_initial_state(&mut self) -> PyResult<()> {
-        self.inner
-            .restore_initial_state()
-            .block_on()
+    pub fn restore_initial_state(&mut self, py: Python<'_>) -> PyResult<()> {
+        let inner = &mut self.inner;
+        py.detach(|| inner.restore_initial_state().block_on())
             .map_runtime_err()
     }
 
@@ -774,12 +778,15 @@ impl PySimulation {
     /// Args:
     ///     settings: Dictionary of settings, e.g.
     ///         ``{"friction_coefficient": 0.3, "drag_coefficient": 3000.0}``.
-    pub fn update_settings(&mut self, settings: &Bound<'_, PyAny>) -> PyResult<()> {
+    pub fn update_settings(&mut self, py: Python<'_>, settings: &Bound<'_, PyAny>) -> PyResult<()> {
         let json_value: serde_json::Value =
             depythonize(settings).map_err(|e| PyErr::new::<PyTypeError, _>(e.to_string()))?;
         let json_str = serde_json::to_string(&json_value).map_runtime_err()?;
         let patch = Settings::loads(&json_str).map_runtime_err()?;
-        self.inner.update_settings(&patch).map_runtime_err()
+        // switching integer_atomics rebuilds the shaders on worker threads
+        let inner = &mut self.inner;
+        py.detach(|| inner.update_settings(&patch))
+            .map_runtime_err()
     }
 
     /// Whether :meth:`store_initial_state` holds particles to restore.

@@ -88,3 +88,7 @@ debug = 1
 
 # Keep debug information in separate files to minimize linking friction
 split-debuginfo = "unpacked"
+
+# naga parses and validates every WGSL shader when the GPU context starts;
+[profile.dev.package.naga]
+opt-level = 3

@@ -35,6 +35,15 @@ All notable changes to this project might be documented in this file.
   OpenGL backend caused this.
 
 ### Changed
+- The GPU context starts in about 0.25 s instead of 0.5-1.5 s. The adapter is looked up on Vulkan
+  alone first (all backends only when Vulkan has no discrete GPU, or as set with `WGPU_BACKEND`),
+  which skips starting DX12 on Windows. Shader pipelines are built on first use instead of all 43
+  at start, one module per WGSL file, and the pipelines a stage needs together are built in
+  parallel; the shader sources are expanded once per process without regular expressions, and
+  debug builds still write changed imports back into the files. Creating the shaders at start
+  takes 2 ms in release and 5 ms in debug (was 108 ms and 990 ms); debug builds compile `naga`
+  optimized. `WGPU_VALIDATION` and `WGPU_DEBUG` now override the wgpu instance flags.
+- The Python bindings release the GIL while they create, prepare, run or restore a simulation.
 - The integer-atomic grid (WebGPU, or `integer_atomics`) sizes its fixed point units per run from
   the cell size and density instead of fixed 0.1 kg and 0.01 kg m/s: the u32 mass and i32 momentum
   ranges hold a 30 m deep flow over a cell at 100 m/s with a safety factor of 2. A particle then

@@ -1,6 +1,6 @@
 {
   "outlines_path": "data/outline/polygon_10720.shp",
-  "outlines_padding": 4000,
+  "outlines_padding": 200,
   "sim_model": "terrain-following",
   "friction_model": "voellmy",
   "max_steps": 6000,

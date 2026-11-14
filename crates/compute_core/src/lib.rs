@@ -3,12 +3,11 @@ use crate::buffers::{
     RelaxParams, TextureName, create_buffers_and_texture_descriptions,
 };
 use crate::settings::{SimFlags, SimModel};
-use crate::shaders::{ComputeShaderConfig, ShaderName, generate_shader_report};
+use crate::shaders::{ShaderConfigs, ShaderName, generate_shader_report};
 use crate::utils::timer_checkpoint;
 use anyhow::{Context, Result, anyhow};
 use evaluation::{MassMovementEvaluation, chamfer_from_sums, evaluation_from_counts};
 use std::cmp::min;
-use std::collections::HashMap;
 use std::hash::Hash;
 use std::mem::size_of;
 use wgpu::{
@@ -394,9 +393,31 @@ use wgpu::Backends;
 /// An instance of the primary backends. The OpenGL backend is left out: each
 /// of its instances keeps 16 MB of GPU memory after it is dropped.
 fn create_instance() -> Instance {
+    create_instance_with(Backends::PRIMARY)
+}
+
+fn create_instance_with(backends: Backends) -> Instance {
     let mut descriptor = InstanceDescriptor::new_without_display_handle();
-    descriptor.backends = Backends::PRIMARY;
+    descriptor.backends = backends;
+    // build defaults (validation in debug builds), overridable with wgpu's
+    // environment variables such as WGPU_VALIDATION=0 or WGPU_DEBUG=0
+    descriptor.flags = wgpu::InstanceFlags::from_build_config().with_env();
     Instance::new(descriptor)
+}
+
+/// Backend sets searched for the GPU, in order. Vulkan alone comes first: its
+/// instance starts in ~0.2 s, while the primary set also starts DX12 on
+/// Windows, whose adapter probing adds ~0.3-0.4 s, and the simulation runs on
+/// Vulkan there anyway. WGPU_BACKEND (e.g. `dx12`) replaces the search.
+fn backend_search_order() -> Vec<Backends> {
+    if let Some(backends) = Backends::from_env() {
+        return vec![backends];
+    }
+    if cfg!(target_arch = "wasm32") {
+        vec![Backends::PRIMARY]
+    } else {
+        vec![Backends::VULKAN, Backends::PRIMARY]
+    }
 }
 
 pub async fn list_devices() -> Result<Vec<String>> {
@@ -620,7 +641,7 @@ pub struct ComputeOrchestrator {
     /// when enable_weak_pressure is set.
     weak_pressure: Option<(ComputePipeline, BindGroup)>,
     texture_size: Extent3d,
-    shader_configs: HashMap<ShaderName, ComputeShaderConfig>,
+    shader_configs: ShaderConfigs,
     dispatch_number_workgroups_x_2d: u32,
     dispatch_number_workgroups_y_2d: u32,
     dispatch_number_workgroups_1d: u32,
@@ -645,9 +666,8 @@ impl ComputeOrchestrator {
         Self::new_with_gpu(None).await
     }
     pub async fn new_with_gpu(target_gpu: Option<String>) -> Result<Self> {
-        // first search for VULKAN backend to speed up GPU selection, see dev branch
-        let instance = create_instance();
-        let mut selected_adapter = None;
+        let search = backend_search_order();
+        let mut selected = None;
 
         // 1. If a target string was provided, search by Device ID (if numeric) or Name
         if let Some(mut target) = target_gpu {
@@ -657,33 +677,32 @@ impl ComputeOrchestrator {
                 .unwrap_or(&target)
                 .trim()
                 .to_string();
-            let adapters = instance.enumerate_adapters(Backends::PRIMARY).await;
-
             // Try parsing the target string as a number (supports both hex "0x1E84" and decimal)
             let target_id = Self::parse_numeric_id(&target);
-
-            for adapter in adapters {
-                let info = adapter.get_info();
-
-                let matched = if let Some(id) = target_id {
-                    // Match by PCI Device ID
-                    info.device == id
-                } else {
-                    // Match by Name substring (case-insensitive)
-                    info.name.to_lowercase().contains(&target.to_lowercase())
-                };
-
-                if matched {
+            for backends in &search {
+                let instance = create_instance_with(*backends);
+                let adapters = instance.enumerate_adapters(*backends).await;
+                let matched = adapters.into_iter().find(|adapter| {
+                    let info = adapter.get_info();
+                    match target_id {
+                        // Match by PCI Device ID
+                        Some(id) => info.device == id,
+                        // Match by Name substring (case-insensitive)
+                        None => info.name.to_lowercase().contains(&target.to_lowercase()),
+                    }
+                });
+                if let Some(adapter) = matched {
+                    let info = adapter.get_info();
                     info!(
                         "Found target GPU: {} [ID: {:#06X}, Vendor: {:#06X}] ({:?})",
                         info.name, info.device, info.vendor, info.device_type
                     );
-                    selected_adapter = Some(adapter);
+                    selected = Some((instance, adapter));
                     break;
                 }
             }
 
-            if selected_adapter.is_none() {
+            if selected.is_none() {
                 warn!(
                     "Requested GPU '{}' not found, falling back to automatic selection.",
                     target
@@ -691,30 +710,44 @@ impl ComputeOrchestrator {
             }
         }
 
-        // 2. Fallback logic if no argument was given or the target wasn't found
-        let adapter = if let Some(adapter) = selected_adapter {
-            adapter
+        // 2. Automatic selection: the high-performance adapter of the first
+        // backend set that has a discrete GPU, else of the last set searched
+        if selected.is_none() {
+            for backends in &search {
+                let instance = create_instance_with(*backends);
+                let Ok(adapter) = instance
+                    .request_adapter(&RequestAdapterOptions {
+                        power_preference: PowerPreference::HighPerformance,
+                        compatible_surface: None,
+                        force_fallback_adapter: false,
+                        apply_limit_buckets: false,
+                    })
+                    .await
+                else {
+                    continue;
+                };
+                let discrete = adapter.get_info().device_type == wgpu::DeviceType::DiscreteGpu;
+                selected = Some((instance, adapter));
+                if discrete {
+                    break;
+                }
+            }
+        }
+
+        // 3. Fallback logic if no high-performance adapter was found at all
+        let (instance, adapter) = if let Some(selected) = selected {
+            selected
         } else {
+            let instance = create_instance();
+            warn!("High-performance GPU not found, falling back to LowPower/Software.");
             let mut fallback_adapter = instance
                 .request_adapter(&RequestAdapterOptions {
-                    power_preference: PowerPreference::HighPerformance,
+                    power_preference: PowerPreference::LowPower,
                     compatible_surface: None,
                     force_fallback_adapter: false,
                     apply_limit_buckets: false,
                 })
                 .await;
-
-            if fallback_adapter.is_err() {
-                warn!("High-performance GPU not found, falling back to LowPower/Software.");
-                fallback_adapter = instance
-                    .request_adapter(&RequestAdapterOptions {
-                        power_preference: PowerPreference::LowPower,
-                        compatible_surface: None,
-                        force_fallback_adapter: false,
-                        apply_limit_buckets: false,
-                    })
-                    .await;
-            }
 
             if fallback_adapter.is_err() {
                 warn!("Low-performance GPU not found, falling back to Software.");
@@ -728,8 +761,9 @@ impl ComputeOrchestrator {
                     .await;
             }
 
-            fallback_adapter
-                .map_err(|error| anyhow!("Failed to find any suitable GPU adapter: {error}"))?
+            let adapter = fallback_adapter
+                .map_err(|error| anyhow!("Failed to find any suitable GPU adapter: {error}"))?;
+            (instance, adapter)
         };
 
         // let adapter = adapter.expect("Failed to find any suitable GPU adapter");
@@ -1951,6 +1985,17 @@ impl ComputeOrchestrator {
             }
         };
 
+        // build the step pipelines together (in parallel on native)
+        self.shader_configs.prepare(&[
+            ShaderName::UpdateSimInfo,
+            p2g_shader,
+            grid_physics_shader,
+            particle_update_shader,
+            ShaderName::ComputeCenterOfMass,
+            ShaderName::CenterOfMassSeed,
+            ShaderName::CenterOfMassPropagate,
+            ShaderName::ResetGrid,
+        ]);
         let update_sim_info_config = self
             .shader_configs
             .get(&ShaderName::UpdateSimInfo)
@@ -2258,6 +2303,13 @@ impl ComputeOrchestrator {
             &(0..number_release_particles).collect::<Vec<u32>>(),
             usage,
         );
+        self.shader_configs.prepare(&[
+            ShaderName::SortClearBins,
+            ShaderName::SortCountParticles,
+            ShaderName::SortScanBins,
+            ShaderName::SortScatterParticles,
+            sorted_p2g,
+        ]);
         let stage = |shader: ShaderName| -> Result<(ComputePipeline, BindGroup)> {
             let config = self
                 .shader_configs
