@@ -5530,7 +5530,7 @@ fn test_trajectory() {
                 .expect("Failed to set release");
             block_on(sim.run_n_steps(1)).expect("Failed to run");
             // float atomics hold kg directly; otherwise dequantize with
-            // SimInfo::mass_factor and PRESSURE_FACTOR = 1e3 (utils.wgsl)
+            // SimInfo::mass_factor and PRESSURE_FACTOR = 1e3 (force_quantization.wgsl)
             let (mass, sums): (Vec<f32>, Vec<f32>) = if sim.orchestrator.has_float32_atomic() {
                 (
                     block_on(sim.orchestrator.read_buffer(BufferName::GridMass))

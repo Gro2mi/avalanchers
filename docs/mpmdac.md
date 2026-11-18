@@ -111,7 +111,7 @@ f_i = − Σ_p (m_p / ρ) · S_p · ∇w_ip          (m_p/ρ is the particle "vo
 ```
 
 using the analytic gradient of the quadratic B-spline weights
-(`calculate_weight_gradient` in `utils.wgsl`, in 1/m). Note that the product
+(`calculate_weight_gradient` in `bspline.wgsl`, in 1/m). Note that the product
 `A_p · h_p = m_p / ρ` is exactly the particle's column volume, so the force
 needs no current-area bookkeeping.
 
@@ -321,7 +321,7 @@ growing monotonically to 79 t (clumped).
 
 ### 4.3 Quantization factors
 
-`utils.wgsl` constants used by this model: `MASS_FACTOR = 10`
+`quantization.wgsl` / `force_quantization.wgsl` constants used by this model: `MASS_FACTOR = 10`
 (u32 mass atomics), `MOMENTUM_FACTOR = 1e-2` (i32 momentum atomics),
 `FORCE_FACTOR = 1e-3` (i32 force atomics, decode ×10³ → ±2.1·10¹² N/node
 range; observed working values are ≤ ~5·10⁵ N). Without
@@ -367,7 +367,7 @@ plastic law), `enable_particle_interaction` (interaction *is* the method),
 | `crates/compute_core/src/shaders/g2p_mpmdac.wgsl` | grid→particle: APIC gather, advection, stopping |
 | `crates/compute_core/src/shaders/constitutive.wgsl` | strain-rate, deviatoric and µ(I) rheology helpers (shared import) |
 | `crates/compute_core/src/shaders/friction.wgsl` | basal friction laws (shared import) |
-| `crates/compute_core/src/shaders/utils.wgsl` | weight gradients, `FORCE_FACTOR`, mat helpers |
+| `crates/compute_core/src/shaders/bspline.wgsl`, `force_quantization.wgsl` | weight gradients, `FORCE_FACTOR` |
 | `crates/compute_core/src/shaders/reset_grid.wgsl` | additionally zeroes `GridForces` (all models) |
 | `crates/compute_core/src/settings.rs` | `SimModel::DepthAveraged = 2` + parsing |
 | `crates/compute_core/src/shaders.rs` | shader registry + bind group layouts for the new shaders |

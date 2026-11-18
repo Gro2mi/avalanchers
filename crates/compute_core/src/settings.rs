@@ -319,7 +319,7 @@ impl SimSettings {
 
     /// Whether the reference surface and the gully wall friction run: the
     /// smoothing width must reach the cell size. Same test as
-    /// `gully_walls_enabled` in utils.wgsl.
+    /// `gully_walls_enabled` in sim_settings.wgsl.
     pub fn gully_walls_enabled(&self) -> bool {
         self.reference_surface_length >= self.cell_size
     }
@@ -336,7 +336,7 @@ impl SimSettings {
         QUANTIZATION_I32_RANGE / (self.max_node_mass() * MAX_FLOW_VELOCITY)
     }
 
-    /// Length in steps of the no-new-cells rolling window, see utils.wgsl.
+    /// Length in steps of the no-new-cells rolling window, see sim_settings.wgsl.
     pub fn no_new_cells_window(&self) -> u32 {
         ((self.no_new_cells_travel / self.cfl).round() as u32).max(10)
     }

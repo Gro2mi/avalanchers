@@ -1,6 +1,6 @@
 // Shared basal friction models.
 // Pure library module: it is textually imported and relies on the importing
-// module providing the utils.wgsl symbols (sim_settings, g).
+// module importing constants.wgsl and sim_settings.wgsl (sim_settings, g).
 // Returns a deceleration magnitude (m/s^2) acting against the flow direction,
 // given the effective bed-normal acceleration g_eff (m/s^2), the flow density
 // (kg/m^3), the proposed flow speed (m/s) and the flow depth h (m).

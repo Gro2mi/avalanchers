@@ -4,6 +4,10 @@
 // scales with the lithostatic pressure so active/passive earth-pressure
 // behaviour emerges naturally.
 
+fn identity_2x2() -> mat2x2<f32> {
+    return mat2x2<f32>(vec2f(1.0, 0.0), vec2f(0.0, 1.0));
+}
+
 // symmetric strain-rate tensor from the velocity gradient
 fn strain_rate_tensor(velocity_gradient: mat2x2<f32>) -> mat2x2<f32> {
     return 0.5 * (velocity_gradient + transpose(velocity_gradient));

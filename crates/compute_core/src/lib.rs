@@ -611,7 +611,7 @@ pub const RELEASE_THICKNESS_THRESHOLD: f32 = 0.01;
 /// `MAX_FLOW_VELOCITY` = 100 m/s for a full `MAX_FLOW_THICKNESS` node (faster
 /// for thinner nodes), so a faster particle
 /// comes from a numerical blow-up, e.g. a cliff of no-data elevations.
-/// Mirrors `MAX_PARTICLE_SPEED` in utils.wgsl.
+/// Mirrors `MAX_PARTICLE_SPEED` in particle_state.wgsl.
 pub const MAX_PARTICLE_SPEED: f32 = 150.0;
 
 /// Smallest integer-atomic grid momentum range relative to the mass range
@@ -4642,61 +4642,19 @@ mod tests {
             test_output[28],
         );
 
-        if orchestrator.has_float32_atomic() {
-            // expected momentum distribution (grid x-momentum)
+        // expected momentum distribution (grid x-momentum); the integer grid
+        // stores it in units of momentum_factor
+        let expected_momentum_x = [
+            325.6352, 1439.61, 170.7553, 2510.889, 11100.462, 1316.65, 527.475, 2331.9292,
+            276.59528,
+        ];
+        for (offset, expected) in expected_momentum_x.into_iter().enumerate() {
+            let index = 20 + offset;
+            let actual = test_output[index] / momentum_factor;
             assert!(
-                (test_output[20] / momentum_factor - 325.6352).abs() / 325.6352
-                    < rel_error_threshold,
-                "test_output[20] failed"
+                (actual - expected).abs() / expected < rel_error_threshold,
+                "test_output[{index}] failed: {actual} != {expected}"
             );
-            assert!(
-                (test_output[21] / momentum_factor - 1439.61).abs() / 1439.61 < rel_error_threshold,
-                "test_output[21] failed"
-            );
-            assert!(
-                (test_output[22] / momentum_factor - 170.7553).abs() / 170.7553
-                    < rel_error_threshold,
-                "test_output[22] failed"
-            );
-            assert!(
-                (test_output[23] / momentum_factor - 2510.889).abs() / 2510.889
-                    < rel_error_threshold,
-                "test_output[23] failed"
-            );
-            assert!(
-                (test_output[24] / momentum_factor - 11100.462).abs() / 11100.462
-                    < rel_error_threshold,
-                "test_output[24] failed"
-            );
-            assert!(
-                (test_output[25] / momentum_factor - 1316.65).abs() / 1316.65 < rel_error_threshold,
-                "test_output[25] failed"
-            );
-            assert!(
-                (test_output[26] / momentum_factor - 527.475).abs() / 527.475 < rel_error_threshold,
-                "test_output[26] failed"
-            );
-            assert!(
-                (test_output[27] / momentum_factor - 2331.9292).abs() / 2331.9292
-                    < rel_error_threshold,
-                "test_output[27] failed"
-            );
-            assert!(
-                (test_output[28] / momentum_factor - 276.59528).abs() / 276.59528
-                    < rel_error_threshold,
-                "test_output[28] failed"
-            );
-        } else {
-            // momentum transfer is not accurate without float32 atomics, but we can at least check that the maths is correct
-            assert_eq!(test_output[20], 32564.0, "test_output[20] failed");
-            assert_eq!(test_output[21], 143961.0, "test_output[21] failed");
-            assert_eq!(test_output[22], 17076.0, "test_output[22] failed");
-            assert_eq!(test_output[23], 251089.0, "test_output[23] failed");
-            assert_eq!(test_output[24], 1110046.0, "test_output[24] failed");
-            assert_eq!(test_output[25], 131665.0, "test_output[25] failed");
-            assert_eq!(test_output[26], 52747.0, "test_output[26] failed");
-            assert_eq!(test_output[27], 233193.0, "test_output[27] failed");
-            assert_eq!(test_output[28], 27660.0, "test_output[28] failed");
         }
 
         info!(
@@ -4712,54 +4670,17 @@ mod tests {
             test_output[38],
         );
         // expected momentum distribution (grid y-momentum)
-        if orchestrator.has_float32_atomic() {
+        let expected_momentum_y = [
+            488.4528, 2159.415, 256.13293, 3766.3333, 16650.691, 1974.9751, 791.2124, 3497.8938,
+            414.89288,
+        ];
+        for (offset, expected) in expected_momentum_y.into_iter().enumerate() {
+            let index = 30 + offset;
+            let actual = test_output[index] / momentum_factor;
             assert!(
-                (test_output[30] - 488.4528).abs() < 1e-4,
-                "test_output[30] failed"
+                (actual - expected).abs() / expected < rel_error_threshold,
+                "test_output[{index}] failed: {actual} != {expected}"
             );
-            assert!(
-                (test_output[31] - 2159.415).abs() < 1e-4,
-                "test_output[31] failed"
-            );
-            assert!(
-                (test_output[32] - 256.13293).abs() < 1e-4,
-                "test_output[32] failed"
-            );
-            assert!(
-                (test_output[33] - 3766.3333).abs() < 1e-4,
-                "test_output[33] failed"
-            );
-            assert!(
-                (test_output[34] - 16650.691).abs() < 1e-4,
-                "test_output[34] failed"
-            );
-            assert!(
-                (test_output[35] - 1974.9751).abs() < 1e-4,
-                "test_output[35] failed"
-            );
-            assert!(
-                (test_output[36] - 791.2124).abs() < 1e-4,
-                "test_output[36] failed"
-            );
-            assert!(
-                (test_output[37] - 3497.8938).abs() < 1e-4,
-                "test_output[37] failed"
-            );
-            assert!(
-                (test_output[38] - 414.89288).abs() < 1e-4,
-                "test_output[38] failed"
-            );
-        } else {
-            // momentum transfer is not accurate without float32 atomics, but we can at least check that the maths is correct
-            assert_eq!(test_output[30], 48845.0, "test_output[30] failed");
-            assert_eq!(test_output[31], 215942.0, "test_output[31] failed");
-            assert_eq!(test_output[32], 25613.0, "test_output[32] failed");
-            assert_eq!(test_output[33], 376633.0, "test_output[33] failed");
-            assert_eq!(test_output[34], 1665069.0, "test_output[34] failed");
-            assert_eq!(test_output[35], 197498.0, "test_output[35] failed");
-            assert_eq!(test_output[36], 79121.0, "test_output[36] failed");
-            assert_eq!(test_output[37], 349789.0, "test_output[37] failed");
-            assert_eq!(test_output[38], 41489.0, "test_output[38] failed");
         }
     }
 }

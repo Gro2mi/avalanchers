@@ -18,7 +18,7 @@ fn test_friction(@builtin(local_invocation_index) li: u32) {
 // BEGIN friction.wgsl
 // Shared basal friction models.
 // Pure library module: it is textually imported and relies on the importing
-// module providing the utils.wgsl symbols (sim_settings, g).
+// module importing constants.wgsl and sim_settings.wgsl (sim_settings, g).
 // Returns a deceleration magnitude (m/s^2) acting against the flow direction,
 // given the effective bed-normal acceleration g_eff (m/s^2), the flow density
 // (kg/m^3), the proposed flow speed (m/s) and the flow depth h (m).
@@ -97,96 +97,20 @@ fn gully_wall_load_factor(cos_beta: f32, k_y: f32) -> f32 {
 }
 
 // END friction.wgsl
-// import utils.wgsl;
-// BEGIN utils.wgsl
+// import constants.wgsl;
+// BEGIN constants.wgsl
+// Shared constants without dependencies.
 const WG_SIZE_2D: u32 = 16u;
 
 const g: f32 = 9.81;
 
-// u32 limit is 4 294 967 296
-const MAX_VELOCITY_FACTOR: f32 = 1e7; // u32 limit is 430 m/s
-const H_FACTOR: f32 = 1e6;
-const INV_MAX_VELOCITY_FACTOR: f32 = 1 / MAX_VELOCITY_FACTOR; // u32 limit is 430 m/s
-const INV_H_FACTOR: f32 = 1 / H_FACTOR;
-// The integer-atomic grid factors (mass_factor() ...) live in
-// quantization.wgsl, which needs sim_info.
-// Gully walls (reference surface, wall friction) need a reference surface at
-// least one cell wide; must match SimSettings::gully_walls_enabled.
-fn gully_walls_enabled() -> bool {
-    return sim_settings.reference_surface_length >= sim_settings.cell_size;
-}
-// depth-integrated internal force (h * sigma * grad_w * area, ~1e4..1e5 N per node contribution)
-const FORCE_FACTOR: f32 = 1e-3; // i32 limit is 2.1e6 N per node
-const INV_FORCE_FACTOR: f32 = 1 / FORCE_FACTOR;
-// weak-form pressure sum m_p h_p / 2 grad_w (kg) of the curvilinear model,
-// node sum = node_mass * |grad h|: 0.001 kg resolves thin front nodes
-//   (rho*cell^2*h*J ~ 6e4 kg * 1 * 1e3 = 6e7 < 2.1e9)
-const PRESSURE_FACTOR: f32 = 1e3;
-const INV_PRESSURE_FACTOR: f32 = 1 / PRESSURE_FACTOR;
+// END constants.wgsl
+// import sim_settings.wgsl;
+// BEGIN sim_settings.wgsl
+// Simulation settings uniform (group 0, binding 0) and the values derived from
+// it. Must mirror the Rust POD layout of SimSettings.
 
 // TODO precompute often used values on the cpu and pass them as uniforms to avoid redundant calculations on the gpu
-
-struct SimInfo {
-    timestep: u32,
-    dt: f32,
-    elapsed_time: f32,
-    number_particles: u32,
-    elevation_threshold: f32,
-    max_velocity: f32,
-    max_flow_thickness: f32,
-    flags: u32,
-    grid_elapsed_time: f32,
-    travel_length_2d: f32,
-    travel_length_3d: f32,
-    travel_vertical_drop: f32,
-    travel_angle: f32,
-    _first_center_of_mass_timestep: u32,
-    _last_center_of_mass_timestep: u32,
-    // ranges of the integer-atomic grid in units of the reference node (see
-    // quantization.wgsl); previous_mass_scale quantized the last step's grid
-    mass_scale: f32,
-    momentum_scale: f32,
-    previous_mass_scale: f32,
-    _pad0: u32,
-    _pad1: u32,
-};
-
-const SIM_INFO_OUT_OF_BOUNDS: u32 = 1u << 0u;
-const SIM_INFO_CFL_EXCEEDED: u32 = 1u << 1u;
-const SIM_INFO_IS_NAN: u32 = 1u << 2u;
-const SIM_INFO_PARTICLE_OUT_OF_DEM_DATA: u32 = 1u << 3u;
-// a particle exceeded MAX_PARTICLE_SPEED and was stopped
-const SIM_INFO_UNPHYSICAL_SPEED: u32 = 1u << 4u;
-// a node filled more than QUANTIZATION_OVERFLOW_FILL of an integer-atomic
-// grid range, which it may have overflowed (see quantization.wgsl)
-const SIM_INFO_QUANTIZATION_OVERFLOW: u32 = 1u << 5u;
-const SIM_INFO_STOPPED: u32 = 1u << 31u;
-const SIM_INFO_ALL_PARTICLES_STOPPED: u32 = 1u << 30u;
-const SIM_INFO_NO_NEW_CELLS: u32 = 1u << 29u;
-// almost all particles are resting or terminally stopped
-const SIM_INFO_AT_REST: u32 = 1u << 28u;
-// total momentum fell below momentum_stop_fraction of its peak
-const SIM_INFO_LOW_MOMENTUM: u32 = 1u << 27u;
-
-// Fastest particle speed (m/s) taken as physical. Dense flow avalanches reach
-// about 60-80 m/s and the integer atomic grid holds momentum up to
-// MAX_FLOW_VELOCITY = 100 m/s for a full MAX_FLOW_THICKNESS node (faster for
-// thinner nodes); a faster particle comes from a numerical blow-up (e.g. a cliff of no-data elevations) and is stopped.
-// Mirrors compute_core::MAX_PARTICLE_SPEED.
-const MAX_PARTICLE_SPEED: f32 = 150.0;
-// stopped for exceeding MAX_PARTICLE_SPEED
-const PARTICLE_UNPHYSICAL_SPEED: u32 = 1u << 25u;
-// reversible low-speed state; the low bits (below PARTICLE_UNPHYSICAL_SPEED)
-// hold the rest start step while resting and the consecutive slow-step count
-// while moving
-const PARTICLE_RESTING: u32 = 1u << 26u;
-// consecutive slow steps before a particle rests
-const REST_STEPS: u32 = 20u;
-const PARTICLE_FLYING: u32 = 1u << 27u;
-const PARTICLE_OUT_OF_BOUNDS: u32 = 1u << 28u;
-const PARTICLE_IS_NAN: u32 = 1u << 29u;
-const PARTICLE_OUT_OF_DEM_DATA: u32 = 1u << 30u;
-const PARTICLE_STOPPED: u32 = 1u << 31u;
 
 struct SimSettings {
     num_steps: u32,
@@ -236,64 +160,13 @@ struct SimSettings {
     flight_terminal_velocity: f32,
 };
 
-struct AtomicValues {
-    peak_velocity: atomic<u32>,
-    peak_flow_thickness: atomic<u32>,
-    expected_max_velocity: atomic<u32>,
-    travel_length: atomic<u32>,
-    release_volume: atomic<u32>,
-    number_release_cells: atomic<u32>,
-    number_release_particles: atomic<u32>,
-    stopped_particles: atomic<u32>,
-    // resting particles counted during the current step, reset by update_sim_info
-    resting_particles: atomic<u32>,
-    // total grid momentum (kg m/s) of the current step as a 64-bit sum, reset by update_sim_info
-    momentum_lo: atomic<u32>,
-    momentum_hi: atomic<u32>,
-    // f32 bits of the largest total momentum so far
-    peak_momentum: atomic<u32>,
-    // largest node mass (u32 units) and momentum component (|i32| units) of
-    // the integer-atomic grid this step, read and reset by reset_grid
-    max_mass_units: atomic<u32>,
-    max_momentum_units: atomic<u32>,
-    _pad0: u32,
-    _pad1: u32,
-};
-
-// Reversible resting: a particle rests after REST_STEPS consecutive slow steps
-// and wakes once the gathered grid speed exceeds twice the threshold. Resting
-// particles keep depositing mass but no momentum and do not move, which removes
-// sub-threshold creep inside deposits. Returns the new state: its low bits hold
-// the slow-step counter while moving and the rest start step while resting.
-fn next_rest_state(previous_state: u32, speed: f32, timestep: u32) -> u32 {
-    let low_mask = PARTICLE_UNPHYSICAL_SPEED - 1u;
-    var resting = (previous_state & PARTICLE_RESTING) != 0u;
-    var low_bits = previous_state & low_mask;
-    if resting {
-        if speed > 2.0 * sim_settings.velocity_threshold {
-            resting = false;
-            low_bits = 0u;
-        }
-    } else if speed < sim_settings.velocity_threshold {
-        low_bits = min(low_bits + 1u, REST_STEPS);
-        if low_bits >= REST_STEPS {
-            resting = true;
-            low_bits = timestep & low_mask;
-        }
-    } else {
-        low_bits = 0u;
-    }
-    return (previous_state & ~(PARTICLE_RESTING | low_mask))
-        | select(0u, PARTICLE_RESTING, resting)
-        | low_bits;
-}
-
-struct G2PUpdate {
-    velocity: vec2f,
-    affine_matrix: mat2x2<f32>,
-};
-
 @group(0) @binding(0) var<uniform> sim_settings: SimSettings;
+
+// Gully walls (reference surface, wall friction) need a reference surface at
+// least one cell wide; must match SimSettings::gully_walls_enabled.
+fn gully_walls_enabled() -> bool {
+    return sim_settings.reference_surface_length >= sim_settings.cell_size;
+}
 
 // length in steps of the no-new-cells rolling window: the fastest material
 // moves at most cfl cells per step, so round(travel / cfl) steps cover the same
@@ -302,154 +175,4 @@ fn no_new_cells_window() -> u32 {
     return max(10u, u32(round(sim_settings.no_new_cells_travel / sim_settings.cfl)));
 }
 
-fn is_nan(x: f32) -> bool {
-    let bits: u32 = bitcast<u32>(x);
-    return (bits & 0x7F800000u) == 0x7F800000u
-          && (bits & 0x007FFFFFu) != 0u;
-}
-
-fn is_inf(x: f32) -> bool {
-    let bits: u32 = bitcast<u32>(x);
-    return (bits == 0x7F800000u || bits == 0xFF800000u);
-}
-
-fn is_finite(x: f32) -> bool {
-    return !is_nan(x) && !is_inf(x);
-}
-
-fn cell_to_uv(cell: vec2u) -> vec2f {
-    return (vec2f(cell) + 0.5) / vec2f(sim_settings.grid_shape);
-}
-fn cell3_to_uv(cell: vec3u) -> vec2f {
-    return (vec2f(cell.xy) + 0.5) / vec2f(sim_settings.grid_shape);
-}
-fn cellf_to_uv(cell: vec2f) -> vec2f {
-    return (cell + 0.5) / vec2f(sim_settings.grid_shape);
-}
-
-fn position3_to_cell(position: vec3f) -> vec2u {
-    return position_to_cell(position.xy);
-}
-
-fn position_to_cell(position: vec2f) -> vec2u {
-    return vec2u(
-        floor(position.xy / sim_settings.cell_size)
-    );
-}
-
-fn cell_center_xy(cell: vec2u) -> vec2f {
-    return (vec2f(cell) + 0.5) * sim_settings.cell_size;
-}
-
-fn position_to_uv(position: vec2f) -> vec2f {
-    return (position.xy) / (vec2f(sim_settings.world_size)); // add some padding to ensure particles outside the world bounds are still captured in the simulation info
-}
-
-fn position_to_idx(position: vec2f) -> u32 {
-    let uv = position_to_uv(position);
-    return uv_to_idx(uv);
-}
-
-fn uv_to_cell(uv: vec2f) -> vec2u {
-    let epsilon = 1e-5f; // A tiny offset to counteract negative rounding bias
-    let scaled_uv = uv * vec2f(sim_settings.grid_shape) + epsilon;
-    let max_bound = vec2f(sim_settings.grid_shape - 1u);
-
-    return vec2u(clamp(scaled_uv, vec2f(0.0), max_bound));
-}
-
-fn uv_to_idx(uv: vec2f) -> u32 {
-    let cell = uv_to_cell(uv);
-    // return cell.x * sim_settings.grid_shape.y + cell.y;
-    return (cell.y % sim_settings.grid_shape.y * sim_settings.grid_shape.x +
-              (cell.x % sim_settings.grid_shape.x));
-}
-
-fn x_y_to_idx(x: u32, y: u32) -> u32 {
-    return y * sim_settings.grid_shape.x + x;
-}
-
-fn xy_to_idx(xy: vec2<u32>) -> u32 {
-    return xy.y * sim_settings.grid_shape.x + xy.x;
-}
-
-fn idx_to_xy(idx: u32) -> vec2<u32> {
-    let x = idx % sim_settings.grid_shape.x;
-    let y = idx / sim_settings.grid_shape.x;
-    return vec2u(x, y);
-}
-
-fn quadratic_weight(d: f32) -> f32 {
-    let abs_d = abs(d);
-    if abs_d < 0.5 {
-        return 0.75 - abs_d * abs_d;
-    } else if abs_d < 1.5 {
-        return 0.5 * pow(1.5 - abs_d, 2.0);
-    }
-    return 0.0;
-}
-
-fn calculate_weight(distance: vec2f) -> f32 {
-    return quadratic_weight(distance.x) * quadratic_weight(distance.y);
-}
-
-// derivative of quadratic_weight with respect to its (cell-unit) argument
-fn quadratic_weight_gradient(d: f32) -> f32 {
-    let abs_d = abs(d);
-    if abs_d < 0.5 {
-        return -2.0 * d;
-    } else if abs_d < 1.5 {
-        return -sign(d) * (1.5 - abs_d);
-    }
-    return 0.0;
-}
-
-// physical gradient of the 2D B-spline weight, in 1/m
-fn calculate_weight_gradient(distance: vec2f) -> vec2f {
-    return vec2f(
-        quadratic_weight_gradient(distance.x) * quadratic_weight(distance.y),
-        quadratic_weight(distance.x) * quadratic_weight_gradient(distance.y)
-    ) / sim_settings.cell_size;
-}
-
-fn determinant_2x2(m: mat2x2<f32>) -> f32 {
-    return m[0][0] * m[1][1] - m[0][1] * m[1][0];
-}
-
-fn identity_2x2() -> mat2x2<f32> {
-    return mat2x2<f32>(vec2f(1.0, 0.0), vec2f(0.0, 1.0));
-}
-
-fn calculate_distance_to_node(particle_position: vec2f, node_position: vec2u) -> vec2f {
-    return particle_position - vec2f(node_position);
-}
-
-fn get_base_node(grid_pos: vec2f) -> vec2u {
-    return vec2u(floor(grid_pos - vec2f(0.5)));
-}
-
-fn compute_centroid(points: ptr<function, array<vec2<f32>, 256>>, count: u32) -> vec2<f32> {
-    var area: f32 = 0.0;
-    var cx: f32 = 0.0;
-    var cy: f32 = 0.0;
-
-    for (var i = 0u; i < count; i = i + 1u) {
-        let j = (i + 1u) % count;
-        let p0 = (*points)[i];
-        let p1 = (*points)[j];
-        let cross = p0.x * p1.y - p1.x * p0.y;
-
-        area = area + cross;
-        cx = cx + (p0.x + p1.x) * cross;
-        cy = cy + (p0.y + p1.y) * cross;
-    }
-
-    area = area * 0.5;
-
-    if abs(area) < 1e-6 {
-        return vec2<f32>(0.0, 0.0);
-    }
-
-    return vec2<f32>(cx, cy) / (6.0 * area);
-}
-// END utils.wgsl
+// END sim_settings.wgsl

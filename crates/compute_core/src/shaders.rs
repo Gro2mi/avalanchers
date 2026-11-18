@@ -10,7 +10,6 @@ use wgpu::{
     ComputePipelineDescriptor, Device, PipelineLayoutDescriptor, ShaderModuleDescriptor,
     ShaderSource, ShaderStages, StorageTextureAccess, TextureFormat, TextureViewDimension,
 };
-pub const SHADER_UTILS: &str = include_str!("shaders/utils.wgsl");
 
 /// Resolves to the entry point when one is declared, else to the source file
 /// stem (the entry point defaults to the shader name).
@@ -158,7 +157,15 @@ define_shaders! {
     CurvilinearGeometry => "curvilinear_geometry",
     CartesianGeometry => "cartesian_geometry",
     Constitutive => "constitutive",
-    Utils => "utils",
+    // shared import modules (each without imports of its own)
+    Constants => "constants",
+    SimSettingsModule => "sim_settings",
+    SimInfoModule => "sim_info",
+    ParticleState => "particle_state",
+    GridIndex => "grid_index",
+    BSpline => "bspline",
+    FloatChecks => "float_checks",
+    ForceQuantization => "force_quantization",
     Quantization => "quantization",
     QuantizationFill => "quantization_fill",
     Random => "random",
@@ -3627,6 +3634,20 @@ mod tests {
         let sorted = workgroup_memory(ShaderName::P2G3DSorted);
         let bytes = sorted.iter().find(|(name, _)| name == "p2g_3d_sorted");
         assert_eq!(bytes.map(|(_, bytes)| *bytes), Some(4 * 31 * 31 * 4 + 32));
+    }
+
+    /// Every entry point file brings in all the import modules it needs (the
+    /// modules import nothing themselves).
+    #[test]
+    fn every_compute_shader_validates_with_integer_and_float_atomics() {
+        for &shader in ShaderName::ALL {
+            if !load_shader_source(shader, false).contains("@compute") {
+                continue;
+            }
+            for has_float32_atomic in [false, true] {
+                validate_wgsl(shader, has_float32_atomic);
+            }
+        }
     }
 
     #[test]
