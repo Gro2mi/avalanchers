@@ -25,6 +25,8 @@
 @group(0) @binding(11) var<storage> particles_affine_z: array<vec2f>;
 // 3D model only: detached (flying) particles deposit nothing
 @group(0) @binding(12) var<storage> particles_state: array<u32>;
+// 3D model only: cells that hold a depositing particle in this step
+@group(0) @binding(13) var<storage, read_write> grid_occupied: array<atomic<u32>>;
 
 const P2G_SORTED_WG_SIZE: u32 = 256u;
 // 31 keeps the four tiles of the 3D kernel inside the 16 KiB of workgroup
@@ -81,13 +83,19 @@ fn p2g_3d_sorted(
     if node_box.x > node_box.z {
         return; // no valid particle in this workgroup
     }
+    // a flying particle only widens the node box
+    let state = select(0u, particles_state[particle.p_idx], particle.valid);
+    let deposits = particle.valid && (state & PARTICLE_FLYING) == 0u;
+    if deposits {
+        atomicOr(&grid_occupied[xy_to_idx(position_to_cell(particles_position[particle.p_idx]))], 1u);
+    }
     if !box_fits_tile(node_box) {
-        if particle.valid {
+        if deposits {
             transfer_p2g_3d(particle.p_idx, particles_affine_matrix[particle.p_idx]);
         }
         return;
     }
-    if particle.valid {
+    if deposits {
         deposit_to_tile(particle, node_box);
         deposit_z_to_tile(particle, node_box);
     }

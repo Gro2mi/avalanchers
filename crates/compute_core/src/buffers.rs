@@ -147,6 +147,11 @@ pub enum BufferName {
     /// z component of the grid momentum (terrain-following model), kept
     /// separate so GridMomentum stays interleaved (u, v)
     GridMomentumZ,
+    /// 3D model: nonzero for every cell that holds a depositing particle in
+    /// the current step. Only these nodes record the peak flow thickness and
+    /// velocity, so the B-spline spread of the edge particles does not add a
+    /// rim of untouched cells to the footprint. Zeroed by reset_grid.
+    GridOccupied,
     GridVelocity,
     /// z component of the grid velocity (terrain-following model)
     GridVelocityZ,
@@ -248,6 +253,7 @@ impl BufferName {
             BufferName::CenterOfMassPartials => "center_of_mass_partials",
             BufferName::GridMomentum => "grid_momentum",
             BufferName::GridMomentumZ => "grid_momentum_z",
+            BufferName::GridOccupied => "grid_occupied",
             BufferName::GridVelocity => "grid_velocity",
             BufferName::GridVelocityZ => "grid_velocity_z",
             BufferName::GridPeakFlowThickness => "grid_peak_flow_thickness",
@@ -315,6 +321,7 @@ impl std::str::FromStr for BufferName {
             "center_of_mass_partials" => Ok(BufferName::CenterOfMassPartials),
             "grid_momentum" => Ok(BufferName::GridMomentum),
             "grid_momentum_z" => Ok(BufferName::GridMomentumZ),
+            "grid_occupied" => Ok(BufferName::GridOccupied),
             "grid_velocity" => Ok(BufferName::GridVelocity),
             "grid_velocity_z" => Ok(BufferName::GridVelocityZ),
             "grid_peak_flow_thickness" => Ok(BufferName::GridPeakFlowThickness),
@@ -1062,6 +1069,12 @@ pub fn create_buffers_and_texture_descriptions(
         grid_bytes_size,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
     );
+    gpu_resources.add_buffer(
+        device,
+        BufferName::GridOccupied,
+        grid_bytes_size,
+        BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+    );
     // per-cell force vector: written by grid_physics for the terrain-following
     // model, atomically accumulated by p2g_mpmdac for the MPMDAC model,
     // zeroed by reset_grid for every model
@@ -1133,6 +1146,7 @@ mod tests {
             (BufferName::GridMass, "grid_mass"),
             (BufferName::GridMomentum, "grid_momentum"),
             (BufferName::GridMomentumZ, "grid_momentum_z"),
+            (BufferName::GridOccupied, "grid_occupied"),
             (BufferName::GridVelocity, "grid_velocity"),
             (BufferName::GridVelocityZ, "grid_velocity_z"),
             (

@@ -18,6 +18,8 @@
 @group(0) @binding(12) var<storage> grid_momentum_z_atomic: array<i32>; // no_atomic_float
 // atomic_float @group(0) @binding(12) var<storage> grid_momentum_z_atomic: array<f32>;
 @group(0) @binding(13) var<storage, read_write> grid_velocity_z: array<f32>;
+// 3D model: nonzero where a depositing particle lies in the node's cell
+@group(0) @binding(14) var<storage> grid_occupied: array<u32>;
 
 // Cartesian counterpart of grid_physics_curvilinear: forces act on a 3D velocity
 // tangent to the bed and are projected with the bed normal. The node keeps the
@@ -40,7 +42,7 @@ fn grid_physics_terrain_following(@builtin(global_invocation_id) id: vec3u) {
     }
     let mass = node_mass(idx);
     let velocity = surface_to_tangent(node_velocity_xy(idx, mass), n);
-    grid_velocity[idx] = tangent_to_surface(update_node(id.xy, n, velocity, mass), n);
+    grid_velocity[idx] = tangent_to_surface(update_node(id.xy, n, velocity, mass, true), n);
 }
 
 // The same update on a node velocity carried as a full 3D vector.
@@ -67,7 +69,9 @@ fn grid_physics_3d(@builtin(global_invocation_id) id: vec3u) {
     // atomic_float let w = select(grid_momentum_z_atomic[idx] / mass, 0.0, mass <= 0.0);
     // particles on differently inclined beds scatter into this node
     let velocity = tangent_project(vec3f(node_velocity_xy(idx, mass), w), n);
-    let new_velocity = update_node(id.xy, n, velocity, mass);
+    // only cells that hold a particle enter the peak maps, so the B-spline
+    // spread of the flow edge does not mark untouched neighbour cells
+    let new_velocity = update_node(id.xy, n, velocity, mass, grid_occupied[idx] != 0u);
     grid_velocity[idx] = new_velocity.xy;
     grid_velocity_z[idx] = new_velocity.z;
 }
@@ -111,8 +115,10 @@ fn node_velocity_xy(idx: u32, mass: f32) -> vec2f {
 }
 
 // Applies gravity, pressure and friction to the tangent velocity of a node and
-// records the node's diagnostics. Returns the new tangent velocity.
-fn update_node(xy: vec2u, n: vec3f, velocity: vec3f, mass: f32) -> vec3f {
+// records the node's diagnostics (peak velocity, peak flow thickness and the
+// new-cell count) if record_peaks.
+// Returns the new tangent velocity.
+fn update_node(xy: vec2u, n: vec3f, velocity: vec3f, mass: f32, record_peaks: bool) -> vec3f {
     let use_curvature: bool = (sim_settings.flags & (1u << 0u)) != 0u;
     let use_particle_interaction: bool = (sim_settings.flags & (1u << 1u)) != 0u;
     let use_earth_pressure_coefficient: bool = (sim_settings.flags & (1u << 2u)) != 0u;
@@ -122,7 +128,7 @@ fn update_node(xy: vec2u, n: vec3f, velocity: vec3f, mass: f32) -> vec3f {
 
     let h = get_h(xy.x, xy.y);
     let current_peak_flow_thickness = peak_flow_thickness[idx];
-    if current_peak_flow_thickness < h {
+    if record_peaks && current_peak_flow_thickness < h {
         // only if previously cell was empty, we count it as a new cell for diagnostics
         if current_peak_flow_thickness < 1e-5 {
             new_cells_rolling_window[sim_info.timestep % no_new_cells_window()] = new_cells_rolling_window[sim_info.timestep % no_new_cells_window()] + 1u; // update new cell count for diagnostics
@@ -185,10 +191,10 @@ fn update_node(xy: vec2u, n: vec3f, velocity: vec3f, mass: f32) -> vec3f {
     }
 
     let v_mag = length(new_velocity);
-    if !is_nan(v_mag) && h > 1e-3 && bitcast<u32>(v_mag) > atomicLoad(&atomic_values.peak_velocity) {
+    if record_peaks && !is_nan(v_mag) && h > 1e-3 && bitcast<u32>(v_mag) > atomicLoad(&atomic_values.peak_velocity) {
         atomicMax(&atomic_values.peak_velocity, bitcast<u32>(v_mag));
     }
-    if !is_nan(v_mag) && h > 1e-3 {
+    if record_peaks && !is_nan(v_mag) && h > 1e-3 {
         grid_peak_velocity[idx] = max(grid_peak_velocity[idx], v_mag);
     }
     if sim_settings.momentum_stop_fraction > 0.0 && !is_nan(v_mag) {

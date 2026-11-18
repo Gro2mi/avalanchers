@@ -5,6 +5,8 @@
 @group(0) @binding(4) var<storage, read_write> grid_forces_atomic: array<i32>;
 @group(0) @binding(5) var<storage, read_write> sim_info: SimInfo;
 @group(0) @binding(6) var<storage, read_write> grid_momentum_z_atomic: array<i32>;
+// 3D model: cells that hold a depositing particle
+@group(0) @binding(7) var<storage, read_write> grid_occupied: array<u32>;
 
 @compute @workgroup_size(WG_SIZE_2D, WG_SIZE_2D, 1)
 fn reset_grid(@builtin(global_invocation_id) global_id: vec3<u32>) {
@@ -16,6 +18,7 @@ fn reset_grid(@builtin(global_invocation_id) global_id: vec3<u32>) {
         grid_momentum_atomic[xy_to_idx(global_id.xy) * 2u] = 0; // Reset grid momentum (u) for the new timestep
         grid_momentum_atomic[xy_to_idx(global_id.xy) * 2u + 1u] = 0; // Reset grid momentum (v) for the new timestep
         grid_momentum_z_atomic[xy_to_idx(global_id.xy)] = 0; // Reset grid momentum (w) of the terrain-following model
+        grid_occupied[xy_to_idx(global_id.xy)] = 0u;
         grid_forces_atomic[xy_to_idx(global_id.xy) * 2u] = 0; // Reset grid forces (x) for the new timestep
         grid_forces_atomic[xy_to_idx(global_id.xy) * 2u + 1u] = 0; // Reset grid forces (y) for the new timestep
     }

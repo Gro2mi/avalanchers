@@ -13,6 +13,8 @@
 @group(0) @binding(10) var<storage> particles_affine_z: array<vec2f>;
 // 3D model only: detached (flying) particles deposit nothing
 @group(0) @binding(11) var<storage> particles_state: array<u32>;
+// 3D model only: cells that hold a depositing particle in this step
+@group(0) @binding(12) var<storage, read_write> grid_occupied: array<atomic<u32>>;
 
 override WG_SIZE_1D: u32 = 1u;
 @compute @workgroup_size(WG_SIZE_1D, 1, 1)
@@ -62,6 +64,7 @@ fn p2g_3d(@builtin(global_invocation_id) id: vec3u) {
         return;
     }
     transfer_p2g_3d(id.x, particles_affine_matrix[id.x]);
+    atomicOr(&grid_occupied[xy_to_idx(cell)], 1u);
 }
 
 // import transfer_p2g_z.wgsl;

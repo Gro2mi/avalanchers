@@ -2070,6 +2070,15 @@ fn collect_shader_configs(
                         min_binding_size: None,
                     },
                 ),
+                // Binding 7:
+                (
+                    BufferName::GridOccupied.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
             ],
         )?,
     );
@@ -2612,6 +2621,10 @@ fn collect_shader_configs(
             BufferName::ParticlesAffineZ.to_string(),
             storage_buffer(true),
         ),
+        // Binding 11: flying particles deposit nothing
+        (BufferName::ParticlesState.to_string(), storage_buffer(true)),
+        // Binding 12: cells that hold a depositing particle
+        (BufferName::GridOccupied.to_string(), storage_buffer(false)),
     ]);
     let mut three_d_sorted_p2g_bindings = existing_bindings(ShaderName::P2G2DSorted);
     three_d_sorted_p2g_bindings.extend([
@@ -2627,6 +2640,10 @@ fn collect_shader_configs(
             BufferName::ParticlesAffineZ.to_string(),
             storage_buffer(true),
         ),
+        // Binding 12: flying particles deposit nothing
+        (BufferName::ParticlesState.to_string(), storage_buffer(true)),
+        // Binding 13: cells that hold a depositing particle
+        (BufferName::GridOccupied.to_string(), storage_buffer(false)),
     ]);
     let mut terrain_following_grid_physics_bindings =
         existing_bindings(ShaderName::GridPhysicsCurvilinear);
@@ -2639,6 +2656,8 @@ fn collect_shader_configs(
         (BufferName::GridMomentumZ.to_string(), storage_buffer(true)),
         // Binding 13:
         (BufferName::GridVelocityZ.to_string(), storage_buffer(false)),
+        // Binding 14: only nodes whose cell holds a particle record peaks
+        (BufferName::GridOccupied.to_string(), storage_buffer(true)),
     ]);
     let mut terrain_following_g2p_bindings = existing_bindings(ShaderName::G2P);
     // the curvilinear binding 14 is the z velocity, which this model does not have
