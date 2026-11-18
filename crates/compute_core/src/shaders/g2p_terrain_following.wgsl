@@ -47,7 +47,12 @@ override WG_SIZE_1D: u32 = 1u;
 @compute @workgroup_size(WG_SIZE_1D, 1, 1)
 fn g2p_terrain_following(@builtin(global_invocation_id) pId: vec3<u32>) {
     let particleId = pId.x;
-    if particle_is_inactive(particleId) {
+    if invocation_is_idle(particleId) {
+        return;
+    }
+    // read once; the paths below write it at most once more
+    let state = particles_state[particleId];
+    if (state & PARTICLE_STOPPED) != 0u {
         return;
     }
     let position_xy = particles_position[particleId];
@@ -63,7 +68,7 @@ fn g2p_terrain_following(@builtin(global_invocation_id) pId: vec3<u32>) {
     if stop_if_too_fast(particleId, length(surface_to_tangent(update.velocity, normal))) {
         return;
     }
-    if update_rest_state(particleId, length(update.velocity)) {
+    if is_resting(update_rest_state(particleId, state, length(update.velocity))) {
         particles_velocity[particleId] = vec2f(0.0);
         particles_affine_matrix[particleId] = mat2x2<f32>(vec2f(0.0), vec2f(0.0));
         return;
@@ -94,7 +99,12 @@ fn g2p_terrain_following(@builtin(global_invocation_id) pId: vec3<u32>) {
 @compute @workgroup_size(WG_SIZE_1D, 1, 1)
 fn g2p_3d(@builtin(global_invocation_id) pId: vec3<u32>) {
     let particleId = pId.x;
-    if particle_is_inactive(particleId) {
+    if invocation_is_idle(particleId) {
+        return;
+    }
+    // read once; the paths below write it at most once more
+    let state = particles_state[particleId];
+    if (state & PARTICLE_STOPPED) != 0u {
         return;
     }
     let position_xy = particles_position[particleId];
@@ -108,10 +118,10 @@ fn g2p_3d(@builtin(global_invocation_id) pId: vec3<u32>) {
     let normal = normalize(terrain.xyz);
 
     // a detached particle moves under gravity alone, outside the grid
-    if (particles_state[particleId] & PARTICLE_FLYING) != 0u {
+    if (state & PARTICLE_FLYING) != 0u {
         let start = vec3f(position_xy, particles_elevation[particleId]);
         let velocity = vec3f(particles_velocity[particleId], particles_velocity_z[particleId]);
-        fly_step(particleId, flight_motion(start, velocity), uv);
+        fly_step(particleId, state, flight_motion(start, velocity), uv);
         return;
     }
 
@@ -145,7 +155,8 @@ fn g2p_3d(@builtin(global_invocation_id) pId: vec3<u32>) {
         clear_z(particleId);
         return;
     }
-    if update_rest_state(particleId, length(interpolated_velocity)) {
+    let rest_state = update_rest_state(particleId, state, length(interpolated_velocity));
+    if is_resting(rest_state) {
         particles_velocity[particleId] = vec2f(0.0);
         particles_affine_matrix[particleId] = mat2x2<f32>(vec2f(0.0), vec2f(0.0));
         clear_z(particleId);
@@ -161,8 +172,9 @@ fn g2p_3d(@builtin(global_invocation_id) pId: vec3<u32>) {
         let flight = flight_motion(start, tangent_velocity);
         // NaN off the DEM data: the particle stays on the bed
         if flight.position.z > get_elevation(position_to_uv(flight.position.xy)) {
-            particles_state[particleId] |= PARTICLE_FLYING;
-            fly_step(particleId, flight, uv);
+            let flying_state = rest_state | PARTICLE_FLYING;
+            particles_state[particleId] = flying_state;
+            fly_step(particleId, flying_state, flight, uv);
             return;
         }
     }
@@ -216,8 +228,9 @@ fn flight_motion(position: vec3f, velocity: vec3f) -> FlightMotion {
 // Applies a flight step of a detached particle. It lands once it falls below
 // the bed, keeping only the tangential part of its velocity (inelastic
 // impact). It carries no APIC gradient and deposits nothing on the grid
-// (p2g_3d), so its speed enters the CFL condition here.
-fn fly_step(particleId: u32, flight: FlightMotion, uv: vec2f) {
+// (p2g_3d), so its speed enters the CFL condition here. state is the
+// particle's current (flying) state.
+fn fly_step(particleId: u32, state: u32, flight: FlightMotion, uv: vec2f) {
     var position = flight.position;
     var new_velocity = flight.velocity;
     particles_affine_matrix[particleId] = mat2x2<f32>(vec2f(0.0), vec2f(0.0));
@@ -238,7 +251,7 @@ fn fly_step(particleId: u32, flight: FlightMotion, uv: vec2f) {
         normal_new = normalize(terrain_new.xyz);
         new_velocity = landing_velocity(new_velocity, normal_new);
         position.z = bed;
-        particles_state[particleId] = particles_state[particleId] & ~PARTICLE_FLYING;
+        particles_state[particleId] = state & ~PARTICLE_FLYING;
     }
     particles_position[particleId] = position.xy;
     particles_elevation[particleId] = position.z;
@@ -295,10 +308,11 @@ fn clear_z(particleId: u32) {
     particles_affine_z[particleId] = vec2f(0.0);
 }
 
-fn particle_is_inactive(particleId: u32) -> bool {
+// beyond the particle count or the run stopped; stopped particles are checked
+// on the state the entry points read once
+fn invocation_is_idle(particleId: u32) -> bool {
     return particleId >= sim_info.number_particles
-        || (sim_info.flags & SIM_INFO_STOPPED) != 0u
-        || (particles_state[particleId] & PARTICLE_STOPPED) != 0u;
+        || (sim_info.flags & SIM_INFO_STOPPED) != 0u;
 }
 
 // Stopped particles keep depositing mass, but no stale momentum.
@@ -325,15 +339,19 @@ fn stop_outside_dem(particleId: u32) {
     sim_info.flags |= SIM_INFO_PARTICLE_OUT_OF_DEM_DATA;
 }
 
-// Returns whether the particle rests after this step.
-fn update_rest_state(particleId: u32, speed: f32) -> bool {
-    let state = next_rest_state(particles_state[particleId], speed, sim_info.timestep);
-    particles_state[particleId] = state;
-    let resting = (state & PARTICLE_RESTING) != 0u;
-    if resting {
+// Writes and returns the particle state after this step's rest update, from
+// the state read at the start of the step.
+fn update_rest_state(particleId: u32, state: u32, speed: f32) -> u32 {
+    let new_state = next_rest_state(state, speed, sim_info.timestep);
+    particles_state[particleId] = new_state;
+    if is_resting(new_state) {
         atomicAdd(&atomic_values.resting_particles, 1u);
     }
-    return resting;
+    return new_state;
+}
+
+fn is_resting(state: u32) -> bool {
+    return (state & PARTICLE_RESTING) != 0u;
 }
 
 // Curvature-corrected arc step, snapped onto the DEM.
