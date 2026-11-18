@@ -182,11 +182,12 @@ impl PySimInfo {
     }
 }
 
-/// Diagonal-normalized chamfer distance between two cell sets.
+/// Chamfer distance between two cell sets.
 ///
-/// All values are distances measured in world units and then divided by the
-/// length of the grid diagonal, so they are dimensionless and comparable
-/// across grid resolutions. A value of 0 means the two cell sets coincide.
+/// All values are distances in world units (m). They are not normalized: the
+/// grid size depends on the domain padding, so divide by a length of the
+/// avalanche itself (e.g. ``beeline_3d_ref``) to compare avalanches. A value
+/// of 0 means the two cell sets coincide.
 #[pyclass]
 pub struct PyChamferDistance {
     inner: ChamferDistance,
@@ -195,7 +196,7 @@ pub struct PyChamferDistance {
 #[pymethods]
 impl PyChamferDistance {
     /// Mean distance from every simulated cell to the nearest reference
-    /// (region of interest) cell, normalized by the grid diagonal.
+    /// (region of interest) cell, in metres.
     ///
     /// Infinite if the simulation produced cells but the reference is empty.
     #[getter]
@@ -204,7 +205,7 @@ impl PyChamferDistance {
     }
 
     /// Mean distance from every reference cell to the nearest simulated
-    /// cell, normalized by the grid diagonal.
+    /// cell, in metres.
     ///
     /// Infinite if the reference has cells but the simulation is empty.
     #[getter]
@@ -275,7 +276,7 @@ impl PyEvaluation {
         self.metrics.sim_to_roi
     }
 
-    /// Diagonal-normalized chamfer distance between the simulated cells and
+    /// Chamfer distance (m) between the simulated cells and
     /// the reference region of interest (see :class:`PyChamferDistance`).
     #[getter]
     fn roi_to_sim(&self) -> f64 {
@@ -694,8 +695,8 @@ impl PySimulation {
 
     /// Evaluate the finished simulation and return all metrics.
     ///
-    /// Runs both the GPU metrics (overlap components, diagonal-normalized
-    /// chamfer distance against the region of interest and the 3D beeline
+    /// Runs both the GPU metrics (overlap components, the chamfer distance in
+    /// metres against the region of interest and the 3D beeline
     /// distance between the highest and lowest avalanche point) and the
     /// reference-based runout diagnostics.
     ///

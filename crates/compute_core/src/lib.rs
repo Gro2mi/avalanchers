@@ -1586,8 +1586,8 @@ impl ComputeOrchestrator {
     /// metrics combined into a single MassMovementEvaluation:
     /// - intersection/undershoot/overshoot/iou from the simulated vs. reference cell counts
     /// - beeline_3d between the highest and lowest avalanche point
-    /// - chamfer between the simulated cells and the region of interest,
-    ///   normalized with the length of the grid diagonal
+    /// - chamfer between the simulated cells and the region of interest, in
+    ///   metres (not normalized: the grid size depends on the domain padding)
     ///
     /// Release cells (ReleaseAreas > RELEASE_THICKNESS_THRESHOLD) are left out of the overlap counts and
     /// the chamfer means, so the area metrics do not improve with the release
@@ -1645,10 +1645,6 @@ impl ComputeOrchestrator {
         let mut evaluation =
             evaluation_from_counts(raw.intersection, raw.undershoot, raw.overshoot);
         evaluation.beeline_3d = raw.beeline_distance as f64;
-        let diagonal = (((sim_settings.grid_shape_x as f64) * (sim_settings.cell_size as f64))
-            .powi(2)
-            + ((sim_settings.grid_shape_y as f64) * (sim_settings.cell_size as f64)).powi(2))
-        .sqrt();
         Ok(evaluation.with_chamfer(chamfer_from_sums(
             raw.sum_sim_to_roi,
             raw.count_sim,
@@ -1656,7 +1652,6 @@ impl ComputeOrchestrator {
             raw.count_roi,
             raw.roi_seeded != 0,
             raw.sim_seeded != 0,
-            diagonal,
         )))
     }
 
@@ -3841,8 +3836,7 @@ mod tests {
     #[test_log::test]
     fn test_evaluate_gpu_chamfer_distance() {
         // 3x3 grid with cell_size 5: a simulated cell at (2,0) and ROI cells at
-        // (0,0) and (2,2). Every nearest distance is 2 cells = 10 world units,
-        // the grid diagonal is 15*sqrt(2).
+        // (0,0) and (2,2). Every nearest distance is 2 cells = 10 world units.
         let settings = settings::SimSettings {
             grid_shape_x: 3,
             grid_shape_y: 3,
@@ -3881,7 +3875,8 @@ mod tests {
 
         let result = block_on(orchestrator.evaluate_gpu(&settings)).expect("GPU evaluation failed");
 
-        let expected_per_direction = 10.0 / (15.0 * (2.0f64).sqrt());
+        // in metres, not normalized by the grid
+        let expected_per_direction = 10.0;
         assert!(
             (result.sim_to_roi - expected_per_direction).abs() < 1e-6,
             "sim_to_roi was {}",
@@ -3953,9 +3948,9 @@ mod tests {
         (settings, result)
     }
 
+    /// Distance (m) between the centres of the two end cells of the row.
     fn row_ends_distance(width: u32) -> f64 {
-        let (length, height) = (width as f64 * 5.0, 5.0f64);
-        (width - 1) as f64 * 5.0 / length.hypot(height)
+        (width - 1) as f64 * 5.0
     }
 
     #[test_log::test]
@@ -3989,7 +3984,7 @@ mod tests {
             block_on(ComputeOrchestrator::new()).expect("Failed to create ComputeOrchestrator");
         let (_, result) = evaluate_row_ends(&mut orchestrator, 64);
         assert!(
-            (result.sim_to_roi - row_ends_distance(64)).abs() < 1e-5,
+            (result.sim_to_roi - row_ends_distance(64)).abs() < 1e-3,
             "sim_to_roi was {}",
             result.sim_to_roi
         );
@@ -4023,7 +4018,7 @@ mod tests {
         // a new grid gets buffers and flood steps of its own size
         let (_, smaller) = evaluate_row_ends(&mut orchestrator, 8);
         assert!(
-            (smaller.sim_to_roi - row_ends_distance(8)).abs() < 1e-5,
+            (smaller.sim_to_roi - row_ends_distance(8)).abs() < 1e-3,
             "sim_to_roi was {}",
             smaller.sim_to_roi
         );
