@@ -19,10 +19,10 @@ final position. Particles of the neighbouring cells are drawn too, so the
 window is not cut out of the packing.
 
 Usage:
-    python plot_particle_placement.py                  # 7 particles per cell
-    python plot_particle_placement.py --particles-per-cell 13
+    python plot_particle_placement.py                  # 13 particles per cell
+    python plot_particle_placement.py --particles-per-cell 7
     python plot_particle_placement.py --placement relaxed  # random seeding
-    python plot_particle_placement.py --location corner  # release corner
+    python plot_particle_placement.py --location interior  # release corner
     python plot_particle_placement.py --show
 """
 
@@ -43,7 +43,7 @@ RELEASE_THICKNESS = 1.0  # m
 WINDOW_CELLS = (2, 1)
 WINDOW = {"interior": (3, 3), "corner": (0, 0)}
 # an odd, non-square count shows rows with different numbers of strata
-DEFAULT_PARTICLES_PER_CELL = 7
+DEFAULT_PARTICLES_PER_CELL = 13
 # relaxed placement -> (the same seeding without relaxation, its label)
 PLACEMENTS = {
     "uniform-relaxed": ("uniform-random", "stratified"),
@@ -311,7 +311,7 @@ def main():
     parser.add_argument("--placement", choices=sorted(PLACEMENTS), default="uniform-relaxed",
                         help="relaxed placement to show: uniform-relaxed (stratified "
                              "seeding, default) or relaxed (random seeding)")
-    parser.add_argument("--location", choices=sorted(WINDOW), default="interior",
+    parser.add_argument("--location", choices=sorted(WINDOW), default="corner",
                         help="2 x 1 window inside the release or at its corner")
     parser.add_argument("--out-dir", type=pathlib.Path, default=OUTPUT_DIR)
     parser.add_argument("--show", action="store_true", help="also open the figure")
