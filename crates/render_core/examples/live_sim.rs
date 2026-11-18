@@ -9,6 +9,7 @@
 //! simulation, `V` resets the view, `0` hides the overlay, `1` peak flow velocity, `2`
 //! peak flow thickness, `3` grid mass, `4` release areas, `5` slope angle, `6` slope
 //! aspect, `7` roughness, `8` grid momentum, `P` toggles particles, `J` the particle elevation jitter. The egui panel
+//! scales the particle size (1 = a sphere of the particle volume, applied at once),
 //! switches the testcase (the DEM pngs next to the configured one), the simulation
 //! model and the other simulation settings; sliders fine-tune with the arrow keys once
 //! focused (click the slider or its label, or `Tab` to it), and double-clicking a
@@ -19,7 +20,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use compute_core::settings::{FrictionModel, ParticlePlacement, Settings, SimModel};
+use compute_core::settings::{
+    DEFAULT_FLIGHT_TERMINAL_VELOCITY, FrictionModel, ParticlePlacement, Settings, SimModel,
+};
 use compute_core::{ComputeOrchestrator, SimInfo, buffers::BufferName};
 use render_core::{OrbitCamera, OverlayRange, ParticleBuffers, Renderer, TerrainData};
 use simulation::{Simulation, SimulationState};
@@ -84,6 +87,9 @@ const DEFAULT_RELEASED_PARTICLES_PER_CELL: u32 = 8;
 const DEFAULT_MAX_STEPS: u32 = 6000;
 /// 0 disables the reference-surface split (gully confinement) of the grid models
 const DEFAULT_REFERENCE_SURFACE_LENGTH: f32 = 0.0;
+/// Rendered particle radius over the radius of a sphere holding the particle
+/// volume (visual only).
+const DEFAULT_PARTICLE_SIZE_SCALE: f32 = 1.4;
 
 /// Fills in every field the settings panel edits with the engine defaults from
 /// `SimSettings::new`. `from_settings` already falls back to those values for unset
@@ -128,6 +134,10 @@ fn apply_panel_defaults(settings: &mut Settings) {
         .friction_model
         .get_or_insert(FrictionModel::Voellmy);
     settings.enable_curvature.get_or_insert(true);
+    settings.enable_detachment.get_or_insert(false);
+    settings
+        .flight_terminal_velocity
+        .get_or_insert(DEFAULT_FLIGHT_TERMINAL_VELOCITY);
     settings.enable_particle_interaction.get_or_insert(true);
     settings.particle_placement.get_or_insert_default();
     settings
@@ -329,6 +339,9 @@ struct SimulationView {
     /// Absent for models without a vertical velocity.
     velocity_z: Option<wgpu::Buffer>,
     particle_count: u32,
+    /// Radius of a sphere holding the mean particle volume, in metres; the
+    /// rendered particle size at a size scale of 1.
+    particle_volume_radius: f32,
     info: SimInfo,
     exaggeration: f32,
     failed: bool,
@@ -341,11 +354,15 @@ struct SimulationView {
 impl SimulationView {
     /// Factor from a raw `GridMass` value to metres of flow, and whether the
     /// mass is stored as f32 bits (float-atomic grid) instead of a quantized
-    /// u32 (see `SimSettings::mass_factor`).
+    /// u32 (see `SimInfo::mass_factor`; the range adapts during the run).
     fn grid_mass_encoding(&self) -> (f32, bool) {
         let settings = &self.simulation.settings;
         let is_f32 = self.simulation.orchestrator().has_float32_atomic();
-        let mass_factor = if is_f32 { 1.0 } else { settings.mass_factor() };
+        let mass_factor = if is_f32 {
+            1.0
+        } else {
+            self.info.mass_factor(settings)
+        };
         let thickness =
             1.0 / (mass_factor * settings.density * settings.cell_size * settings.cell_size);
         (thickness, is_f32)
@@ -354,7 +371,12 @@ impl SimulationView {
     /// kg m/s per step of the quantized `GridMomentum` of the integer-atomic
     /// grid, for the momentum overlay.
     fn momentum_unit(&self) -> f32 {
-        1.0 / self.simulation.settings.momentum_factor()
+        1.0 / self.info.momentum_factor(&self.simulation.settings)
+    }
+
+    /// The adaptive integer-atomic grid ranges of the last step.
+    fn quantization_scales(&self) -> (f32, f32) {
+        (self.info.mass_scale, self.info.momentum_scale)
     }
 
     fn grid(&self, name: &BufferName) -> &wgpu::Buffer {
@@ -423,6 +445,8 @@ impl SimulationView {
             .collect::<anyhow::Result<Vec<_>>>()?;
         (self.particles, self.velocity_z) = clone_particle_buffers(orchestrator)?;
         self.particle_count = self.info.number_particles;
+        self.particle_volume_radius =
+            volume_sphere_radius(&mut self.simulation, self.particle_count);
         self.failed = false;
         self.final_info_reported = false;
         self.step_timings.clear();
@@ -557,6 +581,35 @@ impl SimulationView {
     }
 }
 
+/// Radius of the sphere whose volume equals the mean particle volume (particle
+/// mass over snow density), the default rendered particle size. Reads the
+/// particle masses back once per (re)initialisation; falls back to 0.9 cells
+/// when they cannot be read.
+fn volume_sphere_radius(simulation: &mut Simulation, particle_count: u32) -> f32 {
+    let fallback = simulation.settings.cell_size * 0.9;
+    if particle_count == 0 {
+        return fallback;
+    }
+    match pollster::block_on(simulation.get_total_volume()) {
+        Ok(volume) if volume.is_finite() && volume > 0.0 => {
+            let mean_volume = volume / particle_count as f32;
+            let radius = (3.0 * mean_volume / (4.0 * std::f32::consts::PI)).cbrt();
+            tracing::debug!("Particle volume {mean_volume:.3} m3, sphere radius {radius:.3} m");
+            radius
+        }
+        Ok(volume) => {
+            tracing::warn!("Total particle volume is {volume}; using a fixed particle size");
+            fallback
+        }
+        Err(error) => {
+            tracing::warn!(
+                "Could not read the particle masses ({error}); using a fixed particle size"
+            );
+            fallback
+        }
+    }
+}
+
 fn start_simulation(settings: Settings, exaggeration: f32) -> anyhow::Result<SimulationView> {
     let mut sim: Simulation = pollster::block_on(Simulation::new_with_settings(settings))?;
     tracing::debug!(
@@ -576,6 +629,7 @@ fn start_simulation(settings: Settings, exaggeration: f32) -> anyhow::Result<Sim
 
     // Lazily prepares the simulation and incremental pipelines without advancing time.
     let info = pollster::block_on(sim.run_n_steps(0))?;
+    let particle_volume_radius = volume_sphere_radius(&mut sim, info.number_particles);
     let orchestrator = sim.orchestrator();
     let clone_buffer = |name: BufferName| -> anyhow::Result<wgpu::Buffer> {
         orchestrator
@@ -608,6 +662,7 @@ fn start_simulation(settings: Settings, exaggeration: f32) -> anyhow::Result<Sim
         particles,
         velocity_z,
         particle_count: info.number_particles,
+        particle_volume_radius,
         info,
         exaggeration,
         failed: false,
@@ -652,7 +707,7 @@ fn write_snapshot(sim: &SimulationView, overlay: Overlay, path: &str) -> anyhow:
     renderer.particles_mut().set_max_velocity(30.0);
     renderer
         .particles_mut()
-        .set_radius(sim.terrain.cell_size() * 0.9);
+        .set_radius(sim.particle_volume_radius * DEFAULT_PARTICLE_SIZE_SCALE);
 
     let pixels = render_core::capture::render_to_rgba8(
         &sim.device,
@@ -761,6 +816,8 @@ struct Viewer {
     show_particles: bool,
     /// Lift particles by a random share of the local flow thickness (visual only).
     particle_jitter: bool,
+    /// Rendered particle radius in units of the particle-volume sphere radius.
+    particle_size_scale: f32,
     /// Input or rebuild changed the view; the next redraw must render. Keeps an
     /// idle viewer at zero GPU work instead of redrawing identical frames.
     dirty: bool,
@@ -784,6 +841,7 @@ impl Viewer {
             overlay: Overlay::PeakFlowVelocity,
             show_particles: true,
             particle_jitter: true,
+            particle_size_scale: DEFAULT_PARTICLE_SIZE_SCALE,
             dirty: true,
             pending_render: false,
             last_render_at: Instant::now(),
@@ -815,6 +873,32 @@ impl Viewer {
         tracing::info!("Overlay: {}", self.overlay.label());
     }
 
+    /// Hands the renderer the integer grid factors again after the adaptive
+    /// ranges changed (quantization.wgsl).
+    fn refresh_grid_encoding(&mut self) {
+        let Some(view) = self.window.as_mut() else {
+            return;
+        };
+        if self.overlay == Overlay::GridMomentum {
+            let buffer = self.overlay.buffer_name().map(|name| self.sim.grid(&name));
+            attach_overlay(
+                &mut view.renderer,
+                &self.sim.device,
+                self.overlay,
+                buffer,
+                self.sim.momentum_unit(),
+            );
+        }
+        let (mass_to_thickness, mass_is_f32) = self.sim.grid_mass_encoding();
+        let amplitude = if self.particle_jitter { 1.0 } else { 0.0 };
+        view.renderer.particles_mut().set_elevation_jitter(
+            amplitude,
+            mass_to_thickness,
+            mass_is_f32,
+        );
+        self.dirty = true;
+    }
+
     fn apply_particles(&mut self) {
         let Some(view) = self.window.as_mut() else {
             return;
@@ -835,6 +919,19 @@ impl Viewer {
             mass_to_thickness,
             mass_is_f32,
         );
+        self.dirty = true;
+    }
+
+    /// Rendered particle radius: the particle-volume sphere times the size scale.
+    fn particle_radius(&self) -> f32 {
+        self.sim.particle_volume_radius * self.particle_size_scale
+    }
+
+    fn apply_particle_size(&mut self) {
+        let radius = self.particle_radius();
+        if let Some(view) = self.window.as_mut() {
+            view.renderer.particles_mut().set_radius(radius);
+        }
         self.dirty = true;
     }
 
@@ -869,11 +966,12 @@ impl Viewer {
         }
         self.apply_overlay();
         self.apply_particles();
+        let radius = self.particle_radius();
         if let Some(view) = self.window.as_mut() {
             let particles = view.renderer.particles_mut();
             particles.set_count(self.sim.particle_count);
             particles.set_max_velocity(30.0);
-            particles.set_radius(self.sim.terrain.cell_size() * 0.9);
+            particles.set_radius(radius);
             view.window.request_redraw();
         }
         Ok(())
@@ -970,11 +1068,12 @@ impl ApplicationHandler for Viewer {
 
         self.apply_overlay();
         self.apply_particles();
+        let radius = self.particle_radius();
         if let Some(view) = self.window.as_mut() {
             let particles = view.renderer.particles_mut();
             particles.set_count(self.sim.particle_count);
             particles.set_max_velocity(30.0);
-            particles.set_radius(self.sim.terrain.cell_size() * 0.9);
+            particles.set_radius(radius);
         }
     }
 
@@ -1121,6 +1220,7 @@ impl ApplicationHandler for Viewer {
                         } else {
                             self.apply_overlay();
                             self.apply_particles();
+                            self.apply_particle_size();
                             if let Some(view) = self.window.as_ref() {
                                 view.window.request_redraw();
                             }
@@ -1197,6 +1297,9 @@ impl ApplicationHandler for Viewer {
                 let mut draft = self.draft.clone();
                 let mut draft_case = draft_case_before.clone();
                 let mut apply_clicked = false;
+                // Visual only: applied immediately, not through the draft settings.
+                let mut particle_size = Some(self.particle_size_scale);
+                let volume_radius = self.sim.particle_volume_radius;
                 let egui_ctx = view.egui_state.egui_ctx().clone();
                 let input = view.egui_state.take_egui_input(&view.window);
                 // `run_ui` (not bare `begin_pass`) so egui knows the root UI covers the
@@ -1212,6 +1315,23 @@ impl ApplicationHandler for Viewer {
                         .default_width(280.0)
                         .show(root.ctx(), |ui| {
                             ui.label(format!("step {timestep} — {elapsed:.2} s"));
+                            ui.add_space(4.0);
+
+                            let scale = particle_size.unwrap_or(DEFAULT_PARTICLE_SIZE_SCALE);
+                            f32_slider(
+                                ui,
+                                "particle size",
+                                DEFAULT_PARTICLE_SIZE_SCALE,
+                                &mut particle_size,
+                                0.1..=10.0,
+                                0.05,
+                            )
+                            .0
+                            .on_hover_text(format!(
+                                "Rendered radius {:.2} m. 1 = a sphere of the particle volume \
+                                 (mass / density, r = {volume_radius:.2} m)",
+                                volume_radius * scale
+                            ));
                             ui.add_space(4.0);
 
                             ui.horizontal(|ui| {
@@ -1458,6 +1578,19 @@ impl ApplicationHandler for Viewer {
 
                             egui::CollapsingHeader::new("features").show(ui, |ui| {
                                 bool_checkbox(ui, "curvature", &mut draft.enable_curvature);
+                                bool_checkbox(ui, "lift-off (3D)", &mut draft.enable_detachment);
+                                ui.add_enabled_ui(draft.enable_detachment == Some(true), |ui| {
+                                    f32_slider(
+                                        ui,
+                                        "flight terminal velocity (m/s)",
+                                        DEFAULT_FLIGHT_TERMINAL_VELOCITY,
+                                        &mut draft.flight_terminal_velocity,
+                                        0.0..=150.0,
+                                        1.0,
+                                    )
+                                    .0
+                                    .on_hover_text("Air drag on flying particles. 0 = no drag");
+                                });
                                 bool_checkbox(
                                     ui,
                                     "particle interaction",
@@ -1504,6 +1637,15 @@ impl ApplicationHandler for Viewer {
                 self.draft = draft;
                 if apply_clicked {
                     pending_settings = Some(self.draft.clone());
+                }
+                // The scene above was drawn with the previous size; redraw once more.
+                let particle_size = particle_size.unwrap_or(DEFAULT_PARTICLE_SIZE_SCALE);
+                let particle_size_changed = particle_size != self.particle_size_scale;
+                if particle_size_changed {
+                    self.particle_size_scale = particle_size;
+                    view.renderer
+                        .particles_mut()
+                        .set_radius(self.sim.particle_volume_radius * particle_size);
                 }
 
                 let pixels_per_point = egui_ctx.pixels_per_point();
@@ -1559,9 +1701,12 @@ impl ApplicationHandler for Viewer {
                 full_output.textures_delta.clear();
 
                 queue.present(frame);
-                self.dirty = false;
+                self.dirty = particle_size_changed;
                 self.pending_render = false;
                 self.last_render_at = Instant::now();
+                if particle_size_changed {
+                    view.window.request_redraw();
+                }
             }
             _ => {}
         }
@@ -1576,12 +1721,13 @@ impl ApplicationHandler for Viewer {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        let Some(view) = self.window.as_ref() else {
+        if self.window.is_none() {
             return;
-        };
+        }
 
         // Drain every due step batch (bounded); rendering is capped separately so
         // fast runs are not throttled to the display rate.
+        let scales = self.sim.quantization_scales();
         let mut stepped = false;
         for _ in 0..MAX_STEP_BATCHES_PER_WAKE {
             match self.sim.advance_frame() {
@@ -1592,6 +1738,12 @@ impl ApplicationHandler for Viewer {
         if stepped {
             self.pending_render = true;
         }
+        if self.sim.quantization_scales() != scales {
+            self.refresh_grid_encoding();
+        }
+        let Some(view) = self.window.as_ref() else {
+            return;
+        };
 
         let active =
             !self.sim.failed && self.sim.simulation.get_state() < SimulationState::Finished;
@@ -1729,7 +1881,17 @@ mod tests {
             1.0,
         )
         .unwrap();
+        let first_particle_count = view.particle_count;
         let first_width = view.simulation.dem.width;
+        // r^3 = 3 V / (4 pi) with V = total volume / particle count
+        let volume = pollster::block_on(view.simulation.get_total_volume()).unwrap();
+        let mean_volume = volume / view.particle_count as f32;
+        let sphere_volume = 4.0 / 3.0 * std::f32::consts::PI * view.particle_volume_radius.powi(3);
+        assert!(
+            (sphere_volume - mean_volume).abs() < 1e-3 * mean_volume,
+            "particle sphere {sphere_volume} m3 vs particle volume {mean_volume} m3"
+        );
+        eprintln!("particle sphere radius {} m", view.particle_volume_radius);
 
         view.apply_settings(&Settings {
             dem_path: Some(format!("{avaframe}/avaParabola.png")),
@@ -1743,7 +1905,7 @@ mod tests {
             "different testcase should switch the terrain"
         );
         assert_eq!(view.grids.len(), GRID_BUFFERS.len());
-        assert_eq!(view.particles.len(), 5);
+        assert_eq!(view.particles.len(), 4);
         assert_eq!(view.particle_count, view.info.number_particles);
         assert!(view.particle_count > 0);
 
