@@ -1,6 +1,7 @@
 """Run avalanchers verification tests and write a markdown report.
 
-Runs the energy line, curvature, dam break, rotation and similarity solution tests
+Runs the energy line, curvature, dam break, rotation, similarity solution and
+(3D model only) double bump tests
 (see the sibling ``run_<test>.py`` scripts) IN-PROCESS with a switchable
 simulation model, collects each test's console tables, summary plots and
 animated GIFs, and writes everything into one markdown document:
@@ -22,7 +23,9 @@ Coulomb with each test's documented angle).
 3D depth-averaged model: it carries the full Cartesian velocity, so the
 similarity solution test compares the momentum in x, y AND z (h*u_z from
 the vertical grid momentum) and reports the 3D vector error plus a separate
-h*u_z error.
+h*u_z error. It is also the only model in which particles detach from the bed
+at sharp convex breaks: the double bump test (skipped for the other models)
+checks take-off at the first bump and landing on the second.
 
 Thesis output: every test writes thesis figures (vector PDF + 300 dpi PNG,
 15 cm text width, Computer Modern; see ``thesis_style.py``) to
@@ -30,7 +33,10 @@ Thesis output: every test writes thesis figures (vector PDF + 300 dpi PNG,
 error CSV. The report lists them first, with captions, ahead of the
 AvaFrame-style quick-look figures, and the run directory gets booktabs
 tables: ``summary.tex``, ``similarity_errors.tex``, ``dam_break_errors.tex``,
-``curvature.tex`` and ``rotation.tex`` (``\\usepackage{booktabs,tabularx}``).
+``curvature.tex``, ``rotation.tex``, ``double_bump.tex`` and
+``double_bump_reference.tex`` (``\\usepackage{booktabs,tabularx}``).
+All thesis PNG, PDF and TEX files are also copied into one flat folder,
+``<run>/thesis_all``, for easy copying into the thesis.
 
 Each test runs in its own subfolder and a failure of one test does not stop
 the others - failures are reported in the markdown. Curvilinear/Coulomb runs
@@ -38,8 +44,8 @@ also apply numerical regression guardrails; other models are labeled comparison
 runs rather than numerical passes.
 
 Usage:
-    python run_all_tests.py                          # all 5 tests, curvilinear
-    python run_all_tests.py --sim-model 3d-depth-averaged   # switch the model
+    python run_all_tests.py                          # all tests, 3d-depth-averaged, 64 particles per cell
+    python run_all_tests.py --sim-model curvilinear  # switch the model (double bump skipped)
     python run_all_tests.py --tests energy_line dam_break --quick
     python run_all_tests.py --particles-per-cell 8          # particles per release cell
 """
@@ -50,6 +56,7 @@ import io
 import math
 import pathlib
 import re
+import shutil
 import sys
 import time
 import traceback
@@ -63,7 +70,11 @@ import numpy as np
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 ALL_TESTS_DIR = REPO_ROOT / "verification" / "outputs" / "all_tests"
 
-TEST_NAMES = ["energy_line", "curvature", "similarity_solution", "dam_break", "rotation"]
+DEFAULT_SIM_MODEL = "3d-depth-averaged"
+DEFAULT_PARTICLES_PER_CELL = 64
+
+TEST_NAMES = ["energy_line", "curvature", "similarity_solution", "dam_break", "rotation",
+              "double_bump"]
 # models checked against the analytical references (with Coulomb friction)
 ANALYTIC_MODELS = ("curvilinear", "curvi", "c", "terrain-following", "terrain", "t",
                    "3d-depth-averaged", "3d")
@@ -74,6 +85,7 @@ TEST_TITLES = {
     "similarity_solution": "Similarity Solution",
     "dam_break": "Dam Break",
     "rotation": "Rotation",
+    "double_bump": "Double Bump",
 }
 
 THREE_D_MODELS = ("3d-depth-averaged", "3d")
@@ -103,7 +115,17 @@ TEST_DESCRIPTIONS = {
     "rotation": (
         "AvaFrame rotation test: DEM and release are rotated by several angles, every "
         "run gets the energy line analysis and its peak fields are rotated back; "
-        "runout and affected area (Dice) must not depend on the grid orientation."),
+        "runout and affected area (IoU) must not depend on the grid orientation."),
+    "double_bump": (
+        "Detachment and landing (3D model only): snow released on a 32 deg incline runs "
+        "over two 20 m sech-shaped bumps (after the double-bump example of Matter). Where "
+        "the bed-normal load g n_z + kappa |u|^2 falls below -0.2 g (lift-off threshold) "
+        "at the first crest, the particles fly ballistically (no air drag); they must land "
+        "on the second bump, flow over it and all be back on the bed when the run ends. "
+        "Coulomb friction mu = 0.4, curvature load and lift-off on. Reference: a Coulomb point slider released at rest at the initial center "
+        "of mass, with the same take-off condition and threshold, a ballistic flight and the same "
+        "inelastic landing with friction impulse mu u_n (closed-form velocity height "
+        "with the integrating factor exp(2 mu atan B'), evaluated by quadrature)."),
 }
 
 # plot files embedded in the report, in order, per test: (glob relative to
@@ -177,7 +199,28 @@ REPORT_PLOTS = {
         ("*_sl_comparison.png", "Max/mean values along the path (quick-look figure)."),
         ("*_areas_comparison.png", "Affected area vs the reference (quick-look figure)."),
     ],
+    "double_bump": [
+        ("thesis/doublebump_snapshots.png",
+         "Side view of the particles while most of them land on the second bump, height "
+         "above the inclined plane over x: particles on the bed (blue, drawn at a random "
+         "height within the flow depth of their cell) and flying particles (orange), with "
+         "the path of the Coulomb point slider (green), its take-offs (yellow) and landings "
+         "(light blue)."),
+        ("thesis/doublebump_flight.png",
+         "Take-off and landing positions along the slope with the bed profile; shaded the "
+         "take-off window of the first bump and the landing window of the second (a). "
+         "Share of flying particles over time with the time of the side view (b)."),
+    ],
 }
+
+# acceptance of the double bump test: share of the first take-offs at the
+# first bump, share of the first landings on the second bump, distance of
+# the median first take-off and landing from the point slider (two 5 m
+# cells) and of the final center of mass from its stop (share of the travel)
+DOUBLE_BUMP_MIN_TAKEOFF = 0.9
+DOUBLE_BUMP_MIN_LANDING = 0.5
+DOUBLE_BUMP_MAX_EVENT_ERROR = 10.0
+DOUBLE_BUMP_MAX_STOP_ERROR = 0.02
 
 # times of the similarity solution error table
 SIMILARITY_TABLE_TIMES = (5.0, 10.0, 15.0, 20.0)
@@ -287,17 +330,60 @@ def run_similarity_solution_test(test_dir, args):
     return _capture(mod, ["--out-dir", str(test_dir)] + extra)
 
 
+def run_double_bump_test(test_dir, args):
+    if not _is_three_d(args):
+        return None, "Double bump test skipped: detachment exists only in the 3D depth-averaged model.", None
+    import run_double_bump_test as mod
+
+    _patch_common(mod.SETTINGS, args)
+    return _capture(mod, ["--out-dir", str(test_dir)])
+
+
 RUNNERS = {
     "energy_line": run_energy_line_test,
     "curvature": run_curvature_test,
     "dam_break": run_dam_break_test,
     "rotation": run_rotation_test,
     "similarity_solution": run_similarity_solution_test,
+    "double_bump": run_double_bump_test,
 }
+
+
+def _double_bump_assessment(ret):
+    if ret is None:
+        return "skipped", ["Detachment exists only in the 3D depth-averaged model."]
+    failures = []
+    if ret["max_flying"] == 0:
+        failures.append("No particle detached.")
+    if ret["takeoff_at_bump_1"] < DOUBLE_BUMP_MIN_TAKEOFF:
+        failures.append(f"First take-offs at the first bump must be >= "
+                        f"{100 * DOUBLE_BUMP_MIN_TAKEOFF:.0f} %.")
+    if ret["landing_on_bump_2"] < DOUBLE_BUMP_MIN_LANDING:
+        failures.append(f"First landings on the second bump must be >= "
+                        f"{100 * DOUBLE_BUMP_MIN_LANDING:.0f} %.")
+    if ret["flying_at_end"] > 0:
+        failures.append("All particles must have landed when the run ends.")
+    reference = ret.get("reference")
+    if reference is None:
+        return ("failed" if failures else "passed"), failures + [
+            "No point-slider comparison: the reference needs Coulomb friction."]
+    for key, label in (("takeoff_x", "first take-off"), ("landing_x", "first landing")):
+        error = ret[key] - ret[f"reference_{key}"]
+        if not np.isfinite(error) or abs(error) > DOUBLE_BUMP_MAX_EVENT_ERROR:
+            failures.append(f"Median {label} x must lie within {DOUBLE_BUMP_MAX_EVENT_ERROR:g} m "
+                            "of the point slider.")
+    travel = reference.x[-1] - reference.x[0]
+    stop_error = ret["stop_x"] - ret["reference_stop_x"]
+    if not np.isfinite(stop_error) or abs(stop_error) > DOUBLE_BUMP_MAX_STOP_ERROR * travel:
+        failures.append(f"Final center of mass must lie within {100 * DOUBLE_BUMP_MAX_STOP_ERROR:g} % "
+                        "of the travel from the point slider stop.")
+    return ("failed" if failures else "passed"), failures
 
 
 def _assessment(name, ret, args):
     """Regression guardrails, not a claim of physical model certification."""
+    if name == "double_bump":
+        return _double_bump_assessment(ret)
     if args.sim_model not in ANALYTIC_MODELS or args.friction_model not in (None, "coulomb"):
         return "comparison", ["Numerical acceptance is only evaluated for curvilinear/terrain-following with Coulomb."]
     failures = []
@@ -345,9 +431,9 @@ def _assessment(name, ret, args):
             for result in ret:
                 if not np.isfinite(result["sEnd"]) or abs(result["sEnd"] - reference) > 0.02 * abs(reference):
                     failures.append(f"Runout at {result['angle']:g} degrees differs by more than 2%.")
-                dice = result["dice"]
-                if dice is not None and (not np.isfinite(dice) or dice < 0.85):
-                    failures.append(f"Dice at {result['angle']:g} degrees must be >= 0.85.")
+                iou = result["iou"]
+                if iou is not None and (not np.isfinite(iou) or iou < 0.74):
+                    failures.append(f"IoU at {result['angle']:g} degrees must be >= 0.74.")
     return ("failed" if failures else "passed"), failures
 
 
@@ -457,10 +543,23 @@ def _headline(test, ret, args=None):
             results = ret
             ref = results[0]
             max_ds = max(abs(r["sEnd"] - ref["sEnd"]) for r in results)
-            dices = [r["dice"] for r in results if r["dice"] is not None]
-            dice = f", Dice >= {min(dices):.3f}" if dices else ""
+            ious = [r["iou"] for r in results if r["iou"] is not None]
+            iou = f", IoU >= {min(ious):.3f}" if ious else ""
             return (f"runout s {ref['sEnd']:.1f} m at {ref['angle']:g} deg, "
-                    f"max |ds| {max_ds:.2f} m over {len(results)} rotations{dice}")
+                    f"max |ds| {max_ds:.2f} m over {len(results)} rotations{iou}")
+        if test == "double_bump":
+            if ret is None:
+                return "skipped: detachment requires the 3D depth-averaged model"
+            text = (f"{100 * ret['takeoff_fraction']:.0f} % took off, first take-off at bump 1 "
+                    f"{100 * ret['takeoff_at_bump_1']:.0f} %, first landing on bump 2 "
+                    f"{100 * ret['landing_on_bump_2']:.0f} %, {ret['flying_at_end']} flying at "
+                    "the end")
+            if ret.get("reference") is not None:
+                text += (f"; sim/slider take-off x {ret['takeoff_x']:.0f}/"
+                         f"{ret['reference_takeoff_x']:.0f} m, landing x {ret['landing_x']:.0f}/"
+                         f"{ret['reference_landing_x']:.0f} m, stop x {ret['stop_x']:.0f}/"
+                         f"{ret['reference_stop_x']:.0f} m")
+            return text
     except Exception:
         return ""
     return ""
@@ -488,9 +587,30 @@ def _test_section(name, test_dir, ret, output, error, args, assessment):
                          f"{r['sEnd'] - ref['sEnd']:+.2f}",
                          f"{r['zEnd'] - ref['zEnd']:+.2f}",
                          f"{r['runoutAngle'] - ref['runoutAngle']:+.3f}",
-                         "-" if r["dice"] is None else f"{r['dice']:.3f}"])
+                         "-" if r["iou"] is None else f"{r['iou']:.3f}"])
         lines += [_md_table(["angle [deg]", "sEnd [m]", "zEnd [m]", "runout angle [deg]",
-                             "ds [m]", "dz [m]", "dAngle [deg]", "Dice"], rows), ""]
+                             "ds [m]", "dz [m]", "dAngle [deg]", "IoU"], rows), ""]
+
+    # double bump: detachment metrics
+    if name == "double_bump" and error is None and ret:
+        lines += [_md_table(["metric", "value"], [
+            ["particles", ret["particles"]],
+            ["particles that took off", f"{100 * ret['takeoff_fraction']:.1f} %"],
+            ["first take-off at the first bump", f"{100 * ret['takeoff_at_bump_1']:.1f} %"],
+            ["first landing on the second bump", f"{100 * ret['landing_on_bump_2']:.1f} %"],
+            ["most particles in flight", f"{ret['max_flying']} at t = {ret['t_max_flying']:.1f} s"],
+            ["highest flight above the bed", f"{ret['max_flight_height']:.1f} m"],
+            ["flying at the end", ret["flying_at_end"]],
+            ["95 % runout x", f"{ret['runout_x']:.0f} m"],
+        ]), ""]
+        if ret.get("reference") is not None:
+            lines += ["Comparison with the Coulomb point slider:", "",
+                      _md_table(["event", "simulation x [m]", "point slider x [m]", "difference [m]"], [
+                          [label, f"{ret[key]:.1f}", f"{ret['reference_' + key]:.1f}",
+                           f"{ret[key] - ret['reference_' + key]:+.1f}"]
+                          for key, label in (("takeoff_x", "first take-off (median)"),
+                                             ("landing_x", "first landing (median)"),
+                                             ("stop_x", "stop (center of mass)"))]), ""]
 
     # similarity solution / dam break: relative error table at selected times
     if name in ("similarity_solution", "dam_break") and error is None and ret:
@@ -646,14 +766,39 @@ def write_latex_tables(run_dir, entries, args):
         ref = results[0]
         rows = [[f"{r['angle']:g}", f"{r['sEnd']:.2f}", f"{r['sEnd'] - ref['sEnd']:+.2f}",
                  f"{r['runoutAngle']:.3f}", f"{r['runoutAngle'] - ref['runoutAngle']:+.3f}",
-                 "--" if r["dice"] is None else f"{r['dice']:.3f}"] for r in results]
+                 "--" if r["iou"] is None else f"{r['iou']:.3f}"] for r in results]
         tables["rotation.tex"] = _latex_table(
             f"Rotation test of the {model} model: center-of-mass runout length and runout "
             f"angle per grid rotation, differences to the reference ({ref['angle']:g}"
-            r"$^\circ$) and Dice coefficient of the affected area.",
+            r"$^\circ$) and intersection over union (IoU) of the affected area.",
             f"tab:rotation_{tag}", "rrrrrr",
             [r"rotation ($^\circ$)", r"$s_\mathrm{end}$ (m)", r"$\Delta s$ (m)",
-             r"runout angle ($^\circ$)", r"$\Delta$ ($^\circ$)", "Dice"], rows)
+             r"runout angle ($^\circ$)", r"$\Delta$ ($^\circ$)", "IoU"], rows)
+
+    if ok("double_bump"):
+        r = entries["double_bump"]["ret"]
+        rows = [[f"{r['particles']}", f"{100 * r['takeoff_fraction']:.1f}",
+                 f"{100 * r['takeoff_at_bump_1']:.1f}", f"{100 * r['landing_on_bump_2']:.1f}",
+                 f"{r['max_flying']}", f"{r['max_flight_height']:.1f}", f"{r['flying_at_end']}"]]
+        tables["double_bump.tex"] = _latex_table(
+            f"Double-bump test of the {model} model: share of the particles that took off, "
+            "share of the first take-offs at the first bump and of the first landings on the "
+            "second bump, most particles in flight at once, highest flight above the bed and "
+            "particles still flying at the end.",
+            f"tab:doublebump_{tag}", "rrrrrrr",
+            ["particles", r"took off (\%)", r"bump 1 (\%)", r"bump 2 (\%)",
+             "max. flying", "max. height (m)", "flying at end"], rows)
+        if r.get("reference") is not None:
+            rows = [[label, f"{r[key]:.1f}", f"{r['reference_' + key]:.1f}",
+                     f"{r[key] - r['reference_' + key]:+.1f}"]
+                    for key, label in (("takeoff_x", "first take-off (median)"),
+                                       ("landing_x", "first landing (median)"),
+                                       ("stop_x", "stop (center of mass)"))]
+            tables["double_bump_reference.tex"] = _latex_table(
+                f"Double-bump test of the {model} model against the Coulomb point slider: "
+                r"horizontal position $x$ of the first take-off and landing and of the stop.",
+                f"tab:doublebump_reference_{tag}", "lrrr",
+                ["event", r"simulation (m)", r"point slider (m)", r"$\Delta x$ (m)"], rows)
 
     paths = []
     for name, text in tables.items():
@@ -661,6 +806,20 @@ def write_latex_tables(run_dir, entries, args):
         path.write_text(text, encoding="utf-8")
         paths.append(path)
     return paths
+
+
+def collect_thesis_files(run_dir, test_dirs, tex_paths):
+    """Copy all thesis figures (PNG + PDF) and LaTeX tables into
+    <run_dir>/thesis_all so they can be copied to the thesis in one go.
+    Returns the folder."""
+    target = run_dir / "thesis_all"
+    target.mkdir(parents=True, exist_ok=True)
+    sources = [p for d in test_dirs.values() if (d / "pics" / "thesis").is_dir()
+               for p in sorted((d / "pics" / "thesis").iterdir())
+               if p.suffix.lower() in (".png", ".pdf", ".tex")]
+    for path in list(sources) + list(tex_paths):
+        shutil.copy2(path, target / f"verification_{path.name}")
+    return target
 
 
 def _build_info():
@@ -680,6 +839,7 @@ def write_report(run_dir, test_dirs, entries, args, elapsed, timestamp):
         headline = _headline(name, entry["ret"], args) if not entry["error"] else ""
         summary_rows.append([TEST_TITLES[name], status, headline])
     tex_paths = write_latex_tables(run_dir, entries, args)
+    collect_thesis_files(run_dir, test_dirs, tex_paths)
     momentum = ("3D (x, y, z) - the model carries the vertical momentum"
                 if _is_three_d(args) else "in-plane (x, y)")
     doc = [
@@ -713,9 +873,14 @@ def write_report(run_dir, test_dirs, entries, args, elapsed, timestamp):
         "Regression guardrails (not a physical model certification): final flow thickness "
         "relative L2 <= 0.15 and momentum relative L2 <= 0.25 at t >= 20 s (10 s in quick "
         "mode); energy line runout error <= 2 %, velocity-height RMSE <= 3 m; rotation "
-        "runout difference <= 2 % and Dice >= 0.85; curvature: each slider runout error "
+        "runout difference <= 2 % and IoU >= 0.74; curvature: each slider runout error "
         "<= 2 %, energy-height RMSE <= 3 m, final RMS speed <= 0.1 m/s, the curvature load "
-        "must shorten the runout and halve the energy error of the uncorrected alpha line.",
+        "must shorten the runout and halve the energy error of the uncorrected alpha line; "
+        f"double bump (3D only): >= {100 * DOUBLE_BUMP_MIN_TAKEOFF:.0f} % of the first take-offs "
+        f"at the first bump, >= {100 * DOUBLE_BUMP_MIN_LANDING:.0f} % of the first landings on "
+        "the second bump, no particle flying at the end, median first take-off and landing "
+        f"within {DOUBLE_BUMP_MAX_EVENT_ERROR:g} m and the final center of mass within "
+        f"{100 * DOUBLE_BUMP_MAX_STOP_ERROR:g} % of the travel of the Coulomb point slider.",
         "",
     ]
     for name in args.tests:
@@ -730,8 +895,9 @@ def write_report(run_dir, test_dirs, entries, args, elapsed, timestamp):
 def main():
     parser = argparse.ArgumentParser(
         description="run all avalanchers verification tests and write a markdown report")
-    parser.add_argument("--sim-model", default="curvilinear",
-                        help="terrain-following | 3d-depth-averaged | curvilinear | mpmdac | sliding-block")
+    parser.add_argument("--sim-model", default=DEFAULT_SIM_MODEL,
+                        help="3d-depth-averaged | terrain-following | curvilinear | mpmdac | "
+                             f"sliding-block (default: {DEFAULT_SIM_MODEL})")
     parser.add_argument("--friction-model", default=None,
                         help="override the friction model (default: coulomb)")
     parser.add_argument("--mu", type=float, default=None,
@@ -742,6 +908,7 @@ def main():
                              "(default: each test's SETTINGS)")
     from cli_args import add_particles_per_cell_argument
     add_particles_per_cell_argument(parser)
+    parser.set_defaults(particles_per_cell=DEFAULT_PARTICLES_PER_CELL)
     parser.add_argument("--tests", nargs="+", default=TEST_NAMES, choices=TEST_NAMES)
     parser.add_argument("--out-dir", default=None,
                         help="run directory (default: all_tests/<model>_<timestamp>)")
@@ -782,6 +949,7 @@ def main():
     report = write_report(run_dir, test_dirs, entries, args, elapsed, timestamp)
     print(f"\nreport written to {report}")
     print(f"LaTeX tables in {run_dir}")
+    print(f"all thesis PNG/PDF/TEX files in {run_dir / 'thesis_all'}")
     for name in args.tests:
         if entries[name]["assessment"][0] in ("error", "failed"):
             print(f"WARNING: {name} FAILED - see the report")

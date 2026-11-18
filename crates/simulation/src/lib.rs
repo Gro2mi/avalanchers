@@ -1411,8 +1411,8 @@ impl Simulation {
         ))
     }
 
-    /// Runs the GPU evaluation metrics: overlap components, diagonal-normalized
-    /// chamfer distance, and the 3D beeline distance between the highest and
+    /// Runs the GPU evaluation metrics: overlap components, the chamfer distance (m)
+    /// and the 3D beeline distance between the highest and
     /// lowest avalanche point.
     /// Packs the per-cell ROI mask into u32 words (least significant bit =
     /// first cell), the layout the evaluation shaders expect.
@@ -2486,12 +2486,17 @@ impl Simulation {
         }
         if self.gpu_cache.grid_mass.is_none() {
             self.gpu_cache.read_count += 1;
-            let mass_factor = self.settings.mass_factor();
             let mass = if self.orchestrator.has_float32_atomic() {
                 self.orchestrator
                     .read_buffer::<f32>(BufferName::GridMass)
                     .await?
             } else {
+                // the adaptive range the grid was quantized with
+                let mass_factor = self
+                    .orchestrator
+                    .get_sim_info()
+                    .await?
+                    .mass_factor(&self.settings);
                 self.orchestrator
                     .read_buffer::<u32>(BufferName::GridMass)
                     .await?
@@ -2511,12 +2516,17 @@ impl Simulation {
         }
         if self.gpu_cache.grid_momentum.is_none() {
             self.gpu_cache.read_count += 1;
-            let momentum_factor = self.settings.momentum_factor();
             let momentum = if self.orchestrator.has_float32_atomic() {
                 self.orchestrator
                     .read_buffer::<f32>(BufferName::GridMomentum)
                     .await?
             } else {
+                // the adaptive range the grid was quantized with
+                let momentum_factor = self
+                    .orchestrator
+                    .get_sim_info()
+                    .await?
+                    .momentum_factor(&self.settings);
                 self.orchestrator
                     .read_buffer::<i32>(BufferName::GridMomentum)
                     .await?
@@ -2537,12 +2547,17 @@ impl Simulation {
         }
         if self.gpu_cache.grid_momentum_z.is_none() {
             self.gpu_cache.read_count += 1;
-            let momentum_factor = self.settings.momentum_factor();
             let momentum = if self.orchestrator.has_float32_atomic() {
                 self.orchestrator
                     .read_buffer::<f32>(BufferName::GridMomentumZ)
                     .await?
             } else {
+                // the adaptive range the grid was quantized with
+                let momentum_factor = self
+                    .orchestrator
+                    .get_sim_info()
+                    .await?
+                    .momentum_factor(&self.settings);
                 self.orchestrator
                     .read_buffer::<i32>(BufferName::GridMomentumZ)
                     .await?
@@ -5515,7 +5530,7 @@ fn test_trajectory() {
                 .expect("Failed to set release");
             block_on(sim.run_n_steps(1)).expect("Failed to run");
             // float atomics hold kg directly; otherwise dequantize with
-            // SimSettings::mass_factor and PRESSURE_FACTOR = 1e3 (utils.wgsl)
+            // SimInfo::mass_factor and PRESSURE_FACTOR = 1e3 (utils.wgsl)
             let (mass, sums): (Vec<f32>, Vec<f32>) = if sim.orchestrator.has_float32_atomic() {
                 (
                     block_on(sim.orchestrator.read_buffer(BufferName::GridMass))
@@ -5528,10 +5543,11 @@ fn test_trajectory() {
                     .expect("Failed to read grid mass");
                 let sums: Vec<i32> = block_on(sim.orchestrator.read_buffer(BufferName::GridForces))
                     .expect("Failed to read weak pressure sums");
+                let mass_factor = block_on(sim.orchestrator.get_sim_info())
+                    .expect("Failed to read sim info")
+                    .mass_factor(&sim.settings);
                 (
-                    mass.iter()
-                        .map(|mass| *mass as f32 / sim.settings.mass_factor())
-                        .collect(),
+                    mass.iter().map(|mass| *mass as f32 / mass_factor).collect(),
                     sums.iter().map(|sum| *sum as f32 * 1e-3).collect(),
                 )
             };
@@ -6171,7 +6187,7 @@ fn test_trajectory() {
     }
 
     /// The integer-atomic grid quantizes masses and momenta with factors that
-    /// fill its range for 30 m of flow at 100 m/s (x2): the light margin
+    /// adapt their ranges to the fullest node (quantization.wgsl): the light margin
     /// particles keep their velocity up to the rounding of their smallest
     /// momentum deposits. Runs on every GPU (integer_atomics).
     #[test_log::test]
@@ -6191,10 +6207,11 @@ fn test_trajectory() {
     }
 
     /// Largest relative speed change of a light margin particle in five steps
-    /// on the integer grid (measured 3.0 % with 5 m cells): the outer stencil
-    /// deposits of a 1.6 kg particle at 1.6 m/s are about 2.6 momentum units,
-    /// whose rounding the margin nodes average over few particles.
-    const INTEGER_MARGIN_LOSS: f32 = 0.05;
+    /// on the integer grid (measured 5e-6 with the adaptive ranges, 2 % with a
+    /// fixed 50 m range): the outer stencil deposits of a 1.6 kg particle at
+    /// 1.6 m/s are rounded to momentum units, which the margin nodes average
+    /// over few particles.
+    const INTEGER_MARGIN_LOSS: f32 = 1e-3;
 
     /// Worst relative velocity change of a forceless uniform flow (0.02 m, 64
     /// particles per cell, 1.6 kg particles) after five steps, on the integer
@@ -6266,6 +6283,87 @@ fn test_trajectory() {
         Some(worst / speed)
     }
 
+    /// The integer-atomic grid ranges follow the fullest node
+    /// (quantization.wgsl): a 0.5 m flow started on a range 16 times too
+    /// coarse halves it, one started 4 times too fine doubles it, and both
+    /// settle where the fullest node fills an eighth to a half of the range.
+    /// The decoded grid mass stays the particle mass throughout.
+    #[test_log::test]
+    fn test_integer_grid_ranges_adapt_to_the_flow() {
+        for start_scale in [1.0f32, 1.0 / 64.0] {
+            let (sim_info, fill, mass_error) = adapted_integer_grid(start_scale);
+            info!(
+                "start scale {start_scale}: mass scale {} momentum scale {} fill {fill:.3} mass error {mass_error:.2e}",
+                sim_info.mass_scale, sim_info.momentum_scale
+            );
+            // halved from 1 or doubled from 1/64 (0.5 m of a 50 m column)
+            if start_scale == 1.0 {
+                assert!(sim_info.mass_scale <= 1.0 / 8.0, "{}", sim_info.mass_scale);
+            } else {
+                assert!(sim_info.mass_scale >= 1.0 / 32.0, "{}", sim_info.mass_scale);
+            }
+            assert!(
+                (0.125..0.5).contains(&fill),
+                "start scale {start_scale}: the fullest node fills {fill} of the range"
+            );
+            assert!(sim_info.momentum_scale >= sim_info.mass_scale / 8.0);
+            assert!(
+                !sim_info
+                    .parsed_flags()
+                    .contains(SimInfoFlags::QUANTIZATION_OVERFLOW)
+            );
+            assert!(mass_error < 1e-3, "grid mass off by {mass_error}");
+        }
+    }
+
+    /// SimInfo, fill of the fullest node and relative grid mass error after
+    /// ten 3D steps of a 0.5 m flat release whose mass range starts at
+    /// `start_scale` reference nodes.
+    fn adapted_integer_grid(start_scale: f32) -> (SimInfo, f32, f32) {
+        const N: usize = 24;
+        const CELL_SIZE: f32 = 5.0;
+        let mut sim = setup_simple_sim(0.0, CELL_SIZE);
+        sim.update_settings(&Settings {
+            integer_atomics: Some(true),
+            ..Default::default()
+        })
+        .expect("Failed to select the integer grid");
+        sim.settings.sim_model = SimModel::ThreeDDepthAveraged.as_int();
+        sim.set_dem(&create_slope(N, N, CELL_SIZE, 0.0), N, N, CELL_SIZE)
+            .expect("Failed to set flat DEM");
+        let mut release = vec![0.0; N * N];
+        for y in 8..16 {
+            for x in 8..16 {
+                release[y * N + x] = 0.5;
+            }
+        }
+        sim.set_release_areas(&release)
+            .expect("Failed to set release");
+        block_on(sim.run_n_steps(0)).expect("Failed to prepare");
+        let mut sim_info = block_on(sim.orchestrator.get_sim_info()).expect("Failed to read");
+        // seeded to fill an eighth to a quarter: 0.5 m of a 50 m column x 16
+        assert_eq!(sim_info.mass_scale, 1.0 / 16.0);
+        sim_info.mass_scale = start_scale;
+        sim_info.previous_mass_scale = start_scale;
+        sim_info.momentum_scale = start_scale;
+        block_on(
+            sim.orchestrator
+                .write_buffer(BufferName::SimInfo, &[sim_info]),
+        )
+        .expect("Failed to write sim info");
+        let sim_info = block_on(sim.run_n_steps(10)).expect("Failed to run");
+        let particle_mass: f32 = block_on(sim.fetch_particles_mass())
+            .expect("Failed to read particle masses")
+            .iter()
+            .sum();
+        let max_node_mass = sim_info.mass_scale * sim.settings.max_node_mass();
+        let grid_mass = block_on(sim.fetch_grid_mass()).expect("Failed to read grid mass");
+        let fullest = grid_mass.iter().copied().fold(0.0f32, f32::max);
+        let fill = fullest / max_node_mass;
+        let mass_error = (grid_mass.iter().sum::<f32>() - particle_mass).abs() / particle_mass;
+        (sim_info, fill, mass_error)
+    }
+
     /// Simulation on a 64x64 slope with a release block on its upper part.
     fn setup_slope_sim(settings: Settings) -> Simulation {
         let (size, cell_size) = (64, 5.0);
@@ -6291,6 +6389,154 @@ fn test_trajectory() {
         sim.set_release_areas(&release)
             .expect("Failed to set release areas");
         sim
+    }
+
+    const CLIFF_WIDTH: usize = 48;
+    const CLIFF_HEIGHT: usize = 16;
+    const CLIFF_CELL_SIZE: f32 = 5.0;
+
+    /// Bed elevation of the cliff DEM at x: flat run-out below x = 52.5 m, a
+    /// 70 degree cliff up to 72.5 m, then a 35 degree slope rising along +x.
+    /// The kinks sit on cell centres, so the bilinear DEM reproduces it.
+    fn cliff_profile(x: f32) -> f32 {
+        let (cliff_foot, cliff_top) = (52.5, 72.5);
+        let cliff = (x.clamp(cliff_foot, cliff_top) - cliff_foot) * 70f32.to_radians().tan();
+        let slope = (x.max(cliff_top) - cliff_top) * 35f32.to_radians().tan();
+        100.0 + cliff + slope
+    }
+
+    /// 3D depth-averaged flow down a 35 degree slope that breaks into a cliff.
+    fn setup_cliff_sim(curvature: bool, detachment: bool) -> Simulation {
+        let mut sim: Simulation = block_on(Simulation::new()).expect("Failed to create Simulation");
+        block_on(sim.create(Settings {
+            sim_model: Some(SimModel::ThreeDDepthAveraged),
+            enable_curvature: Some(curvature),
+            enable_detachment: Some(detachment),
+            max_steps: Some(3000),
+            ..Default::default()
+        }))
+        .expect("Failed to create simulation");
+        let dem: Vec<f32> = (0..CLIFF_WIDTH * CLIFF_HEIGHT)
+            .map(|idx| cliff_profile(((idx % CLIFF_WIDTH) as f32 + 0.5) * CLIFF_CELL_SIZE))
+            .collect();
+        sim.set_dem(&dem, CLIFF_WIDTH, CLIFF_HEIGHT, CLIFF_CELL_SIZE)
+            .expect("Failed to set cliff DEM");
+        let release: Vec<f32> = (0..CLIFF_WIDTH * CLIFF_HEIGHT)
+            .map(|idx| {
+                let (x, y) = (idx % CLIFF_WIDTH, idx / CLIFF_WIDTH);
+                if (32..38).contains(&x) && (5..11).contains(&y) {
+                    1.0
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        sim.set_release_areas(&release)
+            .expect("Failed to set release areas");
+        block_on(sim.prepare()).expect("Failed to prepare cliff simulation");
+        sim
+    }
+
+    /// Runs the cliff flow to the end; returns the most particles in flight at
+    /// once and the highest flight above the bed (m).
+    fn run_cliff_sim(sim: &mut Simulation) -> (usize, f32) {
+        let (mut most_flying, mut highest_flight) = (0, 0.0f32);
+        while sim.state != SimulationState::Finished {
+            block_on(sim.run_n_steps(5)).expect("Failed to advance cliff simulation");
+            let states = block_on(sim.fetch_particles_state())
+                .expect("Failed to read states")
+                .clone();
+            let positions = block_on(sim.fetch_particles_position())
+                .expect("Failed to read positions")
+                .clone();
+            let elevations = block_on(sim.fetch_particles_elevation())
+                .expect("Failed to read elevations")
+                .clone();
+            let mut flying = 0;
+            for ((state, position), elevation) in states.iter().zip(&positions).zip(&elevations) {
+                if state.flying {
+                    flying += 1;
+                    highest_flight = highest_flight.max(elevation - cliff_profile(position[0]));
+                }
+            }
+            most_flying = most_flying.max(flying);
+        }
+        (most_flying, highest_flight)
+    }
+
+    #[test_log::test]
+    fn test_3d_flow_detaches_at_a_cliff_and_lands() {
+        let mut sim = setup_cliff_sim(true, true);
+        let (most_flying, highest_flight) = run_cliff_sim(&mut sim);
+        info!(
+            "cliff: up to {most_flying} particles in flight, highest {highest_flight:.2} m above the bed"
+        );
+        assert!(most_flying > 0, "no particle detached at the cliff edge");
+        assert!(
+            highest_flight > 0.5,
+            "flying particles must leave the bed, highest {highest_flight} m"
+        );
+
+        let states = block_on(sim.fetch_particles_state())
+            .expect("Failed to read states")
+            .clone();
+        let positions = block_on(sim.fetch_particles_position())
+            .expect("Failed to read positions")
+            .clone();
+        let still_flying = states.iter().filter(|state| state.flying).count();
+        assert_eq!(still_flying, 0, "particles must have landed by the end");
+        let below_cliff = positions.iter().filter(|p| p[0] < 52.5).count();
+        assert!(
+            below_cliff > positions.len() / 2,
+            "the deposit must lie below the cliff, {below_cliff} of {}",
+            positions.len()
+        );
+    }
+
+    /// Lift-off is decided on the DEM, not on the curvature load: the flow
+    /// still jumps the cliff with the curvature term off.
+    #[test_log::test]
+    fn test_3d_flow_detaches_without_curvature() {
+        let mut sim = setup_cliff_sim(false, true);
+        let (most_flying, _) = run_cliff_sim(&mut sim);
+        assert!(most_flying > 0, "no particle detached at the cliff edge");
+    }
+
+    /// On a plane a free-flight step always ends g dt^2 / 2 below the bed, so
+    /// no particle may detach, however fast the flow.
+    #[test_log::test]
+    fn test_3d_flow_on_a_plane_never_flies() {
+        let mut sim = setup_slope_sim(Settings {
+            sim_model: Some(SimModel::ThreeDDepthAveraged),
+            friction_model: Some(compute_core::settings::FrictionModel::Coulomb),
+            friction_coefficient: Some(0.1),
+            enable_curvature: Some(true),
+            enable_detachment: Some(true),
+            max_steps: Some(400),
+            ..Default::default()
+        });
+        block_on(sim.prepare()).expect("Failed to prepare slope simulation");
+        while sim.state != SimulationState::Finished {
+            block_on(sim.run_n_steps(10)).expect("Failed to advance slope simulation");
+            let flying = block_on(sim.fetch_particles_state())
+                .expect("Failed to read states")
+                .iter()
+                .filter(|state| state.flying)
+                .count();
+            assert_eq!(flying, 0, "particles detached from a plane");
+        }
+    }
+
+    /// Lift-off is off by default: with the curvature load alone the flow
+    /// stays on the bed.
+    #[test_log::test]
+    fn test_3d_flow_without_detachment_never_flies() {
+        let mut sim = setup_cliff_sim(true, false);
+        let (most_flying, _) = run_cliff_sim(&mut sim);
+        assert_eq!(
+            most_flying, 0,
+            "without enable_detachment no particle may detach"
+        );
     }
 
     #[test_log::test]

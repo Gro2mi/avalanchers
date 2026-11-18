@@ -9,6 +9,8 @@
 @group(0) @binding(6) var<storage, read_write> grid_velocity: array<vec2<f32>>;
 @group(0) @binding(7) var<storage, read_write> test_results: array<f32>;
 @group(0) @binding(8) var<storage, read_write> particles_affine_matrix: array<mat2x2<f32>>;
+// integer-atomic grid ranges (quantization.wgsl)
+@group(0) @binding(9) var<storage> sim_info: SimInfo;
 
 @compute @workgroup_size(1)
 fn test_transfer(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -197,46 +199,8 @@ const MAX_VELOCITY_FACTOR: f32 = 1e7; // u32 limit is 430 m/s
 const H_FACTOR: f32 = 1e6;
 const INV_MAX_VELOCITY_FACTOR: f32 = 1 / MAX_VELOCITY_FACTOR; // u32 limit is 430 m/s
 const INV_H_FACTOR: f32 = 1 / H_FACTOR;
-// Integer-atomic grid (no_atomic_float): node masses and momenta are fixed
-// point numbers in u32 / i32, quantized per particle->node contribution before
-// atomicAdd. The factors fill the integer range with the largest node values a
-// flow can reach: a MAX_FLOW_THICKNESS deep column over a cell
-// (density * thickness * cell_size^2) moving at MAX_FLOW_VELOCITY, times
-// QUANTIZATION_SAFETY (which also covers the slope factor of the node mass).
-// They scale with the cell size like the particle masses, so a particle of a
-// release h_r thick with N particles per cell holds about
-// U32_RANGE * h_r / (N * QUANTIZATION_SAFETY * MAX_FLOW_THICKNESS) mass units
-// (2e6 for 1 m and 64 per cell) at every cell size. Must match settings.rs.
-const MAX_FLOW_THICKNESS: f32 = 30.0;
-const MAX_FLOW_VELOCITY: f32 = 100.0;
-const QUANTIZATION_SAFETY: f32 = 2.0;
-// below 2^32 and 2^31, so a rounded maximum still converts without saturating
-const QUANTIZATION_U32_RANGE: f32 = 4.0e9;
-const QUANTIZATION_I32_RANGE: f32 = 2.0e9;
-fn max_node_mass() -> f32 {
-    return QUANTIZATION_SAFETY * MAX_FLOW_THICKNESS * sim_settings.snow_density
-        * sim_settings.cell_size * sim_settings.cell_size;
-}
-// integer units per kg
-fn mass_factor() -> f32 {
-    return QUANTIZATION_U32_RANGE / max_node_mass();
-}
-fn inv_mass_factor() -> f32 {
-    return max_node_mass() / QUANTIZATION_U32_RANGE;
-}
-// integer units per kg m/s
-fn momentum_factor() -> f32 {
-    return QUANTIZATION_I32_RANGE / (max_node_mass() * MAX_FLOW_VELOCITY);
-}
-fn inv_momentum_factor() -> f32 {
-    return max_node_mass() * MAX_FLOW_VELOCITY / QUANTIZATION_I32_RANGE;
-}
-// Lightest node whose velocity momentum / mass is resolved: one momentum unit
-// changes it by 1 m/s (15 g for 5 m cells and 200 kg/m3). Lighter nodes
-// count as empty.
-fn min_node_mass() -> f32 {
-    return inv_momentum_factor(); // momentum unit / (1 m/s)
-}
+// The integer-atomic grid factors (mass_factor() ...) live in
+// quantization.wgsl, which needs sim_info.
 // Gully walls (reference surface, wall friction) need a reference surface at
 // least one cell wide; must match SimSettings::gully_walls_enabled.
 fn gully_walls_enabled() -> bool {
@@ -269,7 +233,13 @@ struct SimInfo {
     travel_angle: f32,
     _first_center_of_mass_timestep: u32,
     _last_center_of_mass_timestep: u32,
-    _pad: u32,
+    // ranges of the integer-atomic grid in units of the reference node (see
+    // quantization.wgsl); previous_mass_scale quantized the last step's grid
+    mass_scale: f32,
+    momentum_scale: f32,
+    previous_mass_scale: f32,
+    _pad0: u32,
+    _pad1: u32,
 };
 
 const SIM_INFO_OUT_OF_BOUNDS: u32 = 1u << 0u;
@@ -278,6 +248,9 @@ const SIM_INFO_IS_NAN: u32 = 1u << 2u;
 const SIM_INFO_PARTICLE_OUT_OF_DEM_DATA: u32 = 1u << 3u;
 // a particle exceeded MAX_PARTICLE_SPEED and was stopped
 const SIM_INFO_UNPHYSICAL_SPEED: u32 = 1u << 4u;
+// a node filled more than QUANTIZATION_OVERFLOW_FILL of an integer-atomic
+// grid range, which it may have overflowed (see quantization.wgsl)
+const SIM_INFO_QUANTIZATION_OVERFLOW: u32 = 1u << 5u;
 const SIM_INFO_STOPPED: u32 = 1u << 31u;
 const SIM_INFO_ALL_PARTICLES_STOPPED: u32 = 1u << 30u;
 const SIM_INFO_NO_NEW_CELLS: u32 = 1u << 29u;
@@ -288,8 +261,8 @@ const SIM_INFO_LOW_MOMENTUM: u32 = 1u << 27u;
 
 // Fastest particle speed (m/s) taken as physical. Dense flow avalanches reach
 // about 60-80 m/s and the integer atomic grid holds momentum up to
-// QUANTIZATION_SAFETY * MAX_FLOW_VELOCITY = 200 m/s; a faster particle comes from
-// a numerical blow-up (e.g. a cliff of no-data elevations) and is stopped.
+// MAX_FLOW_VELOCITY = 100 m/s for a full MAX_FLOW_THICKNESS node (faster for
+// thinner nodes); a faster particle comes from a numerical blow-up (e.g. a cliff of no-data elevations) and is stopped.
 // Mirrors compute_core::MAX_PARTICLE_SPEED.
 const MAX_PARTICLE_SPEED: f32 = 150.0;
 // stopped for exceeding MAX_PARTICLE_SPEED
@@ -349,6 +322,9 @@ struct SimSettings {
     reference_surface_length: f32,
     // snow water equivalent (kg/m2) of the release cells; NaN if unset
     release_swe: f32,
+    // 3D lift-off: terminal velocity (m/s) of the quadratic air drag in
+    // flight; 0 disables the drag
+    flight_terminal_velocity: f32,
 };
 
 struct AtomicValues {
@@ -367,6 +343,12 @@ struct AtomicValues {
     momentum_hi: atomic<u32>,
     // f32 bits of the largest total momentum so far
     peak_momentum: atomic<u32>,
+    // largest node mass (u32 units) and momentum component (|i32| units) of
+    // the integer-atomic grid this step, read and reset by reset_grid
+    max_mass_units: atomic<u32>,
+    max_momentum_units: atomic<u32>,
+    _pad0: u32,
+    _pad1: u32,
 };
 
 // Reversible resting: a particle rests after REST_STEPS consecutive slow steps
@@ -562,3 +544,81 @@ fn compute_centroid(points: ptr<function, array<vec2<f32>, 256>>, count: u32) ->
     return vec2<f32>(cx, cy) / (6.0 * area);
 }
 // END utils.wgsl
+
+// import quantization.wgsl;
+// BEGIN quantization.wgsl
+// Integer-atomic grid (no_atomic_float): node masses and momenta are fixed
+// point numbers in u32 / i32, quantized per particle->node contribution before
+// atomicAdd. The ranges adapt to the flow. reset_grid doubles a range once the
+// fullest node of the last step filled half of it, and halves it once that
+// node stayed below an eighth, so the integers resolve thin flows finely and
+// still hold deep deposits. sim_info.mass_scale counts the mass range in
+// reference nodes: a MAX_FLOW_THICKNESS deep column over a cell (density *
+// thickness * cell_size^2); sim_info.momentum_scale counts the momentum range
+// in that column moving at MAX_FLOW_VELOCITY. Both start at 1. Needs
+// sim_settings and sim_info; must match settings.rs.
+const MAX_FLOW_THICKNESS: f32 = 50.0;
+const MAX_FLOW_VELOCITY: f32 = 100.0;
+// below 2^32 and 2^31, so a rounded maximum still converts without saturating
+const QUANTIZATION_U32_RANGE: f32 = 4.0e9;
+const QUANTIZATION_I32_RANGE: f32 = 2.0e9;
+// fill of the fullest node at which a range doubles, and below which it halves
+const QUANTIZATION_GROW_FILL: f32 = 0.5;
+const QUANTIZATION_SHRINK_FILL: f32 = 0.125;
+// fill at which the fullest node probably wrapped around
+const QUANTIZATION_OVERFLOW_FILL: f32 = 0.9;
+const MIN_MASS_SCALE: f32 = 1.0 / 256.0;
+const MAX_QUANTIZATION_SCALE: f32 = 256.0;
+// Smallest momentum range relative to the mass range: the full mass range at
+// MAX_FLOW_VELOCITY / 8 = 12.5 m/s. A flow starting from rest (no momentum to
+// measure) cannot outgrow it within one step.
+const MIN_MOMENTUM_PER_MASS_SCALE: f32 = 0.125;
+
+// mass (kg) of the reference node, a MAX_FLOW_THICKNESS deep column
+fn reference_node_mass() -> f32 {
+    return MAX_FLOW_THICKNESS * sim_settings.snow_density
+        * sim_settings.cell_size * sim_settings.cell_size;
+}
+// largest node mass (kg) and momentum component (kg m/s) the integers hold
+fn max_node_mass() -> f32 {
+    return sim_info.mass_scale * reference_node_mass();
+}
+fn max_node_momentum() -> f32 {
+    return sim_info.momentum_scale * reference_node_mass() * MAX_FLOW_VELOCITY;
+}
+// integer units per kg
+fn mass_factor() -> f32 {
+    return QUANTIZATION_U32_RANGE / max_node_mass();
+}
+fn inv_mass_factor() -> f32 {
+    return max_node_mass() / QUANTIZATION_U32_RANGE;
+}
+// kg per unit of the last step's grid mass (MPMDAC's grid_mass_previous)
+fn previous_inv_mass_factor() -> f32 {
+    return sim_info.previous_mass_scale * reference_node_mass() / QUANTIZATION_U32_RANGE;
+}
+// integer units per kg m/s
+fn momentum_factor() -> f32 {
+    return QUANTIZATION_I32_RANGE / max_node_momentum();
+}
+fn inv_momentum_factor() -> f32 {
+    return max_node_momentum() / QUANTIZATION_I32_RANGE;
+}
+// Lightest node whose velocity momentum / mass is resolved: one momentum unit
+// changes it by 1 m/s (12.5 g for 5 m cells and 200 kg/m3 at the start
+// range). Lighter nodes count as empty.
+fn min_node_mass() -> f32 {
+    return inv_momentum_factor(); // momentum unit / (1 m/s)
+}
+// next range scale for a fullest node filling `fill` of the current range
+fn adapted_quantization_scale(scale: f32, fill: f32) -> f32 {
+    if fill >= QUANTIZATION_GROW_FILL {
+        return scale * 2.0;
+    }
+    if fill < QUANTIZATION_SHRINK_FILL {
+        return scale * 0.5;
+    }
+    return scale;
+}
+
+// END quantization.wgsl

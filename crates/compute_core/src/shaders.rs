@@ -159,6 +159,8 @@ define_shaders! {
     CartesianGeometry => "cartesian_geometry",
     Constitutive => "constitutive",
     Utils => "utils",
+    Quantization => "quantization",
+    QuantizationFill => "quantization_fill",
     Random => "random",
     UpdateSimInfo => "update_sim_info",
     TestTransfer => "test_transfer",
@@ -2055,7 +2057,7 @@ fn collect_shader_configs(
                 (
                     BufferName::SimInfo.to_string(),
                     BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
+                        ty: BufferBindingType::Storage { read_only: false },
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
@@ -3314,6 +3316,15 @@ fn create_test_shader_configs(
                     BufferName::ParticlesAffineMatrix.to_string(),
                     BindingType::Buffer {
                         ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                // Binding 9:
+                (
+                    BufferName::SimInfo.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },

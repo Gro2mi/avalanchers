@@ -40,6 +40,10 @@ bitflags! {
         const PARTICLE_OUT_OF_DEM_DATA = 1 << 3;
         /// A particle exceeded [`MAX_PARTICLE_SPEED`] and was stopped.
         const UNPHYSICAL_SPEED         = 1 << 4;
+        /// A node filled more than 90 % of an integer-atomic grid range and
+        /// may have wrapped around: its mass more than doubled within one
+        /// step (see [`SimInfo::mass_scale`]).
+        const QUANTIZATION_OVERFLOW    = 1 << 5;
         const LOW_MOMENTUM             = 1 << 27;
         const AT_REST                  = 1 << 28;
         const NO_NEW_CELLS             = 1 << 29;
@@ -228,7 +232,18 @@ pub struct SimInfo {
     pub travel_angle: f32,
     pub _first_center_of_mass_timestep: u32,
     pub _last_center_of_mass_timestep: u32,
-    pub _pad: u32,
+    /// Mass range of the integer-atomic grid in reference nodes (a
+    /// [`settings::MAX_FLOW_THICKNESS`] deep column over a cell). reset_grid
+    /// doubles it once the fullest node of a step fills half of it and halves
+    /// it below an eighth; 1 on float-atomic GPUs.
+    pub mass_scale: f32,
+    /// Momentum range in reference nodes moving at
+    /// [`settings::MAX_FLOW_VELOCITY`], adapted like [`Self::mass_scale`].
+    pub momentum_scale: f32,
+    /// [`Self::mass_scale`] of the step before (MPMDAC's mass snapshot).
+    pub previous_mass_scale: f32,
+    pub _pad0: u32,
+    pub _pad1: u32,
 }
 
 impl Default for SimInfo {
@@ -249,16 +264,32 @@ impl Default for SimInfo {
             travel_angle: f32::NAN,
             _first_center_of_mass_timestep: u32::MAX,
             _last_center_of_mass_timestep: u32::MAX,
-            _pad: 0,
+            mass_scale: 1.0,
+            momentum_scale: 1.0,
+            previous_mass_scale: 1.0,
+            _pad0: 0,
+            _pad1: 0,
         }
     }
 }
 
-const _: () = assert!(size_of::<SimInfo>() == 64);
+const _: () = assert!(size_of::<SimInfo>() == 80);
 
 impl SimInfo {
     pub fn parsed_flags(&self) -> SimInfoFlags {
         self.flags.into()
+    }
+
+    /// Integer units per kg of the integer-atomic grid as it stands after
+    /// this step (`mass_factor()` in quantization.wgsl).
+    pub fn mass_factor(&self, settings: &settings::SimSettings) -> f32 {
+        settings.mass_factor() / self.mass_scale
+    }
+
+    /// Integer units per kg m/s of the integer-atomic grid as it stands after
+    /// this step (`momentum_factor()` in quantization.wgsl).
+    pub fn momentum_factor(&self, settings: &settings::SimSettings) -> f32 {
+        settings.momentum_factor() / self.momentum_scale
     }
 
     /// Why the run stopped on its own, for messages; `None` while it runs
@@ -301,6 +332,8 @@ impl std::fmt::Debug for SimInfo {
             .field("travel_vertical_drop", &self.travel_vertical_drop)
             .field("travel_angle", &self.travel_angle)
             .field("flags", &self.parsed_flags())
+            .field("mass_scale", &self.mass_scale)
+            .field("momentum_scale", &self.momentum_scale)
             .finish()
     }
 }
@@ -575,10 +608,29 @@ pub const RELEASE_THICKNESS_THRESHOLD: f32 = 0.01;
 /// Fastest particle speed (m/s) taken as physical; faster particles are
 /// stopped and flag [`SimInfoFlags::UNPHYSICAL_SPEED`]. Dense flow avalanches
 /// reach about 60-80 m/s and the integer atomic grid holds momentum up to
-/// `QUANTIZATION_SAFETY * MAX_FLOW_VELOCITY` = 200 m/s, so a faster particle
+/// `MAX_FLOW_VELOCITY` = 100 m/s for a full `MAX_FLOW_THICKNESS` node (faster
+/// for thinner nodes), so a faster particle
 /// comes from a numerical blow-up, e.g. a cliff of no-data elevations.
 /// Mirrors `MAX_PARTICLE_SPEED` in utils.wgsl.
 pub const MAX_PARTICLE_SPEED: f32 = 150.0;
+
+/// Smallest integer-atomic grid momentum range relative to the mass range
+/// (`SimInfo::momentum_scale / SimInfo::mass_scale`); mirrors
+/// `MIN_MOMENTUM_PER_MASS_SCALE` in quantization.wgsl.
+const MIN_MOMENTUM_PER_MASS_SCALE: f32 = 0.125;
+
+/// Power-of-two integer-atomic grid range (`SimInfo::mass_scale`) the first
+/// step starts with: the fullest node of `fullest_node` kg fills between an
+/// eighth and a quarter of it, inside the band reset_grid keeps it in
+/// (quantization.wgsl). `reference_node_mass` is the start range of scale 1.
+fn initial_mass_scale(fullest_node: f32, reference_node_mass: f32) -> f32 {
+    if !(fullest_node > 0.0 && reference_node_mass > 0.0) {
+        return 1.0;
+    }
+    let exponent = (4.0 * fullest_node / reference_node_mass).log2().ceil();
+    // MIN_MASS_SCALE and MAX_QUANTIZATION_SCALE of quantization.wgsl
+    exponent.clamp(-8.0, 8.0).exp2()
+}
 
 /// Release thickness (m) of release areas that hold none of their own, used
 /// unless `release_thickness` or `release_swe` is set.
@@ -677,6 +729,9 @@ pub struct ComputeOrchestrator {
     pub particle_sort_interval: u32,
     particle_sort: Option<ParticleSort>,
     steps_since_particle_sort: u32,
+    /// Integer-atomic grid range the first step starts with, in reference
+    /// nodes (`SimInfo::mass_scale`), sized from the seeded particles.
+    initial_mass_scale: f32,
     /// Weak-form pressure pass of the curvilinear model, dispatched after P2G
     /// when enable_weak_pressure is set.
     weak_pressure: Option<(ComputePipeline, BindGroup)>,
@@ -978,6 +1033,7 @@ impl ComputeOrchestrator {
             particle_sort_interval: 25,
             particle_sort: None,
             steps_since_particle_sort: 0,
+            initial_mass_scale: 1.0,
             weak_pressure: None,
             float32_atomic_supported: has_float32_atomic,
             has_float32_atomic,
@@ -1805,10 +1861,16 @@ impl ComputeOrchestrator {
 
         // no readback: the seeding runs on while the CPU prepares the next
         // stage (AtomicValues holds the estimated release volume)
+        self.initial_mass_scale = 1.0;
         if !self.has_float32_atomic && number_release_particles > 0 {
             // mean seeded mass (the volume estimate rounds every cell to m3)
             let masses = self.read_buffer::<f32>(BufferName::ParticlesMass).await?;
             let mean_mass = masses.iter().map(|&m| m as f64).sum::<f64>() / masses.len() as f64;
+            let max_mass = masses.iter().copied().fold(0.0f32, f32::max);
+            // a node holds about one cell of particles
+            let fullest_node = max_mass * sim_settings.released_particles_per_cell.max(1) as f32;
+            self.initial_mass_scale =
+                initial_mass_scale(fullest_node, sim_settings.max_node_mass());
             self.log_integer_grid_resolution(sim_settings, mean_mass as f32);
         }
         Ok(())
@@ -1825,7 +1887,8 @@ impl ComputeOrchestrator {
         let mass_units = particle_mass * sim_settings.mass_factor();
         let momentum_units = particle_mass * sim_settings.momentum_factor();
         debug!(
-            "Integer atomic grid: up to {:.3e} kg and {:.3e} kg m/s per node in steps of {:.3e} kg \
+            "Integer atomic grid at its start range (it adapts to the fullest node): up to \
+             {:.3e} kg and {:.3e} kg m/s per node in steps of {:.3e} kg \
              and {:.3e} kg m/s; a release particle of {:.3} kg holds {:.3e} mass steps and \
              {:.3e} momentum steps at 1 m/s",
             sim_settings.max_node_mass(),
@@ -2020,6 +2083,15 @@ impl ComputeOrchestrator {
         let sim_info = SimInfo {
             timestep: 0,
             number_particles: number_release_particles,
+            mass_scale: self.initial_mass_scale,
+            previous_mass_scale: self.initial_mass_scale,
+            // the release starts at rest: the smallest momentum range (the
+            // float-atomic grid keeps every scale at 1)
+            momentum_scale: if self.has_float32_atomic {
+                1.0
+            } else {
+                self.initial_mass_scale * MIN_MOMENTUM_PER_MASS_SCALE
+            },
             // estimated timestep for a 60 degree slope
             dt: (2.0 * sim_settings.cfl * sim_settings.cell_size / (9.81 * 0.866) as f32).sqrt(),
             elevation_threshold: minimum_dem_elevation - 0.1,
@@ -2939,6 +3011,20 @@ mod tests {
     use super::*;
     use bytemuck::{Pod, Zeroable};
     use pollster::block_on;
+
+    #[test]
+    fn initial_mass_scale_puts_the_fullest_node_in_the_adaptive_band() {
+        for fullest in [1.0 / 400.0, 1.0 / 40.0, 0.3, 3.0, 30.0] {
+            let scale = initial_mass_scale(fullest, 1.0);
+            let fill = fullest / scale;
+            assert_eq!(scale.log2().fract(), 0.0, "{scale} is no power of two");
+            assert!(fill > 0.125 && fill <= 0.25, "{fullest}: fill {fill}");
+        }
+        assert_eq!(initial_mass_scale(0.0, 1.0), 1.0);
+        // clamped to the scales reset_grid allows
+        assert_eq!(initial_mass_scale(1e-6, 1.0), 1.0 / 256.0);
+        assert_eq!(initial_mass_scale(1e6, 1.0), 256.0);
+    }
 
     #[test]
     fn particle_state_decodes_status_bits_and_timestep() {

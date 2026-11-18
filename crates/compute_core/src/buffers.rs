@@ -34,6 +34,13 @@ pub struct AtomicValues {
     pub momentum_hi: u32,
     /// Largest total momentum so far in kg m/s.
     pub peak_momentum: f32,
+    /// Largest integer-atomic grid node mass (u32 units) and momentum
+    /// component (|i32| units) of the last step, read and reset by
+    /// reset_grid to adapt the ranges (quantization.wgsl).
+    pub max_mass_units: u32,
+    pub max_momentum_units: u32,
+    /// Keeps the size a multiple of 16 bytes, the buffer's size.
+    pub _pad: [u32; 2],
 }
 
 /// GPU layout mirror of the CenterOfMassResult struct in center_of_mass.wgsl
@@ -949,10 +956,11 @@ pub fn create_buffers_and_texture_descriptions(
         DEBUG_BUFFER_SIZE,
         buffer_usage_output,
     );
-    gpu_resources.add_buffer(
+    // the integer-atomic grid scales start at 1, not 0
+    gpu_resources.add_buffer_with_data(
         device,
         BufferName::SimInfo,
-        size_of::<SimInfo>(),
+        &[SimInfo::default()],
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
     );
     gpu_resources.add_buffer(

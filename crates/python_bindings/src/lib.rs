@@ -1454,6 +1454,23 @@ impl PySimulation {
         Ok(data.to_pyarray(py))
     }
 
+    /// bool array: whether each particle is detached from the bed and flying
+    /// ballistically (3D depth-averaged model with curvature; always false
+    /// for the other models).
+    #[getter]
+    fn get_particles_flying<'py>(
+        &mut self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyArray1<bool>>> {
+        let states = self
+            .inner
+            .fetch_particles_state()
+            .block_on()
+            .map_runtime_err()?;
+        let flying: Vec<bool> = states.iter().map(|state| state.flying).collect();
+        Ok(flying.to_pyarray(py))
+    }
+
     /// u32 array of the particle stop timesteps (0 = still moving).
     #[getter]
     fn get_stopped<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<u32>>> {

@@ -1267,6 +1267,7 @@ mod tests {
             momentum_stop_fraction: None,
             no_new_cells_travel: None,
             reference_surface_length: None,
+            flight_terminal_velocity: None,
             cfl: Some(8.0),
             min_slope_angle: Some(9.0),
             max_slope_angle: Some(10.0),
@@ -1278,6 +1279,7 @@ mod tests {
             enable_curvature: Some(true),
             enable_entrainment: Some(true),
             enable_weak_pressure: Some(true),
+            enable_detachment: Some(true),
             enable_particle_interaction: Some(true),
             particle_placement: Some(ParticlePlacement::UniformRelaxed),
             integer_atomics: Some(true),
@@ -1329,6 +1331,7 @@ mod tests {
         assert_eq!(loaded.enable_curvature, Some(true));
         assert_eq!(loaded.enable_entrainment, Some(true));
         assert_eq!(loaded.enable_weak_pressure, Some(true));
+        assert_eq!(loaded.enable_detachment, Some(true));
         assert_eq!(loaded.enable_particle_interaction, Some(true));
         assert_eq!(loaded.enable_earth_pressure_coefficient, Some(true));
         assert_eq!(loaded.n0, Some(1.0));

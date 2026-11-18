@@ -28,6 +28,10 @@ impl SimFlags {
     /// Set only for the particle seeding dispatch, from
     /// [`ParticlePlacement::is_uniform`]; not a simulation parameter.
     pub const UNIFORM_PARTICLE_PLACEMENT: u32 = 1 << 6;
+    /// 3D depth-averaged model: a particle detaches where one free-flight
+    /// step from the bed would end above the DEM, and flies ballistically
+    /// until it lands.
+    pub const DETACHMENT: u32 = 1 << 7;
 
     pub fn new(
         curvature: bool,
@@ -81,6 +85,9 @@ impl SimFlags {
     }
     pub fn is_weak_pressure_enabled(&self) -> bool {
         (self.mask & (1 << 5)) != 0
+    }
+    pub fn is_detachment_enabled(&self) -> bool {
+        (self.mask & Self::DETACHMENT) != 0
     }
 }
 #[repr(C)]
@@ -146,6 +153,10 @@ pub struct SimSettings {
         deserialize_with = "deserialize_unset_as_nan"
     )]
     pub release_swe: f32,
+    /// 3D lift-off ([`SimFlags::DETACHMENT`]): terminal velocity (m/s) of the quadratic air drag on
+    /// flying particles, a = -g |u| u / v_t^2; 0 disables the drag.
+    #[serde(default = "default_flight_terminal_velocity")]
+    pub flight_terminal_velocity: f32,
 }
 
 /// Hashes only the fields the selected simulation, friction and constitutive
@@ -230,6 +241,9 @@ impl Hash for SimSettings {
                 if sim_model == Some(SimModel::Curvilinear) {
                     flags_mask |= SimFlags::WEAK_PRESSURE;
                 }
+                if sim_model == Some(SimModel::ThreeDDepthAveraged) {
+                    flags_mask |= SimFlags::DETACHMENT;
+                }
                 if SimFlags::from_u32(self.flags).is_earth_pressure_coefficient_enabled() {
                     hash_f32(self.internal_friction_angle, state);
                     hash_f32(self.basal_friction_angle, state);
@@ -240,6 +254,11 @@ impl Hash for SimSettings {
         if grid_flow_model {
             hash_f32(self.momentum_stop_fraction, state);
             hash_f32(self.reference_surface_length, state);
+        }
+        if sim_model == Some(SimModel::ThreeDDepthAveraged)
+            && SimFlags::from_u32(self.flags).is_detachment_enabled()
+        {
+            hash_f32(self.flight_terminal_velocity, state);
         }
 
         (self.flags & flags_mask).hash(state);
@@ -257,6 +276,14 @@ fn unset_release_swe() -> f32 {
     f32::NAN
 }
 
+/// Default terminal velocity (m/s) of flying particles (see
+/// [`SimSettings::flight_terminal_velocity`]).
+pub const DEFAULT_FLIGHT_TERMINAL_VELOCITY: f32 = 40.0;
+
+fn default_flight_terminal_velocity() -> f32 {
+    DEFAULT_FLIGHT_TERMINAL_VELOCITY
+}
+
 fn is_release_thickness(thickness: f32) -> bool {
     thickness.is_finite() && thickness > RELEASE_THICKNESS_THRESHOLD
 }
@@ -268,28 +295,26 @@ impl Default for SimSettings {
 }
 
 /// Integer-atomic grid (GPUs without float atomics, or `integer_atomics`):
-/// node masses and momenta are fixed point numbers in u32 / i32 whose factors
-/// fill the integer range with the largest node values a flow can reach, a
-/// [`MAX_FLOW_THICKNESS`] deep column over a cell moving at
-/// [`MAX_FLOW_VELOCITY`], times [`QUANTIZATION_SAFETY`]. Must match utils.wgsl.
-pub const MAX_FLOW_THICKNESS: f32 = 30.0;
+/// node masses and momenta are fixed point numbers in u32 / i32. Their ranges
+/// start at a [`MAX_FLOW_THICKNESS`] deep column over a cell (the reference
+/// node) moving at [`MAX_FLOW_VELOCITY`] and then adapt to the fullest node
+/// (`SimInfo::mass_scale`, `SimInfo::momentum_scale`). Must match
+/// quantization.wgsl.
+pub const MAX_FLOW_THICKNESS: f32 = 50.0;
 /// Largest flow speed (m/s) the integer momentum range holds, see
 /// [`MAX_FLOW_THICKNESS`].
 pub const MAX_FLOW_VELOCITY: f32 = 100.0;
-/// Headroom of the integer range above [`MAX_FLOW_THICKNESS`] and
-/// [`MAX_FLOW_VELOCITY`]; also covers the slope factor of the node mass.
-pub const QUANTIZATION_SAFETY: f32 = 2.0;
 /// Integer range used for masses (u32) and momenta (i32): below 2^32 and 2^31
 /// so that a rounded maximum still converts without saturating.
 const QUANTIZATION_U32_RANGE: f32 = 4.0e9;
 const QUANTIZATION_I32_RANGE: f32 = 2.0e9;
 
 impl SimSettings {
-    /// Largest node mass (kg) the integer-atomic grid holds, see
-    /// [`MAX_FLOW_THICKNESS`]; same expression as `max_node_mass` in
-    /// utils.wgsl.
+    /// Node mass (kg) of the integer-atomic grid's start range, see
+    /// [`MAX_FLOW_THICKNESS`]; `reference_node_mass` in quantization.wgsl.
+    /// The range in use is this times `SimInfo::mass_scale`.
     pub fn max_node_mass(&self) -> f32 {
-        QUANTIZATION_SAFETY * MAX_FLOW_THICKNESS * self.density * self.cell_size * self.cell_size
+        MAX_FLOW_THICKNESS * self.density * self.cell_size * self.cell_size
     }
 
     /// Whether the reference surface and the gully wall friction run: the
@@ -299,12 +324,14 @@ impl SimSettings {
         self.reference_surface_length >= self.cell_size
     }
 
-    /// Integer units per kg of the integer-atomic grid mass.
+    /// Integer units per kg of the integer-atomic grid mass at the start
+    /// range; [`crate::SimInfo::mass_factor`] gives the one in use.
     pub fn mass_factor(&self) -> f32 {
         QUANTIZATION_U32_RANGE / self.max_node_mass()
     }
 
-    /// Integer units per kg m/s of the integer-atomic grid momentum.
+    /// Integer units per kg m/s of the integer-atomic grid momentum at the
+    /// start range; [`crate::SimInfo::momentum_factor`] gives the one in use.
     pub fn momentum_factor(&self) -> f32 {
         QUANTIZATION_I32_RANGE / (self.max_node_mass() * MAX_FLOW_VELOCITY)
     }
@@ -463,6 +490,7 @@ impl SimSettings {
             no_new_cells_travel: 65.0,
             reference_surface_length: 0.0,
             release_swe: f32::NAN,
+            flight_terminal_velocity: DEFAULT_FLIGHT_TERMINAL_VELOCITY,
         }
     }
 
@@ -584,6 +612,9 @@ impl SimSettings {
         if let Some(val) = patch.reference_surface_length {
             settings.reference_surface_length = val;
         }
+        if let Some(val) = patch.flight_terminal_velocity {
+            settings.flight_terminal_velocity = val;
+        }
         if let Some(val) = patch.enable_curvature {
             if val {
                 settings.flags |= 1 << 0;
@@ -624,6 +655,13 @@ impl SimSettings {
                 settings.flags |= 1 << 5;
             } else {
                 settings.flags &= !(1 << 5);
+            }
+        }
+        if let Some(val) = patch.enable_detachment {
+            if val {
+                settings.flags |= SimFlags::DETACHMENT;
+            } else {
+                settings.flags &= !SimFlags::DETACHMENT;
             }
         }
     }
@@ -1205,6 +1243,15 @@ pub struct Settings {
     /// difference of the nodal thickness. Thin front nodes are then pushed by
     /// the full pressure of the particles behind them (defaults to false).
     pub enable_weak_pressure: Option<bool>,
+    /// 3D depth-averaged model: a particle detaches where one free-flight
+    /// step from the bed would end above the DEM (the bed falls away faster
+    /// than the particle can fall), flies ballistically and lands with the
+    /// tangential velocity minus a Coulomb impulse (defaults to false).
+    pub enable_detachment: Option<bool>,
+    /// 3D lift-off: terminal velocity (m/s) of the air drag on flying
+    /// particles; 0 disables it (defaults to
+    /// [`DEFAULT_FLIGHT_TERMINAL_VELOCITY`]).
+    pub flight_terminal_velocity: Option<f32>,
     pub enable_entrainment: Option<bool>,
     pub enable_center_of_mass: Option<bool>,
     /// Accumulate the grid with integer (fixed point) atomics even on GPUs
@@ -1344,8 +1391,9 @@ mod tests {
             density: 200.0,
             ..SimSettings::new()
         };
-        // 2 x 30 m x 200 kg/m3 x 25 m2
-        assert!((settings.max_node_mass() - 3.0e5).abs() < 1.0);
+        // MAX_FLOW_THICKNESS x 200 kg/m3 x 25 m2
+        let column = MAX_FLOW_THICKNESS;
+        assert!((settings.max_node_mass() - column * 200.0 * 25.0).abs() < 1.0);
         for cell_size in [1.0, 5.0, 25.0] {
             settings.cell_size = cell_size;
             let max_mass = settings.max_node_mass() * settings.mass_factor();
@@ -1356,7 +1404,9 @@ mod tests {
             // a 1 m release, 64 particles per cell: units per particle do not
             // depend on the cell size
             let particle_mass = settings.density * cell_size * cell_size / 64.0;
-            assert!((particle_mass * settings.mass_factor() - 4.0e9 / (64.0 * 60.0)).abs() < 10.0);
+            assert!(
+                (particle_mass * settings.mass_factor() - 4.0e9 / (64.0 * column)).abs() < 10.0
+            );
         }
     }
 
@@ -1393,6 +1443,7 @@ mod tests {
             momentum_stop_fraction: None,
             no_new_cells_travel: None,
             reference_surface_length: Some(12.5),
+            flight_terminal_velocity: Some(35.0),
             cfl: Some(0.9),
             min_slope_angle: Some(10.0),
             max_slope_angle: Some(20.0),
@@ -1425,6 +1476,7 @@ mod tests {
             enable_earth_pressure_coefficient: Some(false),
             enable_entrainment: Some(false),
             enable_weak_pressure: Some(false),
+            enable_detachment: Some(false),
             enable_center_of_mass: Some(true),
             integer_atomics: Some(true),
             center_of_mass_biggest_blob: Some(false),

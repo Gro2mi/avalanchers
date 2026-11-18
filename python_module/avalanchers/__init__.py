@@ -59,6 +59,8 @@ CALIBRATION_PARAMETER_DEFAULTS = {
     "enable_earth_pressure_coefficient": False,
     "enable_entrainment": True,
     "enable_weak_pressure": False,
+    "enable_detachment": False,
+    "flight_terminal_velocity": 40.0,
 }
 
 # Metric names of PyEvaluation (see crates/python_bindings/src/lib.rs),

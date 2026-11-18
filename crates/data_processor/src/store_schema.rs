@@ -509,9 +509,9 @@ fn setting_attributes(name: &str) -> Attributes {
         )),
         "constitutive_model" => result.extend(flag_values(&[0, 1], "drucker_prager mu_i")),
         "flags" => result.extend(attributes(json!({
-            "flag_masks": [1, 2, 4, 8, 16, 32],
+            "flag_masks": [1, 2, 4, 8, 16, 32, 128],
             "flag_meanings": "curvature particle_interaction earth_pressure_coefficient \
-                entrainment center_of_mass_biggest_blob weak_pressure",
+                entrainment center_of_mass_biggest_blob weak_pressure detachment",
         }))),
         _ => {}
     }
@@ -535,7 +535,7 @@ fn setting_units(name: &str) -> Option<&'static str> {
         | "reference_surface_length" => "m",
         "density" => "kg/m3",
         "release_swe" => "kg/m2",
-        "velocity_threshold" => "m/s",
+        "velocity_threshold" | "flight_terminal_velocity" => "m/s",
         "drag_coefficient" => "m/s2",
         "internal_friction_angle"
         | "basal_friction_angle"

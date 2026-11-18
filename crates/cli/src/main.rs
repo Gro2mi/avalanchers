@@ -105,6 +105,9 @@ struct Args {
     no_new_cells_travel: Option<f32>,
     #[arg(long)]
     reference_surface_length: Option<f32>,
+    /// 3D lift-off: terminal velocity (m/s) of flying particles, 0 = no drag
+    #[arg(long)]
+    flight_terminal_velocity: Option<f32>,
     #[arg(long, value_parser = parse_friction_model)]
     friction_model: Option<FrictionModel>,
     #[arg(long)]
@@ -189,6 +192,10 @@ struct Args {
     enable_entrainment: Option<bool>,
     #[arg(long, value_parser = parse_bool)]
     enable_weak_pressure: Option<bool>,
+    /// 3D model: particles detach where the bed-normal load turns negative and
+    /// fly ballistically (needs the curvature load; default false)
+    #[arg(long, value_parser = parse_bool)]
+    enable_detachment: Option<bool>,
     #[arg(long, value_parser = parse_bool)]
     enable_center_of_mass: Option<bool>,
     /// Integer (fixed point) grid atomics even on GPUs with float atomics;
@@ -278,6 +285,9 @@ impl Args {
         }
         if let Some(value) = self.reference_surface_length {
             settings.reference_surface_length = Some(value);
+        }
+        if let Some(value) = self.flight_terminal_velocity {
+            settings.flight_terminal_velocity = Some(value);
         }
         if let Some(value) = self.friction_model {
             settings.friction_model = Some(value);
@@ -374,6 +384,9 @@ impl Args {
         }
         if let Some(value) = self.enable_weak_pressure {
             settings.enable_weak_pressure = Some(value);
+        }
+        if let Some(value) = self.enable_detachment {
+            settings.enable_detachment = Some(value);
         }
         if let Some(value) = self.center_of_mass_biggest_blob {
             settings.center_of_mass_biggest_blob = Some(value);
@@ -761,6 +774,7 @@ mod tests {
             momentum_stop_fraction: None,
             no_new_cells_travel: None,
             reference_surface_length: None,
+            flight_terminal_velocity: None,
             released_particles_per_cell: None,
             release_thickness: None,
             release_swe: None,
@@ -790,6 +804,7 @@ mod tests {
             enable_earth_pressure_coefficient: None,
             enable_entrainment: None,
             enable_weak_pressure: None,
+            enable_detachment: None,
             center_of_mass_biggest_blob: None,
             release_area_fraction: None,
             crown_line_method: None,
