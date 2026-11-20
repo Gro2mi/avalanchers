@@ -11,7 +11,7 @@ VERIFICATION = pathlib.Path(__file__).resolve().parents[2] / "verification"
 sys.path.insert(0, str(VERIFICATION))
 
 
-GRID_FLOW_MODELS = ["curvilinear", "terrain-following", "3d-depth-averaged"]
+GRID_FLOW_MODELS = ["curvilinear", "terrain-following", "dampm-global-cartesian"]
 
 
 def gather_grid(values, positions):

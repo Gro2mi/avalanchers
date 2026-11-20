@@ -19,11 +19,14 @@ Usage:
 
 import argparse
 import pathlib
+import sys
 
 import numpy as np
 
-REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
-OUTPUT_DIR = REPO_ROOT / "verification" / "outputs" / "dataset_figures"
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+# shared helpers (thesis_style, cli_args) live in verification/
+sys.path.insert(0, str(REPO_ROOT / "verification"))
+OUTPUT_DIR = REPO_ROOT / "docs" / "figures"
 EVALUATION_DIR = REPO_ROOT.parent / "avalanchers_evaluation"
 OSHD_FILE = pathlib.Path("data") / "OSHD_DATA_2018-01.nc"
 OUTLINES_FILE = pathlib.Path("data") / "aval_outlines2018" / "outlines2018.shp"
@@ -81,7 +84,7 @@ def mapped_area(outlines, easting, northing):
     cell = abs(easting[1] - easting[0])
 
     def disk(radius_km):
-        r = int(round(radius_km / cell))
+        r = round(radius_km / cell)
         y, x = np.ogrid[-r:r + 1, -r:r + 1]
         return x * x + y * y <= r * r
 
@@ -118,10 +121,10 @@ def draw_orientation(ax, evaluation_dir):
 def figure_swe(out_dir, evaluation_dir, outlines=True):
     import geopandas as gpd
     import matplotlib.pyplot as plt
+    import thesis_style as ts
     import xarray as xr
     from matplotlib.colors import ListedColormap, Normalize
     from matplotlib.lines import Line2D
-    import thesis_style as ts
 
     with xr.open_dataset(evaluation_dir / OSHD_FILE) as dataset:
         swe = dataset.swe.sel(time=[np.datetime64(SNOW_START), np.datetime64(SNOW_END)])

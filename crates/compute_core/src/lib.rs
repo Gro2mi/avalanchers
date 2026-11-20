@@ -2451,7 +2451,7 @@ impl ComputeOrchestrator {
         self.particle_sort = None;
         let sorted_p2g = match SimModel::from_int(sim_settings.sim_model) {
             Some(SimModel::Curvilinear | SimModel::TerrainFollowing) => ShaderName::P2G2DSorted,
-            Some(SimModel::ThreeDDepthAveraged) => ShaderName::P2G3DSorted,
+            Some(SimModel::GlobalCartesian) => ShaderName::P2G3DSorted,
             _ => return Ok(()),
         };
         if self.particle_sort_interval == 0 {
@@ -2533,8 +2533,7 @@ impl ComputeOrchestrator {
     }
 
     pub async fn step_3d(&mut self, steps: u32) -> Result<SimInfo> {
-        self.step_simulation(steps, SimModel::ThreeDDepthAveraged)
-            .await
+        self.step_simulation(steps, SimModel::GlobalCartesian).await
     }
 
     pub async fn step_sliding_block(&mut self, steps: u32) -> Result<SimInfo> {
@@ -2564,7 +2563,7 @@ impl ComputeOrchestrator {
                 .min(sim_settings.max_steps - steps_run);
             let sim_info = if sim_settings.sim_model == SimModel::SlidingBlock.as_int() {
                 self.step_sliding_block(steps).await?
-            } else if sim_settings.sim_model == SimModel::ThreeDDepthAveraged.as_int() {
+            } else if sim_settings.sim_model == SimModel::GlobalCartesian.as_int() {
                 self.step_3d(steps).await?
             } else {
                 self.step_terrain_following(steps).await?
@@ -2887,7 +2886,7 @@ impl ComputeOrchestrator {
         // terrain-following, 3D and sliding-block particles start their step
         // from the stored elevation; the other models resample it from the DEM
         if sim_model == SimModel::TerrainFollowing.as_int()
-            || sim_model == SimModel::ThreeDDepthAveraged.as_int()
+            || sim_model == SimModel::GlobalCartesian.as_int()
             || sim_model == SimModel::SlidingBlock.as_int()
         {
             names.push(BufferName::ParticlesElevation);

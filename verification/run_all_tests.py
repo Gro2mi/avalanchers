@@ -9,18 +9,18 @@ animated GIFs, and writes everything into one markdown document:
     verification/outputs/all_tests/<model>_<timestamp>/report.md
 
 Model switching: ``--sim-model`` accepts any avalanchers model string
-(``curvilinear`` | ``terrain-following`` | ``3d-depth-averaged`` | ``mpmdac``
+(``curvilinear`` | ``terrain-following`` | ``dampm-global-cartesian`` | ``mpmdac``
 | ``sliding-block``) and is injected into every test's settings before it
 runs. The analytic reference solutions (alpha line, Faccanoni-Mangeney,
 Hutter 1993) apply to the depth-averaged models (curvilinear,
-terrain-following, 3d-depth-averaged) with Coulomb friction - for other
+terrain-following, dampm-global-cartesian) with Coulomb friction - for other
 models the tests still run and produce plots/tables, but treat them as
 model-comparison runs, not analytic validation. The curvature-specific
 benchmark is explicitly skipped for other models or friction laws.
 ``--friction-model`` / ``--mu`` optionally override the friction (defaults:
 Coulomb with each test's documented angle).
 
-3D depth-averaged model: it carries the full Cartesian velocity, so the
+DAMPM global model: it carries the full Cartesian velocity, so the
 similarity solution test compares the momentum in x, y AND z (h*u_z from
 the vertical grid momentum) and reports the 3D vector error plus a separate
 h*u_z error. It is also the only model in which particles detach from the bed
@@ -44,7 +44,7 @@ also apply numerical regression guardrails; other models are labeled comparison
 runs rather than numerical passes.
 
 Usage:
-    python run_all_tests.py                          # all tests, 3d-depth-averaged, 64 particles per cell
+    python run_all_tests.py                          # all tests, dampm-global-cartesian, 64 particles per cell
     python run_all_tests.py --sim-model curvilinear  # switch the model (double bump skipped)
     python run_all_tests.py --tests energy_line dam_break --quick
     python run_all_tests.py --particles-per-cell 8          # particles per release cell
@@ -70,14 +70,15 @@ import numpy as np
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 ALL_TESTS_DIR = REPO_ROOT / "verification" / "outputs" / "all_tests"
 
-DEFAULT_SIM_MODEL = "3d-depth-averaged"
+DEFAULT_SIM_MODEL = "dampm-global-cartesian"
 DEFAULT_PARTICLES_PER_CELL = 64
 
 TEST_NAMES = ["energy_line", "curvature", "similarity_solution", "dam_break", "rotation",
               "double_bump"]
 # models checked against the analytical references (with Coulomb friction)
-ANALYTIC_MODELS = ("curvilinear", "curvi", "c", "terrain-following", "terrain", "t",
-                   "3d-depth-averaged", "3d")
+ANALYTIC_MODELS = ("dampm-curvilinear", "curvilinear", "curvi", "c",
+                   "dampm-terrain-following", "terrain-following", "terrain", "t",
+                   "dampm-global-cartesian", "global", "3d-depth-averaged", "3d")
 
 TEST_TITLES = {
     "energy_line": "Energy Line",
@@ -88,7 +89,7 @@ TEST_TITLES = {
     "double_bump": "Double Bump",
 }
 
-THREE_D_MODELS = ("3d-depth-averaged", "3d")
+THREE_D_MODELS = ("dampm-global-cartesian", "global", "3d-depth-averaged", "3d")
 
 # what each test verifies (report text, reusable in the thesis methods)
 TEST_DESCRIPTIONS = {
@@ -332,7 +333,7 @@ def run_similarity_solution_test(test_dir, args):
 
 def run_double_bump_test(test_dir, args):
     if not _is_three_d(args):
-        return None, "Double bump test skipped: detachment exists only in the 3D depth-averaged model.", None
+        return None, "Double bump test skipped: detachment exists only in the DAMPM global model.", None
     import run_double_bump_test as mod
 
     _patch_common(mod.SETTINGS, args)
@@ -351,7 +352,7 @@ RUNNERS = {
 
 def _double_bump_assessment(ret):
     if ret is None:
-        return "skipped", ["Detachment exists only in the 3D depth-averaged model."]
+        return "skipped", ["Detachment exists only in the DAMPM global model."]
     failures = []
     if ret["max_flying"] == 0:
         failures.append("No particle detached.")
@@ -549,7 +550,7 @@ def _headline(test, ret, args=None):
                     f"max |ds| {max_ds:.2f} m over {len(results)} rotations{iou}")
         if test == "double_bump":
             if ret is None:
-                return "skipped: detachment requires the 3D depth-averaged model"
+                return "skipped: detachment requires the DAMPM global model"
             text = (f"{100 * ret['takeoff_fraction']:.0f} % took off, first take-off at bump 1 "
                     f"{100 * ret['takeoff_at_bump_1']:.0f} %, first landing on bump 2 "
                     f"{100 * ret['landing_on_bump_2']:.0f} %, {ret['flying_at_end']} flying at "
@@ -863,7 +864,7 @@ def write_report(run_dir, test_dirs, entries, args, elapsed, timestamp):
         ]),
         "",
         "The analytic references apply to the depth-averaged models (curvilinear, "
-        "terrain-following, 3d-depth-averaged) with Coulomb friction; other models are "
+        "terrain-following, dampm-global-cartesian) with Coulomb friction; other models are "
         "comparison runs.",
         "",
         "## Summary",
@@ -896,7 +897,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="run all avalanchers verification tests and write a markdown report")
     parser.add_argument("--sim-model", default=DEFAULT_SIM_MODEL,
-                        help="3d-depth-averaged | terrain-following | curvilinear | mpmdac | "
+                        help="dampm-global-cartesian | terrain-following | curvilinear | mpmdac | "
                              f"sliding-block (default: {DEFAULT_SIM_MODEL})")
     parser.add_argument("--friction-model", default=None,
                         help="override the friction model (default: coulomb)")

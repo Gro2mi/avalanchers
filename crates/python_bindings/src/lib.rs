@@ -1443,7 +1443,7 @@ impl PySimulation {
     }
 
     /// f32 array of the per-cell deposited vertical momentum in kg m/s,
-    /// ``height * width``. Only the 3D depth-averaged model carries it; it is
+    /// ``height * width``. Only the DAMPM global model carries it; it is
     /// zero for the other models.
     #[getter]
     fn get_grid_momentum_z<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<f32>>> {
@@ -1456,7 +1456,7 @@ impl PySimulation {
     }
 
     /// bool array: whether each particle is detached from the bed and flying
-    /// ballistically (3D depth-averaged model with curvature; always false
+    /// ballistically (DAMPM global model with curvature; always false
     /// for the other models).
     #[getter]
     fn get_particles_flying<'py>(

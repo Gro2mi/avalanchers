@@ -4,6 +4,13 @@ All notable changes to this project might be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- Grid models renamed: `3d-depth-averaged` is now **DAMPM global** (`dampm-global-cartesian`, short `global`),
+  `terrain-following` is **DAMPM terrain-following** (`dampm-terrain-following`, short `terrain-following`
+  or `terrain`) and `curvilinear` is **DAMPM curvilinear** (`dampm-curvilinear`, short `curvilinear` or
+  `curvi`). Settings and stores record the new names; the old strings, including `3d-depth-averaged`
+  and `3d`, are still accepted. The Rust enum variant `SimModel::ThreeDDepthAveraged` is now `SimModel::Global`.
+
 ### Fixed
 - GeoTIFF DEMs written by GDAL keep their no-data cells out of the simulation. The no-data tag
   (42113) is an ASCII string such as `"-9999"`, which was read as a number and ignored, so the

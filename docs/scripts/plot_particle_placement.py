@@ -29,11 +29,14 @@ Usage:
 import argparse
 import math
 import pathlib
+import sys
 
 import numpy as np
 
-REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
-OUTPUT_DIR = REPO_ROOT / "verification" / "outputs" / "particle_placement"
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+# shared helpers (thesis_style, cli_args) live in verification/
+sys.path.insert(0, str(REPO_ROOT / "verification"))
+OUTPUT_DIR = REPO_ROOT / "docs" / "figures"
 
 CELL_SIZE = 1.0          # m; the figure is in cell units, so any size works
 GRID_CELLS = 16          # flat plane of GRID_CELLS x GRID_CELLS cells

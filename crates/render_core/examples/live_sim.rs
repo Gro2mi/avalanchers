@@ -1367,17 +1367,17 @@ impl ApplicationHandler for Viewer {
                                         ui.selectable_value(
                                             &mut model,
                                             SimModel::TerrainFollowing,
-                                            "Terrain-following",
+                                            "DAMPM terrain-following",
                                         );
                                         ui.selectable_value(
                                             &mut model,
-                                            SimModel::ThreeDDepthAveraged,
-                                            "3D depth averaged",
+                                            SimModel::GlobalCartesian,
+                                            "DAMPM global",
                                         );
                                         ui.selectable_value(
                                             &mut model,
                                             SimModel::Curvilinear,
-                                            "Curvilinear",
+                                            "DAMPM curvilinear",
                                         );
                                         ui.selectable_value(&mut model, SimModel::MpmDaC, "MPMDAC");
                                         ui.selectable_value(

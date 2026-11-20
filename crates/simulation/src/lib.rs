@@ -1215,7 +1215,7 @@ impl Simulation {
             match self.settings.sim_model {
                 model
                     if model == SimModel::TerrainFollowing.as_int()
-                        || model == SimModel::ThreeDDepthAveraged.as_int()
+                        || model == SimModel::GlobalCartesian.as_int()
                         || model == SimModel::SlidingBlock.as_int() =>
                 {
                     self.orchestrator
@@ -1268,7 +1268,7 @@ impl Simulation {
             model if model == SimModel::TerrainFollowing.as_int() => {
                 self.orchestrator.step_terrain_following(steps).await?
             }
-            model if model == SimModel::ThreeDDepthAveraged.as_int() => {
+            model if model == SimModel::GlobalCartesian.as_int() => {
                 self.orchestrator.step_3d(steps).await?
             }
             model if model == SimModel::Curvilinear.as_int() => {
@@ -2442,7 +2442,7 @@ impl Simulation {
         if self.settings.sim_model == SimModel::TerrainFollowing.as_int() {
             bail!(
                 "The terrain-following model has no vertical velocity: particle velocities \
-                 are 2D vectors in the surface plane, use the 3d-depth-averaged model for a z component"
+                 are 2D vectors in the surface plane, use the DAMPM global model for a z component"
             );
         }
         if self.gpu_cache.particles_velocity_z.is_none() {
@@ -2539,7 +2539,7 @@ impl Simulation {
         Ok(self.gpu_cache.grid_momentum.as_ref().unwrap())
     }
 
-    /// Per-cell deposited vertical momentum in kg m/s of the 3D depth-averaged
+    /// Per-cell deposited vertical momentum in kg m/s of the DAMPM global
     /// model; zero for every other model (reset_grid clears it each step).
     pub async fn fetch_grid_momentum_z(&mut self) -> Result<&Vec<f32>> {
         if self.state < SimulationState::ParticlesInitialized {
@@ -5189,7 +5189,7 @@ fn test_trajectory() {
         for model in [
             SimModel::Curvilinear,
             SimModel::TerrainFollowing,
-            SimModel::ThreeDDepthAveraged,
+            SimModel::GlobalCartesian,
         ] {
             check_sorted_p2g_matches_direct_p2g(model);
         }
@@ -5313,7 +5313,7 @@ fn test_trajectory() {
             [
                 SimModel::Curvilinear,
                 SimModel::TerrainFollowing,
-                SimModel::ThreeDDepthAveraged,
+                SimModel::GlobalCartesian,
             ]
             .map(|model| (release, model))
         }) {
@@ -5605,7 +5605,7 @@ fn test_trajectory() {
         for model in [
             SimModel::Curvilinear,
             SimModel::TerrainFollowing,
-            SimModel::ThreeDDepthAveraged,
+            SimModel::GlobalCartesian,
         ] {
             check_momentum_stop_fraction(model);
         }
@@ -6007,7 +6007,7 @@ fn test_trajectory() {
     #[test_log::test]
     fn test_nodes_outside_the_flow_keep_zero_velocity() {
         const N: usize = 40;
-        for model in [SimModel::TerrainFollowing, SimModel::ThreeDDepthAveraged] {
+        for model in [SimModel::TerrainFollowing, SimModel::GlobalCartesian] {
             let mut sim = setup_restore_sim(model);
             block_on(sim.prepare()).expect("Failed to prepare");
             block_on(sim.run_n_steps(10)).expect("Failed to run");
@@ -6034,7 +6034,7 @@ fn test_trajectory() {
     fn test_3d_velocity_is_tangent_to_bed() {
         let slope_angle: f32 = 40.0;
         let mut sim = setup_simple_sim(slope_angle, 3.0);
-        sim.settings.sim_model = SimModel::ThreeDDepthAveraged.as_int();
+        sim.settings.sim_model = SimModel::GlobalCartesian.as_int();
         sim.set_dem(&create_slope(16, 16, 3.0, slope_angle), 16, 16, 3.0)
             .expect("Failed to set interior test DEM");
         let mut release = vec![0.0; 16 * 16];
@@ -6173,7 +6173,7 @@ fn test_trajectory() {
         for model in [
             SimModel::Curvilinear,
             SimModel::TerrainFollowing,
-            SimModel::ThreeDDepthAveraged,
+            SimModel::GlobalCartesian,
         ] {
             let Some(loss) = light_flow_margin_loss(model, false) else {
                 info!("{model}: no float atomics, the integer grid quantizes light deposits");
@@ -6195,7 +6195,7 @@ fn test_trajectory() {
         for model in [
             SimModel::Curvilinear,
             SimModel::TerrainFollowing,
-            SimModel::ThreeDDepthAveraged,
+            SimModel::GlobalCartesian,
         ] {
             let loss = light_flow_margin_loss(model, true).expect("integer grid always runs");
             info!("{model}: integer grid margin change {loss:.2e} of the speed");
@@ -6258,7 +6258,7 @@ fn test_trajectory() {
                 .write_buffer(BufferName::ParticlesAffineMatrix, &vec![[0.0f32; 4]; count]),
         )
         .expect("Failed to seed affine matrices");
-        if model == SimModel::ThreeDDepthAveraged {
+        if model == SimModel::GlobalCartesian {
             block_on(
                 sim.orchestrator
                     .write_buffer(BufferName::ParticlesVelocityZ, &vec![0.0f32; count]),
@@ -6328,7 +6328,7 @@ fn test_trajectory() {
             ..Default::default()
         })
         .expect("Failed to select the integer grid");
-        sim.settings.sim_model = SimModel::ThreeDDepthAveraged.as_int();
+        sim.settings.sim_model = SimModel::GlobalCartesian.as_int();
         sim.set_dem(&create_slope(N, N, CELL_SIZE, 0.0), N, N, CELL_SIZE)
             .expect("Failed to set flat DEM");
         let mut release = vec![0.0; N * N];
@@ -6405,11 +6405,11 @@ fn test_trajectory() {
         100.0 + cliff + slope
     }
 
-    /// 3D depth-averaged flow down a 35 degree slope that breaks into a cliff.
+    /// DAMPM global flow down a 35 degree slope that breaks into a cliff.
     fn setup_cliff_sim(curvature: bool, detachment: bool) -> Simulation {
         let mut sim: Simulation = block_on(Simulation::new()).expect("Failed to create Simulation");
         block_on(sim.create(Settings {
-            sim_model: Some(SimModel::ThreeDDepthAveraged),
+            sim_model: Some(SimModel::GlobalCartesian),
             enable_curvature: Some(curvature),
             enable_detachment: Some(detachment),
             max_steps: Some(3000),
@@ -6507,7 +6507,7 @@ fn test_trajectory() {
     #[test_log::test]
     fn test_3d_flow_on_a_plane_never_flies() {
         let mut sim = setup_slope_sim(Settings {
-            sim_model: Some(SimModel::ThreeDDepthAveraged),
+            sim_model: Some(SimModel::GlobalCartesian),
             friction_model: Some(compute_core::settings::FrictionModel::Coulomb),
             friction_coefficient: Some(0.1),
             enable_curvature: Some(true),

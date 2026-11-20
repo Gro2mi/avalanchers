@@ -13,7 +13,7 @@ it follows the closed-form velocity height of a Coulomb slider with the
 centripetal load, takes off where the normal load turns negative, flies
 ballistically and lands with the same friction impulse as the particles.
 
-Only the 3D depth-averaged model with the centripetal load
+Only the DAMPM global model with the centripetal load
 (enable_curvature) has detachment. The run is sampled every step: take-off
 and landing positions come from the change of the flying flag between two
 samples. The figures show the particles in a side view (height above the
@@ -43,7 +43,7 @@ SETTINGS = dict(case.MODEL_SETTINGS,
                 dem_path=str(_DEM_PATH),
                 release_areas_path=str(_RELEASE_PATH))
 
-THREE_D_MODELS = ("3d-depth-averaged", "3d")
+THREE_D_MODELS = ("dampm-global-cartesian", "global", "3d-depth-averaged", "3d")
 DEFAULT_DENSITY = 200.0  # kg/m3, engine default (SimSettings::new)
 SIM_INFO_STOPPED = 1 << 31
 
@@ -74,7 +74,7 @@ def run_simulation(settings, save_steps=1):
     import avalanchers
 
     if settings["sim_model"].lower() not in THREE_D_MODELS:
-        raise ValueError("Detachment is only modeled in the 3D depth-averaged model.")
+        raise ValueError("Detachment is only modeled in the DAMPM global model.")
     if not settings.get("enable_curvature", False):
         raise ValueError("Detachment needs the centripetal load (enable_curvature).")
     ensure_testcase()

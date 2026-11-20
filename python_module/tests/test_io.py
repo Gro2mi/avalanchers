@@ -12,7 +12,7 @@ from avalanchers import AvalanchersOutput
 
 @pytest.mark.parametrize(
     "model",
-    ["terrain-following", "curvilinear", "mpmdac", "sliding-block", "3d-depth-averaged"],
+    ["terrain-following", "curvilinear", "mpmdac", "sliding-block", "dampm-global-cartesian"],
 )
 @pytest.mark.parametrize("batched", [False, True])
 def test_every_simulation_model_saves_3d_travel_length(tmp_path, model, batched):
@@ -81,7 +81,7 @@ def test_export_calibration_parameters(tmp_path):
     # Unset parameters are recorded with the engine defaults
     assert frame.loc[0, "friction_coefficient"] == 0.2
     assert frame.loc[0, "drag_coefficient"] == 2000.0
-    assert frame.loc[0, "sim_model"] == "terrain-following"
+    assert frame.loc[0, "sim_model"] == "dampm-terrain-following"
     assert frame.loc[0, "avalanchers_version"] == avalanchers.__version__
     # Evaluation results are stored in the same row, metrics without a
     # value stay null

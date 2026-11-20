@@ -28,7 +28,7 @@ impl SimFlags {
     /// Set only for the particle seeding dispatch, from
     /// [`ParticlePlacement::is_uniform`]; not a simulation parameter.
     pub const UNIFORM_PARTICLE_PLACEMENT: u32 = 1 << 6;
-    /// 3D depth-averaged model: a particle detaches where one free-flight
+    /// DAMPM global model: a particle detaches where one free-flight
     /// step from the bed would end above the DEM, and flies ballistically
     /// until it lands.
     pub const DETACHMENT: u32 = 1 << 7;
@@ -140,7 +140,7 @@ pub struct SimSettings {
     /// The no-new-cells stop window spans round(travel / cfl) steps, at least
     /// 10: the steps the fastest material needs to travel this many cells.
     pub no_new_cells_travel: f32,
-    /// Curvilinear, terrain-following and 3D depth averaged: Gaussian width (m)
+    /// Curvilinear, terrain-following and DAMPM global: Gaussian width (m)
     /// of the reference surface that defines gully wall inclinations for the
     /// confinement friction; below the cell size (e.g. 0) disables it, see
     /// [`Self::gully_walls_enabled`].
@@ -169,9 +169,7 @@ impl Hash for SimSettings {
         let sim_model = SimModel::from_int(self.sim_model);
         let grid_flow_model = matches!(
             sim_model,
-            Some(
-                SimModel::TerrainFollowing | SimModel::Curvilinear | SimModel::ThreeDDepthAveraged
-            )
+            Some(SimModel::TerrainFollowing | SimModel::Curvilinear | SimModel::GlobalCartesian)
         );
 
         // Shared by all models: run length, grid, release and evaluation
@@ -241,7 +239,7 @@ impl Hash for SimSettings {
                 if sim_model == Some(SimModel::Curvilinear) {
                     flags_mask |= SimFlags::WEAK_PRESSURE;
                 }
-                if sim_model == Some(SimModel::ThreeDDepthAveraged) {
+                if sim_model == Some(SimModel::GlobalCartesian) {
                     flags_mask |= SimFlags::DETACHMENT;
                 }
                 if SimFlags::from_u32(self.flags).is_earth_pressure_coefficient_enabled() {
@@ -255,7 +253,7 @@ impl Hash for SimSettings {
             hash_f32(self.momentum_stop_fraction, state);
             hash_f32(self.reference_surface_length, state);
         }
-        if sim_model == Some(SimModel::ThreeDDepthAveraged)
+        if sim_model == Some(SimModel::GlobalCartesian)
             && SimFlags::from_u32(self.flags).is_detachment_enabled()
         {
             hash_f32(self.flight_terminal_velocity, state);
@@ -843,14 +841,17 @@ impl<'de> Deserialize<'de> for ConstitutiveModel {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SimModel {
+    /// DAMPM terrain-following: velocities in the surface plane, no z component.
     TerrainFollowing,
+    /// DAMPM curvilinear: horizontal velocities `(dx/dt, dy/dt)` with the full
+    /// surface metric.
     Curvilinear,
     MpmDaC,
     /// Legacy per-particle sliding-block model (former model 0).
     SlidingBlock,
-    /// Depth-averaged terrain-following grid model that carries the full 3D
-    /// Cartesian velocity.
-    ThreeDDepthAveraged,
+    /// DAMPM global: depth-averaged material point method that carries the full
+    /// 3D Cartesian velocity tangent to the bed.
+    GlobalCartesian,
 }
 
 impl SimModel {
@@ -860,7 +861,7 @@ impl SimModel {
             1 => Some(Self::Curvilinear),
             2 => Some(Self::MpmDaC),
             3 => Some(Self::SlidingBlock),
-            4 => Some(Self::ThreeDDepthAveraged),
+            4 => Some(Self::GlobalCartesian),
             _ => None,
         }
     }
@@ -871,7 +872,7 @@ impl SimModel {
             Self::Curvilinear => 1,
             Self::MpmDaC => 2,
             Self::SlidingBlock => 3,
-            Self::ThreeDDepthAveraged => 4,
+            Self::GlobalCartesian => 4,
         }
     }
 }
@@ -881,11 +882,16 @@ impl FromStr for SimModel {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value.to_lowercase().as_str() {
-            "terrain-following" | "terrain" | "t" => Ok(Self::TerrainFollowing),
-            "curvilinear" | "curvi" | "c" => Ok(Self::Curvilinear),
+            // "t", "c", "3d-depth-averaged" and "3d" keep older settings and stores readable.
+            "dampm-terrain-following" | "terrain-following" | "terrain" | "t" => {
+                Ok(Self::TerrainFollowing)
+            }
+            "dampm-curvilinear" | "curvilinear" | "curvi" | "c" => Ok(Self::Curvilinear),
             "mpmdac" | "mpm-dac" | "mpm_depth_averaged_curvilinear" => Ok(Self::MpmDaC),
             "sliding-block" | "block" | "b" => Ok(Self::SlidingBlock),
-            "3d-depth-averaged" | "3d" => Ok(Self::ThreeDDepthAveraged),
+            "dampm-global-cartesian" | "dampm-global" | "global" | "3d-depth-averaged" | "3d" => {
+                Ok(Self::GlobalCartesian)
+            }
             _ => Err(format!("unknown simulation model: {value}")),
         }
     }
@@ -894,11 +900,11 @@ impl FromStr for SimModel {
 impl fmt::Display for SimModel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::TerrainFollowing => "terrain-following",
-            Self::Curvilinear => "curvilinear",
+            Self::TerrainFollowing => "dampm-terrain-following",
+            Self::Curvilinear => "dampm-curvilinear",
             Self::MpmDaC => "mpmdac",
             Self::SlidingBlock => "sliding-block",
-            Self::ThreeDDepthAveraged => "3d-depth-averaged",
+            Self::GlobalCartesian => "dampm-global-cartesian",
         })
     }
 }
@@ -1227,7 +1233,7 @@ pub struct Settings {
     /// the steps the fastest material needs to travel this many cells,
     /// round(travel / cfl) and at least 10 (default 65 cells, 72 steps at CFL 0.9).
     pub no_new_cells_travel: Option<f32>,
-    /// Curvilinear, terrain-following and 3D depth averaged: Gaussian width (m)
+    /// Curvilinear, terrain-following and DAMPM global: Gaussian width (m)
     /// of the smoothed reference surface.
     /// Bed inclined by beta against it counts as a gully wall whose normal
     /// load grows by 1 + K tan^2(beta) from the lateral pressure of the snow
@@ -1243,7 +1249,7 @@ pub struct Settings {
     /// difference of the nodal thickness. Thin front nodes are then pushed by
     /// the full pressure of the particles behind them (defaults to false).
     pub enable_weak_pressure: Option<bool>,
-    /// 3D depth-averaged model: a particle detaches where one free-flight
+    /// DAMPM global model: a particle detaches where one free-flight
     /// step from the bed would end above the DEM (the bed falls away faster
     /// than the particle can fall), flies ballistically and lands with the
     /// tangential velocity minus a Coulomb impulse (defaults to false).
@@ -1780,7 +1786,7 @@ mod tests {
             SimModel::Curvilinear,
             SimModel::MpmDaC,
             SimModel::SlidingBlock,
-            SimModel::ThreeDDepthAveraged,
+            SimModel::GlobalCartesian,
         ];
 
         for model in models {
@@ -1799,7 +1805,7 @@ mod tests {
 
         assert_eq!(SimModel::from_int(3), Some(SimModel::SlidingBlock));
 
-        assert_eq!(SimModel::from_int(4), Some(SimModel::ThreeDDepthAveraged));
+        assert_eq!(SimModel::from_int(4), Some(SimModel::GlobalCartesian));
         assert_eq!(SimModel::from_int(5), None);
         assert_eq!(SimModel::from_int(u32::MAX), None);
     }
@@ -1807,10 +1813,11 @@ mod tests {
     #[test]
     fn sim_model_string_roundtrip() {
         let models = [
-            (SimModel::TerrainFollowing, "terrain-following"),
-            (SimModel::Curvilinear, "curvilinear"),
+            (SimModel::TerrainFollowing, "dampm-terrain-following"),
+            (SimModel::Curvilinear, "dampm-curvilinear"),
             (SimModel::MpmDaC, "mpmdac"),
             (SimModel::SlidingBlock, "sliding-block"),
+            (SimModel::GlobalCartesian, "dampm-global-cartesian"),
         ];
 
         for (model, string) in models {
@@ -1826,6 +1833,9 @@ mod tests {
         }
         for value in ["curvilinear", "curvi", "c", "CURVI"] {
             assert_eq!(SimModel::from_str(value), Ok(SimModel::Curvilinear));
+        }
+        for value in ["global", "GLOBAL", "3d-depth-averaged", "3d"] {
+            assert_eq!(SimModel::from_str(value), Ok(SimModel::GlobalCartesian));
         }
         for value in ["mpmdac", "MPM-DAC", "mpm_depth_averaged_curvilinear"] {
             assert_eq!(SimModel::from_str(value), Ok(SimModel::MpmDaC));

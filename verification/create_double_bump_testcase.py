@@ -103,7 +103,7 @@ def profile_curvature(x: np.ndarray) -> np.ndarray:
 # model settings of the test case, shared with run_double_bump_test.py:
 # Coulomb friction, so that a point slider gives the reference
 MODEL_SETTINGS = {
-    "sim_model": "3d",
+    "sim_model": "dampm-global-cartesian",
     "friction_model": "coulomb",
     "friction_coefficient": 0.4,
     "enable_curvature": True,

@@ -59,11 +59,14 @@ import heapq
 import math
 import os
 import pathlib
+import sys
 
 import numpy as np
 
-REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
-OUTPUT_DIR = REPO_ROOT / "verification" / "outputs" / "method_figures"
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+# shared helpers (thesis_style, cli_args) live in verification/
+sys.path.insert(0, str(REPO_ROOT / "verification"))
+OUTPUT_DIR = REPO_ROOT / "docs" / "figures"
 EVALUATION_DIR = REPO_ROOT.parent / "avalanchers_evaluation"
 OUTLINES_SUBDIR = pathlib.Path("data") / "single_avalanche_outlines_switzerland_2018"
 
@@ -82,7 +85,7 @@ FRICTION_PARAMETERS = {"mu": 0.2, "xi": 2000.0, "mu_s": 0.38, "mu_2": 0.65, "I_0
 
 # release area estimation as in Table tab:release-parameters of the thesis
 RELEASE_SETTINGS = {
-    "sim_model": "3d-depth-averaged",
+    "sim_model": "dampm-global-cartesian",
     "outlines_padding": 100,
     "density": 200.0,
     "release_swe": 100.0,  # only scales the thickness, not the release cells
@@ -168,7 +171,6 @@ def schematic_axes(fig_size):
 
 
 def figure_gully(out_dir):
-    import matplotlib.pyplot as plt
     import thesis_style as ts
 
     # bed across the gully: Gaussian gully of depth D and width w in a gently
@@ -515,7 +517,7 @@ def uphill_steps(dem, roi):
             continue
         start = np.array([col + 0.5, row + 0.5])
         point = start + g / norm
-        pc, pr = int(math.floor(point[0])), int(math.floor(point[1]))
+        pc, pr = math.floor(point[0]), math.floor(point[1])
         if 0 <= pr < height and 0 <= pc < width and roi[pr, pc]:
             continue
         nearest = math.inf
@@ -546,10 +548,10 @@ def geodesic_distance(seeds, traversable, cell_size):
             continue
         for dr, dc, w in steps:
             nr, nc = r + dr, c + dc
-            if 0 <= nr < height and 0 <= nc < width and traversable[nr, nc]:
-                if d0 + w < distance[nr, nc]:
-                    distance[nr, nc] = d0 + w
-                    heapq.heappush(heap, (d0 + w, nr, nc))
+            if (0 <= nr < height and 0 <= nc < width and traversable[nr, nc]
+                    and d0 + w < distance[nr, nc]):
+                distance[nr, nc] = d0 + w
+                heapq.heappush(heap, (d0 + w, nr, nc))
     return distance
 
 
@@ -572,11 +574,11 @@ def outline_edges(mask):
 
 def figure_release(out_dir, evaluation_dir, avalanche_id):
     import matplotlib.pyplot as plt
+    import thesis_style as ts
     from matplotlib.collections import LineCollection
     from matplotlib.colors import ListedColormap
     from matplotlib.lines import Line2D
     from matplotlib.patches import FancyArrowPatch, Patch
-    import thesis_style as ts
 
     layers = run_release_estimation(evaluation_dir, avalanche_id)
     dem, roi = layers["dem"], layers["roi"]
@@ -756,7 +758,7 @@ def figure_mpm(out_dir):
         label(ax, xp + up + (0.1, 0.12), r"$\mathbf{u}_p, \mathbf{C}_p$", colors["u"],
               ha="left")
         label(ax, (0.0, -2.42), r"$m_i = \sum_p w_{ip}\, m_p$", va="bottom", fontsize=8,
-              bbox=dict(facecolor="white", edgecolor="none", pad=1.0))
+              bbox={"facecolor": "white", "edgecolor": "none", "pad": 1.0})
         ts.panel_label(ax, "a", loc=(0.0, 1.06))
 
         # (b) grid update on the nodes with mass
@@ -765,10 +767,10 @@ def figure_mpm(out_dir):
             vector(ax, node, node + 0.6 * a, "0.55", lw=0.8, zorder=3)
             vector(ax, node, node + 0.6 * b, colors["node"], lw=1.1, zorder=4)
         label(ax, (-0.1, -2.42), r"$\tilde{\mathbf{u}}_i$", "0.45", ha="right", va="bottom",
-              fontsize=8, bbox=dict(facecolor="white", edgecolor="none", pad=1.0))
+              fontsize=8, bbox={"facecolor": "white", "edgecolor": "none", "pad": 1.0})
         label(ax, (0.1, -2.42), r"$\rightarrow\ \mathbf{u}^{n+1}_i$", colors["node"],
               ha="left", va="bottom", fontsize=8,
-              bbox=dict(facecolor="white", edgecolor="none", pad=1.0))
+              bbox={"facecolor": "white", "edgecolor": "none", "pad": 1.0})
         ts.panel_label(ax, "b", loc=(0.0, 1.06))
 
         # (c) grid to particle
@@ -779,7 +781,7 @@ def figure_mpm(out_dir):
         label(ax, xp + up_new + (0.1, 0.12), r"$\mathbf{u}^{n+1}_p, \mathbf{C}^{n+1}_p$",
               colors["u"], ha="left")
         label(ax, (0.0, -2.42), r"$\mathbf{u}^{n+1}_p = \sum_i w_{ip}\, \mathbf{u}^{n+1}_i$",
-              va="bottom", fontsize=8, bbox=dict(facecolor="white", edgecolor="none", pad=1.0))
+              va="bottom", fontsize=8, bbox={"facecolor": "white", "edgecolor": "none", "pad": 1.0})
         ts.panel_label(ax, "c", loc=(0.0, 1.06))
 
         # (d) advection along the bed with the new stencil
@@ -801,7 +803,7 @@ def figure_mpm(out_dir):
         label(ax, xp + (-0.1, -0.3), r"$\mathbf{x}_p^{n}$", colors["p"], ha="right")
         label(ax, xp_new + (0.12, -0.3), r"$\mathbf{x}_p^{n+1}$", colors["p"], ha="left")
         label(ax, (0.0, -2.42), "arc step and rotation", va="bottom", fontsize=8,
-              bbox=dict(facecolor="white", edgecolor="none", pad=1.0))
+              bbox={"facecolor": "white", "edgecolor": "none", "pad": 1.0})
         ts.panel_label(ax, "d", loc=(0.0, 1.06))
         ts.save(fig, out_dir, "method_mpm_step")
 
@@ -941,10 +943,10 @@ def mask_image(ax, mask, color, alpha=1.0, zorder=3):
 
 def figure_loss(out_dir, evaluation_dir, avalanche_id):
     import matplotlib.pyplot as plt
+    import thesis_style as ts
     from matplotlib.collections import LineCollection
     from matplotlib.lines import Line2D
     from matplotlib.patches import FancyArrowPatch, Patch
-    import thesis_style as ts
 
     runs = [run_simulation(evaluation_dir, avalanche_id, mu, xi) for mu, xi in LOSS_RUNS]
     metrics = [footprint_metrics(run) for run in runs]
@@ -996,7 +998,7 @@ def figure_loss(out_dir, evaluation_dir, avalanche_id):
                     rf"$L_{{\mathrm{{dist}}}} = {m['L_dist']:.3f}$, "
                     rf"$L_{{\mathrm{{runout}}}} = {m['L_runout']:.2f}$",
                     transform=ax.transAxes, ha="left", va="bottom", fontsize=7, zorder=10,
-                    bbox=dict(facecolor="white", edgecolor="none", alpha=0.85, pad=2.0))
+                    bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.85, "pad": 2.0})
             ts.panel_label(ax, letter)
         handles = [
             Patch(facecolor=colors["release"], alpha=0.55, label="release area $R$"),
@@ -1018,10 +1020,10 @@ def figure_loss(out_dir, evaluation_dir, avalanche_id):
 
 def figure_com(out_dir, evaluation_dir, avalanche_id):
     import matplotlib.pyplot as plt
+    import thesis_style as ts
     from matplotlib.collections import LineCollection
     from matplotlib.lines import Line2D
     from matplotlib.patches import Patch
-    import thesis_style as ts
 
     mu, xi = LOSS_RUNS[0]
     run = run_simulation(evaluation_dir, avalanche_id, mu, xi)
@@ -1112,8 +1114,8 @@ def figure_com(out_dir, evaluation_dir, avalanche_id):
                 linestyle=(0, (4, 2)))
         ax.plot([0, s2d[-1]], [com[-1, 2]] * 2, color="0.5", linewidth=0.5, linestyle=":")
         ax.annotate("", xy=(s2d[-1] * 1.02, com[-1, 2]), xytext=(s2d[-1] * 1.02, com[0, 2]),
-                    arrowprops=dict(arrowstyle="<|-|>,head_length=0.35,head_width=0.15",
-                                    color="0.25", linewidth=0.6, shrinkA=0, shrinkB=0))
+                    arrowprops={"arrowstyle": "<|-|>,head_length=0.35,head_width=0.15",
+                                    "color": "0.25", "linewidth": 0.6, "shrinkA": 0, "shrinkB": 0})
         ax.text(s2d[-1] * 1.035, 0.5 * (com[0, 2] + com[-1, 2]),
                 rf"$\Delta Z = {drop:.0f}$ m", ha="left", va="center", fontsize=8)
         ax.text(0.5 * s2d[-1], com[-1, 2] - 0.05 * drop,

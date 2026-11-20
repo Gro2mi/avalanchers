@@ -27,9 +27,9 @@ Usage:
     python run_similarity_solution_test.py              # run with the SETTINGS below
     python run_similarity_solution_test.py --t-end 10   # shorter run
     python run_similarity_solution_test.py --plot-sequence --show
-    python run_similarity_solution_test.py --sim-model 3d-depth-averaged
+    python run_similarity_solution_test.py --sim-model dampm-global-cartesian
 
-The 3D depth-averaged model carries the full Cartesian velocity: its momentum
+The DAMPM global model carries the full Cartesian velocity: its momentum
 is compared in x, y AND z (h*u_z from ``grid_momentum_z``). Thesis figures
 (PDF + PNG, 15 cm text width) and an error CSV are written to
 ``<out-dir>/pics/thesis``.
@@ -193,7 +193,7 @@ def run_simulation(settings, cfg):
     surface_velocity = settings["sim_model"].lower() in sst.SURFACE_VELOCITY_MODELS
     three_d = sst.is_three_d(settings["sim_model"])
     if three_d:
-        print("3D depth-averaged model: momentum compared in x, y AND z "
+        print("DAMPM global model: momentum compared in x, y AND z "
               "(grid_momentum + grid_momentum_z)")
 
     samples = {"t": [], "h": [], "u": [], "v": [], "vx": [], "vy": [], "speed": [],
@@ -292,7 +292,7 @@ def main():
     from cli_args import add_particles_per_cell_argument
     add_particles_per_cell_argument(parser)
     parser.add_argument("--sim-model", default=None,
-                        help="curvilinear | terrain-following | 3d-depth-averaged | mpmdac")
+                        help="curvilinear | terrain-following | dampm-global-cartesian | mpmdac")
     parser.add_argument("--earth-pressure", action="store_true",
                         help="Savage-Hutter earth pressure coefficients in the "
                              "analytic solution and the simulation")
