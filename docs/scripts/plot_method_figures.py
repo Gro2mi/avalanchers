@@ -41,6 +41,9 @@ Four figures:
    along the horizontal path with the travel angle.
 8. ``method_friction_laws``: friction deceleration of the four friction laws
    against speed, and the steady speed on a plane against the slope angle.
+9. ``method_release_fraction``: release area fraction f (Eq.
+   eq:release-fraction) against the outline area, from 100 m^2 (size 1) to the largest
+   outline of the inventory, over the histogram of the outline areas.
 
 Figures 1-3, 5 and 8 are schematic or analytical; 4, 6 and 7 run the engine.
 Figures 1-3 are schematic and need no data. Figure 4 needs the outline
@@ -70,7 +73,7 @@ OUTPUT_DIR = REPO_ROOT / "docs" / "figures"
 EVALUATION_DIR = REPO_ROOT.parent / "avalanchers_evaluation"
 OUTLINES_SUBDIR = pathlib.Path("data") / "single_avalanche_outlines_switzerland_2018"
 
-FIGURES = ("gully", "bed", "arc", "release", "mpm", "loss", "com", "friction")
+FIGURES = ("gully", "bed", "arc", "release", "mpm", "loss", "com", "friction", "fraction")
 
 G = 9.81
 # footprint threshold h_th of Eq. eq:footprint: the engine default
@@ -93,7 +96,8 @@ RELEASE_SETTINGS = {
     "max_slope_angle": 60.0,
     "roughness_threshold": 1.0,  # r <= 1 always holds: the filter is off
     "released_particles_per_cell": 4,
-    "release_area_fraction": 0.215,
+    # release_area_fraction: per avalanche from its outline area, see
+    # release_area_fraction (Eq. eq:release-fraction)
     "crown_line_method": "gradient",
     "crown_line_exit_distance": 0.75,
 }
@@ -486,8 +490,10 @@ def run_release_estimation(evaluation_dir, avalanche_id):
         sim.create(settings)
         dem, roi = np.asarray(sim.dem, float), np.asarray(sim.roi, bool)
         z_min = float(np.percentile(dem[roi], RELEASE_MIN_ELEVATION_PERCENTILE))
+        fraction = float(release_area_fraction(roi.sum() * float(sim.cell_size) ** 2))
         sim = avalanchers.PySimulation.new()
-        sim.create(dict(settings, release_min_elevation=z_min))
+        sim.create(dict(settings, release_min_elevation=z_min,
+                        release_area_fraction=fraction))
         sim.prepare()
         layers = {
             "dem": np.asarray(sim.dem, float),
@@ -499,6 +505,7 @@ def run_release_estimation(evaluation_dir, avalanche_id):
             "cell_size": float(sim.cell_size),
             "bounds": np.asarray(sim.dem_bounds, float),
             "z_min": z_min,
+            "fraction": fraction,
         }
     return layers
 
@@ -590,7 +597,8 @@ def figure_release(out_dir, evaluation_dir, avalanche_id):
     exits = uphill_steps(dem, roi)
     distance = geodesic_distance(crown, roi, cell)
     # check: the release area holds the potential cells nearest to the crown
-    target = min(round(RELEASE_SETTINGS["release_area_fraction"] * roi.sum()),
+    print(f"release: outline {roi.sum() * cell**2:.0f} m^2, f = {layers['fraction']:.4f}")
+    target = min(round(layers["fraction"] * roi.sum()),
                  int(potential.sum()))
     order = np.argsort(np.where(potential, distance, np.inf), axis=None, kind="stable")
     ours = np.zeros(roi.size, bool)
@@ -833,6 +841,11 @@ def run_simulation(evaluation_dir, avalanche_id, mu, xi):
         sim.create(settings)
         dem, roi = np.asarray(sim.dem, float), np.asarray(sim.roi, bool)
         z_min = float(np.percentile(dem[roi], RELEASE_MIN_ELEVATION_PERCENTILE))
+        # as calibration.calibrate.release_area_fraction_settings: the outline
+        # area sets the fraction unless the base settings fix it
+        if "release_area_fraction" not in settings:
+            settings["release_area_fraction"] = float(
+                release_area_fraction(roi.sum() * float(sim.cell_size) ** 2))
         sim = avalanchers.PySimulation.new()
         sim.create(dict(settings, release_min_elevation=z_min, friction_coefficient=mu,
                         drag_coefficient=xi))
@@ -1241,6 +1254,66 @@ def figure_friction(out_dir):
         ts.save(fig, out_dir, "method_friction_laws")
 
 
+def release_area_fraction(area):
+    """Eq. eq:release-fraction: f = min(1, 4 A^-log10(2)) with A in m^2."""
+    return np.minimum(1.0, 4.0 * np.asarray(area, dtype=float) ** -math.log10(2.0))
+
+
+def figure_fraction(out_dir, evaluation_dir):
+    import matplotlib.pyplot as plt
+    import pandas as pd
+    import thesis_style as ts
+
+    # SHAPE_Ar_1 is the area of the outline polygons (EPSG:2056); Shape_Area
+    # of the inventory does not match the polygons.
+    inventory = pd.read_csv(evaluation_dir / "avalanche_outline_attributes_all.csv")
+    areas = inventory["SHAPE_Ar_1"].to_numpy(dtype=float)
+    areas = areas[np.isfinite(areas) & (areas > 0)]
+    largest = inventory.loc[inventory["SHAPE_Ar_1"].idxmax()]
+    a_max = float(largest["SHAPE_Ar_1"])
+
+    # the plot starts at the lower limit of size 1, where f reaches its cap of 1
+    a_min = 100.0
+    area = np.logspace(math.log10(a_min), math.log10(a_max), 400)
+    sizes = np.arange(1, 6)
+    size_areas = 10.0 ** (1 + sizes)
+
+    with ts.style():
+        fig, ax = plt.subplots(figsize=ts.size(1.0, 0.45), layout="constrained")
+        counts = ax.twinx()
+        bins = np.logspace(math.log10(a_min), math.log10(a_max), 37)
+        counts.hist(areas, bins=bins, color="0.85", edgecolor="0.7", linewidth=0.3, zorder=0)
+        counts.grid(False)
+        counts.set_ylabel("number of outlines", color=ts.NEUTRAL)
+        counts.tick_params(axis="y", colors=ts.NEUTRAL)
+        ax.set_zorder(counts.get_zorder() + 1)
+        ax.patch.set_visible(False)
+
+        ax.plot(area, release_area_fraction(area), color=ts.BLUE)
+        ax.plot(size_areas, release_area_fraction(size_areas), "o", color=ts.BLUE,
+                markersize=3.5)
+        for size, a in zip(sizes, size_areas):
+            ax.annotate(f"size {size}", (a, release_area_fraction(a)), xytext=(3, 4),
+                        textcoords="offset points", fontsize=7)
+        ax.axvline(a_max, color=ts.VERMILION, linewidth=0.8, linestyle="--")
+        ax.text(a_max / 1.25, 0.75,
+                f"largest outline\n({a_max / 1e6:.2f} km$^2$, id {int(largest['OBJECTID'])})",
+                ha="right", va="top", fontsize=7, color=ts.VERMILION)
+
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        ax.set_xlim(a_min / 1.3, a_max * 1.3)
+        ax.set_ylim(0.03, 1.5)
+        ax.set_yticks([0.05, 0.1, 0.25, 0.5, 1.0])
+        ax.set_yticklabels(["0.05", "0.1", "0.25", "0.5", "1"])
+        ax.set_xlabel(r"outline area $|\mathcal{M}|\,\Delta^2$ (m$^2$)")
+        ax.set_ylabel("release area fraction $f$")
+        ts.save(fig, out_dir, "method_release_fraction")
+    print(f"release fraction: {areas.size} outlines ({int((areas < a_min).sum())} below "
+          f"{a_min:g} m^2, not shown), largest {a_max:.0f} m^2 "
+          f"(id {int(largest['OBJECTID'])}), f = {float(release_area_fraction(a_max)):.4f}")
+
+
 # ---------------------------------------------------------------------------
 
 
@@ -1278,6 +1351,8 @@ def main():
         figure_com(out_dir, args.evaluation_dir.resolve(), args.com_avalanche_id)
     if "friction" in args.figures:
         figure_friction(out_dir)
+    if "fraction" in args.figures:
+        figure_fraction(out_dir, args.evaluation_dir.resolve())
 
 
 if __name__ == "__main__":
