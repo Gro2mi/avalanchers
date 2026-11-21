@@ -21,7 +21,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use compute_core::settings::{
-    DEFAULT_FLIGHT_TERMINAL_VELOCITY, FrictionModel, ParticlePlacement, Settings, SimModel,
+    DEFAULT_FLIGHT_TERMINAL_VELOCITY, Detachment, FrictionModel, ParticlePlacement, Settings,
+    SimModel,
 };
 use compute_core::{ComputeOrchestrator, SimInfo, buffers::BufferName};
 use render_core::{OrbitCamera, OverlayRange, ParticleBuffers, Renderer, TerrainData};
@@ -134,7 +135,7 @@ fn apply_panel_defaults(settings: &mut Settings) {
         .friction_model
         .get_or_insert(FrictionModel::Voellmy);
     settings.enable_curvature.get_or_insert(true);
-    settings.enable_detachment.get_or_insert(false);
+    settings.detachment.get_or_insert_default();
     settings
         .flight_terminal_velocity
         .get_or_insert(DEFAULT_FLIGHT_TERMINAL_VELOCITY);
@@ -1578,8 +1579,29 @@ impl ApplicationHandler for Viewer {
 
                             egui::CollapsingHeader::new("features").show(ui, |ui| {
                                 bool_checkbox(ui, "curvature", &mut draft.enable_curvature);
-                                bool_checkbox(ui, "lift-off (3D)", &mut draft.enable_detachment);
-                                ui.add_enabled_ui(draft.enable_detachment == Some(true), |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label("detachment (3D)");
+                                    let detachment = draft.detachment.get_or_insert_default();
+                                    egui::ComboBox::from_id_salt("detachment")
+                                        .selected_text(detachment.to_string())
+                                        .show_ui(ui, |ui| {
+                                            for option in [
+                                                Detachment::None,
+                                                Detachment::FreeFall,
+                                                Detachment::Curvature,
+                                            ] {
+                                                ui.selectable_value(
+                                                    detachment,
+                                                    option,
+                                                    option.to_string(),
+                                                );
+                                            }
+                                        });
+                                });
+                                let detachment_enabled = draft
+                                    .detachment
+                                    .is_some_and(|mode| mode != Detachment::None);
+                                ui.add_enabled_ui(detachment_enabled, |ui| {
                                     f32_slider(
                                         ui,
                                         "flight terminal velocity (m/s)",

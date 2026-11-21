@@ -163,15 +163,12 @@ fn g2p_3d(@builtin(global_invocation_id) pId: vec3<u32>) {
         return;
     }
 
-    // The bed falls away faster than the particle could fall: one free-flight
-    // step from the bed ends above the DEM, so it detaches. On a plane the
-    // flight ends g dt^2 / 2 below the bed, and on concave terrain lower.
     let tangent_velocity = tangent_project(interpolated_velocity, normal);
-    if detachment_enabled() {
+    let detachment = detachment_mode();
+    if detachment != DETACHMENT_NONE {
         let start = vec3f(position_xy, particles_elevation[particleId]);
         let flight = flight_motion(start, tangent_velocity);
-        // NaN off the DEM data: the particle stays on the bed
-        if flight.position.z > get_elevation(position_to_uv(flight.position.xy)) {
+        if detaches(detachment, flight, uv, tangent_velocity, normal) {
             let flying_state = rest_state | PARTICLE_FLYING;
             particles_state[particleId] = flying_state;
             fly_step(particleId, flying_state, flight, uv);
@@ -201,9 +198,36 @@ fn g2p_3d(@builtin(global_invocation_id) pId: vec3<u32>) {
     }
 }
 
-// SimFlags::DETACHMENT: particles may lift off the bed (enable_detachment)
-fn detachment_enabled() -> bool {
-    return (sim_settings.flags & (1u << 7u)) != 0u;
+// Settings::detachment, from the SimFlags bits DETACHMENT_FREE_FALL (7) and
+// DETACHMENT_CURVATURE (8)
+const DETACHMENT_NONE: u32 = 0u;
+const DETACHMENT_FREE_FALL: u32 = 1u;
+const DETACHMENT_CURVATURE: u32 = 2u;
+fn detachment_mode() -> u32 {
+    if (sim_settings.flags & (1u << 8u)) != 0u {
+        return DETACHMENT_CURVATURE;
+    }
+    if (sim_settings.flags & (1u << 7u)) != 0u {
+        return DETACHMENT_FREE_FALL;
+    }
+    return DETACHMENT_NONE;
+}
+
+// Whether a particle on the bed with the tangent velocity v detaches.
+// free-fall: the bed falls away faster than the particle could fall, i.e. one
+// free-flight step from the bed ends above the DEM. On a plane the flight
+// ends g dt^2 / 2 below the bed, and on concave terrain lower.
+// curvature: the bed-normal load g_eff = g n_z + n_z H(v, v) of the DEM
+// Hessian H (as in grid_physics_3d) is negative, so the bed would have to
+// pull the particle down.
+// Off the DEM data (NaN elevation or Hessian) the particle stays on the bed.
+fn detaches(mode: u32, flight: FlightMotion, uv: vec2f, v: vec3f, n: vec3f) -> bool {
+    if mode == DETACHMENT_CURVATURE {
+        let hessian = textureSampleLevel(curvature_texture, tex_sampler, uv, 0.0).xyz;
+        let g_eff = g * n.z + normal_curvature_acceleration(hessian, v, n);
+        return g_eff < 0.0;
+    }
+    return flight.position.z > get_elevation(position_to_uv(flight.position.xy));
 }
 
 struct FlightMotion {

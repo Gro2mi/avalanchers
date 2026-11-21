@@ -2,8 +2,8 @@
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use compute_core::settings::{
-    ConstitutiveModel, CrownLineMethod, FrictionModel, ParticlePlacement, ReleaseFillMethod,
-    Settings, SimModel,
+    ConstitutiveModel, CrownLineMethod, Detachment, FrictionModel, ParticlePlacement,
+    ReleaseFillMethod, Settings, SimModel,
 };
 use compute_core::utils::{MaxValue, timer_checkpoint, timer_new};
 use pollster::block_on;
@@ -39,6 +39,11 @@ fn parse_crown_line_method(value: &str) -> Result<CrownLineMethod> {
 fn parse_release_fill_method(value: &str) -> Result<ReleaseFillMethod> {
     ReleaseFillMethod::from_str(value)
         .map_err(|err| anyhow::anyhow!("invalid release fill method '{value}': {err}"))
+}
+
+fn parse_detachment(value: &str) -> Result<Detachment> {
+    Detachment::from_str(value)
+        .map_err(|err| anyhow::anyhow!("invalid detachment mode '{value}': {err}"))
 }
 
 fn parse_particle_placement(value: &str) -> Result<ParticlePlacement> {
@@ -192,10 +197,10 @@ struct Args {
     enable_entrainment: Option<bool>,
     #[arg(long, value_parser = parse_bool)]
     enable_weak_pressure: Option<bool>,
-    /// 3D model: particles detach where the bed-normal load turns negative and
-    /// fly ballistically (needs the curvature load; default false)
-    #[arg(long, value_parser = parse_bool)]
-    enable_detachment: Option<bool>,
+    /// DAMPM global model: when particles detach and fly ballistically:
+    /// none (default), free-fall or curvature
+    #[arg(long, value_parser = parse_detachment)]
+    detachment: Option<Detachment>,
     #[arg(long, value_parser = parse_bool)]
     enable_center_of_mass: Option<bool>,
     /// Integer (fixed point) grid atomics even on GPUs with float atomics;
@@ -385,8 +390,8 @@ impl Args {
         if let Some(value) = self.enable_weak_pressure {
             settings.enable_weak_pressure = Some(value);
         }
-        if let Some(value) = self.enable_detachment {
-            settings.enable_detachment = Some(value);
+        if let Some(value) = self.detachment {
+            settings.detachment = Some(value);
         }
         if let Some(value) = self.center_of_mass_biggest_blob {
             settings.center_of_mass_biggest_blob = Some(value);
@@ -804,7 +809,7 @@ mod tests {
             enable_earth_pressure_coefficient: None,
             enable_entrainment: None,
             enable_weak_pressure: None,
-            enable_detachment: None,
+            detachment: None,
             center_of_mass_biggest_blob: None,
             release_area_fraction: None,
             crown_line_method: None,

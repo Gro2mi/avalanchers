@@ -28,10 +28,13 @@ impl SimFlags {
     /// Set only for the particle seeding dispatch, from
     /// [`ParticlePlacement::is_uniform`]; not a simulation parameter.
     pub const UNIFORM_PARTICLE_PLACEMENT: u32 = 1 << 6;
-    /// DAMPM global model: a particle detaches where one free-flight
-    /// step from the bed would end above the DEM, and flies ballistically
-    /// until it lands.
-    pub const DETACHMENT: u32 = 1 << 7;
+    /// DAMPM global model, [`Detachment::FreeFall`]: a particle detaches where
+    /// one free-flight step from the bed would end above the DEM.
+    pub const DETACHMENT_FREE_FALL: u32 = 1 << 7;
+    /// DAMPM global model, [`Detachment::Curvature`]: a particle detaches where
+    /// the bed-normal load g n_z + n_z H(v, v) turns negative.
+    pub const DETACHMENT_CURVATURE: u32 = 1 << 8;
+    pub const DETACHMENT: u32 = Self::DETACHMENT_FREE_FALL | Self::DETACHMENT_CURVATURE;
 
     pub fn new(
         curvature: bool,
@@ -86,8 +89,17 @@ impl SimFlags {
     pub fn is_weak_pressure_enabled(&self) -> bool {
         (self.mask & (1 << 5)) != 0
     }
+    pub fn detachment(&self) -> Detachment {
+        if (self.mask & Self::DETACHMENT_CURVATURE) != 0 {
+            Detachment::Curvature
+        } else if (self.mask & Self::DETACHMENT_FREE_FALL) != 0 {
+            Detachment::FreeFall
+        } else {
+            Detachment::None
+        }
+    }
     pub fn is_detachment_enabled(&self) -> bool {
-        (self.mask & Self::DETACHMENT) != 0
+        self.detachment() != Detachment::None
     }
 }
 #[repr(C)]
@@ -153,7 +165,7 @@ pub struct SimSettings {
         deserialize_with = "deserialize_unset_as_nan"
     )]
     pub release_swe: f32,
-    /// 3D lift-off ([`SimFlags::DETACHMENT`]): terminal velocity (m/s) of the quadratic air drag on
+    /// 3D lift-off ([`Settings::detachment`]): terminal velocity (m/s) of the quadratic air drag on
     /// flying particles, a = -g |u| u / v_t^2; 0 disables the drag.
     #[serde(default = "default_flight_terminal_velocity")]
     pub flight_terminal_velocity: f32,
@@ -655,12 +667,8 @@ impl SimSettings {
                 settings.flags &= !(1 << 5);
             }
         }
-        if let Some(val) = patch.enable_detachment {
-            if val {
-                settings.flags |= SimFlags::DETACHMENT;
-            } else {
-                settings.flags &= !SimFlags::DETACHMENT;
-            }
+        if let Some(val) = patch.detachment {
+            settings.flags = (settings.flags & !SimFlags::DETACHMENT) | val.flags();
         }
     }
 
@@ -1065,6 +1073,76 @@ impl<'de> Deserialize<'de> for ParticlePlacement {
     }
 }
 
+/// DAMPM global model: when a particle on the bed detaches and flies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Detachment {
+    /// Particles always stay on the bed.
+    #[default]
+    None,
+    /// Detach where one free-flight step from the bed would end above the
+    /// DEM: the bed falls away faster than gravity pulls the particle down.
+    FreeFall,
+    /// Detach where the bed-normal load g n_z + n_z H(v, v) of the DEM
+    /// Hessian H turns negative, the load the grid update clamps at zero.
+    Curvature,
+}
+
+impl Detachment {
+    /// The [`SimFlags`] bits of this mode.
+    pub fn flags(self) -> u32 {
+        match self {
+            Self::None => 0,
+            Self::FreeFall => SimFlags::DETACHMENT_FREE_FALL,
+            Self::Curvature => SimFlags::DETACHMENT_CURVATURE,
+        }
+    }
+}
+
+impl FromStr for Detachment {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_lowercase().replace(['_', ' '], "-").as_str() {
+            "none" | "off" => Ok(Self::None),
+            "free-fall" | "freefall" => Ok(Self::FreeFall),
+            "curvature" => Ok(Self::Curvature),
+            _ => Err(format!(
+                "unknown detachment mode: {value} (expected none, free-fall or curvature)"
+            )),
+        }
+    }
+}
+
+impl fmt::Display for Detachment {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(match self {
+            Self::None => "none",
+            Self::FreeFall => "free-fall",
+            Self::Curvature => "curvature",
+        })
+    }
+}
+
+impl Serialize for Detachment {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for Detachment {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        String::deserialize(deserializer)?
+            .parse::<Self>()
+            .map_err(D::Error::custom)
+    }
+}
+
 /// How the release estimation orders the potential release cells below the
 /// crown line: by geodesic distance alone, or by a geodesic distance whose
 /// steps through unfavourable release slopes count as longer.
@@ -1249,11 +1327,11 @@ pub struct Settings {
     /// difference of the nodal thickness. Thin front nodes are then pushed by
     /// the full pressure of the particles behind them (defaults to false).
     pub enable_weak_pressure: Option<bool>,
-    /// DAMPM global model: a particle detaches where one free-flight
-    /// step from the bed would end above the DEM (the bed falls away faster
-    /// than the particle can fall), flies ballistically and lands with the
-    /// tangential velocity minus a Coulomb impulse (defaults to false).
-    pub enable_detachment: Option<bool>,
+    /// DAMPM global model: when a particle detaches from the bed
+    /// ([`Detachment`], defaults to none). A detached particle flies
+    /// ballistically and lands with the tangential velocity minus a Coulomb
+    /// impulse.
+    pub detachment: Option<Detachment>,
     /// 3D lift-off: terminal velocity (m/s) of the air drag on flying
     /// particles; 0 disables it (defaults to
     /// [`DEFAULT_FLIGHT_TERMINAL_VELOCITY`]).
@@ -1482,7 +1560,7 @@ mod tests {
             enable_earth_pressure_coefficient: Some(false),
             enable_entrainment: Some(false),
             enable_weak_pressure: Some(false),
-            enable_detachment: Some(false),
+            detachment: Some(Detachment::None),
             enable_center_of_mass: Some(true),
             integer_atomics: Some(true),
             center_of_mass_biggest_blob: Some(false),
@@ -2091,6 +2169,25 @@ mod tests {
     fn release_fill_method_invalid_string() {
         assert!(ReleaseFillMethod::from_str("invalid").is_err());
         assert!(ReleaseFillMethod::from_str("").is_err());
+    }
+
+    #[test]
+    fn detachment_strings_and_flags() {
+        for mode in [
+            Detachment::None,
+            Detachment::FreeFall,
+            Detachment::Curvature,
+        ] {
+            assert_eq!(mode.to_string().parse::<Detachment>(), Ok(mode));
+            assert_eq!(
+                SimFlags::from_u32(mode.flags() | SimFlags::CURVATURE).detachment(),
+                mode
+            );
+        }
+        assert_eq!("freefall".parse::<Detachment>(), Ok(Detachment::FreeFall));
+        assert!("threshold".parse::<Detachment>().is_err());
+        let patch: Settings = serde_json::from_str(r#"{"detachment": "curvature"}"#).unwrap();
+        assert_eq!(patch.detachment, Some(Detachment::Curvature));
     }
 
     #[test]

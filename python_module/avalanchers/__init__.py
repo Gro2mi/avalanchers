@@ -59,7 +59,7 @@ CALIBRATION_PARAMETER_DEFAULTS = {
     "enable_earth_pressure_coefficient": False,
     "enable_entrainment": True,
     "enable_weak_pressure": False,
-    "enable_detachment": False,
+    "detachment": "none",
     "flight_terminal_velocity": 40.0,
 }
 

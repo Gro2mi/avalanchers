@@ -1279,7 +1279,7 @@ mod tests {
             enable_curvature: Some(true),
             enable_entrainment: Some(true),
             enable_weak_pressure: Some(true),
-            enable_detachment: Some(true),
+            detachment: Some(compute_core::settings::Detachment::FreeFall),
             enable_particle_interaction: Some(true),
             particle_placement: Some(ParticlePlacement::UniformRelaxed),
             integer_atomics: Some(true),
@@ -1331,7 +1331,10 @@ mod tests {
         assert_eq!(loaded.enable_curvature, Some(true));
         assert_eq!(loaded.enable_entrainment, Some(true));
         assert_eq!(loaded.enable_weak_pressure, Some(true));
-        assert_eq!(loaded.enable_detachment, Some(true));
+        assert_eq!(
+            loaded.detachment,
+            Some(compute_core::settings::Detachment::FreeFall)
+        );
         assert_eq!(loaded.enable_particle_interaction, Some(true));
         assert_eq!(loaded.enable_earth_pressure_coefficient, Some(true));
         assert_eq!(loaded.n0, Some(1.0));

@@ -2904,6 +2904,7 @@ fn trajectory_summary_cpu(
 mod tests {
     use super::*;
     use compute_core::buffers::AtomicValues;
+    use compute_core::settings::Detachment;
     use pollster::block_on;
     use std::collections::HashSet;
     use std::hash::Hash;
@@ -6406,12 +6407,12 @@ fn test_trajectory() {
     }
 
     /// DAMPM global flow down a 35 degree slope that breaks into a cliff.
-    fn setup_cliff_sim(curvature: bool, detachment: bool) -> Simulation {
+    fn setup_cliff_sim(curvature: bool, detachment: Detachment) -> Simulation {
         let mut sim: Simulation = block_on(Simulation::new()).expect("Failed to create Simulation");
         block_on(sim.create(Settings {
             sim_model: Some(SimModel::GlobalCartesian),
             enable_curvature: Some(curvature),
-            enable_detachment: Some(detachment),
+            detachment: Some(detachment),
             max_steps: Some(3000),
             ..Default::default()
         }))
@@ -6466,10 +6467,16 @@ fn test_trajectory() {
 
     #[test_log::test]
     fn test_3d_flow_detaches_at_a_cliff_and_lands() {
-        let mut sim = setup_cliff_sim(true, true);
+        for detachment in [Detachment::FreeFall, Detachment::Curvature] {
+            assert_cliff_jump(detachment);
+        }
+    }
+
+    fn assert_cliff_jump(detachment: Detachment) {
+        let mut sim = setup_cliff_sim(true, detachment);
         let (most_flying, highest_flight) = run_cliff_sim(&mut sim);
         info!(
-            "cliff: up to {most_flying} particles in flight, highest {highest_flight:.2} m above the bed"
+            "cliff ({detachment}): up to {most_flying} particles in flight, highest {highest_flight:.2} m above the bed"
         );
         assert!(most_flying > 0, "no particle detached at the cliff edge");
         assert!(
@@ -6493,25 +6500,35 @@ fn test_trajectory() {
         );
     }
 
-    /// Lift-off is decided on the DEM, not on the curvature load: the flow
-    /// still jumps the cliff with the curvature term off.
+    /// Lift-off is decided on the DEM, not on the curvature load of the grid
+    /// update: the flow still jumps the cliff with the curvature term off.
     #[test_log::test]
     fn test_3d_flow_detaches_without_curvature() {
-        let mut sim = setup_cliff_sim(false, true);
+        let mut sim = setup_cliff_sim(false, Detachment::Curvature);
+        let (most_flying, _) = run_cliff_sim(&mut sim);
+        assert!(most_flying > 0, "no particle detached at the cliff edge");
+        let mut sim = setup_cliff_sim(false, Detachment::FreeFall);
         let (most_flying, _) = run_cliff_sim(&mut sim);
         assert!(most_flying > 0, "no particle detached at the cliff edge");
     }
 
-    /// On a plane a free-flight step always ends g dt^2 / 2 below the bed, so
-    /// no particle may detach, however fast the flow.
+    /// On a plane a free-flight step always ends g dt^2 / 2 below the bed and
+    /// the bed-normal load is g n_z > 0, so no particle may detach, however
+    /// fast the flow.
     #[test_log::test]
     fn test_3d_flow_on_a_plane_never_flies() {
+        for detachment in [Detachment::FreeFall, Detachment::Curvature] {
+            assert_no_flight_on_a_plane(detachment);
+        }
+    }
+
+    fn assert_no_flight_on_a_plane(detachment: Detachment) {
         let mut sim = setup_slope_sim(Settings {
             sim_model: Some(SimModel::GlobalCartesian),
             friction_model: Some(compute_core::settings::FrictionModel::Coulomb),
             friction_coefficient: Some(0.1),
             enable_curvature: Some(true),
-            enable_detachment: Some(true),
+            detachment: Some(detachment),
             max_steps: Some(400),
             ..Default::default()
         });
@@ -6523,7 +6540,7 @@ fn test_trajectory() {
                 .iter()
                 .filter(|state| state.flying)
                 .count();
-            assert_eq!(flying, 0, "particles detached from a plane");
+            assert_eq!(flying, 0, "particles detached from a plane ({detachment})");
         }
     }
 
@@ -6531,11 +6548,11 @@ fn test_trajectory() {
     /// stays on the bed.
     #[test_log::test]
     fn test_3d_flow_without_detachment_never_flies() {
-        let mut sim = setup_cliff_sim(true, false);
+        let mut sim = setup_cliff_sim(true, Detachment::None);
         let (most_flying, _) = run_cliff_sim(&mut sim);
         assert_eq!(
             most_flying, 0,
-            "without enable_detachment no particle may detach"
+            "with detachment none no particle may detach"
         );
     }
 

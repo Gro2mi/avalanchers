@@ -5,7 +5,7 @@
   "friction_model": "coulomb",
   "friction_coefficient": 0.4,
   "enable_curvature": true,
-  "enable_detachment": true,
+  "detachment": "curvature",
   "flight_terminal_velocity": 0.0,
   "enable_particle_interaction": true,
   "released_particles_per_cell": 8,

@@ -107,7 +107,7 @@ MODEL_SETTINGS = {
     "friction_model": "coulomb",
     "friction_coefficient": 0.4,
     "enable_curvature": True,
-    "enable_detachment": True,
+    "detachment": "curvature",
     "flight_terminal_velocity": 0.0,  # pure ballistic jump onto the second bump
     "enable_particle_interaction": True,
     "released_particles_per_cell": 8,

@@ -358,6 +358,8 @@ def main():
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--out-dir", default=str(OUTPUT_DIR))
     parser.add_argument("--save-steps", type=int, default=1)
+    parser.add_argument("--detachment", choices=("free-fall", "curvature"),
+                        default=SETTINGS["detachment"])
     from cli_args import add_particles_per_cell_argument
     add_particles_per_cell_argument(parser)
     args = parser.parse_args()
@@ -365,7 +367,7 @@ def main():
     matplotlib.use("Agg")
     if args.save_steps < 1:
         parser.error("--save-steps must be positive")
-    settings = dict(SETTINGS)
+    settings = dict(SETTINGS, detachment=args.detachment)
     if args.particles_per_cell is not None:
         settings["released_particles_per_cell"] = args.particles_per_cell
     run = run_simulation(settings, args.save_steps)
