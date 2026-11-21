@@ -1,6 +1,6 @@
 use crate::buffers::{
     AtomicValues, BufferName, CenterOfMassResult, ChamferParams, EvaluationResult, GpuResources,
-    RelaxParams, TextureName, create_buffers_and_texture_descriptions,
+    PostProcessParams, RelaxParams, TextureName, create_buffers_and_texture_descriptions,
 };
 use crate::settings::{SimFlags, SimModel};
 use crate::shaders::{ShaderConfigs, ShaderName, generate_shader_report};
@@ -1499,7 +1499,7 @@ impl ComputeOrchestrator {
     }
 
     /// Records the chamfer distance between the simulated cells
-    /// (`grid_peak_flow_thickness > peak_flow_thickness_threshold`) and the
+    /// (`grid_peak_flow_thickness >= peak_flow_thickness_threshold`) and the
     /// region-of-interest bitmask: seeds two nearest-neighbor fields,
     /// propagates the nearest seeds with the jump flooding algorithm (one
     /// dispatch per power-of-two step size) and reduces the distances into the
@@ -1578,6 +1578,47 @@ impl ComputeOrchestrator {
         Ok(())
     }
 
+    /// Masks the peak result buffers in place on the GPU: every cell whose
+    /// peak flow thickness is below `min_peak_flow_thickness` or whose peak
+    /// velocity is below `min_peak_velocity` is set to zero in both
+    /// GridPeakFlowThickness and GridPeakVelocity.
+    pub async fn run_post_process(
+        &mut self,
+        sim_settings: &settings::SimSettings,
+        min_peak_flow_thickness: f32,
+        min_peak_velocity: f32,
+    ) -> Result<()> {
+        if sim_settings.grid_shape_x == 0 || sim_settings.grid_shape_y == 0 {
+            return Err(anyhow!("Post-processing grid must not be empty"));
+        }
+        self.resources.write_buffer(
+            &self.queue,
+            BufferName::SimSettings,
+            sim_settings.as_bytes(),
+        )?;
+        self.ensure_buffer(
+            BufferName::PostProcessParams,
+            size_of::<PostProcessParams>(),
+            BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+        );
+        self.resources.write_buffer(
+            &self.queue,
+            BufferName::PostProcessParams,
+            &[PostProcessParams {
+                min_peak_flow_thickness,
+                min_peak_velocity,
+                _padding: [0.0; 2],
+            }],
+        )?;
+        self.run_shader(
+            &ShaderName::PostProcess,
+            sim_settings.grid_shape_x.div_ceil(WORKGROUP_SIZE_2D),
+            sim_settings.grid_shape_y.div_ceil(WORKGROUP_SIZE_2D),
+            1,
+        )
+        .await
+    }
+
     /// Evaluates the simulation against the region of interest on the GPU.
     ///
     /// Dispatches the mass movement count shaders, the chamfer distance
@@ -1585,14 +1626,16 @@ impl ComputeOrchestrator {
     /// unified EvaluationResult buffer. The buffer is read back once and the
     /// metrics combined into a single MassMovementEvaluation:
     /// - intersection/undershoot/overshoot/iou from the simulated vs. reference cell counts
-    /// - beeline_3d between the highest and lowest avalanche point
+    /// - beeline_3d, horizontal_distance and vertical_drop between the
+    ///   highest and lowest avalanche point, the same for the region of
+    ///   interest (`*_ref`), and the peak velocity over the avalanche cells
     /// - chamfer between the simulated cells and the region of interest, in
     ///   metres (not normalized: the grid size depends on the domain padding)
     ///
     /// Release cells (ReleaseAreas > RELEASE_THICKNESS_THRESHOLD) are left out of the overlap counts and
     /// the chamfer means, so the area metrics do not improve with the release
     /// area fraction.
-    pub async fn evaluate_gpu(
+    pub async fn evaluate(
         &mut self,
         sim_settings: &settings::SimSettings,
     ) -> Result<MassMovementEvaluation> {
@@ -1645,6 +1688,12 @@ impl ComputeOrchestrator {
         let mut evaluation =
             evaluation_from_counts(raw.intersection, raw.undershoot, raw.overshoot);
         evaluation.beeline_3d = raw.beeline_distance as f64;
+        evaluation.horizontal_distance = raw.horizontal_distance as f64;
+        evaluation.vertical_drop = raw.vertical_drop as f64;
+        evaluation.beeline_3d_ref = raw.reference_beeline_distance as f64;
+        evaluation.horizontal_distance_ref = raw.reference_horizontal_distance as f64;
+        evaluation.vertical_drop_ref = raw.reference_vertical_drop as f64;
+        evaluation.peak_velocity = raw.peak_velocity as f64;
         Ok(evaluation.with_chamfer(chamfer_from_sums(
             raw.sum_sim_to_roi,
             raw.count_sim,
@@ -2015,7 +2064,7 @@ impl ComputeOrchestrator {
             label: Some("Particle Relaxation Pass"),
             timestamp_writes: None,
         };
-        // one submission, see evaluate_gpu
+        // one submission, see evaluate
         let mut encoder = self
             .device
             .create_command_encoder(&CommandEncoderDescriptor {
@@ -3232,7 +3281,7 @@ mod tests {
     }
 
     #[test_log::test]
-    fn test_evaluate_gpu_matches_cpu() {
+    fn test_evaluate_matches_cpu() {
         let reference = vec![true, true, false, false, true, false];
         let simulated = vec![false, true, true, false, true, false];
         let expected = evaluation::evaluate_mass_movement_area(&reference, &simulated).unwrap();
@@ -3267,11 +3316,11 @@ mod tests {
             .expect("Failed to write ROI");
         block_on(orchestrator.write_buffer(
             BufferName::GridPeakFlowThickness,
-            &[1.0f32, 2.0, 2.0, 0.0, 2.0, 0.0],
+            &[0.5f32, 2.0, 2.0, 0.0, 2.0, 0.0],
         ))
         .expect("Failed to write peak flow thicknesses");
 
-        let actual = block_on(orchestrator.evaluate_gpu(&settings)).expect("GPU evaluation failed");
+        let actual = block_on(orchestrator.evaluate(&settings)).expect("GPU evaluation failed");
 
         assert_eq!(actual.intersection, expected.intersection);
         assert_eq!(actual.undershoot, expected.undershoot);
@@ -3297,7 +3346,7 @@ mod tests {
             &simulated_outside_release,
         )
         .unwrap();
-        let actual = block_on(orchestrator.evaluate_gpu(&settings))
+        let actual = block_on(orchestrator.evaluate(&settings))
             .expect("GPU evaluation with release cells failed");
         assert_eq!(actual.intersection, expected.intersection);
         assert_eq!(actual.undershoot, expected.undershoot);
@@ -3307,9 +3356,9 @@ mod tests {
         block_on(orchestrator.write_buffer(BufferName::ReleaseAreas, &[0.0f32; 6]))
             .expect("Failed to reset release areas");
 
-        block_on(orchestrator.write_buffer(BufferName::GridPeakFlowThickness, &[1.0f32; 6]))
+        block_on(orchestrator.write_buffer(BufferName::GridPeakFlowThickness, &[0.5f32; 6]))
             .expect("Failed to reset peak flow thicknesses");
-        let empty_simulation = block_on(orchestrator.evaluate_gpu(&settings))
+        let empty_simulation = block_on(orchestrator.evaluate(&settings))
             .expect("GPU evaluation without affected cells failed");
         assert_eq!(empty_simulation.beeline_3d, 0.0);
     }
@@ -3762,7 +3811,7 @@ mod tests {
     }
 
     #[test_log::test]
-    fn test_evaluate_gpu_beeline_distance() {
+    fn test_evaluate_runout() {
         // 3x3 grid with cell_size 5. Avalanche cells (thickness 2.0 > 1.0) are
         // (0,0) at 100 m, (1,1) at 70 m and (2,2) at 40 m. Cell (0,2) is the
         // highest point of the DEM (9999 m) but not part of the avalanche.
@@ -3801,16 +3850,38 @@ mod tests {
             &[2.0f32, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 2.0],
         ))
         .expect("Failed to write peak flow thicknesses");
-        block_on(orchestrator.write_buffer(BufferName::RegionOfInterest, &[0u32]))
-            .expect("Failed to write region of interest");
+        // region of interest: (1,0) at 50 m and (0,2) at 9999 m
+        block_on(
+            orchestrator.write_buffer(BufferName::RegionOfInterest, &[(1u32 << 1) | (1 << 6)]),
+        )
+        .expect("Failed to write region of interest");
+        // the fastest cell (1,0) is not part of the avalanche
+        block_on(orchestrator.write_buffer(
+            BufferName::GridPeakVelocity,
+            &[3.0f32, 99.0, 0.0, 0.0, 7.0, 0.0, 0.0, 0.0, 5.0],
+        ))
+        .expect("Failed to write peak velocities");
 
-        let result = block_on(orchestrator.evaluate_gpu(&settings)).expect("GPU evaluation failed");
+        let result = block_on(orchestrator.evaluate(&settings)).expect("GPU evaluation failed");
         let expected = 3800.0f64.sqrt();
         assert!(
             (result.beeline_3d - expected).abs() < 1e-3,
             "beeline distance was {}, expected {}",
             result.beeline_3d,
             expected
+        );
+        assert!((result.horizontal_distance - 200.0f64.sqrt()).abs() < 1e-4);
+        assert_eq!(result.vertical_drop, 60.0);
+        assert_eq!(result.peak_velocity, 7.0);
+        // reference: highest (2.5, 12.5, 9999), lowest (7.5, 2.5, 50)
+        assert!((result.horizontal_distance_ref - 125.0f64.sqrt()).abs() < 1e-4);
+        assert_eq!(result.vertical_drop_ref, 9949.0);
+        let expected_reference = (125.0f64 + 9949.0 * 9949.0).sqrt();
+        assert!(
+            (result.beeline_3d_ref - expected_reference).abs() < 1e-2,
+            "reference beeline distance was {}, expected {}",
+            result.beeline_3d_ref,
+            expected_reference
         );
 
         // the beeline section of the unified result buffer keeps the paired
@@ -3827,13 +3898,53 @@ mod tests {
         // without avalanche cells there are no extreme points
         block_on(orchestrator.write_buffer(BufferName::GridPeakFlowThickness, &[0.0f32; 9]))
             .expect("Failed to reset peak flow thicknesses");
-        let empty = block_on(orchestrator.evaluate_gpu(&settings))
+        let empty = block_on(orchestrator.evaluate(&settings))
             .expect("GPU evaluation without avalanche cells failed");
         assert_eq!(empty.beeline_3d, 0.0);
+        assert_eq!(empty.horizontal_distance, 0.0);
+        assert_eq!(empty.vertical_drop, 0.0);
+        assert_eq!(empty.peak_velocity, 0.0);
     }
 
     #[test_log::test]
-    fn test_evaluate_gpu_chamfer_distance() {
+    fn test_post_process_masks_cells_below_either_threshold() {
+        let settings = settings::SimSettings {
+            grid_shape_x: 3,
+            grid_shape_y: 2,
+            ..Default::default()
+        };
+        let mut orchestrator =
+            block_on(ComputeOrchestrator::new()).expect("Failed to create ComputeOrchestrator");
+        orchestrator
+            .create_buffers_and_texture_descriptions(&settings)
+            .expect("Failed to create GPU resources");
+        // cells: both above, thickness below, velocity below, both below,
+        // exactly at both thresholds, zero
+        block_on(orchestrator.write_buffer(
+            BufferName::GridPeakFlowThickness,
+            &[2.0f32, 0.5, 2.0, 0.5, 1.0, 0.0],
+        ))
+        .expect("Failed to write peak flow thickness");
+        block_on(orchestrator.write_buffer(
+            BufferName::GridPeakVelocity,
+            &[5.0f32, 5.0, 1.0, 1.0, 3.0, 0.0],
+        ))
+        .expect("Failed to write peak velocity");
+
+        block_on(orchestrator.run_post_process(&settings, 1.0, 3.0))
+            .expect("Post-processing failed");
+
+        let thickness =
+            block_on(orchestrator.read_buffer::<f32>(BufferName::GridPeakFlowThickness))
+                .expect("Failed to read peak flow thickness");
+        let velocity = block_on(orchestrator.read_buffer::<f32>(BufferName::GridPeakVelocity))
+            .expect("Failed to read peak velocity");
+        assert_eq!(thickness[..6], [2.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+        assert_eq!(velocity[..6], [5.0, 0.0, 0.0, 0.0, 3.0, 0.0]);
+    }
+
+    #[test_log::test]
+    fn test_evaluate_chamfer_distance() {
         // 3x3 grid with cell_size 5: a simulated cell at (2,0) and ROI cells at
         // (0,0) and (2,2). Every nearest distance is 2 cells = 10 world units.
         let settings = settings::SimSettings {
@@ -3872,7 +3983,7 @@ mod tests {
         block_on(orchestrator.write_buffer(BufferName::RegionOfInterest, &[0b1_0000_0001u32]))
             .expect("Failed to write region of interest");
 
-        let result = block_on(orchestrator.evaluate_gpu(&settings)).expect("GPU evaluation failed");
+        let result = block_on(orchestrator.evaluate(&settings)).expect("GPU evaluation failed");
 
         // in metres, not normalized by the grid
         let expected_per_direction = 10.0;
@@ -3896,7 +4007,7 @@ mod tests {
         // so the chamfer distance is infinite
         block_on(orchestrator.write_buffer(BufferName::GridPeakFlowThickness, &[0.0f32; 9]))
             .expect("Failed to reset peak flow thicknesses");
-        let empty_simulation = block_on(orchestrator.evaluate_gpu(&settings))
+        let empty_simulation = block_on(orchestrator.evaluate(&settings))
             .expect("GPU evaluation without simulated cells failed");
         assert!(empty_simulation.chamfer.is_infinite());
         assert_eq!(empty_simulation.sim_to_roi, 0.0);
@@ -3943,7 +4054,7 @@ mod tests {
         roi[last_cell / 32] = 1 << (last_cell % 32);
         block_on(orchestrator.write_buffer(BufferName::RegionOfInterest, &roi))
             .expect("Failed to write region of interest");
-        let result = block_on(orchestrator.evaluate_gpu(&settings)).expect("GPU evaluation failed");
+        let result = block_on(orchestrator.evaluate(&settings)).expect("GPU evaluation failed");
         (settings, result)
     }
 
@@ -3977,7 +4088,7 @@ mod tests {
     }
 
     #[test_log::test]
-    fn test_evaluate_gpu_chamfer_applies_every_flood_step() {
+    fn test_evaluate_chamfer_applies_every_flood_step() {
         // a single step size would not carry the seeds across the row
         let mut orchestrator =
             block_on(ComputeOrchestrator::new()).expect("Failed to create ComputeOrchestrator");
@@ -3990,7 +4101,7 @@ mod tests {
     }
 
     #[test_log::test]
-    fn test_evaluate_gpu_reuses_the_chamfer_buffers() {
+    fn test_evaluate_reuses_the_chamfer_buffers() {
         let mut orchestrator =
             block_on(ComputeOrchestrator::new()).expect("Failed to create ComputeOrchestrator");
         let (settings, first) = evaluate_row_ends(&mut orchestrator, 64);
@@ -4010,7 +4121,7 @@ mod tests {
         };
         let allocated = buffers(&orchestrator);
 
-        let second = block_on(orchestrator.evaluate_gpu(&settings)).expect("GPU evaluation failed");
+        let second = block_on(orchestrator.evaluate(&settings)).expect("GPU evaluation failed");
         assert_eq!(buffers(&orchestrator), allocated);
         assert_eq!(first.sim_to_roi, second.sim_to_roi);
 

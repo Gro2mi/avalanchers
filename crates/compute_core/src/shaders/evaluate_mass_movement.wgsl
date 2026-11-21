@@ -37,7 +37,7 @@ fn evaluate_mass_movement(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let word_index = index / 32u;
     let reference_affected = bit_is_set(region_of_interest[word_index], index);
-    let simulated_affected = grid_peak_flow_thickness[index] > sim_settings.peak_flow_thickness_threshold;
+    let simulated_affected = grid_peak_flow_thickness[index] >= sim_settings.peak_flow_thickness_threshold;
 
     if reference_affected && simulated_affected {
         atomicAdd(&counts.intersection, 1u);

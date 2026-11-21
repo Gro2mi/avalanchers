@@ -1,5 +1,5 @@
 // Chamfer distance between the simulated cells
-// (grid_peak_flow_thickness > sim_settings.peak_flow_thickness_threshold)
+// (grid_peak_flow_thickness >= sim_settings.peak_flow_thickness_threshold)
 // and the region-of-interest bitmask, in three kernels sharing this module:
 // - chamfer_prepare: seeds the nearest-neighbor fields. Per cell, both fields
 //   store the cell's own coordinates if it is a seed (region_of_interest bit
@@ -83,7 +83,7 @@ fn chamfer_prepare(@builtin(global_invocation_id) id: vec3u) {
     chamfer_nearest_sim[idx] = select(
         no_seed,
         id.xy,
-        grid_peak_flow_thickness[idx] > sim_settings.peak_flow_thickness_threshold,
+        grid_peak_flow_thickness[idx] >= sim_settings.peak_flow_thickness_threshold,
     );
 }
 
@@ -148,7 +148,7 @@ fn chamfer_reduce(@builtin(local_invocation_index) li: u32) {
         if release_areas[i] > RELEASE_THICKNESS_THRESHOLD {
             continue;
         }
-        let simulated = grid_peak_flow_thickness[i] > sim_settings.peak_flow_thickness_threshold;
+        let simulated = grid_peak_flow_thickness[i] >= sim_settings.peak_flow_thickness_threshold;
         let reference = bit_is_set(region_of_interest[i / 32u], i);
 
         if simulated {

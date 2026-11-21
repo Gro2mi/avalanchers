@@ -1,9 +1,12 @@
-// Computes the 3D beeline distance between the highest and the lowest point
-// of the avalanche: among the cells with peak_flow_thickness above
-// sim_settings.peak_flow_thickness_threshold, the one with the maximum and
-// the one with the minimum terrain elevation (from the DEM) are the extreme
-// points, and the distance is measured between their cell centers in world
-// coordinates plus the elevation difference.
+// Computes the runout of the avalanche and of the region of interest, and
+// the peak velocity of the avalanche. The avalanche cells are those with
+// peak_flow_thickness at or above sim_settings.peak_flow_thickness_threshold.
+// For each mask, the cells with the maximum and the minimum terrain elevation
+// (from the DEM) are the extreme points; the horizontal distance is measured
+// between their cell centers, the vertical drop is their elevation
+// difference and the beeline distance combines both in 3D. Non-finite
+// elevations are skipped. The peak velocity is the maximum of
+// grid_peak_velocity over the avalanche cells.
 //
 // Runs as a single workgroup with a strided loop over all cells, so the
 // workgroup barriers provide full global synchronization and the elevation
@@ -11,9 +14,9 @@
 // Dispatch exactly one workgroup.
 
 // The unified evaluation result buffer starts with the mass movement counts
-// (32 bytes) and the chamfer sums (16 bytes) written by the other evaluation
-// shaders; the beeline section follows.
-struct BeelineDistanceResult {
+// (32 bytes) and the chamfer sums (24 bytes) written by the other evaluation
+// shaders; the runout section follows.
+struct RunoutResult {
     _evaluation_counts: array<u32, 8>,
     _chamfer: array<f32, 6>,
     distance: f32,
@@ -21,7 +24,20 @@ struct BeelineDistanceResult {
     max_elevation: f32,
     min_cell: u32,
     max_cell: u32,
-    _padding: u32,
+    peak_velocity: f32,
+    horizontal_distance: f32,
+    vertical_drop: f32,
+    reference_distance: f32,
+    reference_horizontal_distance: f32,
+    reference_vertical_drop: f32,
+    _padding: array<u32, 3>,
+}
+
+struct Extrema {
+    max_elevation: f32,
+    max_cell: u32,
+    min_elevation: f32,
+    min_cell: u32,
 }
 
 const NO_CELL: u32 = 0xFFFFFFFFu;
@@ -29,15 +45,26 @@ const WG_SIZE: u32 = 256u;
 
 @group(0) @binding(1) var<storage, read> grid_peak_flow_thickness: array<f32>;
 @group(0) @binding(2) var dem_texture: texture_2d<f32>;
-@group(0) @binding(3) var<storage, read_write> beeline_result: BeelineDistanceResult;
+@group(0) @binding(3) var<storage, read_write> runout_result: RunoutResult;
+@group(0) @binding(4) var<storage, read> region_of_interest: array<u32>;
+@group(0) @binding(5) var<storage, read> grid_peak_velocity: array<f32>;
 
 var<workgroup> wg_max_elevation: array<f32, WG_SIZE>;
 var<workgroup> wg_max_cell: array<u32, WG_SIZE>;
 var<workgroup> wg_min_elevation: array<f32, WG_SIZE>;
 var<workgroup> wg_min_cell: array<u32, WG_SIZE>;
 
-@compute @workgroup_size(WG_SIZE, 1, 1)
-fn compute_beeline_distance(@builtin(local_invocation_index) li: u32) {
+fn is_avalanche_cell(i: u32) -> bool {
+    return grid_peak_flow_thickness[i] >= sim_settings.peak_flow_thickness_threshold;
+}
+
+fn is_reference_cell(i: u32) -> bool {
+    return ((region_of_interest[i / 32u] >> (i % 32u)) & 1u) == 1u;
+}
+
+// Highest and lowest cell of the avalanche (reference = false) or of the
+// region of interest (reference = true). Every invocation must call it.
+fn reduce_extrema(li: u32, reference: bool) -> Extrema {
     let num_cells = sim_settings.grid_shape.x * sim_settings.grid_shape.y;
 
     // per-thread extremes, elevation and cell index stay paired
@@ -46,16 +73,21 @@ fn compute_beeline_distance(@builtin(local_invocation_index) li: u32) {
     var min_elevation = 1e30;
     var min_cell = NO_CELL;
     for (var i = li; i < num_cells; i = i + WG_SIZE) {
-        if grid_peak_flow_thickness[i] > sim_settings.peak_flow_thickness_threshold {
-            let elevation = textureLoad(dem_texture, vec2<i32>(idx_to_xy(i)), 0).r;
-            if elevation > max_elevation {
-                max_elevation = elevation;
-                max_cell = i;
-            }
-            if elevation < min_elevation {
-                min_elevation = elevation;
-                min_cell = i;
-            }
+        let in_mask = select(is_avalanche_cell(i), is_reference_cell(i), reference);
+        if !in_mask {
+            continue;
+        }
+        let elevation = textureLoad(dem_texture, vec2<i32>(idx_to_xy(i)), 0).r;
+        if !is_finite(elevation) {
+            continue;
+        }
+        if elevation > max_elevation {
+            max_elevation = elevation;
+            max_cell = i;
+        }
+        if elevation < min_elevation {
+            min_elevation = elevation;
+            min_cell = i;
         }
     }
     wg_max_elevation[li] = max_elevation;
@@ -83,16 +115,76 @@ fn compute_beeline_distance(@builtin(local_invocation_index) li: u32) {
         }
         stride_size = stride_size >> 1u;
     }
+    let extrema = Extrema(
+        wg_max_elevation[0u],
+        wg_max_cell[0u],
+        wg_min_elevation[0u],
+        wg_min_cell[0u],
+    );
+    // the next reduction reuses the workgroup arrays
+    workgroupBarrier();
+    return extrema;
+}
+
+// Maximum peak velocity over the avalanche cells (0 without any).
+fn reduce_peak_velocity(li: u32) -> f32 {
+    let num_cells = sim_settings.grid_shape.x * sim_settings.grid_shape.y;
+    var peak_velocity = 0.0;
+    for (var i = li; i < num_cells; i = i + WG_SIZE) {
+        if is_avalanche_cell(i) {
+            peak_velocity = max(peak_velocity, grid_peak_velocity[i]);
+        }
+    }
+    wg_max_elevation[li] = peak_velocity;
+    workgroupBarrier();
+    var stride_size = WG_SIZE / 2u;
+    loop {
+        if li < stride_size {
+            wg_max_elevation[li] = max(wg_max_elevation[li], wg_max_elevation[li + stride_size]);
+        }
+        workgroupBarrier();
+        if stride_size == 1u {
+            break;
+        }
+        stride_size = stride_size >> 1u;
+    }
+    let result = wg_max_elevation[0u];
+    workgroupBarrier();
+    return result;
+}
+
+// Horizontal distance, vertical drop and 3D beeline distance between the
+// extreme points; zero when the mask has no cell.
+fn runout(extrema: Extrema) -> vec3f {
+    if extrema.max_cell == NO_CELL || extrema.min_cell == NO_CELL {
+        return vec3f(0.0);
+    }
+    let d = cell_center_xy(idx_to_xy(extrema.max_cell)) - cell_center_xy(idx_to_xy(extrema.min_cell));
+    let horizontal = length(d);
+    let drop = extrema.max_elevation - extrema.min_elevation;
+    return vec3f(horizontal, drop, length(vec3f(d.x, d.y, drop)));
+}
+
+@compute @workgroup_size(WG_SIZE, 1, 1)
+fn compute_beeline_distance(@builtin(local_invocation_index) li: u32) {
+    let avalanche = reduce_extrema(li, false);
+    let reference = reduce_extrema(li, true);
+    let peak_velocity = reduce_peak_velocity(li);
 
     if li == 0u {
-        beeline_result.max_elevation = wg_max_elevation[0u];
-        beeline_result.min_elevation = wg_min_elevation[0u];
-        beeline_result.max_cell = wg_max_cell[0u];
-        beeline_result.min_cell = wg_min_cell[0u];
-        let has_avalanche_cells = wg_max_cell[0u] != NO_CELL && wg_min_cell[0u] != NO_CELL;
-        let d = cell_center_xy(idx_to_xy(wg_max_cell[0u])) - cell_center_xy(idx_to_xy(wg_min_cell[0u]));
-        let dz = wg_max_elevation[0u] - wg_min_elevation[0u];
-        beeline_result.distance = select(0.0, length(vec3f(d.x, d.y, dz)), has_avalanche_cells);
+        runout_result.max_elevation = avalanche.max_elevation;
+        runout_result.min_elevation = avalanche.min_elevation;
+        runout_result.max_cell = avalanche.max_cell;
+        runout_result.min_cell = avalanche.min_cell;
+        let avalanche_runout = runout(avalanche);
+        runout_result.horizontal_distance = avalanche_runout.x;
+        runout_result.vertical_drop = avalanche_runout.y;
+        runout_result.distance = avalanche_runout.z;
+        let reference_runout = runout(reference);
+        runout_result.reference_horizontal_distance = reference_runout.x;
+        runout_result.reference_vertical_drop = reference_runout.y;
+        runout_result.reference_distance = reference_runout.z;
+        runout_result.peak_velocity = peak_velocity;
     }
 }
 
@@ -225,3 +317,23 @@ fn idx_to_xy(idx: u32) -> vec2<u32> {
 }
 
 // END grid_index.wgsl
+// import float_checks.wgsl;
+// BEGIN float_checks.wgsl
+// NaN / infinity checks on the bit pattern (comparisons may be optimized away).
+
+fn is_nan(x: f32) -> bool {
+    let bits: u32 = bitcast<u32>(x);
+    return (bits & 0x7F800000u) == 0x7F800000u
+          && (bits & 0x007FFFFFu) != 0u;
+}
+
+fn is_inf(x: f32) -> bool {
+    let bits: u32 = bitcast<u32>(x);
+    return (bits == 0x7F800000u || bits == 0xFF800000u);
+}
+
+fn is_finite(x: f32) -> bool {
+    return !is_nan(x) && !is_inf(x);
+}
+
+// END float_checks.wgsl

@@ -39,24 +39,6 @@ impl Default for MassMovementEvaluation {
 }
 
 impl MassMovementEvaluation {
-    pub fn with_runout(
-        mut self,
-        horizontal_distance: f64,
-        vertical_drop: f64,
-        horizontal_distance_ref: f64,
-        vertical_drop_ref: f64,
-        peak_velocity: f64,
-    ) -> Self {
-        self.horizontal_distance = horizontal_distance;
-        self.vertical_drop = vertical_drop;
-        self.horizontal_distance_ref = horizontal_distance_ref;
-        self.vertical_drop_ref = vertical_drop_ref;
-        self.beeline_3d = horizontal_distance.hypot(vertical_drop);
-        self.beeline_3d_ref = horizontal_distance_ref.hypot(vertical_drop_ref);
-        self.peak_velocity = peak_velocity;
-        self
-    }
-
     pub fn with_chamfer(mut self, chamfer: ChamferDistance) -> Self {
         self.sim_to_roi = chamfer.sim_to_roi;
         self.roi_to_sim = chamfer.roi_to_sim;

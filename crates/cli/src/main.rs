@@ -635,9 +635,13 @@ fn print_summary(simulation: &mut Simulation, peak_velocity: &[f32]) -> Result<(
     );
     row("Peak flow thickness", format!("{peak_flow_thickness:.2} m"));
 
-    // the avalanche: the largest connected area above the thickness threshold
-    block_on(simulation.post_process())?;
-    let affected_cells = simulation.ava_mask.iter().filter(|&&set| set).count();
+    // the avalanche: the cells above the thickness threshold
+    block_on(simulation.post_process(settings.peak_flow_thickness_threshold, 0.0))?;
+    let affected: Vec<bool> = block_on(simulation.fetch_peak_flow_thickness())?
+        .iter()
+        .map(|&thickness| thickness > 0.0)
+        .collect();
+    let affected_cells = affected.iter().filter(|&&set| set).count();
     row(
         "Affected area",
         format!(
@@ -648,7 +652,7 @@ fn print_summary(simulation: &mut Simulation, peak_velocity: &[f32]) -> Result<(
     );
     let (runout_distance, runout_drop) = simulation
         .dem
-        .get_elevation_extrema_distance_and_drop(&simulation.ava_mask)
+        .get_elevation_extrema_distance_and_drop(&affected)
         .unwrap_or((0.0, 0.0));
     row(
         "Runout",

@@ -121,6 +121,7 @@ define_shaders! {
     ChamferFlood => "chamfer" entry_point "chamfer_flood",
     ChamferReduce => "chamfer" entry_point "chamfer_reduce",
     ComputeBeelineDistance => "compute_beeline_distance",
+    PostProcess => "post_process",
     EvaluateMassMovement => "evaluate_mass_movement",
     InitializeParticles => "initialize_particles",
     // the four relaxation kernels share one source file; each entry point
@@ -1095,6 +1096,24 @@ fn collect_shader_configs(
                         min_binding_size: None,
                     },
                 ),
+                // Binding 4:
+                (
+                    BufferName::RegionOfInterest.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                // Binding 5:
+                (
+                    BufferName::GridPeakVelocity.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
             ],
         )?,
     );
@@ -1215,6 +1234,52 @@ fn collect_shader_configs(
             ShaderName::ChamferReduce,
             load_shader_source(ShaderName::ChamferReduce, has_float32_atomic),
             &chamfer_bindings,
+        )?,
+    );
+
+    shader_configs.insert(
+        ShaderName::PostProcess,
+        PendingShader::new(
+            ShaderName::PostProcess,
+            load_shader_source(ShaderName::PostProcess, has_float32_atomic),
+            &[
+                // Binding 0:
+                (
+                    BufferName::SimSettings.to_string(),
+                    BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                // Binding 1:
+                (
+                    BufferName::PostProcessParams.to_string(),
+                    BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                // Binding 2:
+                (
+                    BufferName::GridPeakFlowThickness.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                // Binding 3:
+                (
+                    BufferName::GridPeakVelocity.to_string(),
+                    BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+            ],
         )?,
     );
 

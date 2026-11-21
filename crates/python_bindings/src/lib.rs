@@ -687,34 +687,49 @@ impl PySimulation {
 
     /// Run the post-processing steps after the simulation finishes.
     ///
-    /// Downloads the peak fields from the GPU and derives the simulated
-    /// avalanche mask used by :meth:`evaluate`.
-    pub fn post_process(&mut self) -> PyResult<()> {
-        self.inner.post_process().block_on().map_runtime_err()
+    /// Masks the peak fields on the GPU: every cell whose peak flow thickness
+    /// is below ``min_peak_flow_thickness`` (m) or whose peak velocity is
+    /// below ``min_peak_velocity`` (m/s) is set to zero in both fields. The
+    /// remaining cells form the simulated avalanche mask used by
+    /// :meth:`evaluate`. ``min_peak_flow_thickness`` defaults to the
+    /// ``peak_flow_thickness_threshold`` setting, ``min_peak_velocity`` to 0.
+    ///
+    /// The peak fields are overwritten, so a second call can only remove
+    /// more cells.
+    #[pyo3(signature = (min_peak_flow_thickness=None, min_peak_velocity=0.0))]
+    pub fn post_process(
+        &mut self,
+        py: Python<'_>,
+        min_peak_flow_thickness: Option<f32>,
+        min_peak_velocity: f32,
+    ) -> PyResult<()> {
+        let inner = &mut self.inner;
+        let min_peak_flow_thickness =
+            min_peak_flow_thickness.unwrap_or(inner.settings.peak_flow_thickness_threshold);
+        py.detach(|| {
+            inner
+                .post_process(min_peak_flow_thickness, min_peak_velocity)
+                .block_on()
+        })
+        .map_runtime_err()
     }
 
-    /// Evaluate the finished simulation and return all metrics.
+    /// Evaluate the post-processed simulation on the GPU.
     ///
-    /// Runs both the GPU metrics (overlap components, the chamfer distance in
-    /// metres against the region of interest and the 3D beeline
-    /// distance between the highest and lowest avalanche point) and the
-    /// reference-based runout diagnostics.
+    /// Computes the overlap components, the chamfer distance in metres
+    /// against the region of interest and the 3D beeline distance between
+    /// the highest and lowest avalanche point. A cell counts as simulated
+    /// when its peak flow thickness is at least the
+    /// ``peak_flow_thickness_threshold`` setting.
     ///
     /// Returns:
     ///     PyEvaluation: All evaluation metrics; also indexable by name,
     ///     e.g. ``result["iou"]``.
-    pub fn evaluate(&mut self) -> PyResult<PyEvaluation> {
-        let mut metrics = self.inner.evaluate().block_on().map_runtime_err()?;
-        let gpu_metrics = self.inner.evaluate_gpu().block_on().map_runtime_err()?;
-        metrics.intersection = gpu_metrics.intersection;
-        metrics.undershoot = gpu_metrics.undershoot;
-        metrics.overshoot = gpu_metrics.overshoot;
-        metrics.iou = gpu_metrics.iou;
-        metrics.beeline_3d = gpu_metrics.beeline_3d;
-        metrics.sim_to_roi = gpu_metrics.sim_to_roi;
-        metrics.roi_to_sim = gpu_metrics.roi_to_sim;
-        metrics.chamfer = gpu_metrics.chamfer;
-
+    pub fn evaluate(&mut self, py: Python<'_>) -> PyResult<PyEvaluation> {
+        let inner = &mut self.inner;
+        let metrics = py
+            .detach(|| inner.evaluate().block_on())
+            .map_runtime_err()?;
         Ok(PyEvaluation { metrics })
     }
 
