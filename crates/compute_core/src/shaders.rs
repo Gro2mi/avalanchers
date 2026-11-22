@@ -137,6 +137,7 @@ define_shaders! {
     P2G2D => "p2g" entry_point "p2g_2d",
     P2G2DSorted => "p2g_sorted" entry_point "p2g_2d_sorted",
     P2GWeakPressure => "p2g_weak_pressure",
+    P2GWeakPressure3D => "p2g_weak_pressure" entry_point "p2g_weak_pressure_3d",
     // the four particle sort kernels share one source file
     SortClearBins => "sort_particles" entry_point "sort_clear_bins",
     SortCountParticles => "sort_particles" entry_point "sort_count_particles",
@@ -2319,47 +2320,62 @@ fn collect_shader_configs(
             &sorted_p2g_bindings,
         )?,
     );
-    // curvilinear weak-form pressure, a particle pass after either P2G
+    // weak-form pressure, a particle pass after either P2G
+    let weak_pressure_bindings = vec![
+        // Binding 0:
+        (
+            BufferName::SimSettings.to_string(),
+            BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+        ),
+        // Binding 1:
+        (BufferName::SimInfo.to_string(), storage_buffer(false)),
+        // Binding 2:
+        (
+            BufferName::ParticlesPosition.to_string(),
+            storage_buffer(true),
+        ),
+        // Binding 3:
+        (BufferName::ParticlesMass.to_string(), storage_buffer(true)),
+        // Binding 4:
+        (BufferName::GridMass.to_string(), storage_buffer(true)),
+        // Binding 5:
+        (
+            TextureName::TerrainGeometry.to_string(),
+            BindingType::Texture {
+                multisampled: false,
+                view_dimension: wgpu::TextureViewDimension::D2,
+                sample_type: wgpu::TextureSampleType::Float {
+                    filterable: has_float32_filterable,
+                },
+            },
+        ),
+        // Binding 6:
+        (BufferName::GridForces.to_string(), storage_buffer(false)),
+    ];
+    // curvilinear model
     shader_configs.insert(
         ShaderName::P2GWeakPressure,
         PendingShader::new_with_constants(
             ShaderName::P2GWeakPressure,
             load_shader_source(ShaderName::P2GWeakPressure, has_float32_atomic),
-            &[
-                // Binding 0:
-                (
-                    BufferName::SimSettings.to_string(),
-                    BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                ),
-                // Binding 1:
-                (BufferName::SimInfo.to_string(), storage_buffer(false)),
-                // Binding 2:
-                (
-                    BufferName::ParticlesPosition.to_string(),
-                    storage_buffer(true),
-                ),
-                // Binding 3:
-                (BufferName::ParticlesMass.to_string(), storage_buffer(true)),
-                // Binding 4:
-                (BufferName::GridMass.to_string(), storage_buffer(true)),
-                // Binding 5:
-                (
-                    TextureName::TerrainGeometry.to_string(),
-                    BindingType::Texture {
-                        multisampled: false,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        sample_type: wgpu::TextureSampleType::Float {
-                            filterable: has_float32_filterable,
-                        },
-                    },
-                ),
-                // Binding 6:
-                (BufferName::GridForces.to_string(), storage_buffer(false)),
-            ],
+            &weak_pressure_bindings,
+            &[("WG_SIZE_1D", max_compute_invocations_per_workgroup as f64)],
+        )?,
+    );
+    // 3D Cartesian model: skips flying particles like p2g_3d
+    let mut weak_pressure_3d_bindings = weak_pressure_bindings.clone();
+    // Binding 7:
+    weak_pressure_3d_bindings.push((BufferName::ParticlesState.to_string(), storage_buffer(true)));
+    shader_configs.insert(
+        ShaderName::P2GWeakPressure3D,
+        PendingShader::new_with_constants(
+            ShaderName::P2GWeakPressure3D,
+            load_shader_source(ShaderName::P2GWeakPressure3D, has_float32_atomic),
+            &weak_pressure_3d_bindings,
             &[("WG_SIZE_1D", max_compute_invocations_per_workgroup as f64)],
         )?,
     );
@@ -2730,6 +2746,8 @@ fn collect_shader_configs(
         (BufferName::GridVelocityZ.to_string(), storage_buffer(false)),
         // Binding 14: only nodes whose cell holds a particle record peaks
         (BufferName::GridOccupied.to_string(), storage_buffer(true)),
+        // Binding 15: weak-form pressure sums of p2g_weak_pressure_3d
+        (BufferName::GridForces.to_string(), storage_buffer(true)),
     ]);
     let mut terrain_following_g2p_bindings = existing_bindings(ShaderName::G2P);
     // the curvilinear binding 14 is the z velocity, which this model does not have
@@ -3782,6 +3800,7 @@ mod tests {
             ShaderName::P2G3D,
             ShaderName::P2G3DSorted,
             ShaderName::P2GWeakPressure,
+            ShaderName::P2GWeakPressure3D,
         ] {
             for has_float32_atomic in [false, true] {
                 let source = validate_wgsl(shader, has_float32_atomic);

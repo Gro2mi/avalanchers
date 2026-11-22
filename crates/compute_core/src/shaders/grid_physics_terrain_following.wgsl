@@ -20,6 +20,10 @@
 @group(0) @binding(13) var<storage, read_write> grid_velocity_z: array<f32>;
 // 3D model: nonzero where a depositing particle lies in the node's cell
 @group(0) @binding(14) var<storage> grid_occupied: array<u32>;
+// 3D model: weak-form pressure sum -sum_p m_p h_p / 2 grad N_i of
+// p2g_weak_pressure_3d (enable_weak_pressure)
+@group(0) @binding(15) var<storage> grid_forces: array<i32>; // no_atomic_float
+// atomic_float @group(0) @binding(15) var<storage> grid_forces: array<f32>;
 
 // Cartesian counterpart of grid_physics_curvilinear: forces act on a 3D velocity
 // tangent to the bed and are projected with the bed normal. The node keeps the
@@ -42,7 +46,7 @@ fn grid_physics_terrain_following(@builtin(global_invocation_id) id: vec3u) {
     }
     let mass = node_mass(idx);
     let velocity = surface_to_tangent(node_velocity_xy(idx, mass), n);
-    grid_velocity[idx] = tangent_to_surface(update_node(id.xy, n, velocity, mass, true), n);
+    grid_velocity[idx] = tangent_to_surface(update_node(id.xy, n, velocity, mass, true, false, vec2f(0.0)), n);
 }
 
 // The same update on a node velocity carried as a full 3D vector.
@@ -69,9 +73,16 @@ fn grid_physics_3d(@builtin(global_invocation_id) id: vec3u) {
     // atomic_float let w = select(grid_momentum_z_atomic[idx] / mass, 0.0, mass <= 0.0);
     // particles on differently inclined beds scatter into this node
     let velocity = tangent_project(vec3f(node_velocity_xy(idx, mass), w), n);
+    // weak form: m_i grad h = -sum_p m_p h_p / 2 grad N_i(x_p)
+    let use_weak_pressure = (sim_settings.flags & (1u << 5u)) != 0u;
+    var weak_sum = vec2f(0.0);
+    if use_weak_pressure {
+        weak_sum = vec2f(f32(grid_forces[idx * 2u]), f32(grid_forces[idx * 2u + 1u])) * INV_PRESSURE_FACTOR; // no_atomic_float
+        // atomic_float weak_sum = vec2f(grid_forces[idx * 2u], grid_forces[idx * 2u + 1u]);
+    }
     // only cells that hold a particle enter the peak maps, so the B-spline
     // spread of the flow edge does not mark untouched neighbour cells
-    let new_velocity = update_node(id.xy, n, velocity, mass, grid_occupied[idx] != 0u);
+    let new_velocity = update_node(id.xy, n, velocity, mass, grid_occupied[idx] != 0u, use_weak_pressure, weak_sum);
     grid_velocity[idx] = new_velocity.xy;
     grid_velocity_z[idx] = new_velocity.z;
 }
@@ -116,9 +127,12 @@ fn node_velocity_xy(idx: u32, mass: f32) -> vec2f {
 
 // Applies gravity, pressure and friction to the tangent velocity of a node and
 // records the node's diagnostics (peak velocity, peak flow thickness and the
-// new-cell count) if record_peaks.
+// new-cell count) if record_peaks. With use_weak_pressure the horizontal
+// thickness gradient is the weak-form sum weak_sum = m_i grad h divided by the
+// node mass instead of the centred difference of the nodal thickness.
 // Returns the new tangent velocity.
-fn update_node(xy: vec2u, n: vec3f, velocity: vec3f, mass: f32, record_peaks: bool) -> vec3f {
+fn update_node(xy: vec2u, n: vec3f, velocity: vec3f, mass: f32, record_peaks: bool,
+               use_weak_pressure: bool, weak_sum: vec2f) -> vec3f {
     let use_curvature: bool = (sim_settings.flags & (1u << 0u)) != 0u;
     let use_particle_interaction: bool = (sim_settings.flags & (1u << 1u)) != 0u;
     let use_earth_pressure_coefficient: bool = (sim_settings.flags & (1u << 2u)) != 0u;
@@ -149,10 +163,15 @@ fn update_node(xy: vec2u, n: vec3f, velocity: vec3f, mass: f32, record_peaks: bo
 
     // 3. Driving accelerations: tangential gravity and hydrostatic pressure
     let gravity_acceleration = vec3f(0.0, 0.0, -g) + g * n.z * n;
-    let grad_h = vec2f(
+    var grad_h = vec2f(
         (get_h(xy.x + 1, xy.y) - get_h(xy.x - 1, xy.y)) / (2.0 * sim_settings.cell_size),
         (get_h(xy.x, xy.y + 1) - get_h(xy.x, xy.y - 1)) / (2.0 * sim_settings.cell_size)
     );
+    if use_weak_pressure {
+        let node_is_empty = mass < min_node_mass(); // no_atomic_float
+        // atomic_float let node_is_empty = mass <= 0.0;
+        grad_h = select(weak_sum / mass, vec2f(0.0), node_is_empty);
+    }
     // Savage-Hutter earth pressure (Hutter et al. 1993): k_x along the fall
     // line, k_y across it, each active where the flow stretches in that
     // direction and passive where it is compressed; hydrostatic when disabled
@@ -806,6 +825,21 @@ fn adapted_quantization_scale(scale: f32, fill: f32) -> f32 {
 
 // END quantization.wgsl
 
+// import force_quantization.wgsl;
+// BEGIN force_quantization.wgsl
+// Fixed-point factors of the integer-atomic force and pressure sums (the mass
+// and momentum factors live in quantization.wgsl).
+
+// depth-integrated internal force (h * sigma * grad_w * area, ~1e4..1e5 N per node contribution)
+const FORCE_FACTOR: f32 = 1e-3; // i32 limit is 2.1e6 N per node
+const INV_FORCE_FACTOR: f32 = 1 / FORCE_FACTOR;
+// weak-form pressure sum m_p h_p / 2 grad_w (kg) of the curvilinear model,
+// node sum = node_mass * |grad h|: 0.001 kg resolves thin front nodes
+//   (rho*cell^2*h*J ~ 6e4 kg * 1 * 1e3 = 6e7 < 2.1e9)
+const PRESSURE_FACTOR: f32 = 1e3;
+const INV_PRESSURE_FACTOR: f32 = 1 / PRESSURE_FACTOR;
+
+// END force_quantization.wgsl
 // import quantization_fill.wgsl;
 // BEGIN quantization_fill.wgsl
 // Records how full the integer-atomic grid ranges are (quantization.wgsl):

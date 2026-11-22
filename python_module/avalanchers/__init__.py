@@ -383,28 +383,60 @@ def plot_dem(sim, ax, dark=True):
         extent=[xx.min(), xx.max(), yy.max(), yy.min()],
         origin="upper",
     )
+    _dem_contours(ax, xx, yy, dem)
+    ax.invert_yaxis()
+    return xx, yy, dem, dem_mask
+
+
+def _dem_contours(ax, xx, yy, dem, label_size=14):
+    """Minor (100 m) and labelled major (500 m) elevation contours."""
     ax.contour(
-        xx, yy, 
+        xx, yy,
         dem,
         levels=np.arange(0, 5000, 100),
         colors="grey",
         linewidths=0.8,
         alpha=0.65,
     )
-    # ax.clabel(cs100, inline=True, fontsize=14, fmt="%d m", use_clabeltext=True)
-
-    # Major contours
     cs = ax.contour(
-        xx, yy, 
+        xx, yy,
         dem,
         levels=np.arange(0, 5000, 500),
         colors="black",
         linewidths=0.8,
         alpha=0.65,
     )
-    ax.clabel(cs, inline=True, fontsize=14, fmt="%d m", use_clabeltext=True)
-    ax.invert_yaxis()
-    return xx, yy, dem, dem_mask
+    if label_size:
+        ax.clabel(cs, inline=True, fontsize=label_size, fmt="%d m", use_clabeltext=True)
+
+
+def plot_dem_geo(ax, x, y, dem, label_size=14):
+    """Hillshade and contours of a DEM on georeferenced cell centres ``x``,
+    ``y`` (1d, either order), north up. The stored counterpart of
+    ``plot_dem``, e.g. for ``AvalancherSite.dem``."""
+    import_plt()
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    dem = np.asarray(dem, dtype=np.float32)
+    dx = abs(x[1] - x[0]) if len(x) > 1 else 1.0
+    dy = abs(y[1] - y[0]) if len(y) > 1 else 1.0
+    # LightSource expects row 0 at the top (north)
+    north_up = dem[::-1] if y[0] < y[-1] else dem
+    filled = np.where(np.isfinite(north_up), north_up, np.nanmin(north_up))
+    shade = LightSource(azdeg=315, altdeg=45).hillshade(filled, dx=dx, dy=dy)
+    ax.imshow(
+        shade,
+        cmap="gray",
+        alpha=0.5,
+        vmin=0,
+        vmax=1,
+        extent=[x.min() - dx / 2, x.max() + dx / 2, y.min() - dy / 2, y.max() + dy / 2],
+        origin="upper",
+    )
+    xx, yy = np.meshgrid(x, y)
+    _dem_contours(ax, xx, yy, dem, label_size=label_size)
+    ax.set_aspect("equal")
+    return xx, yy
 
 
 def import_plt():
@@ -521,6 +553,117 @@ def plot_overview(sim, threshold_value=1e-3):
     plt.tight_layout()
     plt.show()
     return fig, axes
+
+
+def _scenario_run(scenario, run=None, label=None):
+    """Run index of ``scenario``: ``run`` if given, else the last run with
+    ``label``, else the last run."""
+    if run is not None:
+        return int(run)
+    if label is not None:
+        runs = scenario.runs_labeled(label)
+        if not runs:
+            raise ValueError(f"no run labelled {label!r} in {scenario.name}")
+        return runs[-1]
+    return scenario.number_of_runs - 1
+
+
+def plot_scenario(
+    scenario,
+    parameter="peak_flow_thickness",
+    run=None,
+    label=None,
+    ax=None,
+    threshold_value=None,
+    cmap="viridis",
+    levels=None,
+    outline=True,
+    release_area=True,
+    colorbar=True,
+    title=None,
+    contour_label_size=14,
+    dataset=None,
+    dem=None,
+):
+    """Plots ``parameter`` of one stored run over the hillshaded DEM, north up
+    in the store's coordinates. The stored counterpart of ``plot2d``.
+
+    Args:
+        scenario: an ``AvalanchersScenario``, e.g.
+            ``AvalanchersOutput(path).get_site("polygon-528").get_scenario(name)``.
+        parameter: a data variable of the scenario with ``(run, y, x)`` or
+            ``(y, x)`` dimensions, e.g. ``peak_flow_thickness``,
+            ``peak_flow_velocity``, ``release_area``.
+        run, label: the run to plot (see ``_scenario_run``); default the last.
+        threshold_value: cells below it are transparent. Default: the run's
+            ``peak_flow_thickness_threshold`` for ``peak_flow_thickness``,
+            else 1e-3.
+        levels: contourf levels; pass the same levels to several panels for
+            a shared colour scale.
+        outline: draws the mapped outline (red), release_area the release
+            area (cyan).
+        dataset, dem: the already opened ``scenario.dataset`` and site DEM
+            (``(y, x)`` array), to avoid reopening the store per panel.
+
+    Returns:
+        (ax, mappable): the axes and the filled contour set (None if no cell
+        exceeds the threshold).
+    """
+    import_plt()
+    from .output import AvalancherSite
+
+    ds = scenario.dataset if dataset is None else dataset
+    run = _scenario_run(scenario, run, label)
+    if dem is None:
+        dem = AvalancherSite(scenario.path, scenario.site).dem.values
+    if ax is None:
+        _fig, ax = plt.subplots(figsize=(10, 8))
+
+    variable = ds[parameter]
+    if "run" in variable.dims:
+        variable = variable.isel(run=run)
+    data = np.asarray(variable.values, dtype=np.float32)
+    if threshold_value is None:
+        threshold_value = (
+            float(ds["peak_flow_thickness_threshold"].isel(run=run))
+            if parameter == "peak_flow_thickness" and "peak_flow_thickness_threshold" in ds
+            else 1e-3
+        )
+    data[~np.isfinite(np.asarray(dem, dtype=np.float32))] = np.nan
+    data[data < threshold_value] = np.nan
+
+    x, y = ds["x"].values, ds["y"].values
+    xx, yy = plot_dem_geo(ax, x, y, dem, label_size=contour_label_size)
+    surf = None
+    if np.isfinite(data).any():
+        surf = ax.contourf(xx, yy, data, cmap=cmap, levels=levels, extend="max" if levels is not None else "neither")
+
+    handles = []
+    if release_area and "release_area" in ds:
+        mask = (np.nan_to_num(ds["release_area"].values) > 0).astype(np.float32)
+        if mask.any():
+            ax.contour(xx, yy, mask, levels=[0.5], colors="cyan", linewidths=1)
+            handles.append(plt.Line2D([0], [0], color="cyan", lw=1, label="Release area"))
+    if outline and "outline" in ds:
+        mask = (ds["outline"].values > 0).astype(np.float32)
+        if mask.any():
+            ax.contour(xx, yy, mask, levels=[0.5], colors="red", linewidths=1.2)
+            handles.append(plt.Line2D([0], [0], color="red", lw=1.2, label="Mapped outline"))
+    if handles:
+        ax.legend(handles=handles, loc="lower right", fontsize="small")
+
+    if colorbar and surf is not None:
+        units = variable.attrs.get("units")
+        name = variable.attrs.get("long_name", parameter.replace("_", " ").title())
+        cbar = ax.figure.colorbar(surf, ax=ax, shrink=0.8)
+        cbar.set_label(f"{name} [{units}]" if units else name)
+    ax.set(
+        title=title if title is not None else f"{scenario.site.split('_')[0]}, run {run}",
+        xlim=(x.min(), x.max()),
+        ylim=(y.min(), y.max()),
+    )
+    ax.ticklabel_format(useOffset=False, style="plain")
+    return ax, surf
 
 
 def calculate_dice(model_a, model_b):

@@ -632,6 +632,21 @@ fn initial_mass_scale(fullest_node: f32, reference_node_mass: f32) -> f32 {
     exponent.clamp(-8.0, 8.0).exp2()
 }
 
+/// Timestep of the first step, before any grid update has measured the flow.
+/// The release is at rest, so the CFL speed is the gravity-wave speed
+/// sqrt(g h) of the thickest release column `max_thickness` (m). The old
+/// estimate for a block on a 60 degree slope is kept as an upper bound; alone
+/// it ignored the pressure of thick columns on fine grids (e.g. a 56 m column
+/// on 1 m cells: 0.46 s instead of 0.038 s, which ejected the column edge at
+/// over 100 m/s in the first step).
+fn initial_dt(cfl: f32, cell_size: f32, max_thickness: f32) -> f32 {
+    let slope_dt = (2.0 * cfl * cell_size / (9.81 * 0.866) as f32).sqrt();
+    if max_thickness <= 0.0 || max_thickness.is_nan() {
+        return slope_dt;
+    }
+    slope_dt.min(cfl * cell_size / (9.81 * max_thickness).sqrt())
+}
+
 /// Release thickness (m) of release areas that hold none of their own, used
 /// unless `release_thickness` or `release_swe` is set.
 pub const DEFAULT_RELEASE_THICKNESS: f32 = 1.0;
@@ -732,6 +747,9 @@ pub struct ComputeOrchestrator {
     /// Integer-atomic grid range the first step starts with, in reference
     /// nodes (`SimInfo::mass_scale`), sized from the seeded particles.
     initial_mass_scale: f32,
+    /// Thickest release column (m), from the seeded particles; caps the
+    /// first timestep by the gravity-wave speed (see `initial_dt`).
+    initial_max_thickness: f32,
     /// Weak-form pressure pass of the curvilinear model, dispatched after P2G
     /// when enable_weak_pressure is set.
     weak_pressure: Option<(ComputePipeline, BindGroup)>,
@@ -1034,6 +1052,7 @@ impl ComputeOrchestrator {
             particle_sort: None,
             steps_since_particle_sort: 0,
             initial_mass_scale: 1.0,
+            initial_max_thickness: 0.0,
             weak_pressure: None,
             float32_atomic_supported: has_float32_atomic,
             has_float32_atomic,
@@ -1906,16 +1925,23 @@ impl ComputeOrchestrator {
         // no readback: the seeding runs on while the CPU prepares the next
         // stage (AtomicValues holds the estimated release volume)
         self.initial_mass_scale = 1.0;
-        if !self.has_float32_atomic && number_release_particles > 0 {
+        self.initial_max_thickness = 0.0;
+        if number_release_particles > 0 {
             // mean seeded mass (the volume estimate rounds every cell to m3)
             let masses = self.read_buffer::<f32>(BufferName::ParticlesMass).await?;
             let mean_mass = masses.iter().map(|&m| m as f64).sum::<f64>() / masses.len() as f64;
             let max_mass = masses.iter().copied().fold(0.0f32, f32::max);
             // a node holds about one cell of particles
             let fullest_node = max_mass * sim_settings.released_particles_per_cell.max(1) as f32;
-            self.initial_mass_scale =
-                initial_mass_scale(fullest_node, sim_settings.max_node_mass());
-            self.log_integer_grid_resolution(sim_settings, mean_mass as f32);
+            // vertical thickness of the fullest column, an upper bound of the
+            // bed-normal thickness the first grid update sees
+            self.initial_max_thickness = fullest_node
+                / (sim_settings.density * sim_settings.cell_size * sim_settings.cell_size);
+            if !self.has_float32_atomic {
+                self.initial_mass_scale =
+                    initial_mass_scale(fullest_node, sim_settings.max_node_mass());
+                self.log_integer_grid_resolution(sim_settings, mean_mass as f32);
+            }
         }
         Ok(())
     }
@@ -2136,8 +2162,11 @@ impl ComputeOrchestrator {
             } else {
                 self.initial_mass_scale * MIN_MOMENTUM_PER_MASS_SCALE
             },
-            // estimated timestep for a 60 degree slope
-            dt: (2.0 * sim_settings.cfl * sim_settings.cell_size / (9.81 * 0.866) as f32).sqrt(),
+            dt: initial_dt(
+                sim_settings.cfl,
+                sim_settings.cell_size,
+                self.initial_max_thickness,
+            ),
             elevation_threshold: minimum_dem_elevation - 0.1,
             ..Default::default()
         };
@@ -2274,19 +2303,29 @@ impl ComputeOrchestrator {
         });
 
         self.prepare_particle_sort(sim_settings, number_release_particles)?;
-        self.weak_pressure = if sim_settings.sim_model == SimModel::Curvilinear.as_int()
-            && SimFlags::from_u32(sim_settings.flags).is_weak_pressure_enabled()
-        {
-            let config = self
-                .shader_configs
-                .get(&ShaderName::P2GWeakPressure)
-                .ok_or_else(|| anyhow!("P2GWeakPressure shader config not found"))?;
-            Some((
-                config.pipeline.clone(),
-                config.create_bind_group(&self.device, &self.resources)?,
-            ))
-        } else {
-            None
+        // weak-form pressure pass of the models that support it
+        let weak_pressure_shader =
+            if !SimFlags::from_u32(sim_settings.flags).is_weak_pressure_enabled() {
+                None
+            } else if sim_settings.sim_model == SimModel::Curvilinear.as_int() {
+                Some(ShaderName::P2GWeakPressure)
+            } else if sim_settings.sim_model == SimModel::GlobalCartesian.as_int() {
+                Some(ShaderName::P2GWeakPressure3D)
+            } else {
+                None
+            };
+        self.weak_pressure = match weak_pressure_shader {
+            Some(shader) => {
+                let config = self
+                    .shader_configs
+                    .get(&shader)
+                    .ok_or_else(|| anyhow!("{shader:?} shader config not found"))?;
+                Some((
+                    config.pipeline.clone(),
+                    config.create_bind_group(&self.device, &self.resources)?,
+                ))
+            }
+            None => None,
         };
         self.prepared_max_steps = Some(sim_settings.max_steps);
         self.prepared_model = Some(sim_settings.sim_model);
@@ -3054,6 +3093,19 @@ mod tests {
     use super::*;
     use bytemuck::{Pod, Zeroable};
     use pollster::block_on;
+
+    #[test]
+    fn initial_dt_respects_the_gravity_wave_speed_of_the_release() {
+        let slope_dt = (2.0 * 0.9 * 5.0 / (9.81 * 0.866) as f32).sqrt();
+        // no release information: the slope estimate
+        assert_eq!(initial_dt(0.9, 5.0, 0.0), slope_dt);
+        // a thin slab on 5 m cells: the slope estimate is already smaller
+        assert_eq!(initial_dt(0.9, 5.0, 0.5), slope_dt);
+        // a thick column on fine cells: the CFL condition of sqrt(g h)
+        let dt = initial_dt(0.9, 1.0, 56.4);
+        assert!((dt - 0.9 / (9.81f32 * 56.4).sqrt()).abs() < 1e-6, "{dt}");
+        assert!(dt < 0.04);
+    }
 
     #[test]
     fn initial_mass_scale_puts_the_fullest_node_in_the_adaptive_band() {

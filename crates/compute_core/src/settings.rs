@@ -1322,10 +1322,14 @@ pub struct Settings {
     pub enable_curvature: Option<bool>,
     pub enable_particle_interaction: Option<bool>,
     pub enable_earth_pressure_coefficient: Option<bool>,
-    /// Curvilinear: hydrostatic pressure gradient from the MPM weak form,
+    /// Curvilinear and 3D Cartesian (dampm-global-cartesian) models:
+    /// hydrostatic pressure gradient from the MPM weak form,
     /// -sum_p m_p h_p / 2 grad N_i(x_p) per node, instead of the centred
     /// difference of the nodal thickness. Thin front nodes are then pushed by
-    /// the full pressure of the particles behind them (defaults to false).
+    /// the full pressure of the particles behind them, and a lone particle
+    /// exerts no net force on itself (sum_i grad N_i = 0), so it cannot push
+    /// itself across the grid when its column is thick against the cell size
+    /// (defaults to false).
     pub enable_weak_pressure: Option<bool>,
     /// DAMPM global model: when a particle detaches from the bed
     /// ([`Detachment`], defaults to none). A detached particle flies
