@@ -889,6 +889,65 @@ pub async fn load_release_areas(
     })
 }
 
+/// Canopy cover as a fraction 0..1: no-data, NaN and negative values become
+/// 0, and a cover holding any value above 1 is taken to be in percent.
+pub fn normalize_forest_cover(mut cover: Vec<f32>) -> Vec<f32> {
+    for value in cover.iter_mut() {
+        if !value.is_finite() || *value < 0.0 {
+            *value = 0.0;
+        }
+    }
+    let in_percent = cover.iter().any(|&value| value > 1.0);
+    if in_percent {
+        info!("The forest cover exceeds 1 and is read as percent");
+    }
+    let scale = if in_percent { 0.01 } else { 1.0 };
+    for value in cover.iter_mut() {
+        *value = (*value * scale).clamp(0.0, 1.0);
+    }
+    cover
+}
+
+/// Loads the canopy cover of the forest model from a raster on the DEM grid:
+/// `.asc` and `.tif` with the cover as a fraction or in percent, or `.png`
+/// with the cover in percent in the alpha channel (as release textures hold
+/// the thickness in cm). The result is a fraction 0..1, see
+/// [`normalize_forest_cover`].
+pub async fn load_forest_cover(path: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let data: Vec<f32> = match ext.as_str() {
+        "asc" => {
+            let mut grid = EsriGrid::from_file(path)?;
+            grid.flip_y();
+            grid.data
+        }
+        "png" => {
+            let (rgba, _, _) = read_png(path).await?;
+            rgba.iter()
+                .skip(3)
+                .step_by(4)
+                .map(|&val| val as f32 / 100.0)
+                .collect()
+        }
+        "tif" | "tiff" => {
+            let mut tiff = read_geo_tiff(path)?;
+            tiff.flip_y();
+            let nodata = tiff.metadata.nodata.map(|value| value as f32);
+            tiff.data
+                .as_f32()
+                .into_iter()
+                .map(|value| if Some(value) == nodata { 0.0 } else { value })
+                .collect()
+        }
+        _ => return Err(format!("Unsupported forest cover format: {ext}").into()),
+    };
+    Ok(normalize_forest_cover(data))
+}
+
 /// Loads release areas from raw bytes. `ext` selects the parser, e.g. "asc" or "tif".
 pub fn load_release_areas_from_bytes(
     bytes: &[u8],
@@ -1106,6 +1165,37 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    #[test]
+    fn forest_cover_is_normalized_to_a_fraction() {
+        assert_eq!(
+            normalize_forest_cover(vec![0.0, 0.5, 1.0, f32::NAN, -9999.0]),
+            vec![0.0, 0.5, 1.0, 0.0, 0.0]
+        );
+        // any value above 1 marks the cover as percent
+        assert_eq!(
+            normalize_forest_cover(vec![0.0, 50.0, 100.0, 120.0]),
+            vec![0.0, 0.5, 1.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn forest_cover_loads_from_ascii_grid_south_row_first() {
+        let mut file = NamedTempFile::with_suffix(".asc").unwrap();
+        write!(
+            file,
+            "ncols 2\nnrows 2\nxllcorner 0\nyllcorner 0\ncellsize 5\nNODATA_value -9999\n\
+             80 -9999\n20 40\n"
+        )
+        .unwrap();
+        let cover = block_on(load_forest_cover(file.path().to_str().unwrap())).unwrap();
+        // the last file row is the southern row 0; percent becomes a fraction
+        let expected = [0.2, 0.4, 0.8, 0.0];
+        assert_eq!(cover.len(), expected.len());
+        for (got, want) in cover.iter().zip(expected) {
+            assert!((got - want).abs() < 1e-6, "{cover:?}");
+        }
+    }
+
     use compute_core::settings::{FrictionModel, ParticlePlacement, SimModel};
 
     const PARABOLA_PATH: &str = "../../data/avaframe/avaParabola.png";
@@ -1268,6 +1358,15 @@ mod tests {
             no_new_cells_travel: None,
             reference_surface_length: None,
             flight_terminal_velocity: None,
+            forest_cover_path: None,
+            enable_forest: None,
+            forest_drag_coefficient: None,
+            forest_trunk_diameter: None,
+            forest_crown_diameter: None,
+            forest_tree_height: None,
+            forest_modulus_of_rupture: None,
+            forest_decay_coefficient: None,
+            forest_release_max_cover: None,
             cfl: Some(8.0),
             min_slope_angle: Some(9.0),
             max_slope_angle: Some(10.0),

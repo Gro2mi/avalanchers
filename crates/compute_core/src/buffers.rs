@@ -211,6 +211,10 @@ pub enum BufferName {
     Roughness,
     ReleaseAreas,
     RegionOfInterest,
+    /// input canopy cover fraction per cell (forest model)
+    ForestCover,
+    /// standing canopy cover per cell, lowered by forest destruction
+    ForestStanding,
 
     /// unified evaluation metrics buffer written by the evaluation shaders
     EvaluationResult,
@@ -286,6 +290,8 @@ impl BufferName {
             BufferName::SlopeAspect => "slope_aspect",
             BufferName::Roughness => "roughness",
             BufferName::ReleaseAreas => "release_areas",
+            BufferName::ForestCover => "forest_cover",
+            BufferName::ForestStanding => "forest_standing",
             BufferName::TestOutput => "test_output",
             BufferName::GridForces => "grid_forces",
             BufferName::RegionOfInterest => "region_of_interest",
@@ -355,6 +361,8 @@ impl std::str::FromStr for BufferName {
             "slope_aspect" => Ok(BufferName::SlopeAspect),
             "roughness" => Ok(BufferName::Roughness),
             "release_areas" => Ok(BufferName::ReleaseAreas),
+            "forest_cover" => Ok(BufferName::ForestCover),
+            "forest_standing" => Ok(BufferName::ForestStanding),
             "test_output" => Ok(BufferName::TestOutput),
             "grid_forces" => Ok(BufferName::GridForces),
             "region_of_interest" => Ok(BufferName::RegionOfInterest),
@@ -910,6 +918,7 @@ pub fn create_buffers_and_texture_descriptions(
     texture_size: Extent3d,
     has_float32_filterable: bool,
     grid_occupied: bool,
+    forest: bool,
 ) -> Result<GpuResources> {
     let mut gpu_resources = GpuResources::default();
     let filter_mode = if has_float32_filterable {
@@ -1154,6 +1163,16 @@ pub fn create_buffers_and_texture_descriptions(
         grid_bytes_size,
         BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
     );
+    // optional (SimFlags::FOREST): the input cover and the standing cover the
+    // forest destruction lowers; one element each without forest
+    for name in [BufferName::ForestCover, BufferName::ForestStanding] {
+        gpu_resources.add_buffer(
+            device,
+            name,
+            if forest { grid_bytes_size } else { 4 },
+            BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+        );
+    }
 
     Ok(gpu_resources)
 }
@@ -1199,6 +1218,8 @@ mod tests {
             (BufferName::SlopeAspect, "slope_aspect"),
             (BufferName::Roughness, "roughness"),
             (BufferName::ReleaseAreas, "release_areas"),
+            (BufferName::ForestCover, "forest_cover"),
+            (BufferName::ForestStanding, "forest_standing"),
             (BufferName::TestOutput, "test_output"),
             (BufferName::GridForces, "grid_forces"),
             (BufferName::CenterOfMass, "center_of_mass"),

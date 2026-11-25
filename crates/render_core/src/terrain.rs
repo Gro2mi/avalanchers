@@ -293,6 +293,22 @@ pub struct OverlayRange {
     pub label: &'static str,
     /// Unit suffix rendered beside the colour bar legend, e.g. "m/s".
     pub unit: &'static str,
+    /// Colour ramp of the overlay and its colour bar.
+    pub ramp: OverlayRamp,
+}
+
+/// Colour ramp of an overlay; must match the ramps in `terrain.wgsl` and
+/// `colorbar.rs`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OverlayRamp {
+    /// Blue to red heat ramp for simulation values.
+    #[default]
+    Heat,
+    /// Light to dark green for canopy cover.
+    Forest,
+    /// Green (intact) over yellow and orange to brown (destroyed) for the
+    /// destroyed fraction of a forest.
+    ForestDamage,
 }
 
 impl Default for OverlayRange {
@@ -303,6 +319,7 @@ impl Default for OverlayRange {
             threshold: 0.0,
             label: "",
             unit: "",
+            ramp: OverlayRamp::Heat,
         }
     }
 }
@@ -315,7 +332,13 @@ impl OverlayRange {
             threshold: min,
             label: "",
             unit: "",
+            ramp: OverlayRamp::Heat,
         }
+    }
+
+    pub fn with_ramp(mut self, ramp: OverlayRamp) -> Self {
+        self.ramp = ramp;
+        self
     }
 
     pub fn with_threshold(mut self, threshold: f32) -> Self {
@@ -343,6 +366,12 @@ enum OverlayMode {
     /// Two interleaved `i32` values `(u, v)` per cell — the p2g momentum pair
     /// of the integer-atomic grid; shown as the magnitude in kg·m/s.
     Momentum = 2,
+    /// Like `Scalar`, coloured with the green forest ramp.
+    Forest = 3,
+    /// Standing cover in the overlay buffer and the initial cover in the
+    /// reference buffer; shown as the destroyed fraction 1 - standing / cover
+    /// of the cells that hold forest.
+    ForestDamage = 4,
 }
 
 /// Draws a DEM as a shaded height field, optionally tinted by a scalar simulation grid.
@@ -462,6 +491,17 @@ impl TerrainRenderer {
                     },
                     count: None,
                 },
+                // reference grid of the forest damage overlay (initial cover)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -477,6 +517,7 @@ impl TerrainRenderer {
             &bind_group_layout,
             &uniform_buffer,
             &heightmap_view,
+            &placeholder_overlay,
             &placeholder_overlay,
         );
 
@@ -550,7 +591,30 @@ impl TerrainRenderer {
         buffer: Option<&wgpu::Buffer>,
         range: OverlayRange,
     ) {
-        self.bind_overlay(device, buffer, OverlayMode::Scalar, range);
+        let mode = match range.ramp {
+            OverlayRamp::Heat => OverlayMode::Scalar,
+            OverlayRamp::Forest | OverlayRamp::ForestDamage => OverlayMode::Forest,
+        };
+        self.bind_overlay(device, buffer, None, mode, range);
+    }
+
+    /// Tints the forest cells by their destroyed fraction 1 - standing /
+    /// cover, from the standing canopy cover in `standing` and the initial
+    /// cover in `cover` (both `f32` per cell like [`Self::set_overlay`]);
+    /// cells without initial cover stay bare terrain. Passing `None` for
+    /// either returns to plain terrain shading.
+    pub fn set_forest_damage_overlay(
+        &mut self,
+        device: &wgpu::Device,
+        standing: Option<&wgpu::Buffer>,
+        cover: Option<&wgpu::Buffer>,
+        range: OverlayRange,
+    ) {
+        let (standing, cover) = match (standing, cover) {
+            (Some(standing), Some(cover)) => (Some(standing), Some(cover)),
+            _ => (None, None),
+        };
+        self.bind_overlay(device, standing, cover, OverlayMode::ForestDamage, range);
     }
 
     /// Like [`Self::set_overlay`], but for the simulation's momentum grid: two
@@ -566,13 +630,14 @@ impl TerrainRenderer {
         momentum_unit: f32,
     ) {
         self.uniforms.elevation[2] = momentum_unit;
-        self.bind_overlay(device, buffer, OverlayMode::Momentum, range);
+        self.bind_overlay(device, buffer, None, OverlayMode::Momentum, range);
     }
 
     fn bind_overlay(
         &mut self,
         device: &wgpu::Device,
         buffer: Option<&wgpu::Buffer>,
+        reference: Option<&wgpu::Buffer>,
         mode: OverlayMode,
         range: OverlayRange,
     ) {
@@ -586,6 +651,7 @@ impl TerrainRenderer {
             &self.uniform_buffer,
             &self.heightmap_view,
             buffer.unwrap_or(&self.placeholder_overlay),
+            reference.unwrap_or(&self.placeholder_overlay),
         );
     }
 
@@ -614,6 +680,7 @@ fn create_bind_group(
     uniforms: &wgpu::Buffer,
     heightmap: &wgpu::TextureView,
     overlay: &wgpu::Buffer,
+    reference: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("Terrain Bind Group"),
@@ -630,6 +697,10 @@ fn create_bind_group(
             wgpu::BindGroupEntry {
                 binding: 2,
                 resource: overlay.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: reference.as_entire_binding(),
             },
         ],
     })

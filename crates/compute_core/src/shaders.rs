@@ -154,6 +154,7 @@ define_shaders! {
     GridPhysics3D => "grid_physics_terrain_following" entry_point "grid_physics_3d",
     G2P3D => "g2p_terrain_following" entry_point "g2p_3d",
     Friction => "friction",
+    Forest => "forest",
     EarthPressure => "earth_pressure",
     CurvilinearGeometry => "curvilinear_geometry",
     CartesianGeometry => "cartesian_geometry",
@@ -1357,6 +1358,15 @@ fn collect_shader_configs(
                 // Binding 7:
                 (
                     BufferName::RegionOfInterest.to_string(),
+                    BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                // Binding 8: input canopy cover (a placeholder without forest)
+                (
+                    BufferName::ForestCover.to_string(),
                     BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
@@ -2747,6 +2757,11 @@ fn collect_shader_configs(
         (BufferName::GridOccupied.to_string(), storage_buffer(true)),
         // Binding 15: weak-form pressure sums of p2g_weak_pressure_3d
         (BufferName::GridForces.to_string(), storage_buffer(true)),
+        // Binding 16: standing canopy cover, lowered by forest destruction
+        (
+            BufferName::ForestStanding.to_string(),
+            storage_buffer(false),
+        ),
     ]);
     let mut terrain_following_g2p_bindings = existing_bindings(ShaderName::G2P);
     // the curvilinear binding 14 is the z velocity, which this model does not have

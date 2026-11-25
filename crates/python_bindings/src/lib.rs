@@ -684,6 +684,26 @@ impl PySimulation {
             .map_runtime_err()
     }
 
+    /// Set the canopy cover of the forest model from a 2D float32 array.
+    ///
+    /// Cover as a fraction 0..1 (or percent if any value exceeds 1). Enables
+    /// the forest drag and destruction of the ``dampm-global-cartesian``
+    /// model and suppresses release where the cover exceeds
+    /// ``forest_release_max_cover``. Takes effect with the next ``prepare``.
+    ///
+    /// Args:
+    ///     forest_cover: ``(height, width)`` array matching the DEM shape.
+    ///         Must be C-contiguous (call ``.copy()`` if needed).
+    pub fn set_forest_cover(&mut self, forest_cover: PyReadonlyArray2<f32>) -> PyResult<()> {
+        let array = forest_cover.as_array();
+        let slice = array.as_slice().ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(
+                "The forest cover must be C-contiguous; pass it with .copy()",
+            )
+        })?;
+        self.inner.set_forest_cover(slice).map_runtime_err()
+    }
+
     /// Run the simulation to completion (up to ``max_timesteps``).
     pub fn run(&mut self, py: Python<'_>) -> PyResult<()> {
         let inner = &mut self.inner;
@@ -1221,6 +1241,41 @@ impl PySimulation {
             .map_runtime_err()?
             .to_vec();
         self.get_layer_f32(py, data)
+    }
+
+    /// ``(height, width)`` float32 array of the canopy cover fraction of
+    /// the forest model, ``None`` without a forest cover.
+    #[getter]
+    pub fn forest_cover<'py>(
+        &mut self,
+        py: Python<'py>,
+    ) -> PyResult<Option<Bound<'py, PyArray2<f32>>>> {
+        match self.inner.forest_cover() {
+            Some(cover) => {
+                let data = cover.to_vec();
+                Ok(Some(self.get_layer_f32(py, data)?))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// ``(height, width)`` float32 array of the standing canopy cover: the
+    /// forest cover lowered by the forest destruction of the current run.
+    /// ``None`` without a forest.
+    #[getter]
+    pub fn forest_standing<'py>(
+        &mut self,
+        py: Python<'py>,
+    ) -> PyResult<Option<Bound<'py, PyArray2<f32>>>> {
+        let data = self
+            .inner
+            .fetch_forest_standing()
+            .block_on()
+            .map_runtime_err()?;
+        if data.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(self.get_layer_f32(py, data)?))
     }
 
     /// ``(height, width)`` float32 array of the configured release areas.

@@ -1213,6 +1213,7 @@ impl ComputeOrchestrator {
             self.texture_size,
             self.has_float32_filterable,
             SimFlags::from_u32(sim_settings.flags).is_grid_occupied_enabled(),
+            SimFlags::from_u32(sim_settings.flags).is_forest_enabled(),
         )?;
         Ok(())
     }
@@ -1261,6 +1262,7 @@ impl ComputeOrchestrator {
             self.texture_size,
             self.has_float32_filterable,
             SimFlags::from_u32(sim_settings.flags).is_grid_occupied_enabled(),
+            SimFlags::from_u32(sim_settings.flags).is_forest_enabled(),
         )?;
 
         self.resources.write_buffer(

@@ -41,7 +41,8 @@ use compute_core::{
     dem::{Bounds, Dem, StableHasher},
     evaluation::MassMovementEvaluation,
     settings::{
-        CrownLineMethod, ParticlePlacement, ReleaseFillMethod, Settings, SimModel, SimSettings,
+        CrownLineMethod, ParticlePlacement, ReleaseFillMethod, Settings, SimFlags, SimModel,
+        SimSettings,
     },
     utils::*,
 };
@@ -202,6 +203,10 @@ pub struct SimulationLoadResult {
     pub particle_sort_interval: Option<u32>,
     /// Destination for results written by [`Simulation::save`].
     pub output_path: Option<String>,
+    /// Canopy cover raster of the forest model, if one was configured.
+    pub forest_cover_path: Option<String>,
+    /// Whether a loaded forest cover is used (defaults to true).
+    pub enable_forest: bool,
 }
 
 /// A single avalanche simulation: owns the GPU orchestrator, the loaded DEM,
@@ -273,6 +278,13 @@ pub struct Simulation {
     pub gpu_cache: GpuCache,
     /// Settings of the particles kept by [`Simulation::store_initial_state`].
     initial_state: Option<InitialState>,
+    /// Canopy cover raster of the forest model; loaded on terrain analysis.
+    forest_cover_path: Option<String>,
+    /// Canopy cover fraction (0..1) per cell, from `forest_cover_path` or
+    /// [`Self::set_forest_cover`].
+    forest_cover: Option<Vec<f32>>,
+    /// Whether a forest cover is used ([`Settings::enable_forest`]).
+    enable_forest: bool,
     #[cfg(not(target_arch = "wasm32"))]
     output: Option<data_processor::output::Output>,
 }
@@ -436,6 +448,9 @@ impl Simulation {
             crown_candidates: Vec::new(),
             potential_release_areas: Vec::new(),
             initial_state: None,
+            forest_cover_path: None,
+            forest_cover: None,
+            enable_forest: true,
             #[cfg(not(target_arch = "wasm32"))]
             output: None,
         })
@@ -564,6 +579,8 @@ impl Simulation {
             release_slope_width: settings.release_slope_width,
             release_slope_smoothing_length: settings.release_slope_smoothing_length,
             output_path: settings.output_path.clone(),
+            forest_cover_path: settings.forest_cover_path.clone(),
+            enable_forest: settings.enable_forest.unwrap_or(true),
         })
     }
 
@@ -620,6 +637,10 @@ impl Simulation {
         self.crown_candidates = Vec::new();
         self.potential_release_areas = Vec::new();
         self.initial_state = None;
+        self.forest_cover_path = data.forest_cover_path;
+        self.forest_cover = None;
+        self.enable_forest = data.enable_forest;
+        self.sync_forest_flag();
 
         self.gpu_cache.reset_all();
 
@@ -842,6 +863,15 @@ impl Simulation {
             self.outline_source = None;
         }
         self.roi_uploaded = false;
+        // a forest cover of another grid no longer applies
+        if self
+            .forest_cover
+            .as_ref()
+            .is_some_and(|cover| cover.len() != expected_len)
+        {
+            self.forest_cover = None;
+            self.sync_forest_flag();
+        }
 
         self.state = SimulationState::DemLoaded;
         info!("Loaded the {}", self.dem_description());
@@ -865,6 +895,111 @@ impl Simulation {
         self.release_areas_array = Some(release_areas.to_vec());
         self.release_areas_path = None;
         Ok(())
+    }
+
+    /// Sets the per-cell canopy cover of the forest model directly (fraction
+    /// 0..1, or percent if any value exceeds 1), overriding any configured
+    /// forest cover path. The length must match the DEM, so the DEM has to
+    /// be set first. Takes effect with the next preparation.
+    pub fn set_forest_cover(&mut self, cover: &[f32]) -> Result<()> {
+        if cover.len() != self.dem.width * self.dem.height {
+            bail!(
+                "Forest cover array length ({}) does not match DEM dimensions ({}x{}={}). You have to set the DEM first.",
+                cover.len(),
+                self.dem.width,
+                self.dem.height,
+                self.dem.width * self.dem.height
+            );
+        }
+        self.forest_cover = Some(data_processor::normalize_forest_cover(cover.to_vec()));
+        self.forest_cover_path = None;
+        self.sync_forest_flag();
+        // the forest buffers are sized on terrain analysis
+        self.initial_state = None;
+        if self.state > SimulationState::DemLoaded {
+            self.state = SimulationState::DemLoaded;
+        }
+        Ok(())
+    }
+
+    /// The canopy cover fraction per cell of the forest model, `None` until a
+    /// forest cover is set or loaded (a file loads on terrain analysis).
+    pub fn forest_cover(&self) -> Option<&[f32]> {
+        self.forest_cover.as_deref()
+    }
+
+    /// Whether the run uses a forest cover ([`SimFlags::FOREST`]).
+    pub fn forest_enabled(&self) -> bool {
+        SimFlags::from_u32(self.settings.flags).is_forest_enabled()
+    }
+
+    /// Sets [`SimFlags::FOREST`] when a forest cover is (or will be) loaded
+    /// and the forest is enabled.
+    fn sync_forest_flag(&mut self) {
+        let has_cover = self.forest_cover.is_some() || self.forest_cover_path.is_some();
+        if self.enable_forest && has_cover {
+            self.settings.flags |= SimFlags::FOREST;
+        } else {
+            self.settings.flags &= !SimFlags::FOREST;
+        }
+    }
+
+    /// Loads the configured forest cover file if it is not loaded yet.
+    async fn ensure_forest_cover(&mut self) -> Result<()> {
+        if self.forest_cover.is_some() || !self.enable_forest {
+            return Ok(());
+        }
+        let Some(path) = self.forest_cover_path.clone() else {
+            return Ok(());
+        };
+        info!("Loading the forest cover from {path}");
+        let cover = data_processor::load_forest_cover(&path)
+            .await
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        if cover.len() != self.dem.width * self.dem.height {
+            bail!(
+                "Forest cover {path} has {} cells, the DEM {}x{}={}",
+                cover.len(),
+                self.dem.width,
+                self.dem.height,
+                self.dem.width * self.dem.height
+            );
+        }
+        self.forest_cover = Some(cover);
+        Ok(())
+    }
+
+    /// Writes the forest cover to the input and the standing cover buffers,
+    /// undoing the forest destruction of a previous run.
+    async fn upload_forest_cover(&mut self) -> Result<()> {
+        if !self.forest_enabled() {
+            return Ok(());
+        }
+        let Some(cover) = &self.forest_cover else {
+            return Ok(());
+        };
+        self.orchestrator
+            .write_buffer(BufferName::ForestCover, cover)
+            .await?;
+        self.orchestrator
+            .write_buffer(BufferName::ForestStanding, cover)
+            .await?;
+        Ok(())
+    }
+
+    /// Standing canopy cover per cell: the forest cover lowered by the forest
+    /// destruction of the current run. Empty without a forest.
+    pub async fn fetch_forest_standing(&mut self) -> Result<Vec<f32>> {
+        if self.state < SimulationState::TerrainAnalyzed {
+            bail!("The terrain must be analyzed before reading the standing forest");
+        }
+        if !self.forest_enabled() {
+            return Ok(Vec::new());
+        }
+        self.gpu_cache.read_count += 1;
+        self.orchestrator
+            .read_buffer(BufferName::ForestStanding)
+            .await
     }
 
     /// Sets the region of interest (avalanche outline) as a cell mask. Must
@@ -931,6 +1066,7 @@ impl Simulation {
             ("outlines_path", patch.outlines_path.is_some()),
             ("outlines_padding", patch.outlines_padding.is_some()),
             ("output_path", patch.output_path.is_some()),
+            ("forest_cover_path", patch.forest_cover_path.is_some()),
         ];
         if let Some((key, _)) = data_keys.iter().find(|(_, is_set)| *is_set) {
             bail!("`{key}` changes the input data; load it with create instead");
@@ -939,6 +1075,10 @@ impl Simulation {
         settings.apply_patch(patch);
         settings.validate().map_err(anyhow::Error::msg)?;
         self.settings = settings;
+        if let Some(enable) = patch.enable_forest {
+            self.enable_forest = enable;
+        }
+        self.sync_forest_flag();
         if let Some(steps) = patch.batch_compute_steps {
             self.orchestrator.batch_compute_steps = steps;
         }
@@ -1048,6 +1188,8 @@ impl Simulation {
             || old.world_size_x != new.world_size_x
             || old.world_size_y != new.world_size_y
             || old.reference_surface_length != new.reference_surface_length
+            // the forest buffers are sized and filled on terrain analysis
+            || (old.flags & SimFlags::FOREST) != (new.flags & SimFlags::FOREST)
         {
             return PreparationStage::Terrain;
         }
@@ -1057,6 +1199,8 @@ impl Simulation {
             || old.release_max_elevation != new.release_max_elevation
             || old.roughness_threshold != new.roughness_threshold
             || old.released_particles_per_cell != new.released_particles_per_cell
+            || (self.forest_enabled()
+                && old.forest_release_max_cover != new.forest_release_max_cover)
             || initial.release != self.release_config()
             // a thickness per cell cannot be rescaled to a uniform one
             || old_thickness.is_some() != new_thickness.is_some()
@@ -1173,6 +1317,8 @@ impl Simulation {
         self.orchestrator
             .restore_initial_particles(mass_scale, thickness_scale)
             .await?;
+        // the destruction of the previous run is undone
+        self.upload_forest_cover().await?;
 
         self.gpu_cache.reset_simulation_result();
         self.gpu_cache.release_areas = None;
@@ -1615,9 +1761,12 @@ impl Simulation {
             bail!("DEM and settings must be loaded before running normals shader");
         }
         self.gpu_cache.reset_all();
+        self.ensure_forest_cover().await?;
+        self.sync_forest_flag();
         self.orchestrator
             .run_analyze_terrain(&self.settings, &self.dem)
             .await?;
+        self.upload_forest_cover().await?;
         self.state = SimulationState::TerrainAnalyzed;
         Ok(())
     }

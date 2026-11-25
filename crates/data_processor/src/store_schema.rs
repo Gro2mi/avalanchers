@@ -532,16 +532,23 @@ fn setting_units(name: &str) -> Option<&'static str> {
         | "release_max_elevation"
         | "release_thickness"
         | "peak_flow_thickness_threshold"
-        | "reference_surface_length" => "m",
+        | "reference_surface_length"
+        | "forest_trunk_diameter"
+        | "forest_crown_diameter"
+        | "forest_tree_height" => "m",
         "density" => "kg/m3",
         "release_swe" => "kg/m2",
-        "velocity_threshold" | "flight_terminal_velocity" => "m/s",
+        "velocity_threshold" | "flight_terminal_velocity" | "forest_decay_coefficient" => "m/s",
         "drag_coefficient" => "m/s2",
         "internal_friction_angle"
         | "basal_friction_angle"
         | "min_slope_angle"
         | "max_slope_angle" => "degrees",
-        "shear_modulus" | "hardening_modulus" | "bulk_modulus" | "compaction_pressure" => "Pa",
+        "shear_modulus"
+        | "hardening_modulus"
+        | "bulk_modulus"
+        | "compaction_pressure"
+        | "forest_modulus_of_rupture" => "Pa",
         _ => return None,
     })
 }

@@ -660,6 +660,14 @@ struct SimSettings {
     // 3D lift-off: terminal velocity (m/s) of the quadratic air drag in
     // flight; 0 disables the drag
     flight_terminal_velocity: f32,
+    // forest model (forest.wgsl), read only with SIM_FLAG_FOREST
+    forest_drag_coefficient: f32,
+    forest_trunk_diameter: f32,
+    forest_crown_diameter: f32,
+    forest_tree_height: f32,
+    forest_modulus_of_rupture: f32,
+    forest_decay_coefficient: f32,
+    forest_release_max_cover: f32,
 };
 
 @group(0) @binding(0) var<uniform> sim_settings: SimSettings;
@@ -667,6 +675,14 @@ struct SimSettings {
 // SimFlags::GRID_OCCUPIED (settings.rs): p2g marks the cells holding a
 // depositing particle in grid_occupied and only those record peak maps
 const SIM_FLAG_GRID_OCCUPIED: u32 = 1u << 9u;
+
+// SimFlags::FOREST (settings.rs): a forest cover is loaded; the DAMPM global
+// model decelerates the flow by the drag of the standing stems
+const SIM_FLAG_FOREST: u32 = 1u << 10u;
+
+fn forest_enabled() -> bool {
+    return (sim_settings.flags & SIM_FLAG_FOREST) != 0u;
+}
 
 // Gully walls (reference surface, wall friction) need a reference surface at
 // least one cell wide; must match SimSettings::gully_walls_enabled.

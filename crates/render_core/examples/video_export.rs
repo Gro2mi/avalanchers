@@ -13,14 +13,14 @@
 //! vertical exaggeration, 4k, peak flow velocity overlay. `resolution` accepts
 //! 480p/720p/1080p/1440p/2160p/4k or an explicit `WIDTHxHEIGHT`; `overlay`
 //! accepts none, peak_velocity, peak_flow_thickness, grid_mass, release_areas,
-//! slope_angle, slope_aspect or roughness. Particles are always drawn.
+//! slope_angle, slope_aspect, roughness, forest_standing or forest_cover. Particles are always drawn.
 
 use std::io::Write;
 use std::process::{Child, Command, Stdio};
 
 use compute_core::settings::Settings;
 use compute_core::{ComputeOrchestrator, SimInfo, buffers::BufferName};
-use render_core::{OverlayRange, ParticleBuffers, Renderer, TerrainData};
+use render_core::{OverlayRamp, OverlayRange, ParticleBuffers, Renderer, TerrainData};
 use simulation::{Simulation, SimulationState};
 
 const DEFAULT_SETTINGS: &str = "settings.json";
@@ -53,7 +53,7 @@ fn parse_resolution(spec: &str) -> anyhow::Result<(u32, u32)> {
 }
 
 /// Grid buffers cloned from the simulation, mirroring the live viewer.
-const GRID_BUFFERS: [BufferName; 7] = [
+const GRID_BUFFERS: [BufferName; 9] = [
     BufferName::GridPeakVelocity,
     BufferName::GridPeakFlowThickness,
     BufferName::GridMass,
@@ -61,6 +61,8 @@ const GRID_BUFFERS: [BufferName; 7] = [
     BufferName::SlopeAngle,
     BufferName::SlopeAspect,
     BufferName::Roughness,
+    BufferName::ForestCover,
+    BufferName::ForestStanding,
 ];
 
 /// Scalar field tinting the terrain, with its colour ramp bounds. Names match
@@ -75,6 +77,8 @@ enum Overlay {
     SlopeAngle,
     SlopeAspect,
     Roughness,
+    ForestStanding,
+    ForestCover,
 }
 
 impl Overlay {
@@ -88,9 +92,11 @@ impl Overlay {
             "slope_angle" => Ok(Self::SlopeAngle),
             "slope_aspect" => Ok(Self::SlopeAspect),
             "roughness" => Ok(Self::Roughness),
+            "forest_standing" => Ok(Self::ForestStanding),
+            "forest_cover" => Ok(Self::ForestCover),
             other => anyhow::bail!(
                 "unknown overlay '{other}': use none, peak_velocity, peak_flow_thickness, \
-                 grid_mass, release_areas, slope_angle, slope_aspect or roughness"
+                 grid_mass, release_areas, slope_angle, slope_aspect, roughness, forest_standing or forest_cover"
             ),
         }
     }
@@ -105,6 +111,8 @@ impl Overlay {
             Self::SlopeAngle => Some(BufferName::SlopeAngle),
             Self::SlopeAspect => Some(BufferName::SlopeAspect),
             Self::Roughness => Some(BufferName::Roughness),
+            Self::ForestStanding => Some(BufferName::ForestStanding),
+            Self::ForestCover => Some(BufferName::ForestCover),
         }
     }
 
@@ -133,6 +141,16 @@ impl Overlay {
                 .with_unit("deg"),
             // Dimensionless, 0 (smooth) to 1 (rough); border cells are forced to 1.
             Self::Roughness => OverlayRange::new(0.0, 1.0),
+            // Canopy cover fraction; the standing cover drops where the flow
+            // breaks the stems
+            // Destroyed fraction of the forest cells, 0 (intact, green) to 1
+            // (destroyed, brown); cells without forest stay bare
+            Self::ForestStanding => OverlayRange::new(0.0, 1.0)
+                .with_threshold(-0.5)
+                .with_ramp(OverlayRamp::ForestDamage),
+            Self::ForestCover => OverlayRange::new(0.0, 1.0)
+                .with_threshold(0.01)
+                .with_ramp(OverlayRamp::Forest),
         };
         range.with_label(self.label())
     }
@@ -147,6 +165,8 @@ impl Overlay {
             Self::SlopeAngle => "slope angle",
             Self::SlopeAspect => "slope aspect",
             Self::Roughness => "roughness",
+            Self::ForestStanding => "forest damage",
+            Self::ForestCover => "forest cover",
         }
     }
 }
@@ -331,7 +351,21 @@ fn main() -> anyhow::Result<()> {
         height,
         &sim.terrain,
     );
-    renderer.set_grid_overlay(&sim.device, overlay_buffer, overlay.range());
+    if overlay == Overlay::ForestStanding {
+        let cover = sim
+            .grids
+            .iter()
+            .find(|(n, _)| *n == BufferName::ForestCover)
+            .map(|(_, buffer)| buffer);
+        renderer.set_grid_forest_damage_overlay(
+            &sim.device,
+            overlay_buffer,
+            cover,
+            overlay.range(),
+        );
+    } else {
+        renderer.set_grid_overlay(&sim.device, overlay_buffer, overlay.range());
+    }
     let [position, velocity, stopped, elevation] = &sim.particles;
     renderer.set_particles(
         &sim.device,

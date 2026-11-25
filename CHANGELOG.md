@@ -4,6 +4,25 @@ All notable changes to this project might be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- Forest model (NAKSIN / MoT-Voellmy type) for the DAMPM global model. A canopy cover raster
+  (`forest_cover_path`: .asc, .tif or .png with percent in the alpha channel; Python
+  `set_forest_cover`) gives the stem density n = cover / (pi/4 `forest_crown_diameter`^2) of stems of
+  `forest_trunk_diameter`. The stems decelerate the flow by 1/2 C_D n D min(h, H)/h u^2 and break
+  once the bending moment exceeds the `forest_modulus_of_rupture` (default 50 MPa); the standing
+  cover then decays at the rate `forest_decay_coefficient` / D. The physics lives in `forest.wgsl`.
+  The cover also suppresses release above `forest_release_max_cover` with every model.
+  `enable_forest: false` runs without the loaded forest. Python getters `forest_cover` and
+  `forest_standing`.
+- Live and web viewer overlays for the forest (key `9` toggles them): the forest damage, i.e. the
+  destroyed fraction 1 - standing / initial cover (green intact to brown destroyed), which changes
+  live as the avalanche breaks the stems, and the initial forest cover (green ramp). The live
+  viewer's headless snapshot takes `LIVE_SIM_SNAPSHOT_OVERLAY` (an overlay label).
+- `data/landcover/forest_cover_from_clcplus.py` derives the cover raster from CLCplus Backbone.
+- `verification/run_forest_parabola_test.py`: forest band on half the width of a parabolic slope,
+  so the same avalanche runs with and without forest side by side (runout per half, inertness of
+  zero cover, breaking criterion), with `--export` for the live viewer.
+
 ### Changed
 - Grid models renamed: `3d-depth-averaged` is now **DAMPM global** (`dampm-global-cartesian`, short `global`),
   `terrain-following` is **DAMPM terrain-following** (`dampm-terrain-following`, short `terrain-following`

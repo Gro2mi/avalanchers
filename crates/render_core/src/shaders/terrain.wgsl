@@ -17,6 +17,8 @@ struct Uniforms {
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var heightmap: texture_2d<f32>;
 @group(0) @binding(2) var<storage, read> overlay_grid: array<f32>;
+// initial forest cover for the forest damage overlay (mode 4)
+@group(0) @binding(3) var<storage, read> overlay_reference: array<f32>;
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -101,7 +103,16 @@ fn sample_overlay(x: i32, y: i32) -> f32 {
     // Overlay mode 2: interleaved i32 momentum pairs (u, v per cell), as
     // quantized by the simulation's p2g pass, u.elevation.z kg m/s per step.
     // Show the magnitude in kg·m/s.
-    if (u.overlay.x > 1.5) {
+    // Overlay mode 4: destroyed fraction of the forest, 1 - standing / initial
+    // cover; cells without forest fall below any threshold and stay bare.
+    if (u.overlay.x > 3.5) {
+        let cover = overlay_reference[cell];
+        if (cover < 0.01) {
+            return -1.0;
+        }
+        return clamp(1.0 - overlay_grid[cell] / cover, 0.0, 1.0);
+    }
+    if (abs(u.overlay.x - 2.0) < 0.5) {
         let mu = f32(bitcast<i32>(overlay_grid[cell * 2u]));
         let mv = f32(bitcast<i32>(overlay_grid[cell * 2u + 1u]));
         return length(vec2<f32>(mu, mv)) * u.elevation.z;
@@ -123,6 +134,40 @@ fn overlay_color(t: f32) -> vec3<f32> {
         return mix(mid, warm, (t - 0.33) / 0.33);
     }
     return mix(warm, hot, (t - 0.66) / 0.34);
+}
+
+// Light to dark green ramp for canopy cover (overlay mode 3); keep in sync
+// with ramp_color in colorbar.rs.
+fn forest_color(t: f32) -> vec3<f32> {
+    let sparse = vec3<f32>(0.86, 0.90, 0.56);
+    let open = vec3<f32>(0.52, 0.76, 0.30);
+    let closed = vec3<f32>(0.18, 0.52, 0.20);
+    let dense = vec3<f32>(0.04, 0.28, 0.12);
+
+    if (t < 0.33) {
+        return mix(sparse, open, t / 0.33);
+    }
+    if (t < 0.66) {
+        return mix(open, closed, (t - 0.33) / 0.33);
+    }
+    return mix(closed, dense, (t - 0.66) / 0.34);
+}
+
+// Intact (green) to destroyed (brown) forest for overlay mode 4; keep in sync
+// with ramp_color in colorbar.rs.
+fn forest_damage_color(t: f32) -> vec3<f32> {
+    let intact = vec3<f32>(0.10, 0.42, 0.16);
+    let bent = vec3<f32>(0.88, 0.80, 0.22);
+    let broken = vec3<f32>(0.92, 0.45, 0.10);
+    let destroyed = vec3<f32>(0.42, 0.20, 0.07);
+
+    if (t < 0.33) {
+        return mix(intact, bent, t / 0.33);
+    }
+    if (t < 0.66) {
+        return mix(bent, broken, (t - 0.33) / 0.33);
+    }
+    return mix(broken, destroyed, (t - 0.66) / 0.34);
 }
 
 fn terrain_color(t: f32) -> vec3<f32> {
@@ -163,8 +208,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let span = max(u.overlay.z - u.overlay.y, 1e-6);
         let v = clamp((in.overlay_value - u.overlay.y) / span, 0.0, 1.0);
         // Fade in near the threshold so the flow edge does not look stamped on.
-        let coverage = clamp(v * 4.0, 0.35, 1.0);
-        albedo = mix(albedo, overlay_color(v), coverage);
+        var coverage = clamp(v * 4.0, 0.35, 1.0);
+        var color = overlay_color(v);
+        if (u.overlay.x > 3.5) {
+            // intact forest is a value of 0 and must stay clearly visible
+            color = forest_damage_color(v);
+            coverage = 0.9;
+        } else if (u.overlay.x > 2.5) {
+            color = forest_color(v);
+            coverage = 0.9;
+        }
+        albedo = mix(albedo, color, coverage);
     }
 
     let shaded = albedo * (0.35 + 0.75 * diffuse);

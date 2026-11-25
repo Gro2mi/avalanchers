@@ -8,7 +8,8 @@
 //! Controls: left drag orbits, right drag pans, scroll zooms, `R` restarts the
 //! simulation, `V` resets the view, `0` hides the overlay, `1` peak flow velocity, `2`
 //! peak flow thickness, `3` grid mass, `4` release areas, `5` slope angle, `6` slope
-//! aspect, `7` roughness, `8` grid momentum, `P` toggles particles, `J` the particle elevation jitter. The egui panel
+//! aspect, `7` roughness, `8` grid momentum, `9` forest damage (again: initial forest
+//! cover), `P` toggles particles, `J` the particle elevation jitter. The egui panel
 //! scales the particle size (1 = a sphere of the particle volume, applied at once),
 //! switches the testcase (the DEM pngs next to the configured one), the simulation
 //! model and the other simulation settings; sliders fine-tune with the arrow keys once
@@ -25,7 +26,7 @@ use compute_core::settings::{
     SimModel,
 };
 use compute_core::{ComputeOrchestrator, SimInfo, buffers::BufferName};
-use render_core::{OrbitCamera, OverlayRange, ParticleBuffers, Renderer, TerrainData};
+use render_core::{OrbitCamera, OverlayRamp, OverlayRange, ParticleBuffers, Renderer, TerrainData};
 use simulation::{Simulation, SimulationState};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -50,10 +51,13 @@ const DEFAULT_TESTCASE_DIR: &str = "data/avaframe";
 /// Release textures follow the frontend naming convention: `avaFoo` ->
 /// `avaFooreleaseTexture.png`.
 const RELEASE_TEXTURE_SUFFIX: &str = "releaseTexture";
+/// Forest cover textures follow the same convention: `avaFoo` ->
+/// `avaFooforestCover.png` (cover in percent in the alpha channel).
+const FOREST_COVER_SUFFIX: &str = "forestCover";
 const WINDOW_ICON: &[u8] = include_bytes!("../../../frontend/icons/android-chrome-512x512.png");
 
 /// Grid buffers cloned from the simulation, both at startup and after a restart.
-const GRID_BUFFERS: [BufferName; 8] = [
+const GRID_BUFFERS: [BufferName; 10] = [
     BufferName::GridPeakVelocity,
     BufferName::GridPeakFlowThickness,
     BufferName::GridMass,
@@ -62,6 +66,8 @@ const GRID_BUFFERS: [BufferName; 8] = [
     BufferName::SlopeAngle,
     BufferName::SlopeAspect,
     BufferName::Roughness,
+    BufferName::ForestCover,
+    BufferName::ForestStanding,
 ];
 
 fn window_icon() -> anyhow::Result<Icon> {
@@ -172,7 +178,8 @@ fn discover_testcases(dir: &str) -> Vec<String> {
         .filter_map(|entry| entry.file_name().into_string().ok())
         .filter_map(|name| {
             let stem = name.strip_suffix(".png")?;
-            (!stem.ends_with(RELEASE_TEXTURE_SUFFIX)).then(|| stem.to_string())
+            (!stem.ends_with(RELEASE_TEXTURE_SUFFIX) && !stem.ends_with(FOREST_COVER_SUFFIX))
+                .then(|| stem.to_string())
         })
         .collect::<Vec<_>>();
     cases.sort();
@@ -192,6 +199,12 @@ fn testcase_paths(dir: &str, case: &str) -> (String, Option<String>) {
             .is_file()
             .then(|| release_path.to_string_lossy().into_owned()),
     )
+}
+
+/// Forest cover texture of a testcase, `None` when it has none.
+fn testcase_forest_path(dir: &str, case: &str) -> Option<String> {
+    let path = Path::new(dir).join(format!("{case}{FOREST_COVER_SUFFIX}.png"));
+    path.is_file().then(|| path.to_string_lossy().into_owned())
 }
 
 /// Testcase name shown in the dropdown for the configured DEM.
@@ -216,9 +229,25 @@ enum Overlay {
     SlopeAngle,
     SlopeAspect,
     Roughness,
+    ForestStanding,
+    ForestCover,
 }
 
 impl Overlay {
+    const ALL: [Overlay; 11] = [
+        Overlay::None,
+        Overlay::PeakFlowVelocity,
+        Overlay::PeakFlowThickness,
+        Overlay::GridMass,
+        Overlay::GridMomentum,
+        Overlay::ReleaseAreas,
+        Overlay::SlopeAngle,
+        Overlay::SlopeAspect,
+        Overlay::Roughness,
+        Overlay::ForestStanding,
+        Overlay::ForestCover,
+    ];
+
     fn buffer_name(self) -> Option<BufferName> {
         match self {
             Overlay::None => None,
@@ -230,6 +259,8 @@ impl Overlay {
             Overlay::SlopeAngle => Some(BufferName::SlopeAngle),
             Overlay::SlopeAspect => Some(BufferName::SlopeAspect),
             Overlay::Roughness => Some(BufferName::Roughness),
+            Overlay::ForestStanding => Some(BufferName::ForestStanding),
+            Overlay::ForestCover => Some(BufferName::ForestCover),
         }
     }
 
@@ -264,6 +295,16 @@ impl Overlay {
                 .with_unit("deg"),
             // Dimensionless, 0 (smooth) to 1 (rough); border cells are forced to 1.
             Overlay::Roughness => OverlayRange::new(0.0, 1.0),
+            // Canopy cover fraction; the standing cover drops where the flow
+            // breaks the stems
+            // Destroyed fraction of the forest cells, 0 (intact, green) to 1
+            // (destroyed, brown); cells without forest stay bare
+            Overlay::ForestStanding => OverlayRange::new(0.0, 1.0)
+                .with_threshold(-0.5)
+                .with_ramp(OverlayRamp::ForestDamage),
+            Overlay::ForestCover => OverlayRange::new(0.0, 1.0)
+                .with_threshold(0.01)
+                .with_ramp(OverlayRamp::Forest),
         };
         range.with_label(self.label())
     }
@@ -279,6 +320,8 @@ impl Overlay {
             Overlay::SlopeAngle => "slope angle",
             Overlay::SlopeAspect => "slope aspect",
             Overlay::Roughness => "roughness",
+            Overlay::ForestStanding => "forest damage",
+            Overlay::ForestCover => "forest cover",
         }
     }
 }
@@ -291,12 +334,20 @@ fn attach_overlay(
     device: &wgpu::Device,
     overlay: Overlay,
     buffer: Option<&wgpu::Buffer>,
+    forest_cover: &wgpu::Buffer,
     momentum_unit: f32,
 ) {
     match overlay {
         Overlay::GridMomentum => {
             renderer.set_grid_momentum_overlay(device, buffer, overlay.range(), momentum_unit)
         }
+        // the standing cover is shown against the initial cover
+        Overlay::ForestStanding => renderer.set_grid_forest_damage_overlay(
+            device,
+            buffer,
+            Some(forest_cover),
+            overlay.range(),
+        ),
         _ => renderer.set_grid_overlay(device, buffer, overlay.range()),
     }
 }
@@ -691,6 +742,7 @@ fn write_snapshot(sim: &SimulationView, overlay: Overlay, path: &str) -> anyhow:
         &sim.device,
         overlay,
         overlay.buffer_name().map(|name| sim.grid(&name)),
+        sim.grid(&BufferName::ForestCover),
         sim.momentum_unit(),
     );
     renderer.set_particles(
@@ -868,6 +920,7 @@ impl Viewer {
             &self.sim.device,
             self.overlay,
             buffer,
+            self.sim.grid(&BufferName::ForestCover),
             momentum_unit,
         );
         self.dirty = true;
@@ -887,6 +940,7 @@ impl Viewer {
                 &self.sim.device,
                 self.overlay,
                 buffer,
+                self.sim.grid(&BufferName::ForestCover),
                 self.sim.momentum_unit(),
             );
         }
@@ -1200,6 +1254,14 @@ impl ApplicationHandler for Viewer {
                         self.overlay = Overlay::GridMomentum;
                         self.apply_overlay();
                     }
+                    Key::Character("9") => {
+                        self.overlay = if self.overlay == Overlay::ForestStanding {
+                            Overlay::ForestCover
+                        } else {
+                            Overlay::ForestStanding
+                        };
+                        self.apply_overlay();
+                    }
                     Key::Character("p" | "P") => {
                         self.show_particles = !self.show_particles;
                         self.apply_particles();
@@ -1356,6 +1418,8 @@ impl ApplicationHandler for Viewer {
                                     testcase_paths(&testcase_dir, &draft_case);
                                 draft.dem_path = Some(dem_path);
                                 draft.release_areas_path = release_areas_path;
+                                draft.forest_cover_path =
+                                    testcase_forest_path(&testcase_dir, &draft_case);
                             }
 
                             ui.horizontal(|ui| {
@@ -1815,7 +1879,13 @@ fn main() -> anyhow::Result<()> {
 
     if let Some(path) = snapshot {
         sim.run_to_completion()?;
-        write_snapshot(&sim, Overlay::PeakFlowVelocity, &path)?;
+        // LIVE_SIM_SNAPSHOT_OVERLAY picks the overlay by its label, e.g.
+        // "standing forest cover"; peak flow velocity by default
+        let overlay = std::env::var("LIVE_SIM_SNAPSHOT_OVERLAY")
+            .ok()
+            .and_then(|label| Overlay::ALL.into_iter().find(|o| o.label() == label))
+            .unwrap_or(Overlay::PeakFlowVelocity);
+        write_snapshot(&sim, overlay, &path)?;
         return Ok(());
     }
 

@@ -62,6 +62,14 @@ CALIBRATION_PARAMETER_DEFAULTS = {
     "detachment": "none",
     "enable_grid_occupied": False,
     "flight_terminal_velocity": 40.0,
+    "enable_forest": True,
+    "forest_drag_coefficient": 1.0,
+    "forest_trunk_diameter": 0.3,
+    "forest_crown_diameter": 6.0,
+    "forest_tree_height": 20.0,
+    "forest_modulus_of_rupture": 50.0e6,
+    "forest_decay_coefficient": 0.15,
+    "forest_release_max_cover": 0.5,
 }
 
 # Metric names of PyEvaluation (see crates/python_bindings/src/lib.rs),

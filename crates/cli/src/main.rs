@@ -113,6 +113,28 @@ struct Args {
     /// 3D lift-off: terminal velocity (m/s) of flying particles, 0 = no drag
     #[arg(long)]
     flight_terminal_velocity: Option<f32>,
+    /// Canopy cover raster (fraction or percent) on the DEM grid
+    #[arg(long)]
+    forest_cover_path: Option<String>,
+    /// Use a loaded forest cover (default true)
+    #[arg(long, value_parser = parse_bool)]
+    enable_forest: Option<bool>,
+    #[arg(long)]
+    forest_drag_coefficient: Option<f32>,
+    #[arg(long)]
+    forest_trunk_diameter: Option<f32>,
+    #[arg(long)]
+    forest_crown_diameter: Option<f32>,
+    #[arg(long)]
+    forest_tree_height: Option<f32>,
+    /// Modulus of rupture of the stems in Pa
+    #[arg(long)]
+    forest_modulus_of_rupture: Option<f32>,
+    /// Decay coefficient in m/s of broken stands
+    #[arg(long)]
+    forest_decay_coefficient: Option<f32>,
+    #[arg(long)]
+    forest_release_max_cover: Option<f32>,
     #[arg(long, value_parser = parse_friction_model)]
     friction_model: Option<FrictionModel>,
     #[arg(long)]
@@ -297,6 +319,33 @@ impl Args {
         }
         if let Some(value) = self.flight_terminal_velocity {
             settings.flight_terminal_velocity = Some(value);
+        }
+        if let Some(value) = self.forest_cover_path.clone() {
+            settings.forest_cover_path = Some(value);
+        }
+        if let Some(value) = self.enable_forest {
+            settings.enable_forest = Some(value);
+        }
+        if let Some(value) = self.forest_drag_coefficient {
+            settings.forest_drag_coefficient = Some(value);
+        }
+        if let Some(value) = self.forest_trunk_diameter {
+            settings.forest_trunk_diameter = Some(value);
+        }
+        if let Some(value) = self.forest_crown_diameter {
+            settings.forest_crown_diameter = Some(value);
+        }
+        if let Some(value) = self.forest_tree_height {
+            settings.forest_tree_height = Some(value);
+        }
+        if let Some(value) = self.forest_modulus_of_rupture {
+            settings.forest_modulus_of_rupture = Some(value);
+        }
+        if let Some(value) = self.forest_decay_coefficient {
+            settings.forest_decay_coefficient = Some(value);
+        }
+        if let Some(value) = self.forest_release_max_cover {
+            settings.forest_release_max_cover = Some(value);
         }
         if let Some(value) = self.friction_model {
             settings.friction_model = Some(value);
@@ -792,6 +841,15 @@ mod tests {
             no_new_cells_travel: None,
             reference_surface_length: None,
             flight_terminal_velocity: None,
+            forest_cover_path: None,
+            enable_forest: None,
+            forest_drag_coefficient: None,
+            forest_trunk_diameter: None,
+            forest_crown_diameter: None,
+            forest_tree_height: None,
+            forest_modulus_of_rupture: None,
+            forest_decay_coefficient: None,
+            forest_release_max_cover: None,
             released_particles_per_cell: None,
             release_thickness: None,
             release_swe: None,
