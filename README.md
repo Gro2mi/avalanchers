@@ -2,6 +2,14 @@
 
 GPU-accelerated avalanche simulation written in Rust on WebGPU, with a browser frontend (WASM) including a live renderer, Python bindings and a CLI. Building on ideas from [weBIGeo](https://github.com/weBIGeo/webigeo/tree/main), it gives fast estimates of runout distance and flow routing for AvaFrame examples, your own DEMs or Austrian GPX tracks. It uses a depth-averaged material point method (DAMPM), with the goal of calibrating friction parameters on a large dataset. This is a work in progress and many features are not verified yet.
 
+
+
+https://github.com/user-attachments/assets/9d240487-5569-427c-8a1f-00f1af1d59f5
+
+<sub>Live simulation of the AvaFrame example <i>avaHit</i>: particles colored by velocity, overlay shows peak flow thickness. Orthophoto: [basemap.at](https://basemap.at) ([CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)), draped on the terrain model.</sub>
+
+
+
 **[▶ Try the demo](https://gro2mi.github.io/avalanchers/)**
 
 ## Requirements
