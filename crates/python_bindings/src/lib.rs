@@ -182,11 +182,12 @@ impl PySimInfo {
     }
 }
 
-/// Diagonal-normalized chamfer distance between two cell sets.
+/// Chamfer distance between two cell sets.
 ///
-/// All values are distances measured in world units and then divided by the
-/// length of the grid diagonal, so they are dimensionless and comparable
-/// across grid resolutions. A value of 0 means the two cell sets coincide.
+/// All values are distances in world units (m). They are not normalized: the
+/// grid size depends on the domain padding, so divide by a length of the
+/// avalanche itself (e.g. ``beeline_3d_ref``) to compare avalanches. A value
+/// of 0 means the two cell sets coincide.
 #[pyclass]
 pub struct PyChamferDistance {
     inner: ChamferDistance,
@@ -195,7 +196,7 @@ pub struct PyChamferDistance {
 #[pymethods]
 impl PyChamferDistance {
     /// Mean distance from every simulated cell to the nearest reference
-    /// (region of interest) cell, normalized by the grid diagonal.
+    /// (region of interest) cell, in metres.
     ///
     /// Infinite if the simulation produced cells but the reference is empty.
     #[getter]
@@ -204,7 +205,7 @@ impl PyChamferDistance {
     }
 
     /// Mean distance from every reference cell to the nearest simulated
-    /// cell, normalized by the grid diagonal.
+    /// cell, in metres.
     ///
     /// Infinite if the reference has cells but the simulation is empty.
     #[getter]
@@ -275,7 +276,7 @@ impl PyEvaluation {
         self.metrics.sim_to_roi
     }
 
-    /// Diagonal-normalized chamfer distance between the simulated cells and
+    /// Chamfer distance (m) between the simulated cells and
     /// the reference region of interest (see :class:`PyChamferDistance`).
     #[getter]
     fn roi_to_sim(&self) -> f64 {
@@ -686,34 +687,49 @@ impl PySimulation {
 
     /// Run the post-processing steps after the simulation finishes.
     ///
-    /// Downloads the peak fields from the GPU and derives the simulated
-    /// avalanche mask used by :meth:`evaluate`.
-    pub fn post_process(&mut self) -> PyResult<()> {
-        self.inner.post_process().block_on().map_runtime_err()
+    /// Masks the peak fields on the GPU: every cell whose peak flow thickness
+    /// is below ``min_peak_flow_thickness`` (m) or whose peak velocity is
+    /// below ``min_peak_velocity`` (m/s) is set to zero in both fields. The
+    /// remaining cells form the simulated avalanche mask used by
+    /// :meth:`evaluate`. ``min_peak_flow_thickness`` defaults to the
+    /// ``peak_flow_thickness_threshold`` setting, ``min_peak_velocity`` to 0.
+    ///
+    /// The peak fields are overwritten, so a second call can only remove
+    /// more cells.
+    #[pyo3(signature = (min_peak_flow_thickness=None, min_peak_velocity=0.0))]
+    pub fn post_process(
+        &mut self,
+        py: Python<'_>,
+        min_peak_flow_thickness: Option<f32>,
+        min_peak_velocity: f32,
+    ) -> PyResult<()> {
+        let inner = &mut self.inner;
+        let min_peak_flow_thickness =
+            min_peak_flow_thickness.unwrap_or(inner.settings.peak_flow_thickness_threshold);
+        py.detach(|| {
+            inner
+                .post_process(min_peak_flow_thickness, min_peak_velocity)
+                .block_on()
+        })
+        .map_runtime_err()
     }
 
-    /// Evaluate the finished simulation and return all metrics.
+    /// Evaluate the post-processed simulation on the GPU.
     ///
-    /// Runs both the GPU metrics (overlap components, diagonal-normalized
-    /// chamfer distance against the region of interest and the 3D beeline
-    /// distance between the highest and lowest avalanche point) and the
-    /// reference-based runout diagnostics.
+    /// Computes the overlap components, the chamfer distance in metres
+    /// against the region of interest and the 3D beeline distance between
+    /// the highest and lowest avalanche point. A cell counts as simulated
+    /// when its peak flow thickness is at least the
+    /// ``peak_flow_thickness_threshold`` setting.
     ///
     /// Returns:
     ///     PyEvaluation: All evaluation metrics; also indexable by name,
     ///     e.g. ``result["iou"]``.
-    pub fn evaluate(&mut self) -> PyResult<PyEvaluation> {
-        let mut metrics = self.inner.evaluate().block_on().map_runtime_err()?;
-        let gpu_metrics = self.inner.evaluate_gpu().block_on().map_runtime_err()?;
-        metrics.intersection = gpu_metrics.intersection;
-        metrics.undershoot = gpu_metrics.undershoot;
-        metrics.overshoot = gpu_metrics.overshoot;
-        metrics.iou = gpu_metrics.iou;
-        metrics.beeline_3d = gpu_metrics.beeline_3d;
-        metrics.sim_to_roi = gpu_metrics.sim_to_roi;
-        metrics.roi_to_sim = gpu_metrics.roi_to_sim;
-        metrics.chamfer = gpu_metrics.chamfer;
-
+    pub fn evaluate(&mut self, py: Python<'_>) -> PyResult<PyEvaluation> {
+        let inner = &mut self.inner;
+        let metrics = py
+            .detach(|| inner.evaluate().block_on())
+            .map_runtime_err()?;
         Ok(PyEvaluation { metrics })
     }
 
@@ -1442,7 +1458,7 @@ impl PySimulation {
     }
 
     /// f32 array of the per-cell deposited vertical momentum in kg m/s,
-    /// ``height * width``. Only the 3D depth-averaged model carries it; it is
+    /// ``height * width``. Only the DAMPM global model carries it; it is
     /// zero for the other models.
     #[getter]
     fn get_grid_momentum_z<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyArray1<f32>>> {
@@ -1452,6 +1468,23 @@ impl PySimulation {
             .block_on()
             .map_runtime_err()?;
         Ok(data.to_pyarray(py))
+    }
+
+    /// bool array: whether each particle is detached from the bed and flying
+    /// ballistically (DAMPM global model with curvature; always false
+    /// for the other models).
+    #[getter]
+    fn get_particles_flying<'py>(
+        &mut self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyArray1<bool>>> {
+        let states = self
+            .inner
+            .fetch_particles_state()
+            .block_on()
+            .map_runtime_err()?;
+        let flying: Vec<bool> = states.iter().map(|state| state.flying).collect();
+        Ok(flying.to_pyarray(py))
     }
 
     /// u32 array of the particle stop timesteps (0 = still moving).

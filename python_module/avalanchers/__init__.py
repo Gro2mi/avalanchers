@@ -21,7 +21,7 @@ __git_dirty__ = _build_info["git_dirty"]
 # when a key is missing from the settings dictionary. Mirrors
 # `SimSettings::new()` in crates/compute_core/src/settings.rs.
 CALIBRATION_PARAMETER_DEFAULTS = {
-    "sim_model": "terrain-following",
+    "sim_model": "dampm-global-cartesian",
     "friction_model": "voellmy",
     "constitutive_model": "drucker-prager",
     "density": 200.0,
@@ -59,6 +59,8 @@ CALIBRATION_PARAMETER_DEFAULTS = {
     "enable_earth_pressure_coefficient": False,
     "enable_entrainment": True,
     "enable_weak_pressure": False,
+    "detachment": "none",
+    "flight_terminal_velocity": 40.0,
 }
 
 # Metric names of PyEvaluation (see crates/python_bindings/src/lib.rs),
@@ -85,20 +87,24 @@ EVALUATION_METRICS = (
 # enums, normalized to the first canonical name of each group.
 _ENUM_ALIASES = {
     "sim_model": {
-        "terrain-following": "terrain-following",
-        "terrain": "terrain-following",
-        "t": "terrain-following",
-        "curvilinear": "curvilinear",
-        "curvi": "curvilinear",
-        "c": "curvilinear",
+        "dampm-terrain-following": "dampm-terrain-following",
+        "terrain-following": "dampm-terrain-following",
+        "terrain": "dampm-terrain-following",
+        "t": "dampm-terrain-following",
+        "dampm-curvilinear": "dampm-curvilinear",
+        "curvilinear": "dampm-curvilinear",
+        "curvi": "dampm-curvilinear",
+        "c": "dampm-curvilinear",
         "mpmdac": "mpmdac",
         "mpm-dac": "mpmdac",
         "mpm_depth_averaged_curvilinear": "mpmdac",
         "sliding-block": "sliding-block",
         "block": "sliding-block",
         "b": "sliding-block",
-        "3d-depth-averaged": "3d-depth-averaged",
-        "3d": "3d-depth-averaged",
+        "dampm-global-cartesian": "dampm-global-cartesian",
+        "global": "dampm-global-cartesian",
+        "3d-depth-averaged": "dampm-global-cartesian",
+        "3d": "dampm-global-cartesian",
     },
     "friction_model": {
         "coulomb": "coulomb",

@@ -1,3 +1,8 @@
+struct G2PUpdate {
+    velocity: vec2f,
+    affine_matrix: mat2x2<f32>,
+};
+
 fn transfer_g2p(p_idx: u32) -> G2PUpdate {
     let grid_pos = particles_position[p_idx] / sim_settings.cell_size - vec2f(0.5);
     let base_node = vec2u(floor(grid_pos - vec2f(0.5)));

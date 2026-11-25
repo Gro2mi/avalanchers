@@ -28,6 +28,13 @@ impl SimFlags {
     /// Set only for the particle seeding dispatch, from
     /// [`ParticlePlacement::is_uniform`]; not a simulation parameter.
     pub const UNIFORM_PARTICLE_PLACEMENT: u32 = 1 << 6;
+    /// DAMPM global model, [`Detachment::FreeFall`]: a particle detaches where
+    /// one free-flight step from the bed would end above the DEM.
+    pub const DETACHMENT_FREE_FALL: u32 = 1 << 7;
+    /// DAMPM global model, [`Detachment::Curvature`]: a particle detaches where
+    /// the bed-normal load g n_z + n_z H(v, v) turns negative.
+    pub const DETACHMENT_CURVATURE: u32 = 1 << 8;
+    pub const DETACHMENT: u32 = Self::DETACHMENT_FREE_FALL | Self::DETACHMENT_CURVATURE;
 
     pub fn new(
         curvature: bool,
@@ -82,6 +89,18 @@ impl SimFlags {
     pub fn is_weak_pressure_enabled(&self) -> bool {
         (self.mask & (1 << 5)) != 0
     }
+    pub fn detachment(&self) -> Detachment {
+        if (self.mask & Self::DETACHMENT_CURVATURE) != 0 {
+            Detachment::Curvature
+        } else if (self.mask & Self::DETACHMENT_FREE_FALL) != 0 {
+            Detachment::FreeFall
+        } else {
+            Detachment::None
+        }
+    }
+    pub fn is_detachment_enabled(&self) -> bool {
+        self.detachment() != Detachment::None
+    }
 }
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable, Serialize, Deserialize)]
@@ -133,7 +152,7 @@ pub struct SimSettings {
     /// The no-new-cells stop window spans round(travel / cfl) steps, at least
     /// 10: the steps the fastest material needs to travel this many cells.
     pub no_new_cells_travel: f32,
-    /// Curvilinear, terrain-following and 3D depth averaged: Gaussian width (m)
+    /// Curvilinear, terrain-following and DAMPM global: Gaussian width (m)
     /// of the reference surface that defines gully wall inclinations for the
     /// confinement friction; below the cell size (e.g. 0) disables it, see
     /// [`Self::gully_walls_enabled`].
@@ -146,6 +165,10 @@ pub struct SimSettings {
         deserialize_with = "deserialize_unset_as_nan"
     )]
     pub release_swe: f32,
+    /// 3D lift-off ([`Settings::detachment`]): terminal velocity (m/s) of the quadratic air drag on
+    /// flying particles, a = -g |u| u / v_t^2; 0 disables the drag.
+    #[serde(default = "default_flight_terminal_velocity")]
+    pub flight_terminal_velocity: f32,
 }
 
 /// Hashes only the fields the selected simulation, friction and constitutive
@@ -158,9 +181,7 @@ impl Hash for SimSettings {
         let sim_model = SimModel::from_int(self.sim_model);
         let grid_flow_model = matches!(
             sim_model,
-            Some(
-                SimModel::TerrainFollowing | SimModel::Curvilinear | SimModel::ThreeDDepthAveraged
-            )
+            Some(SimModel::TerrainFollowing | SimModel::Curvilinear | SimModel::GlobalCartesian)
         );
 
         // Shared by all models: run length, grid, release and evaluation
@@ -230,6 +251,9 @@ impl Hash for SimSettings {
                 if sim_model == Some(SimModel::Curvilinear) {
                     flags_mask |= SimFlags::WEAK_PRESSURE;
                 }
+                if sim_model == Some(SimModel::GlobalCartesian) {
+                    flags_mask |= SimFlags::DETACHMENT;
+                }
                 if SimFlags::from_u32(self.flags).is_earth_pressure_coefficient_enabled() {
                     hash_f32(self.internal_friction_angle, state);
                     hash_f32(self.basal_friction_angle, state);
@@ -240,6 +264,11 @@ impl Hash for SimSettings {
         if grid_flow_model {
             hash_f32(self.momentum_stop_fraction, state);
             hash_f32(self.reference_surface_length, state);
+        }
+        if sim_model == Some(SimModel::GlobalCartesian)
+            && SimFlags::from_u32(self.flags).is_detachment_enabled()
+        {
+            hash_f32(self.flight_terminal_velocity, state);
         }
 
         (self.flags & flags_mask).hash(state);
@@ -257,6 +286,14 @@ fn unset_release_swe() -> f32 {
     f32::NAN
 }
 
+/// Default terminal velocity (m/s) of flying particles (see
+/// [`SimSettings::flight_terminal_velocity`]).
+pub const DEFAULT_FLIGHT_TERMINAL_VELOCITY: f32 = 40.0;
+
+fn default_flight_terminal_velocity() -> f32 {
+    DEFAULT_FLIGHT_TERMINAL_VELOCITY
+}
+
 fn is_release_thickness(thickness: f32) -> bool {
     thickness.is_finite() && thickness > RELEASE_THICKNESS_THRESHOLD
 }
@@ -268,48 +305,48 @@ impl Default for SimSettings {
 }
 
 /// Integer-atomic grid (GPUs without float atomics, or `integer_atomics`):
-/// node masses and momenta are fixed point numbers in u32 / i32 whose factors
-/// fill the integer range with the largest node values a flow can reach, a
-/// [`MAX_FLOW_THICKNESS`] deep column over a cell moving at
-/// [`MAX_FLOW_VELOCITY`], times [`QUANTIZATION_SAFETY`]. Must match utils.wgsl.
-pub const MAX_FLOW_THICKNESS: f32 = 30.0;
+/// node masses and momenta are fixed point numbers in u32 / i32. Their ranges
+/// start at a [`MAX_FLOW_THICKNESS`] deep column over a cell (the reference
+/// node) moving at [`MAX_FLOW_VELOCITY`] and then adapt to the fullest node
+/// (`SimInfo::mass_scale`, `SimInfo::momentum_scale`). Must match
+/// quantization.wgsl.
+pub const MAX_FLOW_THICKNESS: f32 = 50.0;
 /// Largest flow speed (m/s) the integer momentum range holds, see
 /// [`MAX_FLOW_THICKNESS`].
 pub const MAX_FLOW_VELOCITY: f32 = 100.0;
-/// Headroom of the integer range above [`MAX_FLOW_THICKNESS`] and
-/// [`MAX_FLOW_VELOCITY`]; also covers the slope factor of the node mass.
-pub const QUANTIZATION_SAFETY: f32 = 2.0;
 /// Integer range used for masses (u32) and momenta (i32): below 2^32 and 2^31
 /// so that a rounded maximum still converts without saturating.
 const QUANTIZATION_U32_RANGE: f32 = 4.0e9;
 const QUANTIZATION_I32_RANGE: f32 = 2.0e9;
 
 impl SimSettings {
-    /// Largest node mass (kg) the integer-atomic grid holds, see
-    /// [`MAX_FLOW_THICKNESS`]; same expression as `max_node_mass` in
-    /// utils.wgsl.
+    /// Node mass (kg) of the integer-atomic grid's start range, see
+    /// [`MAX_FLOW_THICKNESS`]; `reference_node_mass` in quantization.wgsl.
+    /// The range in use is this times `SimInfo::mass_scale`.
     pub fn max_node_mass(&self) -> f32 {
-        QUANTIZATION_SAFETY * MAX_FLOW_THICKNESS * self.density * self.cell_size * self.cell_size
+        MAX_FLOW_THICKNESS * self.density * self.cell_size * self.cell_size
     }
 
     /// Whether the reference surface and the gully wall friction run: the
     /// smoothing width must reach the cell size. Same test as
-    /// `gully_walls_enabled` in utils.wgsl.
+    /// `gully_walls_enabled` in sim_settings.wgsl.
     pub fn gully_walls_enabled(&self) -> bool {
         self.reference_surface_length >= self.cell_size
     }
 
-    /// Integer units per kg of the integer-atomic grid mass.
+    /// Integer units per kg of the integer-atomic grid mass at the start
+    /// range; [`crate::SimInfo::mass_factor`] gives the one in use.
     pub fn mass_factor(&self) -> f32 {
         QUANTIZATION_U32_RANGE / self.max_node_mass()
     }
 
-    /// Integer units per kg m/s of the integer-atomic grid momentum.
+    /// Integer units per kg m/s of the integer-atomic grid momentum at the
+    /// start range; [`crate::SimInfo::momentum_factor`] gives the one in use.
     pub fn momentum_factor(&self) -> f32 {
         QUANTIZATION_I32_RANGE / (self.max_node_mass() * MAX_FLOW_VELOCITY)
     }
 
-    /// Length in steps of the no-new-cells rolling window, see utils.wgsl.
+    /// Length in steps of the no-new-cells rolling window, see sim_settings.wgsl.
     pub fn no_new_cells_window(&self) -> u32 {
         ((self.no_new_cells_travel / self.cfl).round() as u32).max(10)
     }
@@ -463,6 +500,7 @@ impl SimSettings {
             no_new_cells_travel: 65.0,
             reference_surface_length: 0.0,
             release_swe: f32::NAN,
+            flight_terminal_velocity: DEFAULT_FLIGHT_TERMINAL_VELOCITY,
         }
     }
 
@@ -584,6 +622,9 @@ impl SimSettings {
         if let Some(val) = patch.reference_surface_length {
             settings.reference_surface_length = val;
         }
+        if let Some(val) = patch.flight_terminal_velocity {
+            settings.flight_terminal_velocity = val;
+        }
         if let Some(val) = patch.enable_curvature {
             if val {
                 settings.flags |= 1 << 0;
@@ -625,6 +666,9 @@ impl SimSettings {
             } else {
                 settings.flags &= !(1 << 5);
             }
+        }
+        if let Some(val) = patch.detachment {
+            settings.flags = (settings.flags & !SimFlags::DETACHMENT) | val.flags();
         }
     }
 
@@ -805,14 +849,17 @@ impl<'de> Deserialize<'de> for ConstitutiveModel {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SimModel {
+    /// DAMPM terrain-following: velocities in the surface plane, no z component.
     TerrainFollowing,
+    /// DAMPM curvilinear: horizontal velocities `(dx/dt, dy/dt)` with the full
+    /// surface metric.
     Curvilinear,
     MpmDaC,
     /// Legacy per-particle sliding-block model (former model 0).
     SlidingBlock,
-    /// Depth-averaged terrain-following grid model that carries the full 3D
-    /// Cartesian velocity.
-    ThreeDDepthAveraged,
+    /// DAMPM global: depth-averaged material point method that carries the full
+    /// 3D Cartesian velocity tangent to the bed.
+    GlobalCartesian,
 }
 
 impl SimModel {
@@ -822,7 +869,7 @@ impl SimModel {
             1 => Some(Self::Curvilinear),
             2 => Some(Self::MpmDaC),
             3 => Some(Self::SlidingBlock),
-            4 => Some(Self::ThreeDDepthAveraged),
+            4 => Some(Self::GlobalCartesian),
             _ => None,
         }
     }
@@ -833,7 +880,7 @@ impl SimModel {
             Self::Curvilinear => 1,
             Self::MpmDaC => 2,
             Self::SlidingBlock => 3,
-            Self::ThreeDDepthAveraged => 4,
+            Self::GlobalCartesian => 4,
         }
     }
 }
@@ -843,11 +890,16 @@ impl FromStr for SimModel {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value.to_lowercase().as_str() {
-            "terrain-following" | "terrain" | "t" => Ok(Self::TerrainFollowing),
-            "curvilinear" | "curvi" | "c" => Ok(Self::Curvilinear),
+            // "t", "c", "3d-depth-averaged" and "3d" keep older settings and stores readable.
+            "dampm-terrain-following" | "terrain-following" | "terrain" | "t" => {
+                Ok(Self::TerrainFollowing)
+            }
+            "dampm-curvilinear" | "curvilinear" | "curvi" | "c" => Ok(Self::Curvilinear),
             "mpmdac" | "mpm-dac" | "mpm_depth_averaged_curvilinear" => Ok(Self::MpmDaC),
             "sliding-block" | "block" | "b" => Ok(Self::SlidingBlock),
-            "3d-depth-averaged" | "3d" => Ok(Self::ThreeDDepthAveraged),
+            "dampm-global-cartesian" | "dampm-global" | "global" | "3d-depth-averaged" | "3d" => {
+                Ok(Self::GlobalCartesian)
+            }
             _ => Err(format!("unknown simulation model: {value}")),
         }
     }
@@ -856,11 +908,11 @@ impl FromStr for SimModel {
 impl fmt::Display for SimModel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::TerrainFollowing => "terrain-following",
-            Self::Curvilinear => "curvilinear",
+            Self::TerrainFollowing => "dampm-terrain-following",
+            Self::Curvilinear => "dampm-curvilinear",
             Self::MpmDaC => "mpmdac",
             Self::SlidingBlock => "sliding-block",
-            Self::ThreeDDepthAveraged => "3d-depth-averaged",
+            Self::GlobalCartesian => "dampm-global-cartesian",
         })
     }
 }
@@ -1011,6 +1063,76 @@ impl Serialize for ParticlePlacement {
 }
 
 impl<'de> Deserialize<'de> for ParticlePlacement {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        String::deserialize(deserializer)?
+            .parse::<Self>()
+            .map_err(D::Error::custom)
+    }
+}
+
+/// DAMPM global model: when a particle on the bed detaches and flies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Detachment {
+    /// Particles always stay on the bed.
+    #[default]
+    None,
+    /// Detach where one free-flight step from the bed would end above the
+    /// DEM: the bed falls away faster than gravity pulls the particle down.
+    FreeFall,
+    /// Detach where the bed-normal load g n_z + n_z H(v, v) of the DEM
+    /// Hessian H turns negative, the load the grid update clamps at zero.
+    Curvature,
+}
+
+impl Detachment {
+    /// The [`SimFlags`] bits of this mode.
+    pub fn flags(self) -> u32 {
+        match self {
+            Self::None => 0,
+            Self::FreeFall => SimFlags::DETACHMENT_FREE_FALL,
+            Self::Curvature => SimFlags::DETACHMENT_CURVATURE,
+        }
+    }
+}
+
+impl FromStr for Detachment {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_lowercase().replace(['_', ' '], "-").as_str() {
+            "none" | "off" => Ok(Self::None),
+            "free-fall" | "freefall" => Ok(Self::FreeFall),
+            "curvature" => Ok(Self::Curvature),
+            _ => Err(format!(
+                "unknown detachment mode: {value} (expected none, free-fall or curvature)"
+            )),
+        }
+    }
+}
+
+impl fmt::Display for Detachment {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(match self {
+            Self::None => "none",
+            Self::FreeFall => "free-fall",
+            Self::Curvature => "curvature",
+        })
+    }
+}
+
+impl Serialize for Detachment {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for Detachment {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -1189,7 +1311,7 @@ pub struct Settings {
     /// the steps the fastest material needs to travel this many cells,
     /// round(travel / cfl) and at least 10 (default 65 cells, 72 steps at CFL 0.9).
     pub no_new_cells_travel: Option<f32>,
-    /// Curvilinear, terrain-following and 3D depth averaged: Gaussian width (m)
+    /// Curvilinear, terrain-following and DAMPM global: Gaussian width (m)
     /// of the smoothed reference surface.
     /// Bed inclined by beta against it counts as a gully wall whose normal
     /// load grows by 1 + K tan^2(beta) from the lateral pressure of the snow
@@ -1205,6 +1327,15 @@ pub struct Settings {
     /// difference of the nodal thickness. Thin front nodes are then pushed by
     /// the full pressure of the particles behind them (defaults to false).
     pub enable_weak_pressure: Option<bool>,
+    /// DAMPM global model: when a particle detaches from the bed
+    /// ([`Detachment`], defaults to none). A detached particle flies
+    /// ballistically and lands with the tangential velocity minus a Coulomb
+    /// impulse.
+    pub detachment: Option<Detachment>,
+    /// 3D lift-off: terminal velocity (m/s) of the air drag on flying
+    /// particles; 0 disables it (defaults to
+    /// [`DEFAULT_FLIGHT_TERMINAL_VELOCITY`]).
+    pub flight_terminal_velocity: Option<f32>,
     pub enable_entrainment: Option<bool>,
     pub enable_center_of_mass: Option<bool>,
     /// Accumulate the grid with integer (fixed point) atomics even on GPUs
@@ -1344,8 +1475,9 @@ mod tests {
             density: 200.0,
             ..SimSettings::new()
         };
-        // 2 x 30 m x 200 kg/m3 x 25 m2
-        assert!((settings.max_node_mass() - 3.0e5).abs() < 1.0);
+        // MAX_FLOW_THICKNESS x 200 kg/m3 x 25 m2
+        let column = MAX_FLOW_THICKNESS;
+        assert!((settings.max_node_mass() - column * 200.0 * 25.0).abs() < 1.0);
         for cell_size in [1.0, 5.0, 25.0] {
             settings.cell_size = cell_size;
             let max_mass = settings.max_node_mass() * settings.mass_factor();
@@ -1356,7 +1488,9 @@ mod tests {
             // a 1 m release, 64 particles per cell: units per particle do not
             // depend on the cell size
             let particle_mass = settings.density * cell_size * cell_size / 64.0;
-            assert!((particle_mass * settings.mass_factor() - 4.0e9 / (64.0 * 60.0)).abs() < 10.0);
+            assert!(
+                (particle_mass * settings.mass_factor() - 4.0e9 / (64.0 * column)).abs() < 10.0
+            );
         }
     }
 
@@ -1393,6 +1527,7 @@ mod tests {
             momentum_stop_fraction: None,
             no_new_cells_travel: None,
             reference_surface_length: Some(12.5),
+            flight_terminal_velocity: Some(35.0),
             cfl: Some(0.9),
             min_slope_angle: Some(10.0),
             max_slope_angle: Some(20.0),
@@ -1425,6 +1560,7 @@ mod tests {
             enable_earth_pressure_coefficient: Some(false),
             enable_entrainment: Some(false),
             enable_weak_pressure: Some(false),
+            detachment: Some(Detachment::None),
             enable_center_of_mass: Some(true),
             integer_atomics: Some(true),
             center_of_mass_biggest_blob: Some(false),
@@ -1728,7 +1864,7 @@ mod tests {
             SimModel::Curvilinear,
             SimModel::MpmDaC,
             SimModel::SlidingBlock,
-            SimModel::ThreeDDepthAveraged,
+            SimModel::GlobalCartesian,
         ];
 
         for model in models {
@@ -1747,7 +1883,7 @@ mod tests {
 
         assert_eq!(SimModel::from_int(3), Some(SimModel::SlidingBlock));
 
-        assert_eq!(SimModel::from_int(4), Some(SimModel::ThreeDDepthAveraged));
+        assert_eq!(SimModel::from_int(4), Some(SimModel::GlobalCartesian));
         assert_eq!(SimModel::from_int(5), None);
         assert_eq!(SimModel::from_int(u32::MAX), None);
     }
@@ -1755,10 +1891,11 @@ mod tests {
     #[test]
     fn sim_model_string_roundtrip() {
         let models = [
-            (SimModel::TerrainFollowing, "terrain-following"),
-            (SimModel::Curvilinear, "curvilinear"),
+            (SimModel::TerrainFollowing, "dampm-terrain-following"),
+            (SimModel::Curvilinear, "dampm-curvilinear"),
             (SimModel::MpmDaC, "mpmdac"),
             (SimModel::SlidingBlock, "sliding-block"),
+            (SimModel::GlobalCartesian, "dampm-global-cartesian"),
         ];
 
         for (model, string) in models {
@@ -1774,6 +1911,9 @@ mod tests {
         }
         for value in ["curvilinear", "curvi", "c", "CURVI"] {
             assert_eq!(SimModel::from_str(value), Ok(SimModel::Curvilinear));
+        }
+        for value in ["global", "GLOBAL", "3d-depth-averaged", "3d"] {
+            assert_eq!(SimModel::from_str(value), Ok(SimModel::GlobalCartesian));
         }
         for value in ["mpmdac", "MPM-DAC", "mpm_depth_averaged_curvilinear"] {
             assert_eq!(SimModel::from_str(value), Ok(SimModel::MpmDaC));
@@ -2029,6 +2169,25 @@ mod tests {
     fn release_fill_method_invalid_string() {
         assert!(ReleaseFillMethod::from_str("invalid").is_err());
         assert!(ReleaseFillMethod::from_str("").is_err());
+    }
+
+    #[test]
+    fn detachment_strings_and_flags() {
+        for mode in [
+            Detachment::None,
+            Detachment::FreeFall,
+            Detachment::Curvature,
+        ] {
+            assert_eq!(mode.to_string().parse::<Detachment>(), Ok(mode));
+            assert_eq!(
+                SimFlags::from_u32(mode.flags() | SimFlags::CURVATURE).detachment(),
+                mode
+            );
+        }
+        assert_eq!("freefall".parse::<Detachment>(), Ok(Detachment::FreeFall));
+        assert!("threshold".parse::<Detachment>().is_err());
+        let patch: Settings = serde_json::from_str(r#"{"detachment": "curvature"}"#).unwrap();
+        assert_eq!(patch.detachment, Some(Detachment::Curvature));
     }
 
     #[test]

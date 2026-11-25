@@ -18,7 +18,7 @@ pass consumed).
 
 Momentum components follow AvaFrame's Cartesian convention: the analytic
 along-slope velocity u is split into u_x = u cos(zeta), u_z = -u sin(zeta),
-the cross-slope velocity is u_y. The 3D depth-averaged model carries the
+the cross-slope velocity is u_y. The DAMPM global model carries the
 full Cartesian velocity (``grid_momentum`` + ``grid_momentum_z``), so its
 profiles show h*u_x, h*u_y AND h*u_z and its momentum error is the 3D vector
 norm (as AvaFrame's normL2Vect with fz). The in-plane models
@@ -74,9 +74,9 @@ def jacobian(dem, cell_size):
 # sim models whose velocity is the surface velocity rotated into the horizontal
 # plane: its components already measure surface distance, unlike the horizontal
 # dx/dt of the other models
-SURFACE_VELOCITY_MODELS = ("terrain-following", "terrain", "t")
+SURFACE_VELOCITY_MODELS = ("dampm-terrain-following", "terrain-following", "terrain", "t")
 # sim models carrying the full 3D Cartesian velocity (vertical momentum buffer)
-THREE_D_MODELS = ("3d-depth-averaged", "3d")
+THREE_D_MODELS = ("dampm-global-cartesian", "global", "3d-depth-averaged", "3d")
 
 
 def is_three_d(sim_model):

@@ -1,0 +1,15 @@
+{
+  "dem_path": "data/avaframe/avaDoubleBump.png",
+  "release_areas_path": "data/avaframe/avaDoubleBumpreleaseTexture.png",
+  "sim_model": "dampm-global-cartesian",
+  "friction_model": "coulomb",
+  "friction_coefficient": 0.4,
+  "enable_curvature": true,
+  "detachment": "curvature",
+  "flight_terminal_velocity": 0.0,
+  "enable_particle_interaction": true,
+  "released_particles_per_cell": 8,
+  "cfl": 0.5,
+  "max_steps": 6000,
+  "velocity_threshold": 0.1
+}

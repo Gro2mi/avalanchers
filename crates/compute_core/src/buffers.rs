@@ -34,6 +34,13 @@ pub struct AtomicValues {
     pub momentum_hi: u32,
     /// Largest total momentum so far in kg m/s.
     pub peak_momentum: f32,
+    /// Largest integer-atomic grid node mass (u32 units) and momentum
+    /// component (|i32| units) of the last step, read and reset by
+    /// reset_grid to adapt the ranges (quantization.wgsl).
+    pub max_mass_units: u32,
+    pub max_momentum_units: u32,
+    /// Keeps the size a multiple of 16 bytes, the buffer's size.
+    pub _pad: [u32; 2],
 }
 
 /// GPU layout mirror of the CenterOfMassResult struct in center_of_mass.wgsl
@@ -68,6 +75,15 @@ impl Default for CenterOfMassResult {
 pub struct ChamferParams {
     pub step: u32,
     pub _padding: [u32; 3],
+}
+
+/// GPU layout mirror of the PostProcessParams struct in post_process.wgsl
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable, Default)]
+pub struct PostProcessParams {
+    pub min_peak_flow_thickness: f32,
+    pub min_peak_velocity: f32,
+    pub _padding: [f32; 2],
 }
 
 /// GPU layout mirror of the RelaxParams struct in relax_particles.wgsl
@@ -109,13 +125,23 @@ pub struct EvaluationResult {
     /// included (those are left out of the counts above)
     pub roi_seeded: u32,
     pub sim_seeded: u32,
-    // beeline distance between the highest and lowest avalanche point
+    // runout of the avalanche (cells with peak flow thickness at or above
+    // the threshold), written by compute_beeline_distance.wgsl:
+    // 3D beeline distance between the highest and lowest avalanche point
     pub beeline_distance: f32,
     pub beeline_min_elevation: f32,
     pub beeline_max_elevation: f32,
     pub beeline_min_cell: u32,
     pub beeline_max_cell: u32,
-    pub _padding: u32,
+    /// maximum peak velocity over the avalanche cells
+    pub peak_velocity: f32,
+    pub horizontal_distance: f32,
+    pub vertical_drop: f32,
+    // the same runout for the region of interest
+    pub reference_beeline_distance: f32,
+    pub reference_horizontal_distance: f32,
+    pub reference_vertical_drop: f32,
+    pub _padding: [u32; 3],
 }
 
 #[derive(Eq, Hash, PartialEq, Clone)]
@@ -140,6 +166,11 @@ pub enum BufferName {
     /// z component of the grid momentum (terrain-following model), kept
     /// separate so GridMomentum stays interleaved (u, v)
     GridMomentumZ,
+    /// 3D model: nonzero for every cell that holds a depositing particle in
+    /// the current step. Only these nodes record the peak flow thickness and
+    /// velocity, so the B-spline spread of the edge particles does not add a
+    /// rim of untouched cells to the footprint. Zeroed by reset_grid.
+    GridOccupied,
     GridVelocity,
     /// z component of the grid velocity (terrain-following model)
     GridVelocityZ,
@@ -198,6 +229,9 @@ pub enum BufferName {
     ChamferNearestSim,
     ChamferNearestSimSnapshot,
 
+    /// thresholds of the post_process shader
+    PostProcessParams,
+
     // soft sphere relaxation of the freshly initialized particles
     RelaxParams,
     /// linked list heads over the simulation cells for the relaxation
@@ -241,6 +275,7 @@ impl BufferName {
             BufferName::CenterOfMassPartials => "center_of_mass_partials",
             BufferName::GridMomentum => "grid_momentum",
             BufferName::GridMomentumZ => "grid_momentum_z",
+            BufferName::GridOccupied => "grid_occupied",
             BufferName::GridVelocity => "grid_velocity",
             BufferName::GridVelocityZ => "grid_velocity_z",
             BufferName::GridPeakFlowThickness => "grid_peak_flow_thickness",
@@ -263,6 +298,7 @@ impl BufferName {
             BufferName::ChamferNearestRoiSnapshot => "chamfer_nearest_roi_snapshot",
             BufferName::ChamferNearestSim => "chamfer_nearest_sim",
             BufferName::ChamferNearestSimSnapshot => "chamfer_nearest_sim_snapshot",
+            BufferName::PostProcessParams => "post_process_params",
             BufferName::RelaxParams => "relax_params",
             BufferName::RelaxGridHead => "relax_grid_head",
             BufferName::ParticleNext => "particle_next",
@@ -308,6 +344,7 @@ impl std::str::FromStr for BufferName {
             "center_of_mass_partials" => Ok(BufferName::CenterOfMassPartials),
             "grid_momentum" => Ok(BufferName::GridMomentum),
             "grid_momentum_z" => Ok(BufferName::GridMomentumZ),
+            "grid_occupied" => Ok(BufferName::GridOccupied),
             "grid_velocity" => Ok(BufferName::GridVelocity),
             "grid_velocity_z" => Ok(BufferName::GridVelocityZ),
             "grid_peak_flow_thickness" => Ok(BufferName::GridPeakFlowThickness),
@@ -330,6 +367,7 @@ impl std::str::FromStr for BufferName {
             "chamfer_nearest_roi_snapshot" => Ok(BufferName::ChamferNearestRoiSnapshot),
             "chamfer_nearest_sim" => Ok(BufferName::ChamferNearestSim),
             "chamfer_nearest_sim_snapshot" => Ok(BufferName::ChamferNearestSimSnapshot),
+            "post_process_params" => Ok(BufferName::PostProcessParams),
             "relax_params" => Ok(BufferName::RelaxParams),
             "relax_grid_head" => Ok(BufferName::RelaxGridHead),
             "particle_next" => Ok(BufferName::ParticleNext),
@@ -949,10 +987,11 @@ pub fn create_buffers_and_texture_descriptions(
         DEBUG_BUFFER_SIZE,
         buffer_usage_output,
     );
-    gpu_resources.add_buffer(
+    // the integer-atomic grid scales start at 1, not 0
+    gpu_resources.add_buffer_with_data(
         device,
         BufferName::SimInfo,
-        size_of::<SimInfo>(),
+        &[SimInfo::default()],
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
     );
     gpu_resources.add_buffer(
@@ -1054,6 +1093,12 @@ pub fn create_buffers_and_texture_descriptions(
         grid_bytes_size,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
     );
+    gpu_resources.add_buffer(
+        device,
+        BufferName::GridOccupied,
+        grid_bytes_size,
+        BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+    );
     // per-cell force vector: written by grid_physics for the terrain-following
     // model, atomically accumulated by p2g_mpmdac for the MPMDAC model,
     // zeroed by reset_grid for every model
@@ -1125,6 +1170,7 @@ mod tests {
             (BufferName::GridMass, "grid_mass"),
             (BufferName::GridMomentum, "grid_momentum"),
             (BufferName::GridMomentumZ, "grid_momentum_z"),
+            (BufferName::GridOccupied, "grid_occupied"),
             (BufferName::GridVelocity, "grid_velocity"),
             (BufferName::GridVelocityZ, "grid_velocity_z"),
             (

@@ -13,9 +13,9 @@
 //! 3. **Simulate**: step the particle or MPM model
 //!    ([`Simulation::run_n_steps`], [`Simulation::run`]).
 //! 4. **Consume**: read results back through the cached `fetch_*` methods,
-//!    extract the avalanche mask ([`Simulation::post_process`]), evaluate it
-//!    against the outline ([`Simulation::evaluate`],
-//!    [`Simulation::evaluate_gpu`]) and persist everything to a Zarr store
+//!    mask the peak fields ([`Simulation::post_process`]), evaluate them
+//!    against the outline ([`Simulation::evaluate`]) and persist everything
+//!    to a Zarr store
 //!    ([`Simulation::save`] on native, `export_zarr_entries` in the browser).
 //!
 //! Each stage records its completion in a [`SimulationState`]; methods bail
@@ -30,7 +30,7 @@
 //! sim.create_default_with_release_areas("data/dem.png", "data/release.png")
 //!     .await?;
 //! sim.run().await?;                       // terrain + release + particles + physics
-//! sim.post_process().await?;              // avalanche mask from peak flow thickness
+//! sim.post_process(0.1, 0.0).await?;      // mask peak fields by thickness/velocity
 //! let evaluation = sim.evaluate().await?;  // metrics against the outline
 //! sim.save().await?;                      // write Zarr results
 //! ```
@@ -41,7 +41,6 @@ use compute_core::{
     buffers::{AtomicValues, BufferName, CenterOfMassResult, TextureName},
     dem::{Bounds, Dem, StableHasher},
     evaluation::MassMovementEvaluation,
-    post_processing::*,
     settings::{
         CrownLineMethod, ParticlePlacement, ReleaseFillMethod, Settings, SimModel, SimSettings,
     },
@@ -89,8 +88,7 @@ pub enum SimulationState {
     Running,
     /// Physics finished: `max_steps` reached or the GPU signalled `SIM_STOPPED`.
     Finished,
-    /// Peak grids thresholded and the avalanche mask extracted
-    /// ([`Simulation::post_process`]).
+    /// Peak grids thresholded ([`Simulation::post_process`]).
     PostProcessed,
     /// Evaluation metrics computed against the region of interest
     /// ([`Simulation::evaluate`]).
@@ -276,8 +274,6 @@ pub struct Simulation {
     /// CPU-side memoization of GPU readbacks, invalidated automatically as
     /// the simulation advances.
     pub gpu_cache: GpuCache,
-    /// Avalanche deposit mask extracted by [`Simulation::post_process`].
-    pub ava_mask: Vec<bool>,
     /// Settings of the particles kept by [`Simulation::store_initial_state`].
     initial_state: Option<InitialState>,
     #[cfg(not(target_arch = "wasm32"))]
@@ -442,7 +438,6 @@ impl Simulation {
             crown_line: Vec::new(),
             crown_candidates: Vec::new(),
             potential_release_areas: Vec::new(),
-            ava_mask: Vec::new(),
             initial_state: None,
             #[cfg(not(target_arch = "wasm32"))]
             output: None,
@@ -1185,7 +1180,6 @@ impl Simulation {
         self.gpu_cache.reset_simulation_result();
         self.gpu_cache.release_areas = None;
         self.sim_info = SimInfo::default();
-        self.ava_mask = Vec::new();
         self.state = SimulationState::ParticlesInitialized;
         Ok(())
     }
@@ -1215,7 +1209,7 @@ impl Simulation {
             match self.settings.sim_model {
                 model
                     if model == SimModel::TerrainFollowing.as_int()
-                        || model == SimModel::ThreeDDepthAveraged.as_int()
+                        || model == SimModel::GlobalCartesian.as_int()
                         || model == SimModel::SlidingBlock.as_int() =>
                 {
                     self.orchestrator
@@ -1268,7 +1262,7 @@ impl Simulation {
             model if model == SimModel::TerrainFollowing.as_int() => {
                 self.orchestrator.step_terrain_following(steps).await?
             }
-            model if model == SimModel::ThreeDDepthAveraged.as_int() => {
+            model if model == SimModel::GlobalCartesian.as_int() => {
                 self.orchestrator.step_3d(steps).await?
             }
             model if model == SimModel::Curvilinear.as_int() => {
@@ -1339,81 +1333,30 @@ impl Simulation {
         Ok(())
     }
 
-    /// Extracts the avalanche mask from the results: the peak flow thickness
-    /// is thresholded (`peak_flow_thickness_threshold` setting) and reduced to
-    /// its biggest connected blob, becoming [`Self::ava_mask`]; peak velocity
-    /// is masked to the same region. Requires
-    /// [`SimulationState::Finished`].
-    pub async fn post_process(&mut self) -> Result<()> {
+    /// Masks the peak result fields on the GPU: every cell whose peak flow
+    /// thickness is below `min_peak_flow_thickness` (m) or whose peak velocity
+    /// is below `min_peak_velocity` (m/s) is set to zero in both fields.
+    /// Requires [`SimulationState::Finished`].
+    ///
+    /// The GPU buffers are overwritten, so a second call can only remove
+    /// more cells.
+    pub async fn post_process(
+        &mut self,
+        min_peak_flow_thickness: f32,
+        min_peak_velocity: f32,
+    ) -> Result<()> {
         if self.state < SimulationState::Finished {
             bail!("Simulation must be finished before post-processing results");
         }
-        let threshold = self.settings.peak_flow_thickness_threshold;
-        let dem_width = self.dem.width;
-        let (peak_flow_thickness, ava_mask) = mask_threshold_and_biggest_blob(
-            self.fetch_peak_flow_thickness().await?,
-            dem_width,
-            threshold,
-        );
-        self.ava_mask = ava_mask;
-        self.gpu_cache.peak_flow_thickness = Some(peak_flow_thickness);
-        self.fetch_peak_velocity().await?;
-        mask_in_place(
-            self.gpu_cache.peak_velocity.as_mut().unwrap(),
-            &self.ava_mask,
-        );
+        self.orchestrator
+            .run_post_process(&self.settings, min_peak_flow_thickness, min_peak_velocity)
+            .await?;
+        self.gpu_cache.peak_flow_thickness = None;
+        self.gpu_cache.peak_velocity = None;
         self.state = SimulationState::PostProcessed;
         Ok(())
     }
 
-    /// Compares the simulated avalanche against the region of interest and
-    /// moves the state to [`SimulationState::Evaluated`]. Requires
-    /// [`SimulationState::PostProcessed`].
-    ///
-    /// Returns the CPU-derived overlap, runout, and peak velocity metrics.
-    /// GPU-derived chamfer metrics can be added with [`Self::evaluate_gpu`].
-    /// Release cells are left out of the overlap, as in the GPU evaluation.
-    pub async fn evaluate(&mut self) -> Result<MassMovementEvaluation> {
-        if self.state < SimulationState::PostProcessed {
-            bail!("Simulation must be post-processed before evaluation");
-        }
-        let release_areas = self.fetch_release_areas().await?.to_vec();
-        let outside_release = |mask: &[bool]| -> Vec<bool> {
-            mask.iter()
-                .zip(&release_areas)
-                .map(|(&set, &thickness)| {
-                    set && thickness <= compute_core::RELEASE_THICKNESS_THRESHOLD
-                })
-                .collect()
-        };
-        let overlap = compute_core::evaluation::evaluate_mass_movement_area(
-            &outside_release(&self.roi),
-            &outside_release(&self.ava_mask),
-        )
-        .map_err(|e| anyhow::anyhow!("Mass movement area evaluation failed: {e:?}"))?;
-        let (horizontal_distance, vertical_drop) = self
-            .dem
-            .get_elevation_extrema_distance_and_drop(&self.ava_mask)
-            .unwrap_or((0.0, 0.0));
-        let (horizontal_distance_ref, vertical_drop_ref) = self
-            .dem
-            .get_elevation_extrema_distance_and_drop(&self.roi)
-            .unwrap_or((0.0, 0.0));
-        let velocities = self.fetch_peak_velocity().await?;
-        let peak_velocity = velocities.iter().copied().reduce(f32::max).unwrap_or(0.0);
-        self.state = SimulationState::Evaluated;
-        Ok(overlap.with_runout(
-            horizontal_distance as f64,
-            vertical_drop as f64,
-            horizontal_distance_ref as f64,
-            vertical_drop_ref as f64,
-            peak_velocity as f64,
-        ))
-    }
-
-    /// Runs the GPU evaluation metrics: overlap components, diagonal-normalized
-    /// chamfer distance, and the 3D beeline distance between the highest and
-    /// lowest avalanche point.
     /// Packs the per-cell ROI mask into u32 words (least significant bit =
     /// first cell), the layout the evaluation shaders expect.
     fn pack_roi_mask(roi: &[bool]) -> Vec<u32> {
@@ -1427,11 +1370,24 @@ impl Simulation {
             .collect()
     }
 
-    pub async fn evaluate_gpu(&mut self) -> Result<MassMovementEvaluation> {
-        if !self.roi_uploaded {
-            bail!("Region of interest must be uploaded before GPU evaluation");
+    /// Evaluates the simulated avalanche against the region of interest on
+    /// the GPU: overlap components, the chamfer distance (m) and the 3D
+    /// beeline distance between the highest and lowest avalanche point. A
+    /// cell counts as simulated when its peak flow thickness is at least the
+    /// `peak_flow_thickness_threshold` setting; release cells are left out of
+    /// the overlap and the chamfer means. Requires
+    /// [`SimulationState::PostProcessed`] and an uploaded region of interest;
+    /// moves the state to [`SimulationState::Evaluated`].
+    pub async fn evaluate(&mut self) -> Result<MassMovementEvaluation> {
+        if self.state < SimulationState::PostProcessed {
+            bail!("Simulation must be post-processed before evaluation");
         }
-        self.orchestrator.evaluate_gpu(&self.settings).await
+        if !self.roi_uploaded {
+            bail!("Region of interest must be uploaded before evaluation");
+        }
+        let evaluation = self.orchestrator.evaluate(&self.settings).await?;
+        self.state = SimulationState::Evaluated;
+        Ok(evaluation)
     }
 
     /// Native only: writes the results to the Zarr store at `path`, switching
@@ -2442,7 +2398,7 @@ impl Simulation {
         if self.settings.sim_model == SimModel::TerrainFollowing.as_int() {
             bail!(
                 "The terrain-following model has no vertical velocity: particle velocities \
-                 are 2D vectors in the surface plane, use the 3d-depth-averaged model for a z component"
+                 are 2D vectors in the surface plane, use the DAMPM global model for a z component"
             );
         }
         if self.gpu_cache.particles_velocity_z.is_none() {
@@ -2486,12 +2442,17 @@ impl Simulation {
         }
         if self.gpu_cache.grid_mass.is_none() {
             self.gpu_cache.read_count += 1;
-            let mass_factor = self.settings.mass_factor();
             let mass = if self.orchestrator.has_float32_atomic() {
                 self.orchestrator
                     .read_buffer::<f32>(BufferName::GridMass)
                     .await?
             } else {
+                // the adaptive range the grid was quantized with
+                let mass_factor = self
+                    .orchestrator
+                    .get_sim_info()
+                    .await?
+                    .mass_factor(&self.settings);
                 self.orchestrator
                     .read_buffer::<u32>(BufferName::GridMass)
                     .await?
@@ -2511,12 +2472,17 @@ impl Simulation {
         }
         if self.gpu_cache.grid_momentum.is_none() {
             self.gpu_cache.read_count += 1;
-            let momentum_factor = self.settings.momentum_factor();
             let momentum = if self.orchestrator.has_float32_atomic() {
                 self.orchestrator
                     .read_buffer::<f32>(BufferName::GridMomentum)
                     .await?
             } else {
+                // the adaptive range the grid was quantized with
+                let momentum_factor = self
+                    .orchestrator
+                    .get_sim_info()
+                    .await?
+                    .momentum_factor(&self.settings);
                 self.orchestrator
                     .read_buffer::<i32>(BufferName::GridMomentum)
                     .await?
@@ -2529,7 +2495,7 @@ impl Simulation {
         Ok(self.gpu_cache.grid_momentum.as_ref().unwrap())
     }
 
-    /// Per-cell deposited vertical momentum in kg m/s of the 3D depth-averaged
+    /// Per-cell deposited vertical momentum in kg m/s of the DAMPM global
     /// model; zero for every other model (reset_grid clears it each step).
     pub async fn fetch_grid_momentum_z(&mut self) -> Result<&Vec<f32>> {
         if self.state < SimulationState::ParticlesInitialized {
@@ -2537,12 +2503,17 @@ impl Simulation {
         }
         if self.gpu_cache.grid_momentum_z.is_none() {
             self.gpu_cache.read_count += 1;
-            let momentum_factor = self.settings.momentum_factor();
             let momentum = if self.orchestrator.has_float32_atomic() {
                 self.orchestrator
                     .read_buffer::<f32>(BufferName::GridMomentumZ)
                     .await?
             } else {
+                // the adaptive range the grid was quantized with
+                let momentum_factor = self
+                    .orchestrator
+                    .get_sim_info()
+                    .await?
+                    .momentum_factor(&self.settings);
                 self.orchestrator
                     .read_buffer::<i32>(BufferName::GridMomentumZ)
                     .await?
@@ -2889,6 +2860,7 @@ fn trajectory_summary_cpu(
 mod tests {
     use super::*;
     use compute_core::buffers::AtomicValues;
+    use compute_core::settings::Detachment;
     use pollster::block_on;
     use std::collections::HashSet;
     use std::hash::Hash;
@@ -3457,7 +3429,7 @@ fn test_trajectory() {
     fn test_lifecycle_preconditions_return_errors() {
         let mut sim = block_on(Simulation::new()).expect("Failed to create Simulation");
 
-        assert!(block_on(sim.post_process()).is_err());
+        assert!(block_on(sim.post_process(0.0, 0.0)).is_err());
         assert!(block_on(sim.evaluate()).is_err());
         assert!(block_on(sim.compute_particles()).is_err());
         assert!(block_on(sim.fetch_peak_velocity()).is_err());
@@ -4213,19 +4185,20 @@ fn test_trajectory() {
     }
 
     #[test_log::test]
-    fn test_evaluate_gpu_chamfer_with_roi() {
+    fn test_evaluate_chamfer_with_roi() {
         // Regression test: the evaluation shaders read the region of interest
         // from the GPU buffer, which must be uploaded from the CPU-side mask
         // before evaluating. Without the upload every ROI read is zero and
         // the chamfer distance is infinite.
         let mut sim = setup_simple_sim(40.0, 3.0);
         block_on(sim.run()).expect("Failed to run simulation");
+        block_on(sim.post_process(0.0, 0.0)).expect("Failed to post-process");
         let simulated_cells = [14usize, 15, 20, 21];
         let mut peak_flow_thickness = vec![0.0f32; sim.dem.width * sim.dem.height];
-        sim.ava_mask = vec![false; peak_flow_thickness.len()];
+        let mut simulated_mask = vec![false; peak_flow_thickness.len()];
         for &cell in &simulated_cells {
             peak_flow_thickness[cell] = 1.0;
-            sim.ava_mask[cell] = true;
+            simulated_mask[cell] = true;
         }
         block_on(
             sim.orchestrator
@@ -4234,10 +4207,9 @@ fn test_trajectory() {
         .expect("Failed to seed simulated peak flow thickness");
 
         // ROI identical to the simulated mask: every nearest distance is 0
-        sim.set_roi(&sim.ava_mask.clone())
-            .expect("Failed to set roi");
+        sim.set_roi(&simulated_mask).expect("Failed to set roi");
         block_on(sim.upload_roi()).expect("Failed to upload roi");
-        let evaluation = block_on(sim.evaluate_gpu()).expect("GPU evaluation failed");
+        let evaluation = block_on(sim.evaluate()).expect("GPU evaluation failed");
         assert!(
             (evaluation.chamfer - 0.0).abs() < 1e-9,
             "chamfer was {}",
@@ -4252,12 +4224,12 @@ fn test_trajectory() {
         // ROI narrowed to the two release cells only: the simulated cells
         // that ran downslope are no longer covered, so the chamfer distance
         // is positive but finite
-        let mut release_only = vec![false; sim.ava_mask.len()];
+        let mut release_only = vec![false; simulated_mask.len()];
         release_only[14] = true;
         release_only[15] = true;
         sim.set_roi(&release_only).expect("Failed to set roi");
         block_on(sim.upload_roi()).expect("Failed to upload roi");
-        let shifted_evaluation = block_on(sim.evaluate_gpu()).expect("GPU evaluation failed");
+        let shifted_evaluation = block_on(sim.evaluate()).expect("GPU evaluation failed");
         assert!(
             shifted_evaluation.chamfer.is_finite() && shifted_evaluation.chamfer > 0.0,
             "chamfer was {}",
@@ -5174,7 +5146,7 @@ fn test_trajectory() {
         for model in [
             SimModel::Curvilinear,
             SimModel::TerrainFollowing,
-            SimModel::ThreeDDepthAveraged,
+            SimModel::GlobalCartesian,
         ] {
             check_sorted_p2g_matches_direct_p2g(model);
         }
@@ -5298,7 +5270,7 @@ fn test_trajectory() {
             [
                 SimModel::Curvilinear,
                 SimModel::TerrainFollowing,
-                SimModel::ThreeDDepthAveraged,
+                SimModel::GlobalCartesian,
             ]
             .map(|model| (release, model))
         }) {
@@ -5515,7 +5487,7 @@ fn test_trajectory() {
                 .expect("Failed to set release");
             block_on(sim.run_n_steps(1)).expect("Failed to run");
             // float atomics hold kg directly; otherwise dequantize with
-            // SimSettings::mass_factor and PRESSURE_FACTOR = 1e3 (utils.wgsl)
+            // SimInfo::mass_factor and PRESSURE_FACTOR = 1e3 (force_quantization.wgsl)
             let (mass, sums): (Vec<f32>, Vec<f32>) = if sim.orchestrator.has_float32_atomic() {
                 (
                     block_on(sim.orchestrator.read_buffer(BufferName::GridMass))
@@ -5528,10 +5500,11 @@ fn test_trajectory() {
                     .expect("Failed to read grid mass");
                 let sums: Vec<i32> = block_on(sim.orchestrator.read_buffer(BufferName::GridForces))
                     .expect("Failed to read weak pressure sums");
+                let mass_factor = block_on(sim.orchestrator.get_sim_info())
+                    .expect("Failed to read sim info")
+                    .mass_factor(&sim.settings);
                 (
-                    mass.iter()
-                        .map(|mass| *mass as f32 / sim.settings.mass_factor())
-                        .collect(),
+                    mass.iter().map(|mass| *mass as f32 / mass_factor).collect(),
                     sums.iter().map(|sum| *sum as f32 * 1e-3).collect(),
                 )
             };
@@ -5589,7 +5562,7 @@ fn test_trajectory() {
         for model in [
             SimModel::Curvilinear,
             SimModel::TerrainFollowing,
-            SimModel::ThreeDDepthAveraged,
+            SimModel::GlobalCartesian,
         ] {
             check_momentum_stop_fraction(model);
         }
@@ -5991,7 +5964,7 @@ fn test_trajectory() {
     #[test_log::test]
     fn test_nodes_outside_the_flow_keep_zero_velocity() {
         const N: usize = 40;
-        for model in [SimModel::TerrainFollowing, SimModel::ThreeDDepthAveraged] {
+        for model in [SimModel::TerrainFollowing, SimModel::GlobalCartesian] {
             let mut sim = setup_restore_sim(model);
             block_on(sim.prepare()).expect("Failed to prepare");
             block_on(sim.run_n_steps(10)).expect("Failed to run");
@@ -6018,7 +5991,7 @@ fn test_trajectory() {
     fn test_3d_velocity_is_tangent_to_bed() {
         let slope_angle: f32 = 40.0;
         let mut sim = setup_simple_sim(slope_angle, 3.0);
-        sim.settings.sim_model = SimModel::ThreeDDepthAveraged.as_int();
+        sim.settings.sim_model = SimModel::GlobalCartesian.as_int();
         sim.set_dem(&create_slope(16, 16, 3.0, slope_angle), 16, 16, 3.0)
             .expect("Failed to set interior test DEM");
         let mut release = vec![0.0; 16 * 16];
@@ -6157,7 +6130,7 @@ fn test_trajectory() {
         for model in [
             SimModel::Curvilinear,
             SimModel::TerrainFollowing,
-            SimModel::ThreeDDepthAveraged,
+            SimModel::GlobalCartesian,
         ] {
             let Some(loss) = light_flow_margin_loss(model, false) else {
                 info!("{model}: no float atomics, the integer grid quantizes light deposits");
@@ -6171,7 +6144,7 @@ fn test_trajectory() {
     }
 
     /// The integer-atomic grid quantizes masses and momenta with factors that
-    /// fill its range for 30 m of flow at 100 m/s (x2): the light margin
+    /// adapt their ranges to the fullest node (quantization.wgsl): the light margin
     /// particles keep their velocity up to the rounding of their smallest
     /// momentum deposits. Runs on every GPU (integer_atomics).
     #[test_log::test]
@@ -6179,7 +6152,7 @@ fn test_trajectory() {
         for model in [
             SimModel::Curvilinear,
             SimModel::TerrainFollowing,
-            SimModel::ThreeDDepthAveraged,
+            SimModel::GlobalCartesian,
         ] {
             let loss = light_flow_margin_loss(model, true).expect("integer grid always runs");
             info!("{model}: integer grid margin change {loss:.2e} of the speed");
@@ -6191,10 +6164,11 @@ fn test_trajectory() {
     }
 
     /// Largest relative speed change of a light margin particle in five steps
-    /// on the integer grid (measured 3.0 % with 5 m cells): the outer stencil
-    /// deposits of a 1.6 kg particle at 1.6 m/s are about 2.6 momentum units,
-    /// whose rounding the margin nodes average over few particles.
-    const INTEGER_MARGIN_LOSS: f32 = 0.05;
+    /// on the integer grid (measured 5e-6 with the adaptive ranges, 2 % with a
+    /// fixed 50 m range): the outer stencil deposits of a 1.6 kg particle at
+    /// 1.6 m/s are rounded to momentum units, which the margin nodes average
+    /// over few particles.
+    const INTEGER_MARGIN_LOSS: f32 = 1e-3;
 
     /// Worst relative velocity change of a forceless uniform flow (0.02 m, 64
     /// particles per cell, 1.6 kg particles) after five steps, on the integer
@@ -6241,7 +6215,7 @@ fn test_trajectory() {
                 .write_buffer(BufferName::ParticlesAffineMatrix, &vec![[0.0f32; 4]; count]),
         )
         .expect("Failed to seed affine matrices");
-        if model == SimModel::ThreeDDepthAveraged {
+        if model == SimModel::GlobalCartesian {
             block_on(
                 sim.orchestrator
                     .write_buffer(BufferName::ParticlesVelocityZ, &vec![0.0f32; count]),
@@ -6264,6 +6238,87 @@ fn test_trajectory() {
             .map(|v| (v[0] - VELOCITY[0]).hypot(v[1] - VELOCITY[1]))
             .fold(0.0f32, f32::max);
         Some(worst / speed)
+    }
+
+    /// The integer-atomic grid ranges follow the fullest node
+    /// (quantization.wgsl): a 0.5 m flow started on a range 16 times too
+    /// coarse halves it, one started 4 times too fine doubles it, and both
+    /// settle where the fullest node fills an eighth to a half of the range.
+    /// The decoded grid mass stays the particle mass throughout.
+    #[test_log::test]
+    fn test_integer_grid_ranges_adapt_to_the_flow() {
+        for start_scale in [1.0f32, 1.0 / 64.0] {
+            let (sim_info, fill, mass_error) = adapted_integer_grid(start_scale);
+            info!(
+                "start scale {start_scale}: mass scale {} momentum scale {} fill {fill:.3} mass error {mass_error:.2e}",
+                sim_info.mass_scale, sim_info.momentum_scale
+            );
+            // halved from 1 or doubled from 1/64 (0.5 m of a 50 m column)
+            if start_scale == 1.0 {
+                assert!(sim_info.mass_scale <= 1.0 / 8.0, "{}", sim_info.mass_scale);
+            } else {
+                assert!(sim_info.mass_scale >= 1.0 / 32.0, "{}", sim_info.mass_scale);
+            }
+            assert!(
+                (0.125..0.5).contains(&fill),
+                "start scale {start_scale}: the fullest node fills {fill} of the range"
+            );
+            assert!(sim_info.momentum_scale >= sim_info.mass_scale / 8.0);
+            assert!(
+                !sim_info
+                    .parsed_flags()
+                    .contains(SimInfoFlags::QUANTIZATION_OVERFLOW)
+            );
+            assert!(mass_error < 1e-3, "grid mass off by {mass_error}");
+        }
+    }
+
+    /// SimInfo, fill of the fullest node and relative grid mass error after
+    /// ten 3D steps of a 0.5 m flat release whose mass range starts at
+    /// `start_scale` reference nodes.
+    fn adapted_integer_grid(start_scale: f32) -> (SimInfo, f32, f32) {
+        const N: usize = 24;
+        const CELL_SIZE: f32 = 5.0;
+        let mut sim = setup_simple_sim(0.0, CELL_SIZE);
+        sim.update_settings(&Settings {
+            integer_atomics: Some(true),
+            ..Default::default()
+        })
+        .expect("Failed to select the integer grid");
+        sim.settings.sim_model = SimModel::GlobalCartesian.as_int();
+        sim.set_dem(&create_slope(N, N, CELL_SIZE, 0.0), N, N, CELL_SIZE)
+            .expect("Failed to set flat DEM");
+        let mut release = vec![0.0; N * N];
+        for y in 8..16 {
+            for x in 8..16 {
+                release[y * N + x] = 0.5;
+            }
+        }
+        sim.set_release_areas(&release)
+            .expect("Failed to set release");
+        block_on(sim.run_n_steps(0)).expect("Failed to prepare");
+        let mut sim_info = block_on(sim.orchestrator.get_sim_info()).expect("Failed to read");
+        // seeded to fill an eighth to a quarter: 0.5 m of a 50 m column x 16
+        assert_eq!(sim_info.mass_scale, 1.0 / 16.0);
+        sim_info.mass_scale = start_scale;
+        sim_info.previous_mass_scale = start_scale;
+        sim_info.momentum_scale = start_scale;
+        block_on(
+            sim.orchestrator
+                .write_buffer(BufferName::SimInfo, &[sim_info]),
+        )
+        .expect("Failed to write sim info");
+        let sim_info = block_on(sim.run_n_steps(10)).expect("Failed to run");
+        let particle_mass: f32 = block_on(sim.fetch_particles_mass())
+            .expect("Failed to read particle masses")
+            .iter()
+            .sum();
+        let max_node_mass = sim_info.mass_scale * sim.settings.max_node_mass();
+        let grid_mass = block_on(sim.fetch_grid_mass()).expect("Failed to read grid mass");
+        let fullest = grid_mass.iter().copied().fold(0.0f32, f32::max);
+        let fill = fullest / max_node_mass;
+        let mass_error = (grid_mass.iter().sum::<f32>() - particle_mass).abs() / particle_mass;
+        (sim_info, fill, mass_error)
     }
 
     /// Simulation on a 64x64 slope with a release block on its upper part.
@@ -6291,6 +6346,170 @@ fn test_trajectory() {
         sim.set_release_areas(&release)
             .expect("Failed to set release areas");
         sim
+    }
+
+    const CLIFF_WIDTH: usize = 48;
+    const CLIFF_HEIGHT: usize = 16;
+    const CLIFF_CELL_SIZE: f32 = 5.0;
+
+    /// Bed elevation of the cliff DEM at x: flat run-out below x = 52.5 m, a
+    /// 70 degree cliff up to 72.5 m, then a 35 degree slope rising along +x.
+    /// The kinks sit on cell centres, so the bilinear DEM reproduces it.
+    fn cliff_profile(x: f32) -> f32 {
+        let (cliff_foot, cliff_top) = (52.5, 72.5);
+        let cliff = (x.clamp(cliff_foot, cliff_top) - cliff_foot) * 70f32.to_radians().tan();
+        let slope = (x.max(cliff_top) - cliff_top) * 35f32.to_radians().tan();
+        100.0 + cliff + slope
+    }
+
+    /// DAMPM global flow down a 35 degree slope that breaks into a cliff.
+    fn setup_cliff_sim(curvature: bool, detachment: Detachment) -> Simulation {
+        let mut sim: Simulation = block_on(Simulation::new()).expect("Failed to create Simulation");
+        block_on(sim.create(Settings {
+            sim_model: Some(SimModel::GlobalCartesian),
+            enable_curvature: Some(curvature),
+            detachment: Some(detachment),
+            max_steps: Some(3000),
+            ..Default::default()
+        }))
+        .expect("Failed to create simulation");
+        let dem: Vec<f32> = (0..CLIFF_WIDTH * CLIFF_HEIGHT)
+            .map(|idx| cliff_profile(((idx % CLIFF_WIDTH) as f32 + 0.5) * CLIFF_CELL_SIZE))
+            .collect();
+        sim.set_dem(&dem, CLIFF_WIDTH, CLIFF_HEIGHT, CLIFF_CELL_SIZE)
+            .expect("Failed to set cliff DEM");
+        let release: Vec<f32> = (0..CLIFF_WIDTH * CLIFF_HEIGHT)
+            .map(|idx| {
+                let (x, y) = (idx % CLIFF_WIDTH, idx / CLIFF_WIDTH);
+                if (32..38).contains(&x) && (5..11).contains(&y) {
+                    1.0
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        sim.set_release_areas(&release)
+            .expect("Failed to set release areas");
+        block_on(sim.prepare()).expect("Failed to prepare cliff simulation");
+        sim
+    }
+
+    /// Runs the cliff flow to the end; returns the most particles in flight at
+    /// once and the highest flight above the bed (m).
+    fn run_cliff_sim(sim: &mut Simulation) -> (usize, f32) {
+        let (mut most_flying, mut highest_flight) = (0, 0.0f32);
+        while sim.state != SimulationState::Finished {
+            block_on(sim.run_n_steps(5)).expect("Failed to advance cliff simulation");
+            let states = block_on(sim.fetch_particles_state())
+                .expect("Failed to read states")
+                .clone();
+            let positions = block_on(sim.fetch_particles_position())
+                .expect("Failed to read positions")
+                .clone();
+            let elevations = block_on(sim.fetch_particles_elevation())
+                .expect("Failed to read elevations")
+                .clone();
+            let mut flying = 0;
+            for ((state, position), elevation) in states.iter().zip(&positions).zip(&elevations) {
+                if state.flying {
+                    flying += 1;
+                    highest_flight = highest_flight.max(elevation - cliff_profile(position[0]));
+                }
+            }
+            most_flying = most_flying.max(flying);
+        }
+        (most_flying, highest_flight)
+    }
+
+    #[test_log::test]
+    fn test_3d_flow_detaches_at_a_cliff_and_lands() {
+        for detachment in [Detachment::FreeFall, Detachment::Curvature] {
+            assert_cliff_jump(detachment);
+        }
+    }
+
+    fn assert_cliff_jump(detachment: Detachment) {
+        let mut sim = setup_cliff_sim(true, detachment);
+        let (most_flying, highest_flight) = run_cliff_sim(&mut sim);
+        info!(
+            "cliff ({detachment}): up to {most_flying} particles in flight, highest {highest_flight:.2} m above the bed"
+        );
+        assert!(most_flying > 0, "no particle detached at the cliff edge");
+        assert!(
+            highest_flight > 0.5,
+            "flying particles must leave the bed, highest {highest_flight} m"
+        );
+
+        let states = block_on(sim.fetch_particles_state())
+            .expect("Failed to read states")
+            .clone();
+        let positions = block_on(sim.fetch_particles_position())
+            .expect("Failed to read positions")
+            .clone();
+        let still_flying = states.iter().filter(|state| state.flying).count();
+        assert_eq!(still_flying, 0, "particles must have landed by the end");
+        let below_cliff = positions.iter().filter(|p| p[0] < 52.5).count();
+        assert!(
+            below_cliff > positions.len() / 2,
+            "the deposit must lie below the cliff, {below_cliff} of {}",
+            positions.len()
+        );
+    }
+
+    /// Lift-off is decided on the DEM, not on the curvature load of the grid
+    /// update: the flow still jumps the cliff with the curvature term off.
+    #[test_log::test]
+    fn test_3d_flow_detaches_without_curvature() {
+        let mut sim = setup_cliff_sim(false, Detachment::Curvature);
+        let (most_flying, _) = run_cliff_sim(&mut sim);
+        assert!(most_flying > 0, "no particle detached at the cliff edge");
+        let mut sim = setup_cliff_sim(false, Detachment::FreeFall);
+        let (most_flying, _) = run_cliff_sim(&mut sim);
+        assert!(most_flying > 0, "no particle detached at the cliff edge");
+    }
+
+    /// On a plane a free-flight step always ends g dt^2 / 2 below the bed and
+    /// the bed-normal load is g n_z > 0, so no particle may detach, however
+    /// fast the flow.
+    #[test_log::test]
+    fn test_3d_flow_on_a_plane_never_flies() {
+        for detachment in [Detachment::FreeFall, Detachment::Curvature] {
+            assert_no_flight_on_a_plane(detachment);
+        }
+    }
+
+    fn assert_no_flight_on_a_plane(detachment: Detachment) {
+        let mut sim = setup_slope_sim(Settings {
+            sim_model: Some(SimModel::GlobalCartesian),
+            friction_model: Some(compute_core::settings::FrictionModel::Coulomb),
+            friction_coefficient: Some(0.1),
+            enable_curvature: Some(true),
+            detachment: Some(detachment),
+            max_steps: Some(400),
+            ..Default::default()
+        });
+        block_on(sim.prepare()).expect("Failed to prepare slope simulation");
+        while sim.state != SimulationState::Finished {
+            block_on(sim.run_n_steps(10)).expect("Failed to advance slope simulation");
+            let flying = block_on(sim.fetch_particles_state())
+                .expect("Failed to read states")
+                .iter()
+                .filter(|state| state.flying)
+                .count();
+            assert_eq!(flying, 0, "particles detached from a plane ({detachment})");
+        }
+    }
+
+    /// Lift-off is off by default: with the curvature load alone the flow
+    /// stays on the bed.
+    #[test_log::test]
+    fn test_3d_flow_without_detachment_never_flies() {
+        let mut sim = setup_cliff_sim(true, Detachment::None);
+        let (most_flying, _) = run_cliff_sim(&mut sim);
+        assert_eq!(
+            most_flying, 0,
+            "with detachment none no particle may detach"
+        );
     }
 
     #[test_log::test]

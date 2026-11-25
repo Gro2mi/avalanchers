@@ -16,8 +16,9 @@ import run_energy_line_test as energy_line
 
 SETTINGS = dict(energy_line.SETTINGS, enable_curvature=True)
 # models whose curvature load is compared against the analytical solution
-ANALYTIC_MODELS = ("curvilinear", "curvi", "c", "terrain-following", "terrain", "t",
-                   "3d-depth-averaged", "3d")
+ANALYTIC_MODELS = ("dampm-curvilinear", "curvilinear", "curvi", "c",
+                   "dampm-terrain-following", "terrain-following", "terrain", "t",
+                   "dampm-global-cartesian", "global", "3d-depth-averaged", "3d")
 OUTPUT_DIR = energy_line.REPO_ROOT / "verification" / "outputs" / "curvature_test"
 
 

@@ -40,7 +40,7 @@ BASE_RELEASE = REPO_ROOT / "data" / "avaframe" / "avaTripleBowlreleaseTexture.pn
 
 # grid alignment angles in degrees (clockwise in map coordinates); the FIRST angle is
 # the reference all rotations are compared against
-ROTATIONS = [0.0, 30.0, 60.0]
+ROTATIONS = [0.0, 120.0, 225.0]  # as in AvaFrame's rotation test
 
 # ---------------------------------------------------------------------------
 # Simulation settings - edit here or override on the command line.
@@ -253,7 +253,7 @@ def main():
         }
         profiles[angle] = profile
         results.append({"angle": angle, "simName": "rot%g" % angle,
-                        **result, "dice": None})
+                        **result, "iou": None})
         if angle == rotations[0]:
             ref_path = (profile["x"], profile["y"])
 
@@ -275,7 +275,7 @@ def main():
         if row["angle"] != rotations[0]:
             mask = masks[row["angle"]]
             inter = float((ref_mask & mask).sum())
-            row["dice"] = 2.0 * inter / (ref_mask.sum() + mask.sum())
+            row["iou"] = inter / float((ref_mask | mask).sum())
 
     rotation_test.print_results_table(results, rotations[0])
     rotation_test.plot_runout_comparison(results, rotations[0],

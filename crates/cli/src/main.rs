@@ -2,8 +2,8 @@
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use compute_core::settings::{
-    ConstitutiveModel, CrownLineMethod, FrictionModel, ParticlePlacement, ReleaseFillMethod,
-    Settings, SimModel,
+    ConstitutiveModel, CrownLineMethod, Detachment, FrictionModel, ParticlePlacement,
+    ReleaseFillMethod, Settings, SimModel,
 };
 use compute_core::utils::{MaxValue, timer_checkpoint, timer_new};
 use pollster::block_on;
@@ -39,6 +39,11 @@ fn parse_crown_line_method(value: &str) -> Result<CrownLineMethod> {
 fn parse_release_fill_method(value: &str) -> Result<ReleaseFillMethod> {
     ReleaseFillMethod::from_str(value)
         .map_err(|err| anyhow::anyhow!("invalid release fill method '{value}': {err}"))
+}
+
+fn parse_detachment(value: &str) -> Result<Detachment> {
+    Detachment::from_str(value)
+        .map_err(|err| anyhow::anyhow!("invalid detachment mode '{value}': {err}"))
 }
 
 fn parse_particle_placement(value: &str) -> Result<ParticlePlacement> {
@@ -105,6 +110,9 @@ struct Args {
     no_new_cells_travel: Option<f32>,
     #[arg(long)]
     reference_surface_length: Option<f32>,
+    /// 3D lift-off: terminal velocity (m/s) of flying particles, 0 = no drag
+    #[arg(long)]
+    flight_terminal_velocity: Option<f32>,
     #[arg(long, value_parser = parse_friction_model)]
     friction_model: Option<FrictionModel>,
     #[arg(long)]
@@ -189,6 +197,10 @@ struct Args {
     enable_entrainment: Option<bool>,
     #[arg(long, value_parser = parse_bool)]
     enable_weak_pressure: Option<bool>,
+    /// DAMPM global model: when particles detach and fly ballistically:
+    /// none (default), free-fall or curvature
+    #[arg(long, value_parser = parse_detachment)]
+    detachment: Option<Detachment>,
     #[arg(long, value_parser = parse_bool)]
     enable_center_of_mass: Option<bool>,
     /// Integer (fixed point) grid atomics even on GPUs with float atomics;
@@ -278,6 +290,9 @@ impl Args {
         }
         if let Some(value) = self.reference_surface_length {
             settings.reference_surface_length = Some(value);
+        }
+        if let Some(value) = self.flight_terminal_velocity {
+            settings.flight_terminal_velocity = Some(value);
         }
         if let Some(value) = self.friction_model {
             settings.friction_model = Some(value);
@@ -374,6 +389,9 @@ impl Args {
         }
         if let Some(value) = self.enable_weak_pressure {
             settings.enable_weak_pressure = Some(value);
+        }
+        if let Some(value) = self.detachment {
+            settings.detachment = Some(value);
         }
         if let Some(value) = self.center_of_mass_biggest_blob {
             settings.center_of_mass_biggest_blob = Some(value);
@@ -617,9 +635,13 @@ fn print_summary(simulation: &mut Simulation, peak_velocity: &[f32]) -> Result<(
     );
     row("Peak flow thickness", format!("{peak_flow_thickness:.2} m"));
 
-    // the avalanche: the largest connected area above the thickness threshold
-    block_on(simulation.post_process())?;
-    let affected_cells = simulation.ava_mask.iter().filter(|&&set| set).count();
+    // the avalanche: the cells above the thickness threshold
+    block_on(simulation.post_process(settings.peak_flow_thickness_threshold, 0.0))?;
+    let affected: Vec<bool> = block_on(simulation.fetch_peak_flow_thickness())?
+        .iter()
+        .map(|&thickness| thickness > 0.0)
+        .collect();
+    let affected_cells = affected.iter().filter(|&&set| set).count();
     row(
         "Affected area",
         format!(
@@ -630,7 +652,7 @@ fn print_summary(simulation: &mut Simulation, peak_velocity: &[f32]) -> Result<(
     );
     let (runout_distance, runout_drop) = simulation
         .dem
-        .get_elevation_extrema_distance_and_drop(&simulation.ava_mask)
+        .get_elevation_extrema_distance_and_drop(&affected)
         .unwrap_or((0.0, 0.0));
     row(
         "Runout",
@@ -761,6 +783,7 @@ mod tests {
             momentum_stop_fraction: None,
             no_new_cells_travel: None,
             reference_surface_length: None,
+            flight_terminal_velocity: None,
             released_particles_per_cell: None,
             release_thickness: None,
             release_swe: None,
@@ -790,6 +813,7 @@ mod tests {
             enable_earth_pressure_coefficient: None,
             enable_entrainment: None,
             enable_weak_pressure: None,
+            detachment: None,
             center_of_mass_biggest_blob: None,
             release_area_fraction: None,
             crown_line_method: None,

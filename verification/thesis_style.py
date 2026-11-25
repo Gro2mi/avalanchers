@@ -193,8 +193,10 @@ def error_figure(times, errors, with_z=False, momentum_title=r"momentum $h\,\mat
     return fig
 
 
-def hillshade(ax, raster, extent, cell_size, zorder=0):
-    """Light grey DEM hillshade with thin contour lines as a map background."""
+def hillshade(ax, raster, extent, cell_size, zorder=0, contour_levels=12):
+    """Light grey DEM hillshade with thin contour lines as a map background
+    (contour_levels: number or list of levels as in ax.contour, None for no
+    contour lines)."""
     import numpy as np
     from matplotlib.colors import LightSource
     shaded = LightSource(azdeg=315.0, altdeg=35.0).hillshade(
@@ -203,8 +205,9 @@ def hillshade(ax, raster, extent, cell_size, zorder=0):
     # light grey range (0.65-0.97) so the result field on top stays dominant
     ax.imshow(shaded, cmap="Greys_r", vmin=-2.0, vmax=1.1, extent=extent,
               origin="lower", zorder=zorder, interpolation="bilinear")
-    ax.contour(raster, levels=12, colors="0.45", linewidths=0.3, extent=extent,
-               origin="lower", zorder=zorder + 0.5)
+    if contour_levels is not None:
+        ax.contour(raster, levels=contour_levels, colors="0.45", linewidths=0.3,
+                   extent=extent, origin="lower", zorder=zorder + 0.5)
 
 
 def save(fig, out_dir, name, formats=("pdf", "png")):

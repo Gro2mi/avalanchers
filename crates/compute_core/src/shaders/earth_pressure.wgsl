@@ -1,8 +1,9 @@
 // Savage-Hutter earth pressure coefficients (Hutter et al. 1993) for the grid
 // physics of the depth-averaged models.
 // Pure library module: it is textually imported and relies on the importing
-// module providing grid_mass_atomic, grid_momentum_atomic and the utils.wgsl
-// symbols (sim_settings, x_y_to_idx, inv_mass_factor(), inv_momentum_factor()).
+// module providing grid_mass_atomic, grid_momentum_atomic, sim_settings.wgsl,
+// grid_index.wgsl (x_y_to_idx) and quantization.wgsl (inv_mass_factor(),
+// inv_momentum_factor()).
 
 struct EarthPressure {
     // pressure gradient weighted with k_x along the fall line, k_y across it

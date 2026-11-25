@@ -39,24 +39,6 @@ impl Default for MassMovementEvaluation {
 }
 
 impl MassMovementEvaluation {
-    pub fn with_runout(
-        mut self,
-        horizontal_distance: f64,
-        vertical_drop: f64,
-        horizontal_distance_ref: f64,
-        vertical_drop_ref: f64,
-        peak_velocity: f64,
-    ) -> Self {
-        self.horizontal_distance = horizontal_distance;
-        self.vertical_drop = vertical_drop;
-        self.horizontal_distance_ref = horizontal_distance_ref;
-        self.vertical_drop_ref = vertical_drop_ref;
-        self.beeline_3d = horizontal_distance.hypot(vertical_drop);
-        self.beeline_3d_ref = horizontal_distance_ref.hypot(vertical_drop_ref);
-        self.peak_velocity = peak_velocity;
-        self
-    }
-
     pub fn with_chamfer(mut self, chamfer: ChamferDistance) -> Self {
         self.sim_to_roi = chamfer.sim_to_roi;
         self.roi_to_sim = chamfer.roi_to_sim;
@@ -112,28 +94,29 @@ pub fn evaluate_mass_movement_area(
     ))
 }
 
-/// Diagonal-normalized chamfer distance between the simulated cells and the
-/// reference (region of interest) cells.
+/// Chamfer distance between the simulated cells and the reference (region of
+/// interest) cells, in world units (m). It is not normalized: the grid size
+/// depends on the domain padding, so callers scale it by a length of the
+/// avalanche itself (e.g. the reference beeline).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct ChamferDistance {
-    /// Mean nearest-neighbor distance from simulated cells to the nearest
-    /// region-of-interest cell, normalized by the grid diagonal.
+    /// Mean nearest-neighbor distance (m) from simulated cells to the nearest
+    /// region-of-interest cell.
     /// Infinite if there are simulated cells but the ROI is empty.
     pub sim_to_roi: f64,
-    /// Mean nearest-neighbor distance from region-of-interest cells to the
-    /// nearest simulated cell, normalized by the grid diagonal.
+    /// Mean nearest-neighbor distance (m) from region-of-interest cells to the
+    /// nearest simulated cell.
     /// Infinite if there are ROI cells but the simulation is empty.
     pub roi_to_sim: f64,
-    /// `sim_to_roi + roi_to_sim`; 0.0 if both masks are empty.
+    /// `sim_to_roi + roi_to_sim` (m); 0.0 if both masks are empty.
     pub chamfer: f64,
 }
 
-/// Combines the raw GPU sums into the diagonal-normalized chamfer distance.
+/// Combines the raw GPU sums into the chamfer distance in world units.
 ///
 /// * `sum_sim_to_roi` / `count_sim` - sum of nearest ROI distances over all non-release simulated cells
 /// * `sum_roi_to_sim` / `count_roi` - sum of nearest simulated-cell distances over all non-release ROI cells
 /// * `roi_seeded` / `sim_seeded` - whether the mask has any cell at all, release cells included
-/// * `diagonal` - length of the grid diagonal in world units
 pub(crate) fn chamfer_from_sums(
     sum_sim_to_roi: f32,
     count_sim: f32,
@@ -141,21 +124,20 @@ pub(crate) fn chamfer_from_sums(
     count_roi: f32,
     roi_seeded: bool,
     sim_seeded: bool,
-    diagonal: f64,
 ) -> ChamferDistance {
     let sim_to_roi = if count_sim == 0.0 {
         0.0
     } else if !roi_seeded {
         f64::INFINITY
     } else {
-        sum_sim_to_roi as f64 / count_sim as f64 / diagonal
+        sum_sim_to_roi as f64 / count_sim as f64
     };
     let roi_to_sim = if count_roi == 0.0 {
         0.0
     } else if !sim_seeded {
         f64::INFINITY
     } else {
-        sum_roi_to_sim as f64 / count_roi as f64 / diagonal
+        sum_roi_to_sim as f64 / count_roi as f64
     };
     ChamferDistance {
         sim_to_roi,
@@ -392,11 +374,9 @@ mod tests {
     #[test]
     fn test_chamfer_from_sums_matches_manual() {
         // 3x3 grid with cell_size 5: a simulated cell at (2,0) and ROI cells at
-        // (0,0) and (2,2). Every nearest distance is 2 cells = 10 world units,
-        // the grid diagonal is 15*sqrt(2).
-        let diagonal = 15.0 * (2.0f64).sqrt();
-        let result = chamfer_from_sums(10.0, 1.0, 20.0, 2.0, true, true, diagonal);
-        let expected_per_direction = 10.0 / diagonal;
+        // (0,0) and (2,2). Every nearest distance is 2 cells = 10 world units.
+        let result = chamfer_from_sums(10.0, 1.0, 20.0, 2.0, true, true);
+        let expected_per_direction = 10.0;
         assert!((result.sim_to_roi - expected_per_direction).abs() < 1e-9);
         assert!((result.roi_to_sim - expected_per_direction).abs() < 1e-9);
         assert!((result.chamfer - 2.0 * expected_per_direction).abs() < 1e-9);
@@ -404,29 +384,27 @@ mod tests {
 
     #[test]
     fn test_chamfer_from_sums_empty_masks() {
-        let diagonal = 10.0;
-
         // both masks empty -> perfect score, matching the Jaccard convention
-        let both_empty = chamfer_from_sums(0.0, 0.0, 0.0, 0.0, false, false, diagonal);
+        let both_empty = chamfer_from_sums(0.0, 0.0, 0.0, 0.0, false, false);
         assert_eq!(both_empty.chamfer, 0.0);
 
         // only ROI cells: their nearest simulated cell does not exist
-        let only_roi = chamfer_from_sums(0.0, 0.0, 5.0, 1.0, true, false, diagonal);
+        let only_roi = chamfer_from_sums(0.0, 0.0, 5.0, 1.0, true, false);
         assert!(only_roi.chamfer.is_infinite());
         assert_eq!(only_roi.sim_to_roi, 0.0);
         assert_eq!(only_roi.roi_to_sim, f64::INFINITY);
 
         // only simulated cells
-        let only_sim = chamfer_from_sums(5.0, 1.0, 0.0, 0.0, false, true, diagonal);
+        let only_sim = chamfer_from_sums(5.0, 1.0, 0.0, 0.0, false, true);
         assert!(only_sim.chamfer.is_infinite());
         assert_eq!(only_sim.sim_to_roi, f64::INFINITY);
         assert_eq!(only_sim.roi_to_sim, 0.0);
 
         // simulation confined to the release area: no counted simulated cell,
         // but the ROI cells still measure their distance to the release
-        let release_only = chamfer_from_sums(0.0, 0.0, 5.0, 1.0, true, true, diagonal);
+        let release_only = chamfer_from_sums(0.0, 0.0, 5.0, 1.0, true, true);
         assert_eq!(release_only.sim_to_roi, 0.0);
-        assert_eq!(release_only.roi_to_sim, 0.5);
+        assert_eq!(release_only.roi_to_sim, 5.0);
     }
 
     fn assert_near(actual: f64, expected: f64) {

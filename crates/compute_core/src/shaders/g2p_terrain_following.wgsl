@@ -47,7 +47,12 @@ override WG_SIZE_1D: u32 = 1u;
 @compute @workgroup_size(WG_SIZE_1D, 1, 1)
 fn g2p_terrain_following(@builtin(global_invocation_id) pId: vec3<u32>) {
     let particleId = pId.x;
-    if particle_is_inactive(particleId) {
+    if invocation_is_idle(particleId) {
+        return;
+    }
+    // read once; the paths below write it at most once more
+    let state = particles_state[particleId];
+    if (state & PARTICLE_STOPPED) != 0u {
         return;
     }
     let position_xy = particles_position[particleId];
@@ -63,7 +68,7 @@ fn g2p_terrain_following(@builtin(global_invocation_id) pId: vec3<u32>) {
     if stop_if_too_fast(particleId, length(surface_to_tangent(update.velocity, normal))) {
         return;
     }
-    if update_rest_state(particleId, length(update.velocity)) {
+    if is_resting(update_rest_state(particleId, state, length(update.velocity))) {
         particles_velocity[particleId] = vec2f(0.0);
         particles_affine_matrix[particleId] = mat2x2<f32>(vec2f(0.0), vec2f(0.0));
         return;
@@ -94,7 +99,12 @@ fn g2p_terrain_following(@builtin(global_invocation_id) pId: vec3<u32>) {
 @compute @workgroup_size(WG_SIZE_1D, 1, 1)
 fn g2p_3d(@builtin(global_invocation_id) pId: vec3<u32>) {
     let particleId = pId.x;
-    if particle_is_inactive(particleId) {
+    if invocation_is_idle(particleId) {
+        return;
+    }
+    // read once; the paths below write it at most once more
+    let state = particles_state[particleId];
+    if (state & PARTICLE_STOPPED) != 0u {
         return;
     }
     let position_xy = particles_position[particleId];
@@ -106,6 +116,14 @@ fn g2p_3d(@builtin(global_invocation_id) pId: vec3<u32>) {
         return;
     }
     let normal = normalize(terrain.xyz);
+
+    // a detached particle moves under gravity alone, outside the grid
+    if (state & PARTICLE_FLYING) != 0u {
+        let start = vec3f(position_xy, particles_elevation[particleId]);
+        let velocity = vec3f(particles_velocity[particleId], particles_velocity_z[particleId]);
+        fly_step(particleId, state, flight_motion(start, velocity), uv);
+        return;
+    }
 
     // the shared xy gather is inlined here because the z component uses the
     // same stencil and weights
@@ -137,11 +155,25 @@ fn g2p_3d(@builtin(global_invocation_id) pId: vec3<u32>) {
         clear_z(particleId);
         return;
     }
-    if update_rest_state(particleId, length(interpolated_velocity)) {
+    let rest_state = update_rest_state(particleId, state, length(interpolated_velocity));
+    if is_resting(rest_state) {
         particles_velocity[particleId] = vec2f(0.0);
         particles_affine_matrix[particleId] = mat2x2<f32>(vec2f(0.0), vec2f(0.0));
         clear_z(particleId);
         return;
+    }
+
+    let tangent_velocity = tangent_project(interpolated_velocity, normal);
+    let detachment = detachment_mode();
+    if detachment != DETACHMENT_NONE {
+        let start = vec3f(position_xy, particles_elevation[particleId]);
+        let flight = flight_motion(start, tangent_velocity);
+        if detaches(detachment, flight, uv, tangent_velocity, normal) {
+            let flying_state = rest_state | PARTICLE_FLYING;
+            particles_state[particleId] = flying_state;
+            fly_step(particleId, flying_state, flight, uv);
+            return;
+        }
     }
 
     let v_prev = vec3f(particles_velocity[particleId], particles_velocity_z[particleId]);
@@ -166,15 +198,145 @@ fn g2p_3d(@builtin(global_invocation_id) pId: vec3<u32>) {
     }
 }
 
+// Settings::detachment, from the SimFlags bits DETACHMENT_FREE_FALL (7) and
+// DETACHMENT_CURVATURE (8)
+const DETACHMENT_NONE: u32 = 0u;
+const DETACHMENT_FREE_FALL: u32 = 1u;
+const DETACHMENT_CURVATURE: u32 = 2u;
+fn detachment_mode() -> u32 {
+    if (sim_settings.flags & (1u << 8u)) != 0u {
+        return DETACHMENT_CURVATURE;
+    }
+    if (sim_settings.flags & (1u << 7u)) != 0u {
+        return DETACHMENT_FREE_FALL;
+    }
+    return DETACHMENT_NONE;
+}
+
+// Whether a particle on the bed with the tangent velocity v detaches.
+// free-fall: the bed falls away faster than the particle could fall, i.e. one
+// free-flight step from the bed ends above the DEM. On a plane the flight
+// ends g dt^2 / 2 below the bed, and on concave terrain lower.
+// curvature: the bed-normal load g_eff = g n_z + n_z H(v, v) of the DEM
+// Hessian H (as in grid_physics_3d) is negative, so the bed would have to
+// pull the particle down.
+// Off the DEM data (NaN elevation or Hessian) the particle stays on the bed.
+fn detaches(mode: u32, flight: FlightMotion, uv: vec2f, v: vec3f, n: vec3f) -> bool {
+    if mode == DETACHMENT_CURVATURE {
+        let hessian = textureSampleLevel(curvature_texture, tex_sampler, uv, 0.0).xyz;
+        let g_eff = g * n.z + normal_curvature_acceleration(hessian, v, n);
+        return g_eff < 0.0;
+    }
+    return flight.position.z > get_elevation(position_to_uv(flight.position.xy));
+}
+
+struct FlightMotion {
+    position: vec3f,
+    velocity: vec3f,
+}
+
+// One step of free flight under gravity and quadratic air drag
+// a = -g |u| u / v_t^2 (terminal velocity v_t, none for v_t = 0). Gravity is
+// explicit, drag implicit (stable at any dt); the trapezoidal position is the
+// exact parabola without drag.
+fn flight_motion(position: vec3f, velocity: vec3f) -> FlightMotion {
+    let dt = sim_info.dt;
+    var new_velocity = velocity + vec3f(0.0, 0.0, -g * dt);
+    let terminal_velocity = sim_settings.flight_terminal_velocity;
+    if terminal_velocity > 0.0 {
+        new_velocity /= 1.0 + dt * g * length(new_velocity) / (terminal_velocity * terminal_velocity);
+    }
+    return FlightMotion(position + 0.5 * (velocity + new_velocity) * dt, new_velocity);
+}
+
+// Applies a flight step of a detached particle. It lands once it falls below
+// the bed, keeping only the tangential part of its velocity (inelastic
+// impact). It carries no APIC gradient and deposits nothing on the grid
+// (p2g_3d), so its speed enters the CFL condition here. state is the
+// particle's current (flying) state.
+fn fly_step(particleId: u32, state: u32, flight: FlightMotion, uv: vec2f) {
+    var position = flight.position;
+    var new_velocity = flight.velocity;
+    particles_affine_matrix[particleId] = mat2x2<f32>(vec2f(0.0), vec2f(0.0));
+    particles_affine_z[particleId] = vec2f(0.0);
+
+    let uv_new = position_to_uv(position.xy);
+    let bed = get_elevation(uv_new);
+    if stop_if_too_fast(particleId, length(new_velocity)) {
+        particles_position[particleId] = position.xy;
+        drop_to_bed(particleId, bed);
+        clear_z(particleId);
+        return;
+    }
+    let terrain_new = sample_terrain(uv_new);
+    var normal_new = vec3f(0.0, 0.0, 1.0);
+    // over missing DEM data it stays in flight, the next step flags it
+    if position.z <= bed && on_valid_terrain(terrain_new) {
+        normal_new = normalize(terrain_new.xyz);
+        new_velocity = landing_velocity(new_velocity, normal_new);
+        position.z = bed;
+        particles_state[particleId] = state & ~PARTICLE_FLYING;
+    }
+    particles_position[particleId] = position.xy;
+    particles_elevation[particleId] = position.z;
+    particles_velocity[particleId] = new_velocity.xy;
+    particles_velocity_z[particleId] = new_velocity.z;
+
+    let speed = length(new_velocity);
+    if is_finite(speed) && bitcast<u32>(speed) > atomicLoad(&atomic_values.expected_max_velocity) {
+        atomicMax(&atomic_values.expected_max_velocity, bitcast<u32>(speed));
+    }
+
+    if particleId == sim_info.number_particles / 2u {
+        record_output(position, new_velocity, normal_new, uv);
+    }
+    if stop_if_invalid(particleId, position, new_velocity.x) {
+        drop_to_bed(particleId, bed);
+        clear_z(particleId);
+    }
+}
+
+// A flying particle that is stopped is put on the bed below it rather than
+// left hanging in the air (not possible over missing DEM data).
+fn drop_to_bed(particleId: u32, bed: f32) {
+    if is_finite(bed) {
+        particles_elevation[particleId] = bed;
+    }
+}
+
+// Inelastic landing with Coulomb friction over the impact: the bed removes the
+// normal velocity v_n with the impulse m |v_n|, and the friction it carries
+// removes mu |v_n| of the tangential speed (without reversing it). This is
+// the limit of a resolved concave bend, where the basal friction acts on the
+// centrifugal load; velocity-dependent drag contributes nothing to an
+// instantaneous impact.
+fn landing_velocity(velocity: vec3f, normal: vec3f) -> vec3f {
+    let impact_speed = max(-dot(velocity, normal), 0.0);
+    let tangential = tangent_project(velocity, normal);
+    let tangential_speed = length(tangential);
+    if tangential_speed < 1e-6 {
+        return vec3f(0.0);
+    }
+    let remaining = max(tangential_speed - landing_friction_coefficient() * impact_speed, 0.0);
+    return tangential * (remaining / tangential_speed);
+}
+
+// Coulomb coefficient of the basal friction model: mu0 for mu(I), the
+// friction coefficient for the others
+fn landing_friction_coefficient() -> f32 {
+    return select(sim_settings.friction_coefficient, sim_settings.mu0, sim_settings.friction_model == 5u);
+}
+
 fn clear_z(particleId: u32) {
     particles_velocity_z[particleId] = 0.0;
     particles_affine_z[particleId] = vec2f(0.0);
 }
 
-fn particle_is_inactive(particleId: u32) -> bool {
+// beyond the particle count or the run stopped; stopped particles are checked
+// on the state the entry points read once
+fn invocation_is_idle(particleId: u32) -> bool {
     return particleId >= sim_info.number_particles
-        || (sim_info.flags & SIM_INFO_STOPPED) != 0u
-        || (particles_state[particleId] & PARTICLE_STOPPED) != 0u;
+        || (sim_info.flags & SIM_INFO_STOPPED) != 0u;
 }
 
 // Stopped particles keep depositing mass, but no stale momentum.
@@ -201,15 +363,19 @@ fn stop_outside_dem(particleId: u32) {
     sim_info.flags |= SIM_INFO_PARTICLE_OUT_OF_DEM_DATA;
 }
 
-// Returns whether the particle rests after this step.
-fn update_rest_state(particleId: u32, speed: f32) -> bool {
-    let state = next_rest_state(particles_state[particleId], speed, sim_info.timestep);
-    particles_state[particleId] = state;
-    let resting = (state & PARTICLE_RESTING) != 0u;
-    if resting {
+// Writes and returns the particle state after this step's rest update, from
+// the state read at the start of the step.
+fn update_rest_state(particleId: u32, state: u32, speed: f32) -> u32 {
+    let new_state = next_rest_state(state, speed, sim_info.timestep);
+    particles_state[particleId] = new_state;
+    if is_resting(new_state) {
         atomicAdd(&atomic_values.resting_particles, 1u);
     }
-    return resting;
+    return new_state;
+}
+
+fn is_resting(state: u32) -> bool {
+    return (state & PARTICLE_RESTING) != 0u;
 }
 
 // Curvature-corrected arc step, snapped onto the DEM.
@@ -325,6 +491,11 @@ fn update_output_data(trajectory: u32, timestep: u32, timestep_data: TimestepDat
 
 // import transfer_g2p_affine.wgsl;
 // BEGIN transfer_g2p_affine.wgsl
+struct G2PUpdate {
+    velocity: vec2f,
+    affine_matrix: mat2x2<f32>,
+};
+
 fn transfer_g2p(p_idx: u32) -> G2PUpdate {
     let grid_pos = particles_position[p_idx] / sim_settings.cell_size - vec2f(0.5);
     let base_node = vec2u(floor(grid_pos - vec2f(0.5)));
@@ -428,125 +599,20 @@ fn arc_step(position: vec3f, v_step: vec3f, n: vec3f, bed_kappa: f32, dt: f32) -
 }
 
 // END cartesian_geometry.wgsl
-// import utils.wgsl;
-// BEGIN utils.wgsl
+// import constants.wgsl;
+// BEGIN constants.wgsl
+// Shared constants without dependencies.
 const WG_SIZE_2D: u32 = 16u;
 
 const g: f32 = 9.81;
 
-// u32 limit is 4 294 967 296
-const MAX_VELOCITY_FACTOR: f32 = 1e7; // u32 limit is 430 m/s
-const H_FACTOR: f32 = 1e6;
-const INV_MAX_VELOCITY_FACTOR: f32 = 1 / MAX_VELOCITY_FACTOR; // u32 limit is 430 m/s
-const INV_H_FACTOR: f32 = 1 / H_FACTOR;
-// Integer-atomic grid (no_atomic_float): node masses and momenta are fixed
-// point numbers in u32 / i32, quantized per particle->node contribution before
-// atomicAdd. The factors fill the integer range with the largest node values a
-// flow can reach: a MAX_FLOW_THICKNESS deep column over a cell
-// (density * thickness * cell_size^2) moving at MAX_FLOW_VELOCITY, times
-// QUANTIZATION_SAFETY (which also covers the slope factor of the node mass).
-// They scale with the cell size like the particle masses, so a particle of a
-// release h_r thick with N particles per cell holds about
-// U32_RANGE * h_r / (N * QUANTIZATION_SAFETY * MAX_FLOW_THICKNESS) mass units
-// (2e6 for 1 m and 64 per cell) at every cell size. Must match settings.rs.
-const MAX_FLOW_THICKNESS: f32 = 30.0;
-const MAX_FLOW_VELOCITY: f32 = 100.0;
-const QUANTIZATION_SAFETY: f32 = 2.0;
-// below 2^32 and 2^31, so a rounded maximum still converts without saturating
-const QUANTIZATION_U32_RANGE: f32 = 4.0e9;
-const QUANTIZATION_I32_RANGE: f32 = 2.0e9;
-fn max_node_mass() -> f32 {
-    return QUANTIZATION_SAFETY * MAX_FLOW_THICKNESS * sim_settings.snow_density
-        * sim_settings.cell_size * sim_settings.cell_size;
-}
-// integer units per kg
-fn mass_factor() -> f32 {
-    return QUANTIZATION_U32_RANGE / max_node_mass();
-}
-fn inv_mass_factor() -> f32 {
-    return max_node_mass() / QUANTIZATION_U32_RANGE;
-}
-// integer units per kg m/s
-fn momentum_factor() -> f32 {
-    return QUANTIZATION_I32_RANGE / (max_node_mass() * MAX_FLOW_VELOCITY);
-}
-fn inv_momentum_factor() -> f32 {
-    return max_node_mass() * MAX_FLOW_VELOCITY / QUANTIZATION_I32_RANGE;
-}
-// Lightest node whose velocity momentum / mass is resolved: one momentum unit
-// changes it by 1 m/s (15 g for 5 m cells and 200 kg/m3). Lighter nodes
-// count as empty.
-fn min_node_mass() -> f32 {
-    return inv_momentum_factor(); // momentum unit / (1 m/s)
-}
-// Gully walls (reference surface, wall friction) need a reference surface at
-// least one cell wide; must match SimSettings::gully_walls_enabled.
-fn gully_walls_enabled() -> bool {
-    return sim_settings.reference_surface_length >= sim_settings.cell_size;
-}
-// depth-integrated internal force (h * sigma * grad_w * area, ~1e4..1e5 N per node contribution)
-const FORCE_FACTOR: f32 = 1e-3; // i32 limit is 2.1e6 N per node
-const INV_FORCE_FACTOR: f32 = 1 / FORCE_FACTOR;
-// weak-form pressure sum m_p h_p / 2 grad_w (kg) of the curvilinear model,
-// node sum = node_mass * |grad h|: 0.001 kg resolves thin front nodes
-//   (rho*cell^2*h*J ~ 6e4 kg * 1 * 1e3 = 6e7 < 2.1e9)
-const PRESSURE_FACTOR: f32 = 1e3;
-const INV_PRESSURE_FACTOR: f32 = 1 / PRESSURE_FACTOR;
+// END constants.wgsl
+// import sim_settings.wgsl;
+// BEGIN sim_settings.wgsl
+// Simulation settings uniform (group 0, binding 0) and the values derived from
+// it. Must mirror the Rust POD layout of SimSettings.
 
 // TODO precompute often used values on the cpu and pass them as uniforms to avoid redundant calculations on the gpu
-
-struct SimInfo {
-    timestep: u32,
-    dt: f32,
-    elapsed_time: f32,
-    number_particles: u32,
-    elevation_threshold: f32,
-    max_velocity: f32,
-    max_flow_thickness: f32,
-    flags: u32,
-    grid_elapsed_time: f32,
-    travel_length_2d: f32,
-    travel_length_3d: f32,
-    travel_vertical_drop: f32,
-    travel_angle: f32,
-    _first_center_of_mass_timestep: u32,
-    _last_center_of_mass_timestep: u32,
-    _pad: u32,
-};
-
-const SIM_INFO_OUT_OF_BOUNDS: u32 = 1u << 0u;
-const SIM_INFO_CFL_EXCEEDED: u32 = 1u << 1u;
-const SIM_INFO_IS_NAN: u32 = 1u << 2u;
-const SIM_INFO_PARTICLE_OUT_OF_DEM_DATA: u32 = 1u << 3u;
-// a particle exceeded MAX_PARTICLE_SPEED and was stopped
-const SIM_INFO_UNPHYSICAL_SPEED: u32 = 1u << 4u;
-const SIM_INFO_STOPPED: u32 = 1u << 31u;
-const SIM_INFO_ALL_PARTICLES_STOPPED: u32 = 1u << 30u;
-const SIM_INFO_NO_NEW_CELLS: u32 = 1u << 29u;
-// almost all particles are resting or terminally stopped
-const SIM_INFO_AT_REST: u32 = 1u << 28u;
-// total momentum fell below momentum_stop_fraction of its peak
-const SIM_INFO_LOW_MOMENTUM: u32 = 1u << 27u;
-
-// Fastest particle speed (m/s) taken as physical. Dense flow avalanches reach
-// about 60-80 m/s and the integer atomic grid holds momentum up to
-// QUANTIZATION_SAFETY * MAX_FLOW_VELOCITY = 200 m/s; a faster particle comes from
-// a numerical blow-up (e.g. a cliff of no-data elevations) and is stopped.
-// Mirrors compute_core::MAX_PARTICLE_SPEED.
-const MAX_PARTICLE_SPEED: f32 = 150.0;
-// stopped for exceeding MAX_PARTICLE_SPEED
-const PARTICLE_UNPHYSICAL_SPEED: u32 = 1u << 25u;
-// reversible low-speed state; the low bits (below PARTICLE_UNPHYSICAL_SPEED)
-// hold the rest start step while resting and the consecutive slow-step count
-// while moving
-const PARTICLE_RESTING: u32 = 1u << 26u;
-// consecutive slow steps before a particle rests
-const REST_STEPS: u32 = 20u;
-const PARTICLE_FLYING: u32 = 1u << 27u;
-const PARTICLE_OUT_OF_BOUNDS: u32 = 1u << 28u;
-const PARTICLE_IS_NAN: u32 = 1u << 29u;
-const PARTICLE_OUT_OF_DEM_DATA: u32 = 1u << 30u;
-const PARTICLE_STOPPED: u32 = 1u << 31u;
 
 struct SimSettings {
     num_steps: u32,
@@ -591,7 +657,73 @@ struct SimSettings {
     reference_surface_length: f32,
     // snow water equivalent (kg/m2) of the release cells; NaN if unset
     release_swe: f32,
+    // 3D lift-off: terminal velocity (m/s) of the quadratic air drag in
+    // flight; 0 disables the drag
+    flight_terminal_velocity: f32,
 };
+
+@group(0) @binding(0) var<uniform> sim_settings: SimSettings;
+
+// Gully walls (reference surface, wall friction) need a reference surface at
+// least one cell wide; must match SimSettings::gully_walls_enabled.
+fn gully_walls_enabled() -> bool {
+    return sim_settings.reference_surface_length >= sim_settings.cell_size;
+}
+
+// length in steps of the no-new-cells rolling window: the fastest material
+// moves at most cfl cells per step, so round(travel / cfl) steps cover the same
+// front travel at any cfl; at least 10 steps
+fn no_new_cells_window() -> u32 {
+    return max(10u, u32(round(sim_settings.no_new_cells_travel / sim_settings.cfl)));
+}
+
+// END sim_settings.wgsl
+// import sim_info.wgsl;
+// BEGIN sim_info.wgsl
+// Simulation state shared between the passes: the SimInfo buffer with its
+// status flags and the atomic accumulators. Must mirror the Rust layouts.
+
+struct SimInfo {
+    timestep: u32,
+    dt: f32,
+    elapsed_time: f32,
+    number_particles: u32,
+    elevation_threshold: f32,
+    max_velocity: f32,
+    max_flow_thickness: f32,
+    flags: u32,
+    grid_elapsed_time: f32,
+    travel_length_2d: f32,
+    travel_length_3d: f32,
+    travel_vertical_drop: f32,
+    travel_angle: f32,
+    _first_center_of_mass_timestep: u32,
+    _last_center_of_mass_timestep: u32,
+    // ranges of the integer-atomic grid in units of the reference node (see
+    // quantization.wgsl); previous_mass_scale quantized the last step's grid
+    mass_scale: f32,
+    momentum_scale: f32,
+    previous_mass_scale: f32,
+    _pad0: u32,
+    _pad1: u32,
+};
+
+const SIM_INFO_OUT_OF_BOUNDS: u32 = 1u << 0u;
+const SIM_INFO_CFL_EXCEEDED: u32 = 1u << 1u;
+const SIM_INFO_IS_NAN: u32 = 1u << 2u;
+const SIM_INFO_PARTICLE_OUT_OF_DEM_DATA: u32 = 1u << 3u;
+// a particle exceeded MAX_PARTICLE_SPEED and was stopped
+const SIM_INFO_UNPHYSICAL_SPEED: u32 = 1u << 4u;
+// a node filled more than QUANTIZATION_OVERFLOW_FILL of an integer-atomic
+// grid range, which it may have overflowed (see quantization.wgsl)
+const SIM_INFO_QUANTIZATION_OVERFLOW: u32 = 1u << 5u;
+const SIM_INFO_STOPPED: u32 = 1u << 31u;
+const SIM_INFO_ALL_PARTICLES_STOPPED: u32 = 1u << 30u;
+const SIM_INFO_NO_NEW_CELLS: u32 = 1u << 29u;
+// almost all particles are resting or terminally stopped
+const SIM_INFO_AT_REST: u32 = 1u << 28u;
+// total momentum fell below momentum_stop_fraction of its peak
+const SIM_INFO_LOW_MOMENTUM: u32 = 1u << 27u;
 
 struct AtomicValues {
     peak_velocity: atomic<u32>,
@@ -609,7 +741,38 @@ struct AtomicValues {
     momentum_hi: atomic<u32>,
     // f32 bits of the largest total momentum so far
     peak_momentum: atomic<u32>,
+    // largest node mass (u32 units) and momentum component (|i32| units) of
+    // the integer-atomic grid this step, read and reset by reset_grid
+    max_mass_units: atomic<u32>,
+    max_momentum_units: atomic<u32>,
+    _pad0: u32,
+    _pad1: u32,
 };
+
+// END sim_info.wgsl
+// import particle_state.wgsl;
+// BEGIN particle_state.wgsl
+// Particle state flags and the reversible resting state. Needs sim_settings.
+
+// Fastest particle speed (m/s) taken as physical. Dense flow avalanches reach
+// about 60-80 m/s and the integer atomic grid holds momentum up to
+// MAX_FLOW_VELOCITY = 100 m/s for a full MAX_FLOW_THICKNESS node (faster for
+// thinner nodes); a faster particle comes from a numerical blow-up (e.g. a cliff of no-data elevations) and is stopped.
+// Mirrors compute_core::MAX_PARTICLE_SPEED.
+const MAX_PARTICLE_SPEED: f32 = 150.0;
+// stopped for exceeding MAX_PARTICLE_SPEED
+const PARTICLE_UNPHYSICAL_SPEED: u32 = 1u << 25u;
+// reversible low-speed state; the low bits (below PARTICLE_UNPHYSICAL_SPEED)
+// hold the rest start step while resting and the consecutive slow-step count
+// while moving
+const PARTICLE_RESTING: u32 = 1u << 26u;
+// consecutive slow steps before a particle rests
+const REST_STEPS: u32 = 20u;
+const PARTICLE_FLYING: u32 = 1u << 27u;
+const PARTICLE_OUT_OF_BOUNDS: u32 = 1u << 28u;
+const PARTICLE_IS_NAN: u32 = 1u << 29u;
+const PARTICLE_OUT_OF_DEM_DATA: u32 = 1u << 30u;
+const PARTICLE_STOPPED: u32 = 1u << 31u;
 
 // Reversible resting: a particle rests after REST_STEPS consecutive slow steps
 // and wakes once the gathered grid speed exceeds twice the threshold. Resting
@@ -639,47 +802,14 @@ fn next_rest_state(previous_state: u32, speed: f32, timestep: u32) -> u32 {
         | low_bits;
 }
 
-struct G2PUpdate {
-    velocity: vec2f,
-    affine_matrix: mat2x2<f32>,
-};
-
-@group(0) @binding(0) var<uniform> sim_settings: SimSettings;
-
-// length in steps of the no-new-cells rolling window: the fastest material
-// moves at most cfl cells per step, so round(travel / cfl) steps cover the same
-// front travel at any cfl; at least 10 steps
-fn no_new_cells_window() -> u32 {
-    return max(10u, u32(round(sim_settings.no_new_cells_travel / sim_settings.cfl)));
-}
-
-fn is_nan(x: f32) -> bool {
-    let bits: u32 = bitcast<u32>(x);
-    return (bits & 0x7F800000u) == 0x7F800000u
-          && (bits & 0x007FFFFFu) != 0u;
-}
-
-fn is_inf(x: f32) -> bool {
-    let bits: u32 = bitcast<u32>(x);
-    return (bits == 0x7F800000u || bits == 0xFF800000u);
-}
-
-fn is_finite(x: f32) -> bool {
-    return !is_nan(x) && !is_inf(x);
-}
+// END particle_state.wgsl
+// import grid_index.wgsl;
+// BEGIN grid_index.wgsl
+// Conversions between world positions, cells, uv coordinates and flat grid
+// indices. Needs sim_settings.
 
 fn cell_to_uv(cell: vec2u) -> vec2f {
     return (vec2f(cell) + 0.5) / vec2f(sim_settings.grid_shape);
-}
-fn cell3_to_uv(cell: vec3u) -> vec2f {
-    return (vec2f(cell.xy) + 0.5) / vec2f(sim_settings.grid_shape);
-}
-fn cellf_to_uv(cell: vec2f) -> vec2f {
-    return (cell + 0.5) / vec2f(sim_settings.grid_shape);
-}
-
-fn position3_to_cell(position: vec3f) -> vec2u {
-    return position_to_cell(position.xy);
 }
 
 fn position_to_cell(position: vec2f) -> vec2u {
@@ -730,6 +860,12 @@ fn idx_to_xy(idx: u32) -> vec2<u32> {
     return vec2u(x, y);
 }
 
+// END grid_index.wgsl
+// import bspline.wgsl;
+// BEGIN bspline.wgsl
+// Quadratic B-spline weights of the particle <-> grid transfers. Needs
+// sim_settings (calculate_weight_gradient).
+
 fn quadratic_weight(d: f32) -> f32 {
     let abs_d = abs(d);
     if abs_d < 0.5 {
@@ -763,14 +899,6 @@ fn calculate_weight_gradient(distance: vec2f) -> vec2f {
     ) / sim_settings.cell_size;
 }
 
-fn determinant_2x2(m: mat2x2<f32>) -> f32 {
-    return m[0][0] * m[1][1] - m[0][1] * m[1][0];
-}
-
-fn identity_2x2() -> mat2x2<f32> {
-    return mat2x2<f32>(vec2f(1.0, 0.0), vec2f(0.0, 1.0));
-}
-
 fn calculate_distance_to_node(particle_position: vec2f, node_position: vec2u) -> vec2f {
     return particle_position - vec2f(node_position);
 }
@@ -779,28 +907,24 @@ fn get_base_node(grid_pos: vec2f) -> vec2u {
     return vec2u(floor(grid_pos - vec2f(0.5)));
 }
 
-fn compute_centroid(points: ptr<function, array<vec2<f32>, 256>>, count: u32) -> vec2<f32> {
-    var area: f32 = 0.0;
-    var cx: f32 = 0.0;
-    var cy: f32 = 0.0;
+// END bspline.wgsl
+// import float_checks.wgsl;
+// BEGIN float_checks.wgsl
+// NaN / infinity checks on the bit pattern (comparisons may be optimized away).
 
-    for (var i = 0u; i < count; i = i + 1u) {
-        let j = (i + 1u) % count;
-        let p0 = (*points)[i];
-        let p1 = (*points)[j];
-        let cross = p0.x * p1.y - p1.x * p0.y;
-
-        area = area + cross;
-        cx = cx + (p0.x + p1.x) * cross;
-        cy = cy + (p0.y + p1.y) * cross;
-    }
-
-    area = area * 0.5;
-
-    if abs(area) < 1e-6 {
-        return vec2<f32>(0.0, 0.0);
-    }
-
-    return vec2<f32>(cx, cy) / (6.0 * area);
+fn is_nan(x: f32) -> bool {
+    let bits: u32 = bitcast<u32>(x);
+    return (bits & 0x7F800000u) == 0x7F800000u
+          && (bits & 0x007FFFFFu) != 0u;
 }
-// END utils.wgsl
+
+fn is_inf(x: f32) -> bool {
+    let bits: u32 = bitcast<u32>(x);
+    return (bits == 0x7F800000u || bits == 0xFF800000u);
+}
+
+fn is_finite(x: f32) -> bool {
+    return !is_nan(x) && !is_inf(x);
+}
+
+// END float_checks.wgsl

@@ -21,7 +21,7 @@ the flow follows; narrower terrain becomes confining basal topography).
    already slosh at about 0.5 m/s without the split).
 
 Plots go to verification/outputs/gully_test/. ``--sim-model`` selects the
-curvilinear (default), terrain-following or 3d-depth-averaged model.
+curvilinear (default), terrain-following or dampm-global-cartesian model.
 """
 
 import argparse
@@ -221,7 +221,7 @@ def main(argv=None):
     from cli_args import add_particles_per_cell_argument
     add_particles_per_cell_argument(parser)
     parser.add_argument("--sim-model", default=SETTINGS["sim_model"],
-                        help="curvilinear | terrain-following | 3d-depth-averaged")
+                        help="curvilinear | terrain-following | dampm-global-cartesian")
     parser.add_argument("--out-dir", type=pathlib.Path, default=OUT_DIR)
     parser.add_argument("--show", action="store_true")
     args = parser.parse_args(argv)

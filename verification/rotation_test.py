@@ -223,14 +223,14 @@ def plot_areas_comparison(header, ref_mask, masks, cfg, sim_name, out_dir):
         fp = float((comparison == 3).sum()) * cell_area
         fn = float((comparison == 1).sum()) * cell_area
         union = tp + fp + fn
-        dice = 2 * tp / (2 * tp + fp + fn) if union > 0 else 1.0
+        iou = tp / union if union > 0 else 1.0
         ax.imshow(np.ma.masked_where(comparison == 0, comparison), origin="lower",
                   extent=extent, cmap=cmap, norm=norm, aspect="equal")
         ax.set_xlim(x_lo, x_hi)
         ax.set_ylim(y_lo, y_hi)
         ax.set_aspect("equal", adjustable="box")
-        ax.set_title("%g deg - Dice %.3f (TP %.0f m$^2$, FP %.0f, FN %.0f)"
-                     % (angle, dice, tp, fp, fn), fontsize=FS - 1)
+        ax.set_title("%g deg - IoU %.3f (TP %.0f m$^2$, FP %.0f, FN %.0f)"
+                     % (angle, iou, tp, fp, fn), fontsize=FS - 1)
         ax.set_xlabel("x [m]")
         if k % n_cols == 0:
             ax.set_ylabel("y [m]")
@@ -250,14 +250,14 @@ def print_results_table(results, ref_angle):
     ref = next(r for r in results if r["angle"] == ref_angle)
     print()
     print(f"{'angle':>7} {'sEnd [m]':>10} {'zEnd [m]':>10} {'angle [deg]':>12} "
-          f"{'ds [m]':>9} {'dz [m]':>9} {'dAngle':>9} {'Dice':>7}")
+          f"{'ds [m]':>9} {'dz [m]':>9} {'dAngle':>9} {'IoU':>7}")
     for r in results:
         ds = r["sEnd"] - ref["sEnd"]
         dz = r["zEnd"] - ref["zEnd"]
         da = r["runoutAngle"] - ref["runoutAngle"]
-        dice = "" if r["dice"] is None else "%7.3f" % r["dice"]
+        iou = "" if r["iou"] is None else "%7.3f" % r["iou"]
         print(f"{r['angle']:7g} {r['sEnd']:10.2f} {r['zEnd']:10.2f} "
-              f"{r['runoutAngle']:12.3f} {ds:+9.2f} {dz:+9.2f} {da:+9.3f} {dice:>7}")
+              f"{r['runoutAngle']:12.3f} {ds:+9.2f} {dz:+9.2f} {da:+9.3f} {iou:>7}")
 
 
 def _ensure_dir(out_dir):
@@ -352,7 +352,7 @@ def _thesis_rotation_areas(ts, header, ref_mask, masks, results, angles):
     extent = [header["xmin"], header["xmax"], header["ymin"], header["ymax"]]
     cmap = ListedColormap(["#BBBBBB", ts.VERMILION, ts.BLUE])
     norm = BoundaryNorm([0.5, 1.5, 2.5, 3.5], cmap.N)
-    dice = {r["angle"]: r["dice"] for r in results}
+    iou = {r["angle"]: r["iou"] for r in results}
     for k, angle in enumerate(others):
         ax = axes[0, k]
         comparison = np.zeros(ref_mask.shape)
@@ -365,8 +365,8 @@ def _thesis_rotation_areas(ts, header, ref_mask, masks, results, angles):
         ax.set_ylim(y_lo, y_hi)
         ax.set_aspect("equal")
         ax.grid(False)
-        ax.set_title(r"(%s) $%g^\circ$, Dice $= %.3f$"
-                     % ("abcdefgh"[k], angle, dice.get(angle) or float("nan")))
+        ax.set_title(r"(%s) $%g^\circ$, IoU $= %.3f$"
+                     % ("abcdefgh"[k], angle, iou.get(angle) or float("nan")))
         ax.set_xlabel(r"$x$ (m)")
     axes[0, 0].set_ylabel(r"$y$ (m)")
     handles = [plt.Rectangle((0, 0), 1, 1, fc="#BBBBBB", label="both"),

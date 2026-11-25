@@ -252,3 +252,6 @@ frontend/data/
 /PROJECT_CONTEXT.md
 /TODO.md
 /docs/release_area_estimation_section.tex
+
+# generated PDF versions of the doc figures (PNGs are used in the docs)
+docs/figures/*.pdf

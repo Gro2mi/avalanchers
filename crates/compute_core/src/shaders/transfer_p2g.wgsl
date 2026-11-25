@@ -6,7 +6,7 @@ fn quantize_momentum_component(value: f32) -> i32 {
 }
 
 // Quantized mass contribution of the integer grid (mass_factor() in
-// utils.wgsl). A contribution whose mass rounds to zero must not deposit
+// quantization.wgsl). A contribution whose mass rounds to zero must not deposit
 // momentum either, or it would leave momentum without mass and an unbounded
 // node velocity. With the range-based factors that needs a contribution faster
 // than 2 * MAX_FLOW_VELOCITY, so the guard only protects against misuse.

@@ -1,6 +1,6 @@
 use crate::buffers::{
     AtomicValues, BufferName, CenterOfMassResult, ChamferParams, EvaluationResult, GpuResources,
-    RelaxParams, TextureName, create_buffers_and_texture_descriptions,
+    PostProcessParams, RelaxParams, TextureName, create_buffers_and_texture_descriptions,
 };
 use crate::settings::{SimFlags, SimModel};
 use crate::shaders::{ShaderConfigs, ShaderName, generate_shader_report};
@@ -40,6 +40,10 @@ bitflags! {
         const PARTICLE_OUT_OF_DEM_DATA = 1 << 3;
         /// A particle exceeded [`MAX_PARTICLE_SPEED`] and was stopped.
         const UNPHYSICAL_SPEED         = 1 << 4;
+        /// A node filled more than 90 % of an integer-atomic grid range and
+        /// may have wrapped around: its mass more than doubled within one
+        /// step (see [`SimInfo::mass_scale`]).
+        const QUANTIZATION_OVERFLOW    = 1 << 5;
         const LOW_MOMENTUM             = 1 << 27;
         const AT_REST                  = 1 << 28;
         const NO_NEW_CELLS             = 1 << 29;
@@ -228,7 +232,18 @@ pub struct SimInfo {
     pub travel_angle: f32,
     pub _first_center_of_mass_timestep: u32,
     pub _last_center_of_mass_timestep: u32,
-    pub _pad: u32,
+    /// Mass range of the integer-atomic grid in reference nodes (a
+    /// [`settings::MAX_FLOW_THICKNESS`] deep column over a cell). reset_grid
+    /// doubles it once the fullest node of a step fills half of it and halves
+    /// it below an eighth; 1 on float-atomic GPUs.
+    pub mass_scale: f32,
+    /// Momentum range in reference nodes moving at
+    /// [`settings::MAX_FLOW_VELOCITY`], adapted like [`Self::mass_scale`].
+    pub momentum_scale: f32,
+    /// [`Self::mass_scale`] of the step before (MPMDAC's mass snapshot).
+    pub previous_mass_scale: f32,
+    pub _pad0: u32,
+    pub _pad1: u32,
 }
 
 impl Default for SimInfo {
@@ -249,16 +264,32 @@ impl Default for SimInfo {
             travel_angle: f32::NAN,
             _first_center_of_mass_timestep: u32::MAX,
             _last_center_of_mass_timestep: u32::MAX,
-            _pad: 0,
+            mass_scale: 1.0,
+            momentum_scale: 1.0,
+            previous_mass_scale: 1.0,
+            _pad0: 0,
+            _pad1: 0,
         }
     }
 }
 
-const _: () = assert!(size_of::<SimInfo>() == 64);
+const _: () = assert!(size_of::<SimInfo>() == 80);
 
 impl SimInfo {
     pub fn parsed_flags(&self) -> SimInfoFlags {
         self.flags.into()
+    }
+
+    /// Integer units per kg of the integer-atomic grid as it stands after
+    /// this step (`mass_factor()` in quantization.wgsl).
+    pub fn mass_factor(&self, settings: &settings::SimSettings) -> f32 {
+        settings.mass_factor() / self.mass_scale
+    }
+
+    /// Integer units per kg m/s of the integer-atomic grid as it stands after
+    /// this step (`momentum_factor()` in quantization.wgsl).
+    pub fn momentum_factor(&self, settings: &settings::SimSettings) -> f32 {
+        settings.momentum_factor() / self.momentum_scale
     }
 
     /// Why the run stopped on its own, for messages; `None` while it runs
@@ -301,6 +332,8 @@ impl std::fmt::Debug for SimInfo {
             .field("travel_vertical_drop", &self.travel_vertical_drop)
             .field("travel_angle", &self.travel_angle)
             .field("flags", &self.parsed_flags())
+            .field("mass_scale", &self.mass_scale)
+            .field("momentum_scale", &self.momentum_scale)
             .finish()
     }
 }
@@ -575,10 +608,29 @@ pub const RELEASE_THICKNESS_THRESHOLD: f32 = 0.01;
 /// Fastest particle speed (m/s) taken as physical; faster particles are
 /// stopped and flag [`SimInfoFlags::UNPHYSICAL_SPEED`]. Dense flow avalanches
 /// reach about 60-80 m/s and the integer atomic grid holds momentum up to
-/// `QUANTIZATION_SAFETY * MAX_FLOW_VELOCITY` = 200 m/s, so a faster particle
+/// `MAX_FLOW_VELOCITY` = 100 m/s for a full `MAX_FLOW_THICKNESS` node (faster
+/// for thinner nodes), so a faster particle
 /// comes from a numerical blow-up, e.g. a cliff of no-data elevations.
-/// Mirrors `MAX_PARTICLE_SPEED` in utils.wgsl.
+/// Mirrors `MAX_PARTICLE_SPEED` in particle_state.wgsl.
 pub const MAX_PARTICLE_SPEED: f32 = 150.0;
+
+/// Smallest integer-atomic grid momentum range relative to the mass range
+/// (`SimInfo::momentum_scale / SimInfo::mass_scale`); mirrors
+/// `MIN_MOMENTUM_PER_MASS_SCALE` in quantization.wgsl.
+const MIN_MOMENTUM_PER_MASS_SCALE: f32 = 0.125;
+
+/// Power-of-two integer-atomic grid range (`SimInfo::mass_scale`) the first
+/// step starts with: the fullest node of `fullest_node` kg fills between an
+/// eighth and a quarter of it, inside the band reset_grid keeps it in
+/// (quantization.wgsl). `reference_node_mass` is the start range of scale 1.
+fn initial_mass_scale(fullest_node: f32, reference_node_mass: f32) -> f32 {
+    if !(fullest_node > 0.0 && reference_node_mass > 0.0) {
+        return 1.0;
+    }
+    let exponent = (4.0 * fullest_node / reference_node_mass).log2().ceil();
+    // MIN_MASS_SCALE and MAX_QUANTIZATION_SCALE of quantization.wgsl
+    exponent.clamp(-8.0, 8.0).exp2()
+}
 
 /// Release thickness (m) of release areas that hold none of their own, used
 /// unless `release_thickness` or `release_swe` is set.
@@ -677,6 +729,9 @@ pub struct ComputeOrchestrator {
     pub particle_sort_interval: u32,
     particle_sort: Option<ParticleSort>,
     steps_since_particle_sort: u32,
+    /// Integer-atomic grid range the first step starts with, in reference
+    /// nodes (`SimInfo::mass_scale`), sized from the seeded particles.
+    initial_mass_scale: f32,
     /// Weak-form pressure pass of the curvilinear model, dispatched after P2G
     /// when enable_weak_pressure is set.
     weak_pressure: Option<(ComputePipeline, BindGroup)>,
@@ -978,6 +1033,7 @@ impl ComputeOrchestrator {
             particle_sort_interval: 25,
             particle_sort: None,
             steps_since_particle_sort: 0,
+            initial_mass_scale: 1.0,
             weak_pressure: None,
             float32_atomic_supported: has_float32_atomic,
             has_float32_atomic,
@@ -1443,7 +1499,7 @@ impl ComputeOrchestrator {
     }
 
     /// Records the chamfer distance between the simulated cells
-    /// (`grid_peak_flow_thickness > peak_flow_thickness_threshold`) and the
+    /// (`grid_peak_flow_thickness >= peak_flow_thickness_threshold`) and the
     /// region-of-interest bitmask: seeds two nearest-neighbor fields,
     /// propagates the nearest seeds with the jump flooding algorithm (one
     /// dispatch per power-of-two step size) and reduces the distances into the
@@ -1522,6 +1578,47 @@ impl ComputeOrchestrator {
         Ok(())
     }
 
+    /// Masks the peak result buffers in place on the GPU: every cell whose
+    /// peak flow thickness is below `min_peak_flow_thickness` or whose peak
+    /// velocity is below `min_peak_velocity` is set to zero in both
+    /// GridPeakFlowThickness and GridPeakVelocity.
+    pub async fn run_post_process(
+        &mut self,
+        sim_settings: &settings::SimSettings,
+        min_peak_flow_thickness: f32,
+        min_peak_velocity: f32,
+    ) -> Result<()> {
+        if sim_settings.grid_shape_x == 0 || sim_settings.grid_shape_y == 0 {
+            return Err(anyhow!("Post-processing grid must not be empty"));
+        }
+        self.resources.write_buffer(
+            &self.queue,
+            BufferName::SimSettings,
+            sim_settings.as_bytes(),
+        )?;
+        self.ensure_buffer(
+            BufferName::PostProcessParams,
+            size_of::<PostProcessParams>(),
+            BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+        );
+        self.resources.write_buffer(
+            &self.queue,
+            BufferName::PostProcessParams,
+            &[PostProcessParams {
+                min_peak_flow_thickness,
+                min_peak_velocity,
+                _padding: [0.0; 2],
+            }],
+        )?;
+        self.run_shader(
+            &ShaderName::PostProcess,
+            sim_settings.grid_shape_x.div_ceil(WORKGROUP_SIZE_2D),
+            sim_settings.grid_shape_y.div_ceil(WORKGROUP_SIZE_2D),
+            1,
+        )
+        .await
+    }
+
     /// Evaluates the simulation against the region of interest on the GPU.
     ///
     /// Dispatches the mass movement count shaders, the chamfer distance
@@ -1529,14 +1626,16 @@ impl ComputeOrchestrator {
     /// unified EvaluationResult buffer. The buffer is read back once and the
     /// metrics combined into a single MassMovementEvaluation:
     /// - intersection/undershoot/overshoot/iou from the simulated vs. reference cell counts
-    /// - beeline_3d between the highest and lowest avalanche point
-    /// - chamfer between the simulated cells and the region of interest,
-    ///   normalized with the length of the grid diagonal
+    /// - beeline_3d, horizontal_distance and vertical_drop between the
+    ///   highest and lowest avalanche point, the same for the region of
+    ///   interest (`*_ref`), and the peak velocity over the avalanche cells
+    /// - chamfer between the simulated cells and the region of interest, in
+    ///   metres (not normalized: the grid size depends on the domain padding)
     ///
     /// Release cells (ReleaseAreas > RELEASE_THICKNESS_THRESHOLD) are left out of the overlap counts and
     /// the chamfer means, so the area metrics do not improve with the release
     /// area fraction.
-    pub async fn evaluate_gpu(
+    pub async fn evaluate(
         &mut self,
         sim_settings: &settings::SimSettings,
     ) -> Result<MassMovementEvaluation> {
@@ -1589,10 +1688,12 @@ impl ComputeOrchestrator {
         let mut evaluation =
             evaluation_from_counts(raw.intersection, raw.undershoot, raw.overshoot);
         evaluation.beeline_3d = raw.beeline_distance as f64;
-        let diagonal = (((sim_settings.grid_shape_x as f64) * (sim_settings.cell_size as f64))
-            .powi(2)
-            + ((sim_settings.grid_shape_y as f64) * (sim_settings.cell_size as f64)).powi(2))
-        .sqrt();
+        evaluation.horizontal_distance = raw.horizontal_distance as f64;
+        evaluation.vertical_drop = raw.vertical_drop as f64;
+        evaluation.beeline_3d_ref = raw.reference_beeline_distance as f64;
+        evaluation.horizontal_distance_ref = raw.reference_horizontal_distance as f64;
+        evaluation.vertical_drop_ref = raw.reference_vertical_drop as f64;
+        evaluation.peak_velocity = raw.peak_velocity as f64;
         Ok(evaluation.with_chamfer(chamfer_from_sums(
             raw.sum_sim_to_roi,
             raw.count_sim,
@@ -1600,7 +1701,6 @@ impl ComputeOrchestrator {
             raw.count_roi,
             raw.roi_seeded != 0,
             raw.sim_seeded != 0,
-            diagonal,
         )))
     }
 
@@ -1805,10 +1905,16 @@ impl ComputeOrchestrator {
 
         // no readback: the seeding runs on while the CPU prepares the next
         // stage (AtomicValues holds the estimated release volume)
+        self.initial_mass_scale = 1.0;
         if !self.has_float32_atomic && number_release_particles > 0 {
             // mean seeded mass (the volume estimate rounds every cell to m3)
             let masses = self.read_buffer::<f32>(BufferName::ParticlesMass).await?;
             let mean_mass = masses.iter().map(|&m| m as f64).sum::<f64>() / masses.len() as f64;
+            let max_mass = masses.iter().copied().fold(0.0f32, f32::max);
+            // a node holds about one cell of particles
+            let fullest_node = max_mass * sim_settings.released_particles_per_cell.max(1) as f32;
+            self.initial_mass_scale =
+                initial_mass_scale(fullest_node, sim_settings.max_node_mass());
             self.log_integer_grid_resolution(sim_settings, mean_mass as f32);
         }
         Ok(())
@@ -1825,7 +1931,8 @@ impl ComputeOrchestrator {
         let mass_units = particle_mass * sim_settings.mass_factor();
         let momentum_units = particle_mass * sim_settings.momentum_factor();
         debug!(
-            "Integer atomic grid: up to {:.3e} kg and {:.3e} kg m/s per node in steps of {:.3e} kg \
+            "Integer atomic grid at its start range (it adapts to the fullest node): up to \
+             {:.3e} kg and {:.3e} kg m/s per node in steps of {:.3e} kg \
              and {:.3e} kg m/s; a release particle of {:.3} kg holds {:.3e} mass steps and \
              {:.3e} momentum steps at 1 m/s",
             sim_settings.max_node_mass(),
@@ -1957,7 +2064,7 @@ impl ComputeOrchestrator {
             label: Some("Particle Relaxation Pass"),
             timestamp_writes: None,
         };
-        // one submission, see evaluate_gpu
+        // one submission, see evaluate
         let mut encoder = self
             .device
             .create_command_encoder(&CommandEncoderDescriptor {
@@ -2020,6 +2127,15 @@ impl ComputeOrchestrator {
         let sim_info = SimInfo {
             timestep: 0,
             number_particles: number_release_particles,
+            mass_scale: self.initial_mass_scale,
+            previous_mass_scale: self.initial_mass_scale,
+            // the release starts at rest: the smallest momentum range (the
+            // float-atomic grid keeps every scale at 1)
+            momentum_scale: if self.has_float32_atomic {
+                1.0
+            } else {
+                self.initial_mass_scale * MIN_MOMENTUM_PER_MASS_SCALE
+            },
             // estimated timestep for a 60 degree slope
             dt: (2.0 * sim_settings.cfl * sim_settings.cell_size / (9.81 * 0.866) as f32).sqrt(),
             elevation_threshold: minimum_dem_elevation - 0.1,
@@ -2384,7 +2500,7 @@ impl ComputeOrchestrator {
         self.particle_sort = None;
         let sorted_p2g = match SimModel::from_int(sim_settings.sim_model) {
             Some(SimModel::Curvilinear | SimModel::TerrainFollowing) => ShaderName::P2G2DSorted,
-            Some(SimModel::ThreeDDepthAveraged) => ShaderName::P2G3DSorted,
+            Some(SimModel::GlobalCartesian) => ShaderName::P2G3DSorted,
             _ => return Ok(()),
         };
         if self.particle_sort_interval == 0 {
@@ -2466,8 +2582,7 @@ impl ComputeOrchestrator {
     }
 
     pub async fn step_3d(&mut self, steps: u32) -> Result<SimInfo> {
-        self.step_simulation(steps, SimModel::ThreeDDepthAveraged)
-            .await
+        self.step_simulation(steps, SimModel::GlobalCartesian).await
     }
 
     pub async fn step_sliding_block(&mut self, steps: u32) -> Result<SimInfo> {
@@ -2497,7 +2612,7 @@ impl ComputeOrchestrator {
                 .min(sim_settings.max_steps - steps_run);
             let sim_info = if sim_settings.sim_model == SimModel::SlidingBlock.as_int() {
                 self.step_sliding_block(steps).await?
-            } else if sim_settings.sim_model == SimModel::ThreeDDepthAveraged.as_int() {
+            } else if sim_settings.sim_model == SimModel::GlobalCartesian.as_int() {
                 self.step_3d(steps).await?
             } else {
                 self.step_terrain_following(steps).await?
@@ -2820,7 +2935,7 @@ impl ComputeOrchestrator {
         // terrain-following, 3D and sliding-block particles start their step
         // from the stored elevation; the other models resample it from the DEM
         if sim_model == SimModel::TerrainFollowing.as_int()
-            || sim_model == SimModel::ThreeDDepthAveraged.as_int()
+            || sim_model == SimModel::GlobalCartesian.as_int()
             || sim_model == SimModel::SlidingBlock.as_int()
         {
             names.push(BufferName::ParticlesElevation);
@@ -2939,6 +3054,20 @@ mod tests {
     use super::*;
     use bytemuck::{Pod, Zeroable};
     use pollster::block_on;
+
+    #[test]
+    fn initial_mass_scale_puts_the_fullest_node_in_the_adaptive_band() {
+        for fullest in [1.0 / 400.0, 1.0 / 40.0, 0.3, 3.0, 30.0] {
+            let scale = initial_mass_scale(fullest, 1.0);
+            let fill = fullest / scale;
+            assert_eq!(scale.log2().fract(), 0.0, "{scale} is no power of two");
+            assert!(fill > 0.125 && fill <= 0.25, "{fullest}: fill {fill}");
+        }
+        assert_eq!(initial_mass_scale(0.0, 1.0), 1.0);
+        // clamped to the scales reset_grid allows
+        assert_eq!(initial_mass_scale(1e-6, 1.0), 1.0 / 256.0);
+        assert_eq!(initial_mass_scale(1e6, 1.0), 256.0);
+    }
 
     #[test]
     fn particle_state_decodes_status_bits_and_timestep() {
@@ -3152,7 +3281,7 @@ mod tests {
     }
 
     #[test_log::test]
-    fn test_evaluate_gpu_matches_cpu() {
+    fn test_evaluate_matches_cpu() {
         let reference = vec![true, true, false, false, true, false];
         let simulated = vec![false, true, true, false, true, false];
         let expected = evaluation::evaluate_mass_movement_area(&reference, &simulated).unwrap();
@@ -3187,11 +3316,11 @@ mod tests {
             .expect("Failed to write ROI");
         block_on(orchestrator.write_buffer(
             BufferName::GridPeakFlowThickness,
-            &[1.0f32, 2.0, 2.0, 0.0, 2.0, 0.0],
+            &[0.5f32, 2.0, 2.0, 0.0, 2.0, 0.0],
         ))
         .expect("Failed to write peak flow thicknesses");
 
-        let actual = block_on(orchestrator.evaluate_gpu(&settings)).expect("GPU evaluation failed");
+        let actual = block_on(orchestrator.evaluate(&settings)).expect("GPU evaluation failed");
 
         assert_eq!(actual.intersection, expected.intersection);
         assert_eq!(actual.undershoot, expected.undershoot);
@@ -3217,7 +3346,7 @@ mod tests {
             &simulated_outside_release,
         )
         .unwrap();
-        let actual = block_on(orchestrator.evaluate_gpu(&settings))
+        let actual = block_on(orchestrator.evaluate(&settings))
             .expect("GPU evaluation with release cells failed");
         assert_eq!(actual.intersection, expected.intersection);
         assert_eq!(actual.undershoot, expected.undershoot);
@@ -3227,9 +3356,9 @@ mod tests {
         block_on(orchestrator.write_buffer(BufferName::ReleaseAreas, &[0.0f32; 6]))
             .expect("Failed to reset release areas");
 
-        block_on(orchestrator.write_buffer(BufferName::GridPeakFlowThickness, &[1.0f32; 6]))
+        block_on(orchestrator.write_buffer(BufferName::GridPeakFlowThickness, &[0.5f32; 6]))
             .expect("Failed to reset peak flow thicknesses");
-        let empty_simulation = block_on(orchestrator.evaluate_gpu(&settings))
+        let empty_simulation = block_on(orchestrator.evaluate(&settings))
             .expect("GPU evaluation without affected cells failed");
         assert_eq!(empty_simulation.beeline_3d, 0.0);
     }
@@ -3682,7 +3811,7 @@ mod tests {
     }
 
     #[test_log::test]
-    fn test_evaluate_gpu_beeline_distance() {
+    fn test_evaluate_runout() {
         // 3x3 grid with cell_size 5. Avalanche cells (thickness 2.0 > 1.0) are
         // (0,0) at 100 m, (1,1) at 70 m and (2,2) at 40 m. Cell (0,2) is the
         // highest point of the DEM (9999 m) but not part of the avalanche.
@@ -3721,16 +3850,38 @@ mod tests {
             &[2.0f32, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 2.0],
         ))
         .expect("Failed to write peak flow thicknesses");
-        block_on(orchestrator.write_buffer(BufferName::RegionOfInterest, &[0u32]))
-            .expect("Failed to write region of interest");
+        // region of interest: (1,0) at 50 m and (0,2) at 9999 m
+        block_on(
+            orchestrator.write_buffer(BufferName::RegionOfInterest, &[(1u32 << 1) | (1 << 6)]),
+        )
+        .expect("Failed to write region of interest");
+        // the fastest cell (1,0) is not part of the avalanche
+        block_on(orchestrator.write_buffer(
+            BufferName::GridPeakVelocity,
+            &[3.0f32, 99.0, 0.0, 0.0, 7.0, 0.0, 0.0, 0.0, 5.0],
+        ))
+        .expect("Failed to write peak velocities");
 
-        let result = block_on(orchestrator.evaluate_gpu(&settings)).expect("GPU evaluation failed");
+        let result = block_on(orchestrator.evaluate(&settings)).expect("GPU evaluation failed");
         let expected = 3800.0f64.sqrt();
         assert!(
             (result.beeline_3d - expected).abs() < 1e-3,
             "beeline distance was {}, expected {}",
             result.beeline_3d,
             expected
+        );
+        assert!((result.horizontal_distance - 200.0f64.sqrt()).abs() < 1e-4);
+        assert_eq!(result.vertical_drop, 60.0);
+        assert_eq!(result.peak_velocity, 7.0);
+        // reference: highest (2.5, 12.5, 9999), lowest (7.5, 2.5, 50)
+        assert!((result.horizontal_distance_ref - 125.0f64.sqrt()).abs() < 1e-4);
+        assert_eq!(result.vertical_drop_ref, 9949.0);
+        let expected_reference = (125.0f64 + 9949.0 * 9949.0).sqrt();
+        assert!(
+            (result.beeline_3d_ref - expected_reference).abs() < 1e-2,
+            "reference beeline distance was {}, expected {}",
+            result.beeline_3d_ref,
+            expected_reference
         );
 
         // the beeline section of the unified result buffer keeps the paired
@@ -3747,16 +3898,55 @@ mod tests {
         // without avalanche cells there are no extreme points
         block_on(orchestrator.write_buffer(BufferName::GridPeakFlowThickness, &[0.0f32; 9]))
             .expect("Failed to reset peak flow thicknesses");
-        let empty = block_on(orchestrator.evaluate_gpu(&settings))
+        let empty = block_on(orchestrator.evaluate(&settings))
             .expect("GPU evaluation without avalanche cells failed");
         assert_eq!(empty.beeline_3d, 0.0);
+        assert_eq!(empty.horizontal_distance, 0.0);
+        assert_eq!(empty.vertical_drop, 0.0);
+        assert_eq!(empty.peak_velocity, 0.0);
     }
 
     #[test_log::test]
-    fn test_evaluate_gpu_chamfer_distance() {
+    fn test_post_process_masks_cells_below_either_threshold() {
+        let settings = settings::SimSettings {
+            grid_shape_x: 3,
+            grid_shape_y: 2,
+            ..Default::default()
+        };
+        let mut orchestrator =
+            block_on(ComputeOrchestrator::new()).expect("Failed to create ComputeOrchestrator");
+        orchestrator
+            .create_buffers_and_texture_descriptions(&settings)
+            .expect("Failed to create GPU resources");
+        // cells: both above, thickness below, velocity below, both below,
+        // exactly at both thresholds, zero
+        block_on(orchestrator.write_buffer(
+            BufferName::GridPeakFlowThickness,
+            &[2.0f32, 0.5, 2.0, 0.5, 1.0, 0.0],
+        ))
+        .expect("Failed to write peak flow thickness");
+        block_on(orchestrator.write_buffer(
+            BufferName::GridPeakVelocity,
+            &[5.0f32, 5.0, 1.0, 1.0, 3.0, 0.0],
+        ))
+        .expect("Failed to write peak velocity");
+
+        block_on(orchestrator.run_post_process(&settings, 1.0, 3.0))
+            .expect("Post-processing failed");
+
+        let thickness =
+            block_on(orchestrator.read_buffer::<f32>(BufferName::GridPeakFlowThickness))
+                .expect("Failed to read peak flow thickness");
+        let velocity = block_on(orchestrator.read_buffer::<f32>(BufferName::GridPeakVelocity))
+            .expect("Failed to read peak velocity");
+        assert_eq!(thickness[..6], [2.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+        assert_eq!(velocity[..6], [5.0, 0.0, 0.0, 0.0, 3.0, 0.0]);
+    }
+
+    #[test_log::test]
+    fn test_evaluate_chamfer_distance() {
         // 3x3 grid with cell_size 5: a simulated cell at (2,0) and ROI cells at
-        // (0,0) and (2,2). Every nearest distance is 2 cells = 10 world units,
-        // the grid diagonal is 15*sqrt(2).
+        // (0,0) and (2,2). Every nearest distance is 2 cells = 10 world units.
         let settings = settings::SimSettings {
             grid_shape_x: 3,
             grid_shape_y: 3,
@@ -3793,9 +3983,10 @@ mod tests {
         block_on(orchestrator.write_buffer(BufferName::RegionOfInterest, &[0b1_0000_0001u32]))
             .expect("Failed to write region of interest");
 
-        let result = block_on(orchestrator.evaluate_gpu(&settings)).expect("GPU evaluation failed");
+        let result = block_on(orchestrator.evaluate(&settings)).expect("GPU evaluation failed");
 
-        let expected_per_direction = 10.0 / (15.0 * (2.0f64).sqrt());
+        // in metres, not normalized by the grid
+        let expected_per_direction = 10.0;
         assert!(
             (result.sim_to_roi - expected_per_direction).abs() < 1e-6,
             "sim_to_roi was {}",
@@ -3816,7 +4007,7 @@ mod tests {
         // so the chamfer distance is infinite
         block_on(orchestrator.write_buffer(BufferName::GridPeakFlowThickness, &[0.0f32; 9]))
             .expect("Failed to reset peak flow thicknesses");
-        let empty_simulation = block_on(orchestrator.evaluate_gpu(&settings))
+        let empty_simulation = block_on(orchestrator.evaluate(&settings))
             .expect("GPU evaluation without simulated cells failed");
         assert!(empty_simulation.chamfer.is_infinite());
         assert_eq!(empty_simulation.sim_to_roi, 0.0);
@@ -3863,13 +4054,13 @@ mod tests {
         roi[last_cell / 32] = 1 << (last_cell % 32);
         block_on(orchestrator.write_buffer(BufferName::RegionOfInterest, &roi))
             .expect("Failed to write region of interest");
-        let result = block_on(orchestrator.evaluate_gpu(&settings)).expect("GPU evaluation failed");
+        let result = block_on(orchestrator.evaluate(&settings)).expect("GPU evaluation failed");
         (settings, result)
     }
 
+    /// Distance (m) between the centres of the two end cells of the row.
     fn row_ends_distance(width: u32) -> f64 {
-        let (length, height) = (width as f64 * 5.0, 5.0f64);
-        (width - 1) as f64 * 5.0 / length.hypot(height)
+        (width - 1) as f64 * 5.0
     }
 
     #[test_log::test]
@@ -3897,20 +4088,20 @@ mod tests {
     }
 
     #[test_log::test]
-    fn test_evaluate_gpu_chamfer_applies_every_flood_step() {
+    fn test_evaluate_chamfer_applies_every_flood_step() {
         // a single step size would not carry the seeds across the row
         let mut orchestrator =
             block_on(ComputeOrchestrator::new()).expect("Failed to create ComputeOrchestrator");
         let (_, result) = evaluate_row_ends(&mut orchestrator, 64);
         assert!(
-            (result.sim_to_roi - row_ends_distance(64)).abs() < 1e-5,
+            (result.sim_to_roi - row_ends_distance(64)).abs() < 1e-3,
             "sim_to_roi was {}",
             result.sim_to_roi
         );
     }
 
     #[test_log::test]
-    fn test_evaluate_gpu_reuses_the_chamfer_buffers() {
+    fn test_evaluate_reuses_the_chamfer_buffers() {
         let mut orchestrator =
             block_on(ComputeOrchestrator::new()).expect("Failed to create ComputeOrchestrator");
         let (settings, first) = evaluate_row_ends(&mut orchestrator, 64);
@@ -3930,14 +4121,14 @@ mod tests {
         };
         let allocated = buffers(&orchestrator);
 
-        let second = block_on(orchestrator.evaluate_gpu(&settings)).expect("GPU evaluation failed");
+        let second = block_on(orchestrator.evaluate(&settings)).expect("GPU evaluation failed");
         assert_eq!(buffers(&orchestrator), allocated);
         assert_eq!(first.sim_to_roi, second.sim_to_roi);
 
         // a new grid gets buffers and flood steps of its own size
         let (_, smaller) = evaluate_row_ends(&mut orchestrator, 8);
         assert!(
-            (smaller.sim_to_roi - row_ends_distance(8)).abs() < 1e-5,
+            (smaller.sim_to_roi - row_ends_distance(8)).abs() < 1e-3,
             "sim_to_roi was {}",
             smaller.sim_to_roi
         );
@@ -4561,61 +4752,19 @@ mod tests {
             test_output[28],
         );
 
-        if orchestrator.has_float32_atomic() {
-            // expected momentum distribution (grid x-momentum)
+        // expected momentum distribution (grid x-momentum); the integer grid
+        // stores it in units of momentum_factor
+        let expected_momentum_x = [
+            325.6352, 1439.61, 170.7553, 2510.889, 11100.462, 1316.65, 527.475, 2331.9292,
+            276.59528,
+        ];
+        for (offset, expected) in expected_momentum_x.into_iter().enumerate() {
+            let index = 20 + offset;
+            let actual = test_output[index] / momentum_factor;
             assert!(
-                (test_output[20] / momentum_factor - 325.6352).abs() / 325.6352
-                    < rel_error_threshold,
-                "test_output[20] failed"
+                (actual - expected).abs() / expected < rel_error_threshold,
+                "test_output[{index}] failed: {actual} != {expected}"
             );
-            assert!(
-                (test_output[21] / momentum_factor - 1439.61).abs() / 1439.61 < rel_error_threshold,
-                "test_output[21] failed"
-            );
-            assert!(
-                (test_output[22] / momentum_factor - 170.7553).abs() / 170.7553
-                    < rel_error_threshold,
-                "test_output[22] failed"
-            );
-            assert!(
-                (test_output[23] / momentum_factor - 2510.889).abs() / 2510.889
-                    < rel_error_threshold,
-                "test_output[23] failed"
-            );
-            assert!(
-                (test_output[24] / momentum_factor - 11100.462).abs() / 11100.462
-                    < rel_error_threshold,
-                "test_output[24] failed"
-            );
-            assert!(
-                (test_output[25] / momentum_factor - 1316.65).abs() / 1316.65 < rel_error_threshold,
-                "test_output[25] failed"
-            );
-            assert!(
-                (test_output[26] / momentum_factor - 527.475).abs() / 527.475 < rel_error_threshold,
-                "test_output[26] failed"
-            );
-            assert!(
-                (test_output[27] / momentum_factor - 2331.9292).abs() / 2331.9292
-                    < rel_error_threshold,
-                "test_output[27] failed"
-            );
-            assert!(
-                (test_output[28] / momentum_factor - 276.59528).abs() / 276.59528
-                    < rel_error_threshold,
-                "test_output[28] failed"
-            );
-        } else {
-            // momentum transfer is not accurate without float32 atomics, but we can at least check that the maths is correct
-            assert_eq!(test_output[20], 32564.0, "test_output[20] failed");
-            assert_eq!(test_output[21], 143961.0, "test_output[21] failed");
-            assert_eq!(test_output[22], 17076.0, "test_output[22] failed");
-            assert_eq!(test_output[23], 251089.0, "test_output[23] failed");
-            assert_eq!(test_output[24], 1110046.0, "test_output[24] failed");
-            assert_eq!(test_output[25], 131665.0, "test_output[25] failed");
-            assert_eq!(test_output[26], 52747.0, "test_output[26] failed");
-            assert_eq!(test_output[27], 233193.0, "test_output[27] failed");
-            assert_eq!(test_output[28], 27660.0, "test_output[28] failed");
         }
 
         info!(
@@ -4631,54 +4780,17 @@ mod tests {
             test_output[38],
         );
         // expected momentum distribution (grid y-momentum)
-        if orchestrator.has_float32_atomic() {
+        let expected_momentum_y = [
+            488.4528, 2159.415, 256.13293, 3766.3333, 16650.691, 1974.9751, 791.2124, 3497.8938,
+            414.89288,
+        ];
+        for (offset, expected) in expected_momentum_y.into_iter().enumerate() {
+            let index = 30 + offset;
+            let actual = test_output[index] / momentum_factor;
             assert!(
-                (test_output[30] - 488.4528).abs() < 1e-4,
-                "test_output[30] failed"
+                (actual - expected).abs() / expected < rel_error_threshold,
+                "test_output[{index}] failed: {actual} != {expected}"
             );
-            assert!(
-                (test_output[31] - 2159.415).abs() < 1e-4,
-                "test_output[31] failed"
-            );
-            assert!(
-                (test_output[32] - 256.13293).abs() < 1e-4,
-                "test_output[32] failed"
-            );
-            assert!(
-                (test_output[33] - 3766.3333).abs() < 1e-4,
-                "test_output[33] failed"
-            );
-            assert!(
-                (test_output[34] - 16650.691).abs() < 1e-4,
-                "test_output[34] failed"
-            );
-            assert!(
-                (test_output[35] - 1974.9751).abs() < 1e-4,
-                "test_output[35] failed"
-            );
-            assert!(
-                (test_output[36] - 791.2124).abs() < 1e-4,
-                "test_output[36] failed"
-            );
-            assert!(
-                (test_output[37] - 3497.8938).abs() < 1e-4,
-                "test_output[37] failed"
-            );
-            assert!(
-                (test_output[38] - 414.89288).abs() < 1e-4,
-                "test_output[38] failed"
-            );
-        } else {
-            // momentum transfer is not accurate without float32 atomics, but we can at least check that the maths is correct
-            assert_eq!(test_output[30], 48845.0, "test_output[30] failed");
-            assert_eq!(test_output[31], 215942.0, "test_output[31] failed");
-            assert_eq!(test_output[32], 25613.0, "test_output[32] failed");
-            assert_eq!(test_output[33], 376633.0, "test_output[33] failed");
-            assert_eq!(test_output[34], 1665069.0, "test_output[34] failed");
-            assert_eq!(test_output[35], 197498.0, "test_output[35] failed");
-            assert_eq!(test_output[36], 79121.0, "test_output[36] failed");
-            assert_eq!(test_output[37], 349789.0, "test_output[37] failed");
-            assert_eq!(test_output[38], 41489.0, "test_output[38] failed");
         }
     }
 }
