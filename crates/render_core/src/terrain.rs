@@ -272,7 +272,7 @@ struct TerrainUniforms {
     /// width, height, cell_size, vertical exaggeration
     grid: [f32; 4],
     /// min elevation, max elevation, momentum overlay unit (kg m/s per i32
-    /// step), unused
+    /// step), orthophoto enabled (1) or not (0)
     elevation: [f32; 4],
     /// direction towards the light
     light_dir: [f32; 4],
@@ -293,6 +293,22 @@ pub struct OverlayRange {
     pub label: &'static str,
     /// Unit suffix rendered beside the colour bar legend, e.g. "m/s".
     pub unit: &'static str,
+    /// Colour ramp of the overlay and its colour bar.
+    pub ramp: OverlayRamp,
+}
+
+/// Colour ramp of an overlay; must match the ramps in `terrain.wgsl` and
+/// `colorbar.rs`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OverlayRamp {
+    /// Blue to red heat ramp for simulation values.
+    #[default]
+    Heat,
+    /// Light to dark green for canopy cover.
+    Forest,
+    /// Green (intact) over yellow and orange to brown (destroyed) for the
+    /// destroyed fraction of a forest.
+    ForestDamage,
 }
 
 impl Default for OverlayRange {
@@ -303,6 +319,7 @@ impl Default for OverlayRange {
             threshold: 0.0,
             label: "",
             unit: "",
+            ramp: OverlayRamp::Heat,
         }
     }
 }
@@ -315,7 +332,13 @@ impl OverlayRange {
             threshold: min,
             label: "",
             unit: "",
+            ramp: OverlayRamp::Heat,
         }
+    }
+
+    pub fn with_ramp(mut self, ramp: OverlayRamp) -> Self {
+        self.ramp = ramp;
+        self
     }
 
     pub fn with_threshold(mut self, threshold: f32) -> Self {
@@ -343,6 +366,12 @@ enum OverlayMode {
     /// Two interleaved `i32` values `(u, v)` per cell — the p2g momentum pair
     /// of the integer-atomic grid; shown as the magnitude in kg·m/s.
     Momentum = 2,
+    /// Like `Scalar`, coloured with the green forest ramp.
+    Forest = 3,
+    /// Standing cover in the overlay buffer and the initial cover in the
+    /// reference buffer; shown as the destroyed fraction 1 - standing / cover
+    /// of the cells that hold forest.
+    ForestDamage = 4,
 }
 
 /// Draws a DEM as a shaded height field, optionally tinted by a scalar simulation grid.
@@ -356,6 +385,13 @@ pub struct TerrainRenderer {
     heightmap_view: wgpu::TextureView,
     /// Bound when no simulation grid is attached, so the layout stays valid.
     placeholder_overlay: wgpu::Buffer,
+    /// The draped orthophoto, or a 1x1 placeholder while there is none.
+    ortho_view: wgpu::TextureView,
+    ortho_sampler: wgpu::Sampler,
+    /// The grid buffers bound at the moment, kept to rebuild the bind group
+    /// when the orthophoto changes.
+    overlay: wgpu::Buffer,
+    reference: wgpu::Buffer,
     uniforms: TerrainUniforms,
     vertex_count: u32,
 }
@@ -462,6 +498,34 @@ impl TerrainRenderer {
                     },
                     count: None,
                 },
+                // reference grid of the forest damage overlay (initial cover)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // orthophoto draped over the terrain
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
 
@@ -472,12 +536,25 @@ impl TerrainRenderer {
             mapped_at_creation: false,
         });
 
+        let ortho_view = upload_orthophoto(device, queue, 1, 1, &[0; 4]);
+        let ortho_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Orthophoto Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
         let bind_group = create_bind_group(
             device,
             &bind_group_layout,
             &uniform_buffer,
             &heightmap_view,
             &placeholder_overlay,
+            &placeholder_overlay,
+            &ortho_view,
+            &ortho_sampler,
         );
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -533,7 +610,11 @@ impl TerrainRenderer {
             bind_group,
             uniform_buffer,
             heightmap_view,
+            overlay: placeholder_overlay.clone(),
+            reference: placeholder_overlay.clone(),
             placeholder_overlay,
+            ortho_view,
+            ortho_sampler,
             uniforms,
             vertex_count: terrain.vertex_count(),
         }
@@ -550,7 +631,30 @@ impl TerrainRenderer {
         buffer: Option<&wgpu::Buffer>,
         range: OverlayRange,
     ) {
-        self.bind_overlay(device, buffer, OverlayMode::Scalar, range);
+        let mode = match range.ramp {
+            OverlayRamp::Heat => OverlayMode::Scalar,
+            OverlayRamp::Forest | OverlayRamp::ForestDamage => OverlayMode::Forest,
+        };
+        self.bind_overlay(device, buffer, None, mode, range);
+    }
+
+    /// Tints the forest cells by their destroyed fraction 1 - standing /
+    /// cover, from the standing canopy cover in `standing` and the initial
+    /// cover in `cover` (both `f32` per cell like [`Self::set_overlay`]);
+    /// cells without initial cover stay bare terrain. Passing `None` for
+    /// either returns to plain terrain shading.
+    pub fn set_forest_damage_overlay(
+        &mut self,
+        device: &wgpu::Device,
+        standing: Option<&wgpu::Buffer>,
+        cover: Option<&wgpu::Buffer>,
+        range: OverlayRange,
+    ) {
+        let (standing, cover) = match (standing, cover) {
+            (Some(standing), Some(cover)) => (Some(standing), Some(cover)),
+            _ => (None, None),
+        };
+        self.bind_overlay(device, standing, cover, OverlayMode::ForestDamage, range);
     }
 
     /// Like [`Self::set_overlay`], but for the simulation's momentum grid: two
@@ -566,13 +670,14 @@ impl TerrainRenderer {
         momentum_unit: f32,
     ) {
         self.uniforms.elevation[2] = momentum_unit;
-        self.bind_overlay(device, buffer, OverlayMode::Momentum, range);
+        self.bind_overlay(device, buffer, None, OverlayMode::Momentum, range);
     }
 
     fn bind_overlay(
         &mut self,
         device: &wgpu::Device,
         buffer: Option<&wgpu::Buffer>,
+        reference: Option<&wgpu::Buffer>,
         mode: OverlayMode,
         range: OverlayRange,
     ) {
@@ -580,12 +685,37 @@ impl TerrainRenderer {
             Some(_) => [mode as u32 as f32, range.min, range.max, range.threshold],
             None => [0.0, range.min, range.max, range.threshold],
         };
+        self.overlay = buffer.unwrap_or(&self.placeholder_overlay).clone();
+        self.reference = reference.unwrap_or(&self.placeholder_overlay).clone();
+        self.rebuild_bind_group(device);
+    }
+
+    /// Drapes an RGBA8 (sRGB) image over the terrain in place of the elevation
+    /// colours; `None` returns to them. The image spans the DEM's outer cell
+    /// edges with row 0 at the south edge (the DEM row order), and must fit
+    /// `max_texture_dimension_2d`. Transparent pixels show the elevation colours.
+    pub fn set_orthophoto(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        image: Option<(u32, u32, &[u8])>,
+    ) {
+        let (width, height, rgba) = image.unwrap_or((1, 1, &[0; 4]));
+        self.ortho_view = upload_orthophoto(device, queue, width, height, rgba);
+        self.uniforms.elevation[3] = if image.is_some() { 1.0 } else { 0.0 };
+        self.rebuild_bind_group(device);
+    }
+
+    fn rebuild_bind_group(&mut self, device: &wgpu::Device) {
         self.bind_group = create_bind_group(
             device,
             &self.bind_group_layout,
             &self.uniform_buffer,
             &self.heightmap_view,
-            buffer.unwrap_or(&self.placeholder_overlay),
+            &self.overlay,
+            &self.reference,
+            &self.ortho_view,
+            &self.ortho_sampler,
         );
     }
 
@@ -608,12 +738,61 @@ impl TerrainRenderer {
     }
 }
 
+fn upload_orthophoto(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+) -> wgpu::TextureView {
+    assert_eq!(
+        rgba.len(),
+        width as usize * height as usize * 4,
+        "an orthophoto of {width}x{height} needs that many RGBA8 pixels"
+    );
+    let size = wgpu::Extent3d {
+        width,
+        height,
+        depth_or_array_layers: 1,
+    };
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Orthophoto"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        rgba,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(width * 4),
+            rows_per_image: Some(height),
+        },
+        size,
+    );
+    texture.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn create_bind_group(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     uniforms: &wgpu::Buffer,
     heightmap: &wgpu::TextureView,
     overlay: &wgpu::Buffer,
+    reference: &wgpu::Buffer,
+    ortho: &wgpu::TextureView,
+    ortho_sampler: &wgpu::Sampler,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("Terrain Bind Group"),
@@ -630,6 +809,18 @@ fn create_bind_group(
             wgpu::BindGroupEntry {
                 binding: 2,
                 resource: overlay.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: reference.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::TextureView(ortho),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: wgpu::BindingResource::Sampler(ortho_sampler),
             },
         ],
     })

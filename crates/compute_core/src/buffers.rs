@@ -77,10 +77,11 @@ pub struct ChamferParams {
     pub _padding: [u32; 3],
 }
 
-/// GPU layout mirror of the PostProcessParams struct in post_process.wgsl
+/// GPU layout mirror of the EvaluationParams struct in evaluation_mask.wgsl:
+/// the thresholds a cell's peak fields must reach to count as simulated.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable, Default)]
-pub struct PostProcessParams {
+pub struct EvaluationParams {
     pub min_peak_flow_thickness: f32,
     pub min_peak_velocity: f32,
     pub _padding: [f32; 2],
@@ -210,6 +211,10 @@ pub enum BufferName {
     Roughness,
     ReleaseAreas,
     RegionOfInterest,
+    /// input canopy cover fraction per cell (forest model)
+    ForestCover,
+    /// standing canopy cover per cell, lowered by forest destruction
+    ForestStanding,
 
     /// unified evaluation metrics buffer written by the evaluation shaders
     EvaluationResult,
@@ -229,8 +234,8 @@ pub enum BufferName {
     ChamferNearestSim,
     ChamferNearestSimSnapshot,
 
-    /// thresholds of the post_process shader
-    PostProcessParams,
+    /// simulated-cell thresholds of the evaluation shaders
+    EvaluationParams,
 
     // soft sphere relaxation of the freshly initialized particles
     RelaxParams,
@@ -285,6 +290,8 @@ impl BufferName {
             BufferName::SlopeAspect => "slope_aspect",
             BufferName::Roughness => "roughness",
             BufferName::ReleaseAreas => "release_areas",
+            BufferName::ForestCover => "forest_cover",
+            BufferName::ForestStanding => "forest_standing",
             BufferName::TestOutput => "test_output",
             BufferName::GridForces => "grid_forces",
             BufferName::RegionOfInterest => "region_of_interest",
@@ -298,7 +305,7 @@ impl BufferName {
             BufferName::ChamferNearestRoiSnapshot => "chamfer_nearest_roi_snapshot",
             BufferName::ChamferNearestSim => "chamfer_nearest_sim",
             BufferName::ChamferNearestSimSnapshot => "chamfer_nearest_sim_snapshot",
-            BufferName::PostProcessParams => "post_process_params",
+            BufferName::EvaluationParams => "evaluation_params",
             BufferName::RelaxParams => "relax_params",
             BufferName::RelaxGridHead => "relax_grid_head",
             BufferName::ParticleNext => "particle_next",
@@ -354,6 +361,8 @@ impl std::str::FromStr for BufferName {
             "slope_aspect" => Ok(BufferName::SlopeAspect),
             "roughness" => Ok(BufferName::Roughness),
             "release_areas" => Ok(BufferName::ReleaseAreas),
+            "forest_cover" => Ok(BufferName::ForestCover),
+            "forest_standing" => Ok(BufferName::ForestStanding),
             "test_output" => Ok(BufferName::TestOutput),
             "grid_forces" => Ok(BufferName::GridForces),
             "region_of_interest" => Ok(BufferName::RegionOfInterest),
@@ -367,7 +376,7 @@ impl std::str::FromStr for BufferName {
             "chamfer_nearest_roi_snapshot" => Ok(BufferName::ChamferNearestRoiSnapshot),
             "chamfer_nearest_sim" => Ok(BufferName::ChamferNearestSim),
             "chamfer_nearest_sim_snapshot" => Ok(BufferName::ChamferNearestSimSnapshot),
-            "post_process_params" => Ok(BufferName::PostProcessParams),
+            "evaluation_params" => Ok(BufferName::EvaluationParams),
             "relax_params" => Ok(BufferName::RelaxParams),
             "relax_grid_head" => Ok(BufferName::RelaxGridHead),
             "particle_next" => Ok(BufferName::ParticleNext),
@@ -908,6 +917,8 @@ pub fn create_buffers_and_texture_descriptions(
     device: &Device,
     texture_size: Extent3d,
     has_float32_filterable: bool,
+    grid_occupied: bool,
+    forest: bool,
 ) -> Result<GpuResources> {
     let mut gpu_resources = GpuResources::default();
     let filter_mode = if has_float32_filterable {
@@ -1093,10 +1104,12 @@ pub fn create_buffers_and_texture_descriptions(
         grid_bytes_size,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
     );
+    // optional (enable_grid_occupied): without it the shaders never touch the
+    // buffer, which then only holds one element to satisfy the bindings
     gpu_resources.add_buffer(
         device,
         BufferName::GridOccupied,
-        grid_bytes_size,
+        if grid_occupied { grid_bytes_size } else { 4 },
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
     );
     // per-cell force vector: written by grid_physics for the terrain-following
@@ -1150,6 +1163,16 @@ pub fn create_buffers_and_texture_descriptions(
         grid_bytes_size,
         BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
     );
+    // optional (SimFlags::FOREST): the input cover and the standing cover the
+    // forest destruction lowers; one element each without forest
+    for name in [BufferName::ForestCover, BufferName::ForestStanding] {
+        gpu_resources.add_buffer(
+            device,
+            name,
+            if forest { grid_bytes_size } else { 4 },
+            BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+        );
+    }
 
     Ok(gpu_resources)
 }
@@ -1195,6 +1218,8 @@ mod tests {
             (BufferName::SlopeAspect, "slope_aspect"),
             (BufferName::Roughness, "roughness"),
             (BufferName::ReleaseAreas, "release_areas"),
+            (BufferName::ForestCover, "forest_cover"),
+            (BufferName::ForestStanding, "forest_standing"),
             (BufferName::TestOutput, "test_output"),
             (BufferName::GridForces, "grid_forces"),
             (BufferName::CenterOfMass, "center_of_mass"),
@@ -1213,6 +1238,7 @@ mod tests {
                 "chamfer_nearest_sim_snapshot",
             ),
             (BufferName::EvaluationResult, "evaluation_result"),
+            (BufferName::EvaluationParams, "evaluation_params"),
         ];
 
         for (name, expected) in cases {

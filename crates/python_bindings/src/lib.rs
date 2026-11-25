@@ -494,12 +494,33 @@ impl PySettings {
     }
 }
 
+/// Peak velocity (m/s) at which the peak flow pressure `density * v^2`
+/// reaches `min_peak_flow_pressure` (Pa): `rho v^2 >= p` is `v >= sqrt(p / rho)`
+/// for the non-negative peak velocities, so the pressure threshold folds into
+/// the velocity threshold of the evaluation shaders.
+fn pressure_threshold_velocity(min_peak_flow_pressure: f32, density: f32) -> PyResult<f32> {
+    if min_peak_flow_pressure.is_nan() || min_peak_flow_pressure < 0.0 {
+        return Err(PyErr::new::<PyValueError, _>(
+            "min_peak_flow_pressure must be a non-negative number",
+        ));
+    }
+    if min_peak_flow_pressure == 0.0 {
+        return Ok(0.0);
+    }
+    if density.is_nan() || density <= 0.0 {
+        return Err(PyErr::new::<PyValueError, _>(
+            "the density setting must be positive to threshold by peak flow pressure",
+        ));
+    }
+    Ok((min_peak_flow_pressure / density).sqrt())
+}
+
 /// Main avalanche simulation object.
 ///
 /// Lifecycle: create with :meth:`new`, configure with :meth:`create` (or one
 /// of the ``set_*`` methods / :meth:`create_example`), then :meth:`prepare`,
-/// :meth:`run` (or :meth:`run_n_steps`), :meth:`post_process`, and finally
-/// :meth:`evaluate` and :meth:`save`.
+/// :meth:`run` (or :meth:`run_n_steps`), and finally :meth:`evaluate` and
+/// :meth:`save`.
 #[pyclass]
 pub struct PySimulation {
     inner: Simulation,
@@ -663,6 +684,26 @@ impl PySimulation {
             .map_runtime_err()
     }
 
+    /// Set the canopy cover of the forest model from a 2D float32 array.
+    ///
+    /// Cover as a fraction 0..1 (or percent if any value exceeds 1). Enables
+    /// the forest drag and destruction of the ``dampm-global-cartesian``
+    /// model and suppresses release where the cover exceeds
+    /// ``forest_release_max_cover``. Takes effect with the next ``prepare``.
+    ///
+    /// Args:
+    ///     forest_cover: ``(height, width)`` array matching the DEM shape.
+    ///         Must be C-contiguous (call ``.copy()`` if needed).
+    pub fn set_forest_cover(&mut self, forest_cover: PyReadonlyArray2<f32>) -> PyResult<()> {
+        let array = forest_cover.as_array();
+        let slice = array.as_slice().ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(
+                "The forest cover must be C-contiguous; pass it with .copy()",
+            )
+        })?;
+        self.inner.set_forest_cover(slice).map_runtime_err()
+    }
+
     /// Run the simulation to completion (up to ``max_timesteps``).
     pub fn run(&mut self, py: Python<'_>) -> PyResult<()> {
         let inner = &mut self.inner;
@@ -685,50 +726,50 @@ impl PySimulation {
         Ok(PySimInfo { inner: sim_info })
     }
 
-    /// Run the post-processing steps after the simulation finishes.
-    ///
-    /// Masks the peak fields on the GPU: every cell whose peak flow thickness
-    /// is below ``min_peak_flow_thickness`` (m) or whose peak velocity is
-    /// below ``min_peak_velocity`` (m/s) is set to zero in both fields. The
-    /// remaining cells form the simulated avalanche mask used by
-    /// :meth:`evaluate`. ``min_peak_flow_thickness`` defaults to the
-    /// ``peak_flow_thickness_threshold`` setting, ``min_peak_velocity`` to 0.
-    ///
-    /// The peak fields are overwritten, so a second call can only remove
-    /// more cells.
-    #[pyo3(signature = (min_peak_flow_thickness=None, min_peak_velocity=0.0))]
-    pub fn post_process(
-        &mut self,
-        py: Python<'_>,
-        min_peak_flow_thickness: Option<f32>,
-        min_peak_velocity: f32,
-    ) -> PyResult<()> {
-        let inner = &mut self.inner;
-        let min_peak_flow_thickness =
-            min_peak_flow_thickness.unwrap_or(inner.settings.peak_flow_thickness_threshold);
-        py.detach(|| {
-            inner
-                .post_process(min_peak_flow_thickness, min_peak_velocity)
-                .block_on()
-        })
-        .map_runtime_err()
-    }
-
-    /// Evaluate the post-processed simulation on the GPU.
+    /// Evaluate the finished simulation on the GPU.
     ///
     /// Computes the overlap components, the chamfer distance in metres
     /// against the region of interest and the 3D beeline distance between
     /// the highest and lowest avalanche point. A cell counts as simulated
-    /// when its peak flow thickness is at least the
-    /// ``peak_flow_thickness_threshold`` setting.
+    /// when its peak flow thickness is at least ``min_peak_flow_thickness``
+    /// (m), its peak velocity at least ``min_peak_velocity`` (m/s) and its
+    /// peak flow pressure ``density * peak_velocity**2`` at least
+    /// ``min_peak_flow_pressure`` (Pa), with the ``density`` setting.
+    /// ``min_peak_flow_thickness`` defaults to the
+    /// ``peak_flow_thickness_threshold`` setting, the other two to 0.
+    ///
+    /// The thresholds are applied inside the evaluation shaders; the peak
+    /// fields stay unchanged (and are saved unthresholded), so the same run
+    /// can be evaluated repeatedly with different thresholds.
     ///
     /// Returns:
     ///     PyEvaluation: All evaluation metrics; also indexable by name,
     ///     e.g. ``result["iou"]``.
-    pub fn evaluate(&mut self, py: Python<'_>) -> PyResult<PyEvaluation> {
+    #[pyo3(signature = (
+        min_peak_flow_thickness=None,
+        min_peak_velocity=0.0,
+        min_peak_flow_pressure=0.0,
+    ))]
+    pub fn evaluate(
+        &mut self,
+        py: Python<'_>,
+        min_peak_flow_thickness: Option<f32>,
+        min_peak_velocity: f32,
+        min_peak_flow_pressure: f32,
+    ) -> PyResult<PyEvaluation> {
         let inner = &mut self.inner;
+        let min_peak_flow_thickness =
+            min_peak_flow_thickness.unwrap_or(inner.settings.peak_flow_thickness_threshold);
+        let min_peak_velocity = min_peak_velocity.max(pressure_threshold_velocity(
+            min_peak_flow_pressure,
+            inner.settings.density,
+        )?);
         let metrics = py
-            .detach(|| inner.evaluate().block_on())
+            .detach(|| {
+                inner
+                    .evaluate(min_peak_flow_thickness, min_peak_velocity)
+                    .block_on()
+            })
             .map_runtime_err()?;
         Ok(PyEvaluation { metrics })
     }
@@ -755,7 +796,6 @@ impl PySimulation {
     ///         sim.update_settings(params)
     ///         sim.restore_initial_state()
     ///         sim.run()
-    ///         sim.post_process()
     ///         result = sim.evaluate()
     ///
     /// Must be called before the simulation runs.
@@ -1201,6 +1241,41 @@ impl PySimulation {
             .map_runtime_err()?
             .to_vec();
         self.get_layer_f32(py, data)
+    }
+
+    /// ``(height, width)`` float32 array of the canopy cover fraction of
+    /// the forest model, ``None`` without a forest cover.
+    #[getter]
+    pub fn forest_cover<'py>(
+        &mut self,
+        py: Python<'py>,
+    ) -> PyResult<Option<Bound<'py, PyArray2<f32>>>> {
+        match self.inner.forest_cover() {
+            Some(cover) => {
+                let data = cover.to_vec();
+                Ok(Some(self.get_layer_f32(py, data)?))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// ``(height, width)`` float32 array of the standing canopy cover: the
+    /// forest cover lowered by the forest destruction of the current run.
+    /// ``None`` without a forest.
+    #[getter]
+    pub fn forest_standing<'py>(
+        &mut self,
+        py: Python<'py>,
+    ) -> PyResult<Option<Bound<'py, PyArray2<f32>>>> {
+        let data = self
+            .inner
+            .fetch_forest_standing()
+            .block_on()
+            .map_runtime_err()?;
+        if data.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(self.get_layer_f32(py, data)?))
     }
 
     /// ``(height, width)`` float32 array of the configured release areas.

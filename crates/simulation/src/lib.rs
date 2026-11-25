@@ -13,8 +13,8 @@
 //! 3. **Simulate**: step the particle or MPM model
 //!    ([`Simulation::run_n_steps`], [`Simulation::run`]).
 //! 4. **Consume**: read results back through the cached `fetch_*` methods,
-//!    mask the peak fields ([`Simulation::post_process`]), evaluate them
-//!    against the outline ([`Simulation::evaluate`]) and persist everything
+//!    evaluate them against the outline with peak flow thickness / velocity
+//!    thresholds ([`Simulation::evaluate`]) and persist everything
 //!    to a Zarr store
 //!    ([`Simulation::save`] on native, `export_zarr_entries` in the browser).
 //!
@@ -30,8 +30,7 @@
 //! sim.create_default_with_release_areas("data/dem.png", "data/release.png")
 //!     .await?;
 //! sim.run().await?;                       // terrain + release + particles + physics
-//! sim.post_process(0.1, 0.0).await?;      // mask peak fields by thickness/velocity
-//! let evaluation = sim.evaluate().await?;  // metrics against the outline
+//! let evaluation = sim.evaluate(0.1, 0.0).await?; // metrics against the outline
 //! sim.save().await?;                      // write Zarr results
 //! ```
 
@@ -42,7 +41,8 @@ use compute_core::{
     dem::{Bounds, Dem, StableHasher},
     evaluation::MassMovementEvaluation,
     settings::{
-        CrownLineMethod, ParticlePlacement, ReleaseFillMethod, Settings, SimModel, SimSettings,
+        CrownLineMethod, ParticlePlacement, ReleaseFillMethod, Settings, SimFlags, SimModel,
+        SimSettings,
     },
     utils::*,
 };
@@ -88,8 +88,6 @@ pub enum SimulationState {
     Running,
     /// Physics finished: `max_steps` reached or the GPU signalled `SIM_STOPPED`.
     Finished,
-    /// Peak grids thresholded ([`Simulation::post_process`]).
-    PostProcessed,
     /// Evaluation metrics computed against the region of interest
     /// ([`Simulation::evaluate`]).
     Evaluated,
@@ -205,6 +203,10 @@ pub struct SimulationLoadResult {
     pub particle_sort_interval: Option<u32>,
     /// Destination for results written by [`Simulation::save`].
     pub output_path: Option<String>,
+    /// Canopy cover raster of the forest model, if one was configured.
+    pub forest_cover_path: Option<String>,
+    /// Whether a loaded forest cover is used (defaults to true).
+    pub enable_forest: bool,
 }
 
 /// A single avalanche simulation: owns the GPU orchestrator, the loaded DEM,
@@ -276,6 +278,13 @@ pub struct Simulation {
     pub gpu_cache: GpuCache,
     /// Settings of the particles kept by [`Simulation::store_initial_state`].
     initial_state: Option<InitialState>,
+    /// Canopy cover raster of the forest model; loaded on terrain analysis.
+    forest_cover_path: Option<String>,
+    /// Canopy cover fraction (0..1) per cell, from `forest_cover_path` or
+    /// [`Self::set_forest_cover`].
+    forest_cover: Option<Vec<f32>>,
+    /// Whether a forest cover is used ([`Settings::enable_forest`]).
+    enable_forest: bool,
     #[cfg(not(target_arch = "wasm32"))]
     output: Option<data_processor::output::Output>,
 }
@@ -439,6 +448,9 @@ impl Simulation {
             crown_candidates: Vec::new(),
             potential_release_areas: Vec::new(),
             initial_state: None,
+            forest_cover_path: None,
+            forest_cover: None,
+            enable_forest: true,
             #[cfg(not(target_arch = "wasm32"))]
             output: None,
         })
@@ -567,6 +579,8 @@ impl Simulation {
             release_slope_width: settings.release_slope_width,
             release_slope_smoothing_length: settings.release_slope_smoothing_length,
             output_path: settings.output_path.clone(),
+            forest_cover_path: settings.forest_cover_path.clone(),
+            enable_forest: settings.enable_forest.unwrap_or(true),
         })
     }
 
@@ -623,6 +637,10 @@ impl Simulation {
         self.crown_candidates = Vec::new();
         self.potential_release_areas = Vec::new();
         self.initial_state = None;
+        self.forest_cover_path = data.forest_cover_path;
+        self.forest_cover = None;
+        self.enable_forest = data.enable_forest;
+        self.sync_forest_flag();
 
         self.gpu_cache.reset_all();
 
@@ -845,6 +863,15 @@ impl Simulation {
             self.outline_source = None;
         }
         self.roi_uploaded = false;
+        // a forest cover of another grid no longer applies
+        if self
+            .forest_cover
+            .as_ref()
+            .is_some_and(|cover| cover.len() != expected_len)
+        {
+            self.forest_cover = None;
+            self.sync_forest_flag();
+        }
 
         self.state = SimulationState::DemLoaded;
         info!("Loaded the {}", self.dem_description());
@@ -868,6 +895,111 @@ impl Simulation {
         self.release_areas_array = Some(release_areas.to_vec());
         self.release_areas_path = None;
         Ok(())
+    }
+
+    /// Sets the per-cell canopy cover of the forest model directly (fraction
+    /// 0..1, or percent if any value exceeds 1), overriding any configured
+    /// forest cover path. The length must match the DEM, so the DEM has to
+    /// be set first. Takes effect with the next preparation.
+    pub fn set_forest_cover(&mut self, cover: &[f32]) -> Result<()> {
+        if cover.len() != self.dem.width * self.dem.height {
+            bail!(
+                "Forest cover array length ({}) does not match DEM dimensions ({}x{}={}). You have to set the DEM first.",
+                cover.len(),
+                self.dem.width,
+                self.dem.height,
+                self.dem.width * self.dem.height
+            );
+        }
+        self.forest_cover = Some(data_processor::normalize_forest_cover(cover.to_vec()));
+        self.forest_cover_path = None;
+        self.sync_forest_flag();
+        // the forest buffers are sized on terrain analysis
+        self.initial_state = None;
+        if self.state > SimulationState::DemLoaded {
+            self.state = SimulationState::DemLoaded;
+        }
+        Ok(())
+    }
+
+    /// The canopy cover fraction per cell of the forest model, `None` until a
+    /// forest cover is set or loaded (a file loads on terrain analysis).
+    pub fn forest_cover(&self) -> Option<&[f32]> {
+        self.forest_cover.as_deref()
+    }
+
+    /// Whether the run uses a forest cover ([`SimFlags::FOREST`]).
+    pub fn forest_enabled(&self) -> bool {
+        SimFlags::from_u32(self.settings.flags).is_forest_enabled()
+    }
+
+    /// Sets [`SimFlags::FOREST`] when a forest cover is (or will be) loaded
+    /// and the forest is enabled.
+    fn sync_forest_flag(&mut self) {
+        let has_cover = self.forest_cover.is_some() || self.forest_cover_path.is_some();
+        if self.enable_forest && has_cover {
+            self.settings.flags |= SimFlags::FOREST;
+        } else {
+            self.settings.flags &= !SimFlags::FOREST;
+        }
+    }
+
+    /// Loads the configured forest cover file if it is not loaded yet.
+    async fn ensure_forest_cover(&mut self) -> Result<()> {
+        if self.forest_cover.is_some() || !self.enable_forest {
+            return Ok(());
+        }
+        let Some(path) = self.forest_cover_path.clone() else {
+            return Ok(());
+        };
+        info!("Loading the forest cover from {path}");
+        let cover = data_processor::load_forest_cover(&path)
+            .await
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        if cover.len() != self.dem.width * self.dem.height {
+            bail!(
+                "Forest cover {path} has {} cells, the DEM {}x{}={}",
+                cover.len(),
+                self.dem.width,
+                self.dem.height,
+                self.dem.width * self.dem.height
+            );
+        }
+        self.forest_cover = Some(cover);
+        Ok(())
+    }
+
+    /// Writes the forest cover to the input and the standing cover buffers,
+    /// undoing the forest destruction of a previous run.
+    async fn upload_forest_cover(&mut self) -> Result<()> {
+        if !self.forest_enabled() {
+            return Ok(());
+        }
+        let Some(cover) = &self.forest_cover else {
+            return Ok(());
+        };
+        self.orchestrator
+            .write_buffer(BufferName::ForestCover, cover)
+            .await?;
+        self.orchestrator
+            .write_buffer(BufferName::ForestStanding, cover)
+            .await?;
+        Ok(())
+    }
+
+    /// Standing canopy cover per cell: the forest cover lowered by the forest
+    /// destruction of the current run. Empty without a forest.
+    pub async fn fetch_forest_standing(&mut self) -> Result<Vec<f32>> {
+        if self.state < SimulationState::TerrainAnalyzed {
+            bail!("The terrain must be analyzed before reading the standing forest");
+        }
+        if !self.forest_enabled() {
+            return Ok(Vec::new());
+        }
+        self.gpu_cache.read_count += 1;
+        self.orchestrator
+            .read_buffer(BufferName::ForestStanding)
+            .await
     }
 
     /// Sets the region of interest (avalanche outline) as a cell mask. Must
@@ -934,6 +1066,7 @@ impl Simulation {
             ("outlines_path", patch.outlines_path.is_some()),
             ("outlines_padding", patch.outlines_padding.is_some()),
             ("output_path", patch.output_path.is_some()),
+            ("forest_cover_path", patch.forest_cover_path.is_some()),
         ];
         if let Some((key, _)) = data_keys.iter().find(|(_, is_set)| *is_set) {
             bail!("`{key}` changes the input data; load it with create instead");
@@ -942,6 +1075,10 @@ impl Simulation {
         settings.apply_patch(patch);
         settings.validate().map_err(anyhow::Error::msg)?;
         self.settings = settings;
+        if let Some(enable) = patch.enable_forest {
+            self.enable_forest = enable;
+        }
+        self.sync_forest_flag();
         if let Some(steps) = patch.batch_compute_steps {
             self.orchestrator.batch_compute_steps = steps;
         }
@@ -1051,6 +1188,8 @@ impl Simulation {
             || old.world_size_x != new.world_size_x
             || old.world_size_y != new.world_size_y
             || old.reference_surface_length != new.reference_surface_length
+            // the forest buffers are sized and filled on terrain analysis
+            || (old.flags & SimFlags::FOREST) != (new.flags & SimFlags::FOREST)
         {
             return PreparationStage::Terrain;
         }
@@ -1060,6 +1199,8 @@ impl Simulation {
             || old.release_max_elevation != new.release_max_elevation
             || old.roughness_threshold != new.roughness_threshold
             || old.released_particles_per_cell != new.released_particles_per_cell
+            || (self.forest_enabled()
+                && old.forest_release_max_cover != new.forest_release_max_cover)
             || initial.release != self.release_config()
             // a thickness per cell cannot be rescaled to a uniform one
             || old_thickness.is_some() != new_thickness.is_some()
@@ -1176,6 +1317,8 @@ impl Simulation {
         self.orchestrator
             .restore_initial_particles(mass_scale, thickness_scale)
             .await?;
+        // the destruction of the previous run is undone
+        self.upload_forest_cover().await?;
 
         self.gpu_cache.reset_simulation_result();
         self.gpu_cache.release_areas = None;
@@ -1333,30 +1476,6 @@ impl Simulation {
         Ok(())
     }
 
-    /// Masks the peak result fields on the GPU: every cell whose peak flow
-    /// thickness is below `min_peak_flow_thickness` (m) or whose peak velocity
-    /// is below `min_peak_velocity` (m/s) is set to zero in both fields.
-    /// Requires [`SimulationState::Finished`].
-    ///
-    /// The GPU buffers are overwritten, so a second call can only remove
-    /// more cells.
-    pub async fn post_process(
-        &mut self,
-        min_peak_flow_thickness: f32,
-        min_peak_velocity: f32,
-    ) -> Result<()> {
-        if self.state < SimulationState::Finished {
-            bail!("Simulation must be finished before post-processing results");
-        }
-        self.orchestrator
-            .run_post_process(&self.settings, min_peak_flow_thickness, min_peak_velocity)
-            .await?;
-        self.gpu_cache.peak_flow_thickness = None;
-        self.gpu_cache.peak_velocity = None;
-        self.state = SimulationState::PostProcessed;
-        Ok(())
-    }
-
     /// Packs the per-cell ROI mask into u32 words (least significant bit =
     /// first cell), the layout the evaluation shaders expect.
     fn pack_roi_mask(roi: &[bool]) -> Vec<u32> {
@@ -1373,19 +1492,29 @@ impl Simulation {
     /// Evaluates the simulated avalanche against the region of interest on
     /// the GPU: overlap components, the chamfer distance (m) and the 3D
     /// beeline distance between the highest and lowest avalanche point. A
-    /// cell counts as simulated when its peak flow thickness is at least the
-    /// `peak_flow_thickness_threshold` setting; release cells are left out of
-    /// the overlap and the chamfer means. Requires
-    /// [`SimulationState::PostProcessed`] and an uploaded region of interest;
-    /// moves the state to [`SimulationState::Evaluated`].
-    pub async fn evaluate(&mut self) -> Result<MassMovementEvaluation> {
-        if self.state < SimulationState::PostProcessed {
-            bail!("Simulation must be post-processed before evaluation");
+    /// cell counts as simulated when its peak flow thickness is at least
+    /// `min_peak_flow_thickness` (m) and its peak velocity at least
+    /// `min_peak_velocity` (m/s); release cells are left out of the overlap
+    /// and the chamfer means. The thresholds are applied in the evaluation
+    /// shaders and the peak fields stay unchanged, so they are saved as
+    /// simulated and a run can be evaluated again with other thresholds.
+    /// Requires [`SimulationState::Finished`] and an uploaded region of
+    /// interest; moves the state to [`SimulationState::Evaluated`].
+    pub async fn evaluate(
+        &mut self,
+        min_peak_flow_thickness: f32,
+        min_peak_velocity: f32,
+    ) -> Result<MassMovementEvaluation> {
+        if self.state < SimulationState::Finished {
+            bail!("Simulation must be finished before evaluation");
         }
         if !self.roi_uploaded {
             bail!("Region of interest must be uploaded before evaluation");
         }
-        let evaluation = self.orchestrator.evaluate(&self.settings).await?;
+        let evaluation = self
+            .orchestrator
+            .evaluate(&self.settings, min_peak_flow_thickness, min_peak_velocity)
+            .await?;
         self.state = SimulationState::Evaluated;
         Ok(evaluation)
     }
@@ -1632,9 +1761,12 @@ impl Simulation {
             bail!("DEM and settings must be loaded before running normals shader");
         }
         self.gpu_cache.reset_all();
+        self.ensure_forest_cover().await?;
+        self.sync_forest_flag();
         self.orchestrator
             .run_analyze_terrain(&self.settings, &self.dem)
             .await?;
+        self.upload_forest_cover().await?;
         self.state = SimulationState::TerrainAnalyzed;
         Ok(())
     }
@@ -3429,8 +3561,7 @@ fn test_trajectory() {
     fn test_lifecycle_preconditions_return_errors() {
         let mut sim = block_on(Simulation::new()).expect("Failed to create Simulation");
 
-        assert!(block_on(sim.post_process(0.0, 0.0)).is_err());
-        assert!(block_on(sim.evaluate()).is_err());
+        assert!(block_on(sim.evaluate(0.0, 0.0)).is_err());
         assert!(block_on(sim.compute_particles()).is_err());
         assert!(block_on(sim.fetch_peak_velocity()).is_err());
         assert!(block_on(sim.fetch_timestep_data()).is_err());
@@ -4192,7 +4323,6 @@ fn test_trajectory() {
         // the chamfer distance is infinite.
         let mut sim = setup_simple_sim(40.0, 3.0);
         block_on(sim.run()).expect("Failed to run simulation");
-        block_on(sim.post_process(0.0, 0.0)).expect("Failed to post-process");
         let simulated_cells = [14usize, 15, 20, 21];
         let mut peak_flow_thickness = vec![0.0f32; sim.dem.width * sim.dem.height];
         let mut simulated_mask = vec![false; peak_flow_thickness.len()];
@@ -4209,7 +4339,8 @@ fn test_trajectory() {
         // ROI identical to the simulated mask: every nearest distance is 0
         sim.set_roi(&simulated_mask).expect("Failed to set roi");
         block_on(sim.upload_roi()).expect("Failed to upload roi");
-        let evaluation = block_on(sim.evaluate()).expect("GPU evaluation failed");
+        let evaluation = block_on(sim.evaluate(sim.settings.peak_flow_thickness_threshold, 0.0))
+            .expect("GPU evaluation failed");
         assert!(
             (evaluation.chamfer - 0.0).abs() < 1e-9,
             "chamfer was {}",
@@ -4229,7 +4360,9 @@ fn test_trajectory() {
         release_only[15] = true;
         sim.set_roi(&release_only).expect("Failed to set roi");
         block_on(sim.upload_roi()).expect("Failed to upload roi");
-        let shifted_evaluation = block_on(sim.evaluate()).expect("GPU evaluation failed");
+        let shifted_evaluation =
+            block_on(sim.evaluate(sim.settings.peak_flow_thickness_threshold, 0.0))
+                .expect("GPU evaluation failed");
         assert!(
             shifted_evaluation.chamfer.is_finite() && shifted_evaluation.chamfer > 0.0,
             "chamfer was {}",

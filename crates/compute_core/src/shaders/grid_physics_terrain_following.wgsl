@@ -20,6 +20,13 @@
 @group(0) @binding(13) var<storage, read_write> grid_velocity_z: array<f32>;
 // 3D model: nonzero where a depositing particle lies in the node's cell
 @group(0) @binding(14) var<storage> grid_occupied: array<u32>;
+// 3D model: weak-form pressure sum -sum_p m_p h_p / 2 grad N_i of
+// p2g_weak_pressure_3d (enable_weak_pressure)
+@group(0) @binding(15) var<storage> grid_forces: array<i32>; // no_atomic_float
+// atomic_float @group(0) @binding(15) var<storage> grid_forces: array<f32>;
+// 3D model: standing canopy cover per node (forest.wgsl), lowered where the
+// flow breaks the stems; a 4-byte placeholder without SIM_FLAG_FOREST
+@group(0) @binding(16) var<storage, read_write> forest_standing: array<f32>;
 
 // Cartesian counterpart of grid_physics_curvilinear: forces act on a 3D velocity
 // tangent to the bed and are projected with the bed normal. The node keeps the
@@ -42,7 +49,7 @@ fn grid_physics_terrain_following(@builtin(global_invocation_id) id: vec3u) {
     }
     let mass = node_mass(idx);
     let velocity = surface_to_tangent(node_velocity_xy(idx, mass), n);
-    grid_velocity[idx] = tangent_to_surface(update_node(id.xy, n, velocity, mass, true), n);
+    grid_velocity[idx] = tangent_to_surface(update_node(id.xy, n, velocity, mass, true, false, vec2f(0.0), 0.0), n);
 }
 
 // The same update on a node velocity carried as a full 3D vector.
@@ -69,11 +76,31 @@ fn grid_physics_3d(@builtin(global_invocation_id) id: vec3u) {
     // atomic_float let w = select(grid_momentum_z_atomic[idx] / mass, 0.0, mass <= 0.0);
     // particles on differently inclined beds scatter into this node
     let velocity = tangent_project(vec3f(node_velocity_xy(idx, mass), w), n);
-    // only cells that hold a particle enter the peak maps, so the B-spline
-    // spread of the flow edge does not mark untouched neighbour cells
-    let new_velocity = update_node(id.xy, n, velocity, mass, grid_occupied[idx] != 0u);
+    // weak form: m_i grad h = -sum_p m_p h_p / 2 grad N_i(x_p)
+    let use_weak_pressure = (sim_settings.flags & (1u << 5u)) != 0u;
+    var weak_sum = vec2f(0.0);
+    if use_weak_pressure {
+        weak_sum = vec2f(f32(grid_forces[idx * 2u]), f32(grid_forces[idx * 2u + 1u])) * INV_PRESSURE_FACTOR; // no_atomic_float
+        // atomic_float weak_sum = vec2f(grid_forces[idx * 2u], grid_forces[idx * 2u + 1u]);
+    }
+    // with enable_grid_occupied only cells that hold a particle enter the peak
+    // maps, so the B-spline spread of the flow edge does not mark untouched
+    // neighbour cells; otherwise every node with mass records peaks
+    let use_grid_occupied = (sim_settings.flags & SIM_FLAG_GRID_OCCUPIED) != 0u;
+    let record_peaks = !use_grid_occupied || grid_occupied[idx] != 0u;
+    var forest_cover = 0.0;
+    if forest_enabled() {
+        forest_cover = forest_standing[idx];
+    }
+    let new_velocity = update_node(id.xy, n, velocity, mass, record_peaks, use_weak_pressure, weak_sum, forest_cover);
     grid_velocity[idx] = new_velocity.xy;
     grid_velocity_z[idx] = new_velocity.z;
+    // stems loaded beyond their rupture moment by the flow of this step (the
+    // velocity the drag acted on, as recorded in the peak velocity map)
+    // break; one thread per node, so the read-modify-write needs no atomics
+    if forest_cover > 0.0 && forest_breaks(get_h(id.x, id.y), length(new_velocity)) {
+        forest_standing[idx] = forest_decay(forest_cover, sim_info.dt);
+    }
 }
 
 fn node_is_skipped(xy: vec2u) -> bool {
@@ -116,9 +143,14 @@ fn node_velocity_xy(idx: u32, mass: f32) -> vec2f {
 
 // Applies gravity, pressure and friction to the tangent velocity of a node and
 // records the node's diagnostics (peak velocity, peak flow thickness and the
-// new-cell count) if record_peaks.
+// new-cell count) if record_peaks. With use_weak_pressure the horizontal
+// thickness gradient is the weak-form sum weak_sum = m_i grad h divided by the
+// node mass instead of the centred difference of the nodal thickness.
+// forest_cover is the standing canopy cover of the node (0 without forest),
+// whose stem drag adds to the basal friction.
 // Returns the new tangent velocity.
-fn update_node(xy: vec2u, n: vec3f, velocity: vec3f, mass: f32, record_peaks: bool) -> vec3f {
+fn update_node(xy: vec2u, n: vec3f, velocity: vec3f, mass: f32, record_peaks: bool,
+               use_weak_pressure: bool, weak_sum: vec2f, forest_cover: f32) -> vec3f {
     let use_curvature: bool = (sim_settings.flags & (1u << 0u)) != 0u;
     let use_particle_interaction: bool = (sim_settings.flags & (1u << 1u)) != 0u;
     let use_earth_pressure_coefficient: bool = (sim_settings.flags & (1u << 2u)) != 0u;
@@ -149,10 +181,15 @@ fn update_node(xy: vec2u, n: vec3f, velocity: vec3f, mass: f32, record_peaks: bo
 
     // 3. Driving accelerations: tangential gravity and hydrostatic pressure
     let gravity_acceleration = vec3f(0.0, 0.0, -g) + g * n.z * n;
-    let grad_h = vec2f(
+    var grad_h = vec2f(
         (get_h(xy.x + 1, xy.y) - get_h(xy.x - 1, xy.y)) / (2.0 * sim_settings.cell_size),
         (get_h(xy.x, xy.y + 1) - get_h(xy.x, xy.y - 1)) / (2.0 * sim_settings.cell_size)
     );
+    if use_weak_pressure {
+        let node_is_empty = mass < min_node_mass(); // no_atomic_float
+        // atomic_float let node_is_empty = mass <= 0.0;
+        grad_h = select(weak_sum / mass, vec2f(0.0), node_is_empty);
+    }
     // Savage-Hutter earth pressure (Hutter et al. 1993): k_x along the fall
     // line, k_y across it, each active where the flow stretches in that
     // direction and passive where it is compressed; hydrostatic when disabled
@@ -184,7 +221,8 @@ fn update_node(xy: vec2u, n: vec3f, velocity: vec3f, mass: f32, record_peaks: bo
         let cos_beta = textureLoad(basal_topography_texture, vec2<i32>(xy), 0).x;
         wall_load = g_normal * gully_wall_load_factor(cos_beta, k_y);
     }
-    let friction_acceleration = basal_friction_acceleration(wall_load, sim_settings.snow_density, friction_speed, h, sim_settings.friction_model);
+    let friction_acceleration = basal_friction_acceleration(wall_load, sim_settings.snow_density, friction_speed, h, sim_settings.friction_model)
+        + forest_drag_acceleration(forest_cover, h, friction_speed);
     var new_velocity = vec3f(0.0);
     if (friction_acceleration * sim_info.dt) < proposed_speed {
         new_velocity = proposed * (1.0 - friction_acceleration * sim_info.dt / proposed_speed);
@@ -498,6 +536,79 @@ fn gully_wall_load_factor(cos_beta: f32, k_y: f32) -> f32 {
 }
 
 // END friction.wgsl
+
+// import forest.wgsl;
+// BEGIN forest.wgsl
+// Forest model of the DAMPM global model, after the NAKSIN / MoT-Voellmy
+// forest description (NGI): standing stems exert a quadratic drag on the flow
+// and break once the bending moment of the flow exceeds their strength, after
+// which the standing forest decays and its drag vanishes.
+// Pure library module: it is textually imported and relies on the importing
+// module importing sim_settings.wgsl (sim_settings).
+//
+// State per node: the standing canopy cover c (0..1), initialised with the
+// input cover and lowered by the destruction. All tree parameters derive from
+// the cover and the settings:
+//   stem density   n = c / (pi/4 d_c^2)            (crowns tile the cover)
+//   stem diameter  D = forest_trunk_diameter
+// Drag per unit flow mass (the MoT form 1/2 rho C_D n D h u^2 / (rho h)),
+// with the flow height loading a stem capped at the tree height H:
+//   a_F = 1/2 C_D n D min(h, H) / h u^2
+// Breaking: bending moment at the stem base of the drag force on one stem,
+// acting at half the loaded height, against the elastic section modulus:
+//   M   = 1/2 rho C_D D h_eff u^2 * h_eff / 2
+//   M_c = sigma_MOR pi D^3 / 32
+// Decay (assumption, the source formula is not available): the decay
+// coefficient c_f (m/s) is read as the speed at which the fracture runs
+// through a stem, so a loaded stand fails on the time scale D / c_f:
+//   dc/dt = -c c_f / D   while M >= M_c
+// integrated exactly over a step, c <- c exp(-dt c_f / D).
+// All forest physics lives here so the closures can be swapped as a unit.
+
+const FOREST_PI: f32 = 3.14159265358979;
+
+// stems per m^2 of a canopy cover fraction
+fn forest_stem_density(cover: f32) -> f32 {
+    let d_c = sim_settings.forest_crown_diameter;
+    return max(cover, 0.0) / (0.25 * FOREST_PI * d_c * d_c);
+}
+
+// flow height (m) loading a stem
+fn forest_loaded_height(h: f32) -> f32 {
+    return min(max(h, 0.0), sim_settings.forest_tree_height);
+}
+
+// deceleration (m/s^2) of a flow of bed-normal height h and speed u by the
+// stems of the standing cover
+fn forest_drag_acceleration(standing_cover: f32, h: f32, speed: f32) -> f32 {
+    if standing_cover <= 0.0 {
+        return 0.0;
+    }
+    let n = forest_stem_density(standing_cover);
+    let h_safe = max(h, 1e-3);
+    let loaded_fraction = min(forest_loaded_height(h_safe) / h_safe, 1.0);
+    return 0.5 * sim_settings.forest_drag_coefficient * n * sim_settings.forest_trunk_diameter
+        * loaded_fraction * speed * speed;
+}
+
+// whether the flow breaks the stems: bending moment at the base above the
+// moment of rupture
+fn forest_breaks(h: f32, speed: f32) -> bool {
+    let d = sim_settings.forest_trunk_diameter;
+    let h_eff = forest_loaded_height(h);
+    let moment = 0.25 * sim_settings.snow_density * sim_settings.forest_drag_coefficient * d
+        * h_eff * h_eff * speed * speed;
+    let moment_of_rupture = sim_settings.forest_modulus_of_rupture * FOREST_PI * d * d * d / 32.0;
+    return moment >= moment_of_rupture;
+}
+
+// standing cover after a step of dt of breaking load
+fn forest_decay(standing_cover: f32, dt: f32) -> f32 {
+    let rate = sim_settings.forest_decay_coefficient / sim_settings.forest_trunk_diameter;
+    return standing_cover * exp(-dt * rate);
+}
+
+// END forest.wgsl
 // import constants.wgsl;
 // BEGIN constants.wgsl
 // Shared constants without dependencies.
@@ -559,9 +670,29 @@ struct SimSettings {
     // 3D lift-off: terminal velocity (m/s) of the quadratic air drag in
     // flight; 0 disables the drag
     flight_terminal_velocity: f32,
+    // forest model (forest.wgsl), read only with SIM_FLAG_FOREST
+    forest_drag_coefficient: f32,
+    forest_trunk_diameter: f32,
+    forest_crown_diameter: f32,
+    forest_tree_height: f32,
+    forest_modulus_of_rupture: f32,
+    forest_decay_coefficient: f32,
+    forest_release_max_cover: f32,
 };
 
 @group(0) @binding(0) var<uniform> sim_settings: SimSettings;
+
+// SimFlags::GRID_OCCUPIED (settings.rs): p2g marks the cells holding a
+// depositing particle in grid_occupied and only those record peak maps
+const SIM_FLAG_GRID_OCCUPIED: u32 = 1u << 9u;
+
+// SimFlags::FOREST (settings.rs): a forest cover is loaded; the DAMPM global
+// model decelerates the flow by the drag of the standing stems
+const SIM_FLAG_FOREST: u32 = 1u << 10u;
+
+fn forest_enabled() -> bool {
+    return (sim_settings.flags & SIM_FLAG_FOREST) != 0u;
+}
 
 // Gully walls (reference surface, wall friction) need a reference surface at
 // least one cell wide; must match SimSettings::gully_walls_enabled.
@@ -806,6 +937,21 @@ fn adapted_quantization_scale(scale: f32, fill: f32) -> f32 {
 
 // END quantization.wgsl
 
+// import force_quantization.wgsl;
+// BEGIN force_quantization.wgsl
+// Fixed-point factors of the integer-atomic force and pressure sums (the mass
+// and momentum factors live in quantization.wgsl).
+
+// depth-integrated internal force (h * sigma * grad_w * area, ~1e4..1e5 N per node contribution)
+const FORCE_FACTOR: f32 = 1e-3; // i32 limit is 2.1e6 N per node
+const INV_FORCE_FACTOR: f32 = 1 / FORCE_FACTOR;
+// weak-form pressure sum m_p h_p / 2 grad_w (kg) of the curvilinear model,
+// node sum = node_mass * |grad h|: 0.001 kg resolves thin front nodes
+//   (rho*cell^2*h*J ~ 6e4 kg * 1 * 1e3 = 6e7 < 2.1e9)
+const PRESSURE_FACTOR: f32 = 1e3;
+const INV_PRESSURE_FACTOR: f32 = 1 / PRESSURE_FACTOR;
+
+// END force_quantization.wgsl
 // import quantization_fill.wgsl;
 // BEGIN quantization_fill.wgsl
 // Records how full the integer-atomic grid ranges are (quantization.wgsl):

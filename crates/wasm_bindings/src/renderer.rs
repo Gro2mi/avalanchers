@@ -10,7 +10,7 @@ use anyhow::{Result, anyhow};
 use compute_core::ComputeOrchestrator;
 use compute_core::buffers::BufferName;
 use compute_core::dem::Dem;
-use render_core::{OrbitCamera, OverlayRange, ParticleBuffers, Renderer, TerrainData};
+use render_core::{OrbitCamera, OverlayRamp, OverlayRange, ParticleBuffers, Renderer, TerrainData};
 
 /// Camera input scaling shared with the native viewer, so both feel the same
 /// for the same pixel deltas.
@@ -18,7 +18,7 @@ const ORBIT_SPEED: f32 = 0.005;
 const ZOOM_SPEED: f32 = 0.1;
 
 /// Grid buffers cloned from the simulation, both at attach time and after a rebuild.
-const GRID_BUFFERS: [BufferName; 7] = [
+const GRID_BUFFERS: [BufferName; 9] = [
     BufferName::GridPeakVelocity,
     BufferName::GridPeakFlowThickness,
     BufferName::GridMass,
@@ -26,6 +26,8 @@ const GRID_BUFFERS: [BufferName; 7] = [
     BufferName::SlopeAngle,
     BufferName::SlopeAspect,
     BufferName::Roughness,
+    BufferName::ForestCover,
+    BufferName::ForestStanding,
 ];
 
 #[derive(Clone, Copy, PartialEq)]
@@ -38,6 +40,8 @@ pub enum Overlay {
     SlopeAngle,
     SlopeAspect,
     Roughness,
+    ForestStanding,
+    ForestCover,
 }
 
 impl Overlay {
@@ -52,6 +56,8 @@ impl Overlay {
             "slope_angle" => Some(Self::SlopeAngle),
             "slope_aspect" => Some(Self::SlopeAspect),
             "roughness" => Some(Self::Roughness),
+            "forest_standing" => Some(Self::ForestStanding),
+            "forest_cover" => Some(Self::ForestCover),
             _ => None,
         }
     }
@@ -66,6 +72,8 @@ impl Overlay {
             Self::SlopeAngle => Some(BufferName::SlopeAngle),
             Self::SlopeAspect => Some(BufferName::SlopeAspect),
             Self::Roughness => Some(BufferName::Roughness),
+            Self::ForestStanding => Some(BufferName::ForestStanding),
+            Self::ForestCover => Some(BufferName::ForestCover),
         }
     }
 
@@ -94,6 +102,16 @@ impl Overlay {
                 .with_unit("deg"),
             // Dimensionless, 0 (smooth) to 1 (rough); border cells are forced to 1.
             Self::Roughness => OverlayRange::new(0.0, 1.0),
+            // Canopy cover fraction; the standing cover drops where the flow
+            // breaks the stems
+            // Destroyed fraction of the forest cells, 0 (intact, green) to 1
+            // (destroyed, brown); cells without forest stay bare
+            Self::ForestStanding => OverlayRange::new(0.0, 1.0)
+                .with_threshold(-0.5)
+                .with_ramp(OverlayRamp::ForestDamage),
+            Self::ForestCover => OverlayRange::new(0.0, 1.0)
+                .with_threshold(0.01)
+                .with_ramp(OverlayRamp::Forest),
         };
         range.with_label(self.label())
     }
@@ -108,6 +126,8 @@ impl Overlay {
             Self::SlopeAngle => "slope angle",
             Self::SlopeAspect => "slope aspect",
             Self::Roughness => "roughness",
+            Self::ForestStanding => "forest damage",
+            Self::ForestCover => "forest cover",
         }
     }
 }
@@ -256,8 +276,23 @@ impl RenderView {
             .buffer_name()
             .and_then(|name| self.grids.iter().find(|(n, _)| *n == name))
             .map(|(_, buffer)| buffer.clone());
-        self.renderer
-            .set_grid_overlay(&self.device, buffer.as_ref(), self.overlay.range());
+        if self.overlay == Overlay::ForestStanding {
+            // the standing cover is shown against the initial cover
+            let cover = self
+                .grids
+                .iter()
+                .find(|(n, _)| *n == BufferName::ForestCover)
+                .map(|(_, buffer)| buffer.clone());
+            self.renderer.set_grid_forest_damage_overlay(
+                &self.device,
+                buffer.as_ref(),
+                cover.as_ref(),
+                self.overlay.range(),
+            );
+        } else {
+            self.renderer
+                .set_grid_overlay(&self.device, buffer.as_ref(), self.overlay.range());
+        }
     }
 
     pub fn apply_particles(&mut self) {

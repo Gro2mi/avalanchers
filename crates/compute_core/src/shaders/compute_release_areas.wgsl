@@ -7,6 +7,8 @@
 @group(0) @binding(6) var<storage, read_write> atomic_values: AtomicValues;
 
 @group(0) @binding(7) var<storage, read> roi_bit_packed: array<u32>;
+// canopy cover fraction (0..1) per cell; a 4-byte placeholder without forest
+@group(0) @binding(8) var<storage, read> forest_cover: array<f32>;
 
 fn is_roi(index: u32) -> bool {
     let word = roi_bit_packed[index / 32u];
@@ -30,7 +32,11 @@ fn compute_release_areas(@builtin(global_invocation_id) id: vec3<u32>) {
     let elevation = textureLoad(dem_texture, tex_pos, 0).r;
     let roughness = roughness_buffer[idx];
 
-    let forest = 0f;
+    // dense forest anchors the snowpack: no release above the cover limit
+    var forest = 0f;
+    if forest_enabled() {
+        forest = forest_cover[idx];
+    }
     let predictor = 0f;
 
     // every comparison with NaN is false, so cells without elevation data
@@ -40,7 +46,7 @@ fn compute_release_areas(@builtin(global_invocation_id) id: vec3<u32>) {
         || elevation < sim_settings.min_elevation
         || elevation > sim_settings.release_max_elevation
         || roughness > sim_settings.roughness_threshold
-        || forest > 1e-3 {
+        || forest > sim_settings.forest_release_max_cover {
         // no release cell
         release_areas[idx] = 0f;
     } else {
@@ -112,9 +118,29 @@ struct SimSettings {
     // 3D lift-off: terminal velocity (m/s) of the quadratic air drag in
     // flight; 0 disables the drag
     flight_terminal_velocity: f32,
+    // forest model (forest.wgsl), read only with SIM_FLAG_FOREST
+    forest_drag_coefficient: f32,
+    forest_trunk_diameter: f32,
+    forest_crown_diameter: f32,
+    forest_tree_height: f32,
+    forest_modulus_of_rupture: f32,
+    forest_decay_coefficient: f32,
+    forest_release_max_cover: f32,
 };
 
 @group(0) @binding(0) var<uniform> sim_settings: SimSettings;
+
+// SimFlags::GRID_OCCUPIED (settings.rs): p2g marks the cells holding a
+// depositing particle in grid_occupied and only those record peak maps
+const SIM_FLAG_GRID_OCCUPIED: u32 = 1u << 9u;
+
+// SimFlags::FOREST (settings.rs): a forest cover is loaded; the DAMPM global
+// model decelerates the flow by the drag of the standing stems
+const SIM_FLAG_FOREST: u32 = 1u << 10u;
+
+fn forest_enabled() -> bool {
+    return (sim_settings.flags & SIM_FLAG_FOREST) != 0u;
+}
 
 // Gully walls (reference surface, wall friction) need a reference surface at
 // least one cell wide; must match SimSettings::gully_walls_enabled.

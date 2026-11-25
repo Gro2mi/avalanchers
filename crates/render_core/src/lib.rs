@@ -14,7 +14,7 @@ pub mod terrain;
 pub use camera::OrbitCamera;
 pub use math::Vec3;
 pub use particles::{ParticleBuffers, ParticleRenderer};
-pub use terrain::{OverlayRange, TerrainData, TerrainRenderer};
+pub use terrain::{OverlayRamp, OverlayRange, TerrainData, TerrainRenderer};
 
 use anyhow::Result;
 
@@ -160,6 +160,38 @@ impl Renderer {
         self.terrain
             .set_momentum_overlay(device, buffer, range, momentum_unit);
         self.colorbar.set_enabled_range(buffer.is_some(), range);
+    }
+
+    /// Tints the forest cells by their destroyed fraction: `standing` holds the
+    /// standing canopy cover (`BufferName::ForestStanding`), `cover` the
+    /// initial cover (`BufferName::ForestCover`), both one `f32` per cell.
+    /// Intact forest is green and turns over yellow and orange to brown as the
+    /// flow breaks the stems; cells without forest stay bare terrain.
+    pub fn set_grid_forest_damage_overlay(
+        &mut self,
+        device: &wgpu::Device,
+        standing: Option<&wgpu::Buffer>,
+        cover: Option<&wgpu::Buffer>,
+        range: OverlayRange,
+    ) {
+        self.terrain
+            .set_forest_damage_overlay(device, standing, cover, range);
+        self.colorbar
+            .set_enabled_range(standing.is_some() && cover.is_some(), range);
+    }
+
+    /// Drapes an orthophoto (`(width, height, rgba8 sRGB pixels)`) over the
+    /// terrain in place of the elevation colours; `None` returns to them. The
+    /// image spans the DEM's outer cell edges, row 0 at the south edge, and
+    /// must fit the device's `max_texture_dimension_2d`. Grid overlays are drawn
+    /// on top.
+    pub fn set_orthophoto(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        image: Option<(u32, u32, &[u8])>,
+    ) {
+        self.terrain.set_orthophoto(device, queue, image);
     }
 
     /// Attaches the simulation's particle buffers. Passing `None` hides the particles.

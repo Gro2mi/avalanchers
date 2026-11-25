@@ -27,6 +27,16 @@ def gather_grid(values, positions):
     return gathered
 
 
+def first_step_dt(sim):
+    """The time step the next run_n_steps(1) applies. The first step is not a
+    fixed sqrt(2 cfl dx / (g cos 30)) any more: it is also limited by the
+    gravity-wave speed of the release thickness (compute_core initial_dt),
+    0.072 s instead of 0.243 s for the plane below. run_n_steps(0) prepares
+    without stepping and reports it; the dt of a finished step is already the
+    next one's."""
+    return sim.run_n_steps(0).dt
+
+
 def plane_simulation(angle, friction=0.0, **overrides):
     n = 64
     cell_size = 5.0
@@ -65,10 +75,10 @@ def test_terrain_following_velocity_magnitude_is_the_true_speed(angle, friction)
     sim, _, direction = plane_simulation(angle, friction, sim_model="terrain-following")
     before = np.asarray(sim.particles_position_xy, dtype=np.float64)
     central = ((before > 100.0) & (before < 220.0)).all(axis=1)
+    dt = first_step_dt(sim)
     sim.run_n_steps(1)
     velocity = np.asarray(sim.particles_velocity, dtype=np.float64)
     assert velocity.shape[1] == 2
-    dt = math.sqrt(2.0 * 0.05 * 5.0 / (9.81 * 0.866))
     acceleration = 9.81 * (math.sin(math.radians(35.0)) - friction * math.cos(math.radians(35.0)))
     # no cos(35 deg) as in the horizontal projection of the curvilinear test below
     np.testing.assert_allclose(velocity[central].mean(axis=0), dt * acceleration * direction, atol=0.004)
@@ -80,10 +90,10 @@ def test_curvilinear_plane_acceleration_is_rotation_invariant(angle, friction):
     sim, slope, direction = plane_simulation(angle, friction)
     before = np.asarray(sim.particles_position_xy, dtype=np.float64)
     central = ((before > 100.0) & (before < 220.0)).all(axis=1)
+    dt = first_step_dt(sim)
     sim.run_n_steps(1)
     velocity = np.asarray(sim.particles_velocity, dtype=np.float64)
     after = np.asarray(sim.particles_position_xy, dtype=np.float64)
-    dt = math.sqrt(2.0 * 0.05 * 5.0 / (9.81 * 0.866))
     np.testing.assert_allclose(after - before, velocity[:, :2] * dt, atol=2e-5)
     np.testing.assert_allclose(velocity[central, 2], velocity[central, :2] @ slope, rtol=0.002, atol=3e-5)
     acceleration = 9.81 * (math.sin(math.radians(35.0)) - friction * math.cos(math.radians(35.0)))
@@ -97,6 +107,7 @@ def test_curvilinear_plane_acceleration_is_rotation_invariant(angle, friction):
 def test_curvilinear_pressure_uses_normal_thickness_and_full_metric(angle):
     sim, slope, _ = plane_simulation(angle)
     before = np.asarray(sim.particles_position_xy, dtype=np.float64)
+    dt = first_step_dt(sim)
     sim.run_n_steps(1)
     mass = np.asarray(sim.grid_mass, dtype=np.float64).reshape((64, 64))
     jac = np.asarray(sim.terrain_geometry_z, dtype=np.float64)
@@ -109,7 +120,7 @@ def test_curvilinear_pressure_uses_normal_thickness_and_full_metric(angle):
     inverse_grad = grad - slope * np.sum(grad * slope, axis=2, keepdims=True) / (1.0 + slope @ slope)
     acceleration = -9.81 * slope / (1.0 + slope @ slope) - 9.81 / jac[:, :, None] * inverse_grad
     expected = gather_grid(acceleration, before)
-    expected *= math.sqrt(2.0 * 0.05 * 5.0 / (9.81 * 0.866))
+    expected *= dt
     central = ((before > 100.0) & (before < 220.0)).all(axis=1)
     actual = np.asarray(sim.particles_velocity_xy, dtype=np.float64)
     np.testing.assert_allclose(actual[central], expected[central], atol=3e-5)
@@ -424,3 +435,61 @@ def test_curvature_benchmark_explicitly_skips_other_comparison_models(tmp_path, 
     assert "skipped" in output
     assert run_all_tests._assessment("curvature", result, args)[0] == "comparison"
     assert "skipped" in run_all_tests._headline("curvature", result)
+
+def forest_plane_run(cover_value, **overrides):
+    """3D model on a 35 degree plane running out onto a flat; a forest band
+    of cover_value (None: no forest) covers the foot of the slope."""
+    nx, ny, cell_size = 120, 40, 5.0
+    x = (np.arange(nx) + 0.5) * cell_size
+    xx = np.tile(x, (ny, 1))
+    slope_end = 300.0
+    dem = np.where(xx < slope_end, (slope_end - xx) * math.tan(math.radians(35.0)), 0.0) + 1000.0
+    release = np.zeros((ny, nx), dtype=np.float32)
+    release[12:28, 4:20] = 1.5
+    sim = avalanchers.PySimulation.new()
+    sim.create({
+        "sim_model": "dampm-global-cartesian",
+        "friction_model": "voellmy",
+        "friction_coefficient": 0.3,
+        "drag_coefficient": 2000.0,
+        "density": 200.0,
+        "released_particles_per_cell": 8,
+        "max_steps": 4000,
+        "momentum_stop_fraction": 0.01,
+        **overrides,
+    })
+    sim.set_dem_with_bounds(np.ascontiguousarray(dem.astype(np.float32)), cell_size,
+                            0.0, nx * cell_size, 0.0, ny * cell_size, 1.0)
+    sim.set_release_areas(release)
+    cover = None
+    if cover_value is not None:
+        cover = np.where((xx >= 200.0) & (xx < 450.0), cover_value, 0.0).astype(np.float32)
+        sim.set_forest_cover(np.ascontiguousarray(cover))
+    sim.prepare()
+    info = sim.run_n_steps(1)
+    while not (info.flags & (1 << 31)) and sim.state != "Finished":
+        info = sim.run_n_steps(200)
+    peak_h = np.asarray(sim.peak_flow_thickness)
+    columns = np.where((peak_h > 0.1).any(axis=0))[0]
+    return float(x[columns.max()]), sim, cover
+
+
+def test_forest_shortens_runout_and_zero_cover_is_inert():
+    runout, sim, _ = forest_plane_run(None)
+    assert sim.forest_cover is None and sim.forest_standing is None
+    zero_runout, _, _ = forest_plane_run(0.0)
+    forest_runout, forest_sim, cover = forest_plane_run(0.9, forest_modulus_of_rupture=1e12)
+    assert zero_runout == runout
+    assert forest_runout < runout - 20.0
+    # the unbreakable forest keeps its cover; percent input is normalized
+    np.testing.assert_allclose(forest_sim.forest_standing, cover)
+    np.testing.assert_allclose(forest_sim.forest_cover, cover)
+
+
+def test_forest_cover_in_percent_and_disabled_forest():
+    runout, _, _ = forest_plane_run(None)
+    disabled_runout, sim, _ = forest_plane_run(90.0, enable_forest=False)
+    assert disabled_runout == runout
+    assert sim.forest_standing is None
+    _, sim, cover = forest_plane_run(90.0, forest_modulus_of_rupture=1e12)
+    np.testing.assert_allclose(sim.forest_cover, cover / 100.0)

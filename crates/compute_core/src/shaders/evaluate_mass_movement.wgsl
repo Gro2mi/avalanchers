@@ -5,6 +5,8 @@
 // combines the counts into the final MassMovementEvaluation.
 // Release cells are skipped: they lie in both masks by construction, so
 // counting them would inflate the overlap with the release area fraction.
+// A cell is simulated when it passes the thresholds of evaluation_params
+// (see evaluation_mask.wgsl); the peak fields are only read.
 
 struct EvaluationCounts {
     intersection: atomic<u32>,
@@ -17,6 +19,8 @@ struct EvaluationCounts {
 @group(0) @binding(2) var<storage, read> grid_peak_flow_thickness: array<f32>;
 @group(0) @binding(3) var<storage, read_write> counts: EvaluationCounts;
 @group(0) @binding(4) var<storage, read> release_areas: array<f32>;
+@group(0) @binding(5) var<uniform> evaluation_params: EvaluationParams;
+@group(0) @binding(6) var<storage, read> grid_peak_velocity: array<f32>;
 
 // must match RELEASE_THICKNESS_THRESHOLD in lib.rs and initialize_particles.wgsl
 const RELEASE_THICKNESS_THRESHOLD: f32 = 0.01;
@@ -37,7 +41,7 @@ fn evaluate_mass_movement(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let word_index = index / 32u;
     let reference_affected = bit_is_set(region_of_interest[word_index], index);
-    let simulated_affected = grid_peak_flow_thickness[index] >= sim_settings.peak_flow_thickness_threshold;
+    let simulated_affected = is_simulated_cell(index);
 
     if reference_affected && simulated_affected {
         atomicAdd(&counts.intersection, 1u);
@@ -48,6 +52,30 @@ fn evaluate_mass_movement(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 }
 
+// import evaluation_mask.wgsl;
+// BEGIN evaluation_mask.wgsl
+// Simulated-avalanche mask shared by the evaluation shaders. A cell belongs to
+// the simulated avalanche when its peak flow thickness reaches
+// evaluation_params.min_peak_flow_thickness and its peak velocity reaches
+// evaluation_params.min_peak_velocity. The peak fields themselves are never
+// modified, so a stored run can be re-evaluated with other thresholds.
+//
+// The importing shader declares the evaluation_params uniform
+// (EvaluationParams) and the grid_peak_flow_thickness / grid_peak_velocity
+// storage buffers at its own binding slots.
+
+struct EvaluationParams {
+    min_peak_flow_thickness: f32,
+    min_peak_velocity: f32,
+    _padding: vec2<f32>,
+}
+
+fn is_simulated_cell(idx: u32) -> bool {
+    return grid_peak_flow_thickness[idx] >= evaluation_params.min_peak_flow_thickness
+        && grid_peak_velocity[idx] >= evaluation_params.min_peak_velocity;
+}
+
+// END evaluation_mask.wgsl
 // import sim_settings.wgsl;
 // BEGIN sim_settings.wgsl
 // Simulation settings uniform (group 0, binding 0) and the values derived from
@@ -101,9 +129,29 @@ struct SimSettings {
     // 3D lift-off: terminal velocity (m/s) of the quadratic air drag in
     // flight; 0 disables the drag
     flight_terminal_velocity: f32,
+    // forest model (forest.wgsl), read only with SIM_FLAG_FOREST
+    forest_drag_coefficient: f32,
+    forest_trunk_diameter: f32,
+    forest_crown_diameter: f32,
+    forest_tree_height: f32,
+    forest_modulus_of_rupture: f32,
+    forest_decay_coefficient: f32,
+    forest_release_max_cover: f32,
 };
 
 @group(0) @binding(0) var<uniform> sim_settings: SimSettings;
+
+// SimFlags::GRID_OCCUPIED (settings.rs): p2g marks the cells holding a
+// depositing particle in grid_occupied and only those record peak maps
+const SIM_FLAG_GRID_OCCUPIED: u32 = 1u << 9u;
+
+// SimFlags::FOREST (settings.rs): a forest cover is loaded; the DAMPM global
+// model decelerates the flow by the drag of the standing stems
+const SIM_FLAG_FOREST: u32 = 1u << 10u;
+
+fn forest_enabled() -> bool {
+    return (sim_settings.flags & SIM_FLAG_FOREST) != 0u;
+}
 
 // Gully walls (reference surface, wall friction) need a reference surface at
 // least one cell wide; must match SimSettings::gully_walls_enabled.

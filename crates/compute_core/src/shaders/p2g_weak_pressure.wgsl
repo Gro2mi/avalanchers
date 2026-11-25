@@ -1,31 +1,53 @@
-// Weak-form hydrostatic pressure of the curvilinear model (enable_weak_pressure).
-// Runs after p2g, when the grid holds this step's mass: every particle adds
-// -m_p h_p / 2 grad N_i(x_p) to the nodes of its stencil. This is the weak form
-// of m_i grad h at node i (integrate N_i rho J h grad h by parts, with particle
-// area m_p / (rho J h_p)). Divided by the node mass in grid_physics_curvilinear
-// it replaces the centred difference of the nodal thickness, so a thin front
-// node is pushed by the full pressure of the particles behind it.
+// Weak-form hydrostatic pressure of the curvilinear and the 3D Cartesian model
+// (enable_weak_pressure). Runs after p2g, when the grid holds this step's
+// mass: every particle adds -m_p h_p / 2 grad N_i(x_p) to the nodes of its
+// stencil. This is the weak form of m_i grad h at node i: integrate
+// N_i M h grad h = N_i M grad(h^2 / 2) by parts, with the mass per horizontal
+// area M = rho h / cos(theta) and the particle area m_p / M_p. Divided by the
+// node mass in the grid physics it replaces the centred difference of the
+// nodal thickness. The partition of unity sum_i grad N_i = 0 makes the net
+// force of a particle on its own stencil vanish, so a lone particle no longer
+// pushes itself across the grid; a thin front node is still pushed by the
+// full pressure of the particles behind it.
 @group(0) @binding(1) var<storage, read_write> sim_info: SimInfo;
 @group(0) @binding(2) var<storage> particles_position: array<vec2<f32>>;
 @group(0) @binding(3) var<storage> particles_mass: array<f32>;
 @group(0) @binding(4) var<storage> grid_mass: array<u32>; // no_atomic_float
 // atomic_float @group(0) @binding(4) var<storage> grid_mass: array<f32>;
+// curvilinear: z = area factor J = 1 / cos(theta) (analyze_terrain_curvilinear)
+// 3D: xyz = unit bed normal, z = n_z = cos(theta) (analyze_terrain)
 @group(0) @binding(5) var terrain_geometry_texture: texture_2d<f32>;
 // atomic_float @group(0) @binding(6) var<storage, read_write> grid_forces_atomic: array<atomic<f32>>;
 @group(0) @binding(6) var<storage, read_write> grid_forces_atomic: array<atomic<i32>>; // no_atomic_float
+// 3D model only: detached (flying) particles deposit nothing and push nothing
+@group(0) @binding(7) var<storage> particles_state: array<u32>;
 
 override WG_SIZE_1D: u32 = 1u;
 @compute @workgroup_size(WG_SIZE_1D, 1, 1)
 fn p2g_weak_pressure(@builtin(global_invocation_id) id: vec3u) {
-    if id.x >= sim_info.number_particles || (sim_info.flags & SIM_INFO_STOPPED) != 0u {
+    add_weak_pressure(id.x, false);
+}
+
+// Same sums for the 3D Cartesian model (grid_physics_3d): the terrain texture
+// holds the bed normal, and flying particles are skipped like in p2g_3d.
+@compute @workgroup_size(WG_SIZE_1D, 1, 1)
+fn p2g_weak_pressure_3d(@builtin(global_invocation_id) id: vec3u) {
+    if id.x < sim_info.number_particles && (particles_state[id.x] & PARTICLE_FLYING) != 0u {
         return;
     }
-    // the border guard of p2g_2d: only particles that deposited mass push
-    let cell = position_to_cell(particles_position[id.x]);
+    add_weak_pressure(id.x, true);
+}
+
+fn add_weak_pressure(particle: u32, bed_normal_texture: bool) {
+    if particle >= sim_info.number_particles || (sim_info.flags & SIM_INFO_STOPPED) != 0u {
+        return;
+    }
+    // the border guard of p2g_2d / p2g_3d: only particles that deposited mass push
+    let cell = position_to_cell(particles_position[particle]);
     if cell.x < 3 || cell.x >= sim_settings.grid_shape.x - 3 || cell.y < 3 || cell.y >= sim_settings.grid_shape.y - 3 {
         return;
     }
-    let grid_pos = particles_position[id.x] / sim_settings.cell_size - vec2f(0.5);
+    let grid_pos = particles_position[particle] / sim_settings.cell_size - vec2f(0.5);
     let base_node = vec2u(floor(grid_pos - vec2f(0.5)));
 
     // particle depth interpolated from this step's nodal thickness
@@ -34,10 +56,10 @@ fn p2g_weak_pressure(@builtin(global_invocation_id) id: vec3u) {
         for (var j: u32 = 0; j < 3; j++) {
             let node_coords = base_node + vec2u(i, j);
             let weight = calculate_weight(calculate_distance_to_node(grid_pos, node_coords));
-            h_p += weight * node_thickness(node_coords);
+            h_p += weight * node_thickness(node_coords, bed_normal_texture);
         }
     }
-    let pressure_mass = 0.5 * particles_mass[id.x] * h_p;
+    let pressure_mass = 0.5 * particles_mass[particle] * h_p;
 
     for (var i: u32 = 0; i < 3; i++) {
         for (var j: u32 = 0; j < 3; j++) {
@@ -53,11 +75,14 @@ fn p2g_weak_pressure(@builtin(global_invocation_id) id: vec3u) {
     }
 }
 
-fn node_thickness(node: vec2u) -> f32 {
-    let J = textureLoad(terrain_geometry_texture, vec2<i32>(node), 0).z;
+// Bed-normal flow thickness h = m cos(theta) / (rho dx^2) of a node; the
+// texture holds J = 1 / cos(theta) (curvilinear) or n_z = cos(theta) (3D).
+fn node_thickness(node: vec2u, bed_normal_texture: bool) -> f32 {
+    let z = textureLoad(terrain_geometry_texture, vec2<i32>(node), 0).z;
+    let cos_theta = select(1.0 / z, z, bed_normal_texture);
     let mass = f32(grid_mass[xy_to_idx(node)]) * inv_mass_factor(); // no_atomic_float
     // atomic_float let mass = grid_mass[xy_to_idx(node)];
-    return mass / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size * J);
+    return mass * cos_theta / (sim_settings.snow_density * sim_settings.cell_size * sim_settings.cell_size);
 }
 
 fn quantize_pressure(value: f32) -> i32 {
@@ -119,9 +144,29 @@ struct SimSettings {
     // 3D lift-off: terminal velocity (m/s) of the quadratic air drag in
     // flight; 0 disables the drag
     flight_terminal_velocity: f32,
+    // forest model (forest.wgsl), read only with SIM_FLAG_FOREST
+    forest_drag_coefficient: f32,
+    forest_trunk_diameter: f32,
+    forest_crown_diameter: f32,
+    forest_tree_height: f32,
+    forest_modulus_of_rupture: f32,
+    forest_decay_coefficient: f32,
+    forest_release_max_cover: f32,
 };
 
 @group(0) @binding(0) var<uniform> sim_settings: SimSettings;
+
+// SimFlags::GRID_OCCUPIED (settings.rs): p2g marks the cells holding a
+// depositing particle in grid_occupied and only those record peak maps
+const SIM_FLAG_GRID_OCCUPIED: u32 = 1u << 9u;
+
+// SimFlags::FOREST (settings.rs): a forest cover is loaded; the DAMPM global
+// model decelerates the flow by the drag of the standing stems
+const SIM_FLAG_FOREST: u32 = 1u << 10u;
+
+fn forest_enabled() -> bool {
+    return (sim_settings.flags & SIM_FLAG_FOREST) != 0u;
+}
 
 // Gully walls (reference surface, wall friction) need a reference surface at
 // least one cell wide; must match SimSettings::gully_walls_enabled.
@@ -314,6 +359,59 @@ fn get_base_node(grid_pos: vec2f) -> vec2u {
 }
 
 // END bspline.wgsl
+// import particle_state.wgsl;
+// BEGIN particle_state.wgsl
+// Particle state flags and the reversible resting state. Needs sim_settings.
+
+// Fastest particle speed (m/s) taken as physical. Dense flow avalanches reach
+// about 60-80 m/s and the integer atomic grid holds momentum up to
+// MAX_FLOW_VELOCITY = 100 m/s for a full MAX_FLOW_THICKNESS node (faster for
+// thinner nodes); a faster particle comes from a numerical blow-up (e.g. a cliff of no-data elevations) and is stopped.
+// Mirrors compute_core::MAX_PARTICLE_SPEED.
+const MAX_PARTICLE_SPEED: f32 = 150.0;
+// stopped for exceeding MAX_PARTICLE_SPEED
+const PARTICLE_UNPHYSICAL_SPEED: u32 = 1u << 25u;
+// reversible low-speed state; the low bits (below PARTICLE_UNPHYSICAL_SPEED)
+// hold the rest start step while resting and the consecutive slow-step count
+// while moving
+const PARTICLE_RESTING: u32 = 1u << 26u;
+// consecutive slow steps before a particle rests
+const REST_STEPS: u32 = 20u;
+const PARTICLE_FLYING: u32 = 1u << 27u;
+const PARTICLE_OUT_OF_BOUNDS: u32 = 1u << 28u;
+const PARTICLE_IS_NAN: u32 = 1u << 29u;
+const PARTICLE_OUT_OF_DEM_DATA: u32 = 1u << 30u;
+const PARTICLE_STOPPED: u32 = 1u << 31u;
+
+// Reversible resting: a particle rests after REST_STEPS consecutive slow steps
+// and wakes once the gathered grid speed exceeds twice the threshold. Resting
+// particles keep depositing mass but no momentum and do not move, which removes
+// sub-threshold creep inside deposits. Returns the new state: its low bits hold
+// the slow-step counter while moving and the rest start step while resting.
+fn next_rest_state(previous_state: u32, speed: f32, timestep: u32) -> u32 {
+    let low_mask = PARTICLE_UNPHYSICAL_SPEED - 1u;
+    var resting = (previous_state & PARTICLE_RESTING) != 0u;
+    var low_bits = previous_state & low_mask;
+    if resting {
+        if speed > 2.0 * sim_settings.velocity_threshold {
+            resting = false;
+            low_bits = 0u;
+        }
+    } else if speed < sim_settings.velocity_threshold {
+        low_bits = min(low_bits + 1u, REST_STEPS);
+        if low_bits >= REST_STEPS {
+            resting = true;
+            low_bits = timestep & low_mask;
+        }
+    } else {
+        low_bits = 0u;
+    }
+    return (previous_state & ~(PARTICLE_RESTING | low_mask))
+        | select(0u, PARTICLE_RESTING, resting)
+        | low_bits;
+}
+
+// END particle_state.wgsl
 // import force_quantization.wgsl;
 // BEGIN force_quantization.wgsl
 // Fixed-point factors of the integer-atomic force and pressure sums (the mass

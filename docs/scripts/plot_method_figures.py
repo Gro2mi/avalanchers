@@ -851,7 +851,6 @@ def run_simulation(evaluation_dir, avalanche_id, mu, xi):
                         drag_coefficient=xi))
         sim.prepare()
         sim.run()
-        sim.post_process()
         evaluation = sim.evaluate()
         result = {
             "dem": np.asarray(sim.dem, float),

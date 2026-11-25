@@ -4,12 +4,46 @@ All notable changes to this project might be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- Forest model (NAKSIN / MoT-Voellmy type) for the DAMPM global model. A canopy cover raster
+  (`forest_cover_path`: .asc, .tif or .png with percent in the alpha channel; Python
+  `set_forest_cover`) gives the stem density n = cover / (pi/4 `forest_crown_diameter`^2) of stems of
+  `forest_trunk_diameter`. The stems decelerate the flow by 1/2 C_D n D min(h, H)/h u^2 and break
+  once the bending moment exceeds the `forest_modulus_of_rupture` (default 50 MPa); the standing
+  cover then decays at the rate `forest_decay_coefficient` / D. The physics lives in `forest.wgsl`.
+  The cover also suppresses release above `forest_release_max_cover` with every model.
+  `enable_forest: false` runs without the loaded forest. Python getters `forest_cover` and
+  `forest_standing`.
+- Live and web viewer overlays for the forest (key `9` toggles them): the forest damage, i.e. the
+  destroyed fraction 1 - standing / initial cover (green intact to brown destroyed), which changes
+  live as the avalanche breaks the stems, and the initial forest cover (green ramp). The live
+  viewer's headless snapshot takes `LIVE_SIM_SNAPSHOT_OVERLAY` (an overlay label).
+- `data/landcover/forest_cover_from_clcplus.py` derives the cover raster from CLCplus Backbone.
+- `verification/run_forest_parabola_test.py`: forest band on half the width of a parabolic slope,
+  so the same avalanche runs with and without forest side by side (runout per half, inertness of
+  zero cover, breaking criterion), with `--export` for the live viewer.
+- Orthophoto basemap in the live viewer (key `O` or the panel's "basemap"): swisstopo SWISSIMAGE
+  in Switzerland and the basemap.at orthofoto in Austria, draped over the terrain in place of the
+  elevation colours. The DEM's coordinate system (LV95, LV03, MGI GK West/Central/East, MGI
+  Lambert, ETRS89-LAEA, UTM 32N/33N) is detected from its coordinates and can be overridden in the
+  panel. Tiles are cached in `ortho_cache/` and honour `AVALANCHERS_TILES_OFFLINE` and
+  `AVALANCHERS_TILE_DELAY_MS`. `data_processor::orthophoto` fetches and resamples the imagery
+  (new dependency `proj4rs`), and `Renderer::set_orthophoto` drapes any RGBA image.
+
 ### Changed
 - Grid models renamed: `3d-depth-averaged` is now **DAMPM global** (`dampm-global-cartesian`, short `global`),
   `terrain-following` is **DAMPM terrain-following** (`dampm-terrain-following`, short `terrain-following`
   or `terrain`) and `curvilinear` is **DAMPM curvilinear** (`dampm-curvilinear`, short `curvilinear` or
   `curvi`). Settings and stores record the new names; the old strings, including `3d-depth-averaged`
   and `3d`, are still accepted. The Rust enum variant `SimModel::ThreeDDepthAveraged` is now `SimModel::Global`.
+- `post_process` is removed; `evaluate` takes the thresholds instead:
+  `evaluate(min_peak_flow_thickness, min_peak_velocity)` (Python: both optional, defaulting to the
+  `peak_flow_thickness_threshold` setting and 0). The evaluation shaders apply the thresholds when
+  they read the peak fields, so `peak_flow_thickness` and `peak_velocity` are no longer zeroed on the
+  GPU and are saved unthresholded, which lets a stored run be evaluated again with other thresholds.
+  `evaluate` only needs a finished simulation; the `PostProcessed` state is gone.
+  The Python `evaluate` also takes `min_peak_flow_pressure` (Pa), a threshold on
+  `density * peak_velocity**2` (default 0).
 
 ### Fixed
 - GeoTIFF DEMs written by GDAL keep their no-data cells out of the simulation. The no-data tag

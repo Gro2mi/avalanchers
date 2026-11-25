@@ -35,6 +35,15 @@ impl SimFlags {
     /// the bed-normal load g n_z + n_z H(v, v) turns negative.
     pub const DETACHMENT_CURVATURE: u32 = 1 << 8;
     pub const DETACHMENT: u32 = Self::DETACHMENT_FREE_FALL | Self::DETACHMENT_CURVATURE;
+    /// DAMPM global model: p2g marks the cells holding a depositing particle
+    /// in the grid occupied buffer and only those record peak maps
+    /// ([`Settings::enable_grid_occupied`]).
+    pub const GRID_OCCUPIED: u32 = 1 << 9;
+    /// DAMPM global model: a forest cover grid is loaded and its standing
+    /// trees decelerate the flow (see `forest.wgsl`). Set by the simulation
+    /// when it has a forest cover and [`Settings::enable_forest`] is not
+    /// false; the forest buffers are only allocated with it.
+    pub const FOREST: u32 = 1 << 10;
 
     pub fn new(
         curvature: bool,
@@ -100,6 +109,12 @@ impl SimFlags {
     }
     pub fn is_detachment_enabled(&self) -> bool {
         self.detachment() != Detachment::None
+    }
+    pub fn is_grid_occupied_enabled(&self) -> bool {
+        (self.mask & Self::GRID_OCCUPIED) != 0
+    }
+    pub fn is_forest_enabled(&self) -> bool {
+        (self.mask & Self::FOREST) != 0
     }
 }
 #[repr(C)]
@@ -169,6 +184,32 @@ pub struct SimSettings {
     /// flying particles, a = -g |u| u / v_t^2; 0 disables the drag.
     #[serde(default = "default_flight_terminal_velocity")]
     pub flight_terminal_velocity: f32,
+    // Forest model (NAKSIN / MoT-Voellmy type), see forest.wgsl. Read only
+    // with SimFlags::FOREST.
+    /// Drag coefficient C_D (-) of a tree stem.
+    #[serde(default = "default_forest_drag_coefficient")]
+    pub forest_drag_coefficient: f32,
+    /// Stem (trunk) diameter D (m) of the representative tree.
+    #[serde(default = "default_forest_trunk_diameter")]
+    pub forest_trunk_diameter: f32,
+    /// Crown diameter (m) of the representative tree; the stem density is the
+    /// canopy cover divided by the crown area, n = c / (pi/4 d_c^2).
+    #[serde(default = "default_forest_crown_diameter")]
+    pub forest_crown_diameter: f32,
+    /// Tree height (m): the flow height acting on a stem is capped by it.
+    #[serde(default = "default_forest_tree_height")]
+    pub forest_tree_height: f32,
+    /// Modulus of rupture (Pa) of the stem wood; a stem breaks when the
+    /// bending moment of the flow exceeds sigma pi D^3 / 32.
+    #[serde(default = "default_forest_modulus_of_rupture")]
+    pub forest_modulus_of_rupture: f32,
+    /// Forest decay coefficient c_f (m/s): once the stems break the standing
+    /// cover decays at the rate c_f / D.
+    #[serde(default = "default_forest_decay_coefficient")]
+    pub forest_decay_coefficient: f32,
+    /// Cells with a canopy cover above this fraction never release.
+    #[serde(default = "default_forest_release_max_cover")]
+    pub forest_release_max_cover: f32,
 }
 
 /// Hashes only the fields the selected simulation, friction and constitutive
@@ -252,7 +293,7 @@ impl Hash for SimSettings {
                     flags_mask |= SimFlags::WEAK_PRESSURE;
                 }
                 if sim_model == Some(SimModel::GlobalCartesian) {
-                    flags_mask |= SimFlags::DETACHMENT;
+                    flags_mask |= SimFlags::DETACHMENT | SimFlags::GRID_OCCUPIED;
                 }
                 if SimFlags::from_u32(self.flags).is_earth_pressure_coefficient_enabled() {
                     hash_f32(self.internal_friction_angle, state);
@@ -269,6 +310,20 @@ impl Hash for SimSettings {
             && SimFlags::from_u32(self.flags).is_detachment_enabled()
         {
             hash_f32(self.flight_terminal_velocity, state);
+        }
+        // the forest cover suppresses release with every model
+        flags_mask |= SimFlags::FOREST;
+        if SimFlags::from_u32(self.flags).is_forest_enabled() {
+            // the release shader reads the cover with every model
+            hash_f32(self.forest_release_max_cover, state);
+            if sim_model == Some(SimModel::GlobalCartesian) {
+                hash_f32(self.forest_drag_coefficient, state);
+                hash_f32(self.forest_trunk_diameter, state);
+                hash_f32(self.forest_crown_diameter, state);
+                hash_f32(self.forest_tree_height, state);
+                hash_f32(self.forest_modulus_of_rupture, state);
+                hash_f32(self.forest_decay_coefficient, state);
+            }
         }
 
         (self.flags & flags_mask).hash(state);
@@ -292,6 +347,39 @@ pub const DEFAULT_FLIGHT_TERMINAL_VELOCITY: f32 = 40.0;
 
 fn default_flight_terminal_velocity() -> f32 {
     DEFAULT_FLIGHT_TERMINAL_VELOCITY
+}
+
+// Forest defaults: C_D, modulus of rupture and decay coefficient as in the
+// MoT-Voellmy forest model (NGI / NAKSIN); the tree geometry is that of a
+// mature subalpine conifer stand.
+pub const DEFAULT_FOREST_DRAG_COEFFICIENT: f32 = 1.0;
+pub const DEFAULT_FOREST_TRUNK_DIAMETER: f32 = 0.3;
+pub const DEFAULT_FOREST_CROWN_DIAMETER: f32 = 6.0;
+pub const DEFAULT_FOREST_TREE_HEIGHT: f32 = 20.0;
+pub const DEFAULT_FOREST_MODULUS_OF_RUPTURE: f32 = 50.0e6;
+pub const DEFAULT_FOREST_DECAY_COEFFICIENT: f32 = 0.15;
+pub const DEFAULT_FOREST_RELEASE_MAX_COVER: f32 = 0.5;
+
+fn default_forest_drag_coefficient() -> f32 {
+    DEFAULT_FOREST_DRAG_COEFFICIENT
+}
+fn default_forest_trunk_diameter() -> f32 {
+    DEFAULT_FOREST_TRUNK_DIAMETER
+}
+fn default_forest_crown_diameter() -> f32 {
+    DEFAULT_FOREST_CROWN_DIAMETER
+}
+fn default_forest_tree_height() -> f32 {
+    DEFAULT_FOREST_TREE_HEIGHT
+}
+fn default_forest_modulus_of_rupture() -> f32 {
+    DEFAULT_FOREST_MODULUS_OF_RUPTURE
+}
+fn default_forest_decay_coefficient() -> f32 {
+    DEFAULT_FOREST_DECAY_COEFFICIENT
+}
+fn default_forest_release_max_cover() -> f32 {
+    DEFAULT_FOREST_RELEASE_MAX_COVER
 }
 
 fn is_release_thickness(thickness: f32) -> bool {
@@ -390,6 +478,25 @@ impl SimSettings {
                 ));
             }
             _ => {}
+        }
+        let forest_positive = [
+            ("forest_drag_coefficient", self.forest_drag_coefficient),
+            ("forest_trunk_diameter", self.forest_trunk_diameter),
+            ("forest_crown_diameter", self.forest_crown_diameter),
+            ("forest_tree_height", self.forest_tree_height),
+            ("forest_modulus_of_rupture", self.forest_modulus_of_rupture),
+        ];
+        if let Some((name, value)) = forest_positive
+            .iter()
+            .find(|(_, value)| !(value.is_finite() && *value > 0.0))
+        {
+            return Err(format!("`{name}` must be positive, got {value}"));
+        }
+        if !(self.forest_decay_coefficient.is_finite() && self.forest_decay_coefficient >= 0.0) {
+            return Err(format!(
+                "`forest_decay_coefficient` must not be negative, got {}",
+                self.forest_decay_coefficient
+            ));
         }
         if self.uses_mu_i() {
             let finite = [
@@ -501,6 +608,13 @@ impl SimSettings {
             reference_surface_length: 0.0,
             release_swe: f32::NAN,
             flight_terminal_velocity: DEFAULT_FLIGHT_TERMINAL_VELOCITY,
+            forest_drag_coefficient: DEFAULT_FOREST_DRAG_COEFFICIENT,
+            forest_trunk_diameter: DEFAULT_FOREST_TRUNK_DIAMETER,
+            forest_crown_diameter: DEFAULT_FOREST_CROWN_DIAMETER,
+            forest_tree_height: DEFAULT_FOREST_TREE_HEIGHT,
+            forest_modulus_of_rupture: DEFAULT_FOREST_MODULUS_OF_RUPTURE,
+            forest_decay_coefficient: DEFAULT_FOREST_DECAY_COEFFICIENT,
+            forest_release_max_cover: DEFAULT_FOREST_RELEASE_MAX_COVER,
         }
     }
 
@@ -625,6 +739,27 @@ impl SimSettings {
         if let Some(val) = patch.flight_terminal_velocity {
             settings.flight_terminal_velocity = val;
         }
+        if let Some(val) = patch.forest_drag_coefficient {
+            settings.forest_drag_coefficient = val;
+        }
+        if let Some(val) = patch.forest_trunk_diameter {
+            settings.forest_trunk_diameter = val;
+        }
+        if let Some(val) = patch.forest_crown_diameter {
+            settings.forest_crown_diameter = val;
+        }
+        if let Some(val) = patch.forest_tree_height {
+            settings.forest_tree_height = val;
+        }
+        if let Some(val) = patch.forest_modulus_of_rupture {
+            settings.forest_modulus_of_rupture = val;
+        }
+        if let Some(val) = patch.forest_decay_coefficient {
+            settings.forest_decay_coefficient = val;
+        }
+        if let Some(val) = patch.forest_release_max_cover {
+            settings.forest_release_max_cover = val;
+        }
         if let Some(val) = patch.enable_curvature {
             if val {
                 settings.flags |= 1 << 0;
@@ -669,6 +804,13 @@ impl SimSettings {
         }
         if let Some(val) = patch.detachment {
             settings.flags = (settings.flags & !SimFlags::DETACHMENT) | val.flags();
+        }
+        if let Some(val) = patch.enable_grid_occupied {
+            if val {
+                settings.flags |= SimFlags::GRID_OCCUPIED;
+            } else {
+                settings.flags &= !SimFlags::GRID_OCCUPIED;
+            }
         }
     }
 
@@ -1322,20 +1464,54 @@ pub struct Settings {
     pub enable_curvature: Option<bool>,
     pub enable_particle_interaction: Option<bool>,
     pub enable_earth_pressure_coefficient: Option<bool>,
-    /// Curvilinear: hydrostatic pressure gradient from the MPM weak form,
+    /// Curvilinear and 3D Cartesian (dampm-global-cartesian) models:
+    /// hydrostatic pressure gradient from the MPM weak form,
     /// -sum_p m_p h_p / 2 grad N_i(x_p) per node, instead of the centred
     /// difference of the nodal thickness. Thin front nodes are then pushed by
-    /// the full pressure of the particles behind them (defaults to false).
+    /// the full pressure of the particles behind them, and a lone particle
+    /// exerts no net force on itself (sum_i grad N_i = 0), so it cannot push
+    /// itself across the grid when its column is thick against the cell size
+    /// (defaults to false).
     pub enable_weak_pressure: Option<bool>,
     /// DAMPM global model: when a particle detaches from the bed
     /// ([`Detachment`], defaults to none). A detached particle flies
     /// ballistically and lands with the tangential velocity minus a Coulomb
     /// impulse.
     pub detachment: Option<Detachment>,
+    /// DAMPM global model: allocate the grid occupied buffer, in which p2g
+    /// marks the cells holding a depositing particle, and record the peak
+    /// maps only in those cells, so the B-spline spread of the flow edge does
+    /// not mark untouched neighbour cells (defaults to false: every node with
+    /// mass records peaks).
+    pub enable_grid_occupied: Option<bool>,
     /// 3D lift-off: terminal velocity (m/s) of the air drag on flying
     /// particles; 0 disables it (defaults to
     /// [`DEFAULT_FLIGHT_TERMINAL_VELOCITY`]).
     pub flight_terminal_velocity: Option<f32>,
+    /// Canopy cover raster (.asc, .tif or .png with cover in percent in the
+    /// alpha channel) on the DEM grid, as a fraction 0..1 or in percent.
+    /// Enables the forest model of the DAMPM global model and suppresses
+    /// release in dense forest with every model.
+    pub forest_cover_path: Option<String>,
+    /// Use a loaded forest cover (defaults to true; false runs without forest).
+    pub enable_forest: Option<bool>,
+    /// Forest: drag coefficient of a stem (defaults to 1).
+    pub forest_drag_coefficient: Option<f32>,
+    /// Forest: stem diameter in m (defaults to 0.3).
+    pub forest_trunk_diameter: Option<f32>,
+    /// Forest: crown diameter in m; stem density = cover / crown area
+    /// (defaults to 6).
+    pub forest_crown_diameter: Option<f32>,
+    /// Forest: tree height in m, caps the flow height loading a stem
+    /// (defaults to 20).
+    pub forest_tree_height: Option<f32>,
+    /// Forest: modulus of rupture of the stems in Pa (defaults to 50e6).
+    pub forest_modulus_of_rupture: Option<f32>,
+    /// Forest: decay coefficient in m/s of broken stands (defaults to 0.15).
+    pub forest_decay_coefficient: Option<f32>,
+    /// Forest: cells with more canopy cover than this never release
+    /// (defaults to 0.5).
+    pub forest_release_max_cover: Option<f32>,
     pub enable_entrainment: Option<bool>,
     pub enable_center_of_mass: Option<bool>,
     /// Accumulate the grid with integer (fixed point) atomics even on GPUs
@@ -1528,6 +1704,15 @@ mod tests {
             no_new_cells_travel: None,
             reference_surface_length: Some(12.5),
             flight_terminal_velocity: Some(35.0),
+            forest_cover_path: None,
+            enable_forest: None,
+            forest_drag_coefficient: Some(1.5),
+            forest_trunk_diameter: None,
+            forest_crown_diameter: None,
+            forest_tree_height: None,
+            forest_modulus_of_rupture: None,
+            forest_decay_coefficient: None,
+            forest_release_max_cover: None,
             cfl: Some(0.9),
             min_slope_angle: Some(10.0),
             max_slope_angle: Some(20.0),
@@ -1561,6 +1746,7 @@ mod tests {
             enable_entrainment: Some(false),
             enable_weak_pressure: Some(false),
             detachment: Some(Detachment::None),
+            enable_grid_occupied: Some(false),
             enable_center_of_mass: Some(true),
             integer_atomics: Some(true),
             center_of_mass_biggest_blob: Some(false),
@@ -1648,6 +1834,11 @@ mod tests {
             SimFlags::new(true, true, true, true, true, true).mask
         );
         assert!(SimFlags::from_u32(sim_settings.flags).is_weak_pressure_enabled());
+        assert!(!SimFlags::from_u32(sim_settings.flags).is_grid_occupied_enabled());
+
+        patch.enable_grid_occupied = Some(true);
+        sim_settings = SimSettings::from_settings(&patch, &dem);
+        assert!(SimFlags::from_u32(sim_settings.flags).is_grid_occupied_enabled());
     }
 
     #[test_log::test]

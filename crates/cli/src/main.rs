@@ -113,6 +113,28 @@ struct Args {
     /// 3D lift-off: terminal velocity (m/s) of flying particles, 0 = no drag
     #[arg(long)]
     flight_terminal_velocity: Option<f32>,
+    /// Canopy cover raster (fraction or percent) on the DEM grid
+    #[arg(long)]
+    forest_cover_path: Option<String>,
+    /// Use a loaded forest cover (default true)
+    #[arg(long, value_parser = parse_bool)]
+    enable_forest: Option<bool>,
+    #[arg(long)]
+    forest_drag_coefficient: Option<f32>,
+    #[arg(long)]
+    forest_trunk_diameter: Option<f32>,
+    #[arg(long)]
+    forest_crown_diameter: Option<f32>,
+    #[arg(long)]
+    forest_tree_height: Option<f32>,
+    /// Modulus of rupture of the stems in Pa
+    #[arg(long)]
+    forest_modulus_of_rupture: Option<f32>,
+    /// Decay coefficient in m/s of broken stands
+    #[arg(long)]
+    forest_decay_coefficient: Option<f32>,
+    #[arg(long)]
+    forest_release_max_cover: Option<f32>,
     #[arg(long, value_parser = parse_friction_model)]
     friction_model: Option<FrictionModel>,
     #[arg(long)]
@@ -201,6 +223,10 @@ struct Args {
     /// none (default), free-fall or curvature
     #[arg(long, value_parser = parse_detachment)]
     detachment: Option<Detachment>,
+    /// DAMPM global model: record peak maps only in cells holding a
+    /// depositing particle (allocates the grid occupied buffer)
+    #[arg(long, value_parser = parse_bool)]
+    enable_grid_occupied: Option<bool>,
     #[arg(long, value_parser = parse_bool)]
     enable_center_of_mass: Option<bool>,
     /// Integer (fixed point) grid atomics even on GPUs with float atomics;
@@ -293,6 +319,33 @@ impl Args {
         }
         if let Some(value) = self.flight_terminal_velocity {
             settings.flight_terminal_velocity = Some(value);
+        }
+        if let Some(value) = self.forest_cover_path.clone() {
+            settings.forest_cover_path = Some(value);
+        }
+        if let Some(value) = self.enable_forest {
+            settings.enable_forest = Some(value);
+        }
+        if let Some(value) = self.forest_drag_coefficient {
+            settings.forest_drag_coefficient = Some(value);
+        }
+        if let Some(value) = self.forest_trunk_diameter {
+            settings.forest_trunk_diameter = Some(value);
+        }
+        if let Some(value) = self.forest_crown_diameter {
+            settings.forest_crown_diameter = Some(value);
+        }
+        if let Some(value) = self.forest_tree_height {
+            settings.forest_tree_height = Some(value);
+        }
+        if let Some(value) = self.forest_modulus_of_rupture {
+            settings.forest_modulus_of_rupture = Some(value);
+        }
+        if let Some(value) = self.forest_decay_coefficient {
+            settings.forest_decay_coefficient = Some(value);
+        }
+        if let Some(value) = self.forest_release_max_cover {
+            settings.forest_release_max_cover = Some(value);
         }
         if let Some(value) = self.friction_model {
             settings.friction_model = Some(value);
@@ -392,6 +445,9 @@ impl Args {
         }
         if let Some(value) = self.detachment {
             settings.detachment = Some(value);
+        }
+        if let Some(value) = self.enable_grid_occupied {
+            settings.enable_grid_occupied = Some(value);
         }
         if let Some(value) = self.center_of_mass_biggest_blob {
             settings.center_of_mass_biggest_blob = Some(value);
@@ -635,11 +691,11 @@ fn print_summary(simulation: &mut Simulation, peak_velocity: &[f32]) -> Result<(
     );
     row("Peak flow thickness", format!("{peak_flow_thickness:.2} m"));
 
-    // the avalanche: the cells above the thickness threshold
-    block_on(simulation.post_process(settings.peak_flow_thickness_threshold, 0.0))?;
+    // the avalanche: the cells at or above the thickness threshold, the same
+    // mask the evaluation shaders use
     let affected: Vec<bool> = block_on(simulation.fetch_peak_flow_thickness())?
         .iter()
-        .map(|&thickness| thickness > 0.0)
+        .map(|&thickness| thickness >= settings.peak_flow_thickness_threshold)
         .collect();
     let affected_cells = affected.iter().filter(|&&set| set).count();
     row(
@@ -681,7 +737,8 @@ fn print_summary(simulation: &mut Simulation, peak_velocity: &[f32]) -> Result<(
     }
 
     if has_outline {
-        let evaluation = block_on(simulation.evaluate())?;
+        let evaluation =
+            block_on(simulation.evaluate(settings.peak_flow_thickness_threshold, 0.0))?;
         println!();
         println!("Compared with the outline ({outline_cells} cells)");
         row(
@@ -784,6 +841,15 @@ mod tests {
             no_new_cells_travel: None,
             reference_surface_length: None,
             flight_terminal_velocity: None,
+            forest_cover_path: None,
+            enable_forest: None,
+            forest_drag_coefficient: None,
+            forest_trunk_diameter: None,
+            forest_crown_diameter: None,
+            forest_tree_height: None,
+            forest_modulus_of_rupture: None,
+            forest_decay_coefficient: None,
+            forest_release_max_cover: None,
             released_particles_per_cell: None,
             release_thickness: None,
             release_swe: None,
@@ -813,6 +879,7 @@ mod tests {
             enable_earth_pressure_coefficient: None,
             enable_entrainment: None,
             enable_weak_pressure: None,
+            enable_grid_occupied: None,
             detachment: None,
             center_of_mass_biggest_blob: None,
             release_area_fraction: None,

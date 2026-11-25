@@ -21,3 +21,17 @@ Categories:
 | 253   | Coastal seawater buffer           | 191 | 223 | 255 |
 | 254   | Outside area                      | 230 | 230 | 230 |
 | 255   | No data                           | 0   | 0   | 0   |
+
+## Forest cover for the forest model
+
+`forest_cover_from_clcplus.py` turns the CLCplus download zip into a canopy cover raster for the
+`forest_cover_path` setting. The cover of a cell is the area fraction of tree pixels (classes 2-4),
+warped onto the DEM grid with average resampling and smoothed with a Gaussian (`--smoothing`, default 10 m):
+
+```
+python data/landcover/forest_cover_from_clcplus.py --reference dem.tif --output forest_cover.tif
+python data/landcover/forest_cover_from_clcplus.py --epsg 2056 --bounds 2780000 1180000 2786000 1186000 --cell-size 5 --output forest_cover.tif
+```
+
+It needs `rasterio` (and `scipy` for the smoothing) and reads the 100 km tiles it needs directly from
+`CLCPLUS_RAS_S2023_R10m_03035.zip`.

@@ -1,6 +1,8 @@
 avalanchers.code-workspace
+docs/videos/avalanchers.mp4
 web_output/
 dtm_cache.zarr
+ortho_cache/
 cole_considerations/
 .zcode
 outputs

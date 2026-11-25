@@ -6,7 +6,7 @@
 //! range, unit or viewport size changes; the GPU side is a single draw over a static font
 //! atlas.
 
-use crate::terrain::OverlayRange;
+use crate::terrain::{OverlayRamp, OverlayRange};
 
 /// 5x7 pixel font. Rows run top to bottom, `#` marks a lit pixel. Covers the digits and
 /// the lowercase alphabet so legend labels like "peak flow velocity (m/s)" render.
@@ -308,12 +308,29 @@ fn glyph_uv(index: usize) -> [[f32; 2]; 4] {
     [[u0, v0], [u1, v0], [u0, v1], [u1, v1]]
 }
 
-/// The ramp from `overlay_color` in `terrain.wgsl`; keep the two in sync.
-fn ramp_color(t: f32) -> [f32; 4] {
-    const COLD: [f32; 3] = [0.13, 0.36, 0.86];
-    const MID: [f32; 3] = [0.15, 0.82, 0.75];
-    const WARM: [f32; 3] = [0.98, 0.82, 0.20];
-    const HOT: [f32; 3] = [0.86, 0.14, 0.10];
+/// The ramps from `overlay_color` and `forest_color` in `terrain.wgsl`; keep
+/// them in sync.
+fn ramp_color(ramp: OverlayRamp, t: f32) -> [f32; 4] {
+    let [low, mid, high, top]: [[f32; 3]; 4] = match ramp {
+        OverlayRamp::Heat => [
+            [0.13, 0.36, 0.86],
+            [0.15, 0.82, 0.75],
+            [0.98, 0.82, 0.20],
+            [0.86, 0.14, 0.10],
+        ],
+        OverlayRamp::Forest => [
+            [0.86, 0.90, 0.56],
+            [0.52, 0.76, 0.30],
+            [0.18, 0.52, 0.20],
+            [0.04, 0.28, 0.12],
+        ],
+        OverlayRamp::ForestDamage => [
+            [0.10, 0.42, 0.16],
+            [0.88, 0.80, 0.22],
+            [0.92, 0.45, 0.10],
+            [0.42, 0.20, 0.07],
+        ],
+    };
     let mix = |a: [f32; 3], b: [f32; 3], k: f32| {
         [
             a[0] + (b[0] - a[0]) * k,
@@ -323,11 +340,11 @@ fn ramp_color(t: f32) -> [f32; 4] {
         ]
     };
     if t < 0.33 {
-        mix(COLD, MID, t / 0.33)
+        mix(low, mid, t / 0.33)
     } else if t < 0.66 {
-        mix(MID, WARM, (t - 0.33) / 0.33)
+        mix(mid, high, (t - 0.33) / 0.33)
     } else {
-        mix(WARM, HOT, (t - 0.66) / 0.34)
+        mix(high, top, (t - 0.66) / 0.34)
     }
 }
 
@@ -484,8 +501,8 @@ fn build_vertices(width: u32, height: u32, range: &OverlayRange) -> Vec<Colorbar
         let t1 = f64::from(i + 1) / 3.0;
         let y_top = bar_y1 - t1 as f32 * bar_h;
         let y_bottom = bar_y1 - t0 as f32 * bar_h;
-        let top = ramp_color(t1 as f32);
-        let bottom = ramp_color(t0 as f32);
+        let top = ramp_color(range.ramp, t1 as f32);
+        let bottom = ramp_color(range.ramp, t0 as f32);
         sink.quad(
             [
                 [bar_x0, y_top],
@@ -819,12 +836,23 @@ mod tests {
             }
             assert_eq!(got[3], 1.0);
         };
-        assert_rgb(ramp_color(0.0), [0.13, 0.36, 0.86]);
-        assert_rgb(ramp_color(0.33), [0.15, 0.82, 0.75]);
-        assert_rgb(ramp_color(0.66), [0.98, 0.82, 0.20]);
-        assert_rgb(ramp_color(1.0), [0.86, 0.14, 0.10]);
+        let heat = |t| ramp_color(OverlayRamp::Heat, t);
+        assert_rgb(heat(0.0), [0.13, 0.36, 0.86]);
+        assert_rgb(heat(0.33), [0.15, 0.82, 0.75]);
+        assert_rgb(heat(0.66), [0.98, 0.82, 0.20]);
+        assert_rgb(heat(1.0), [0.86, 0.14, 0.10]);
+        let forest = |t| ramp_color(OverlayRamp::Forest, t);
+        assert_rgb(forest(0.0), [0.86, 0.90, 0.56]);
+        assert_rgb(forest(0.33), [0.52, 0.76, 0.30]);
+        assert_rgb(forest(0.66), [0.18, 0.52, 0.20]);
+        assert_rgb(forest(1.0), [0.04, 0.28, 0.12]);
+        let damage = |t| ramp_color(OverlayRamp::ForestDamage, t);
+        assert_rgb(damage(0.0), [0.10, 0.42, 0.16]);
+        assert_rgb(damage(0.33), [0.88, 0.80, 0.22]);
+        assert_rgb(damage(0.66), [0.92, 0.45, 0.10]);
+        assert_rgb(damage(1.0), [0.42, 0.20, 0.07]);
         // Halfway into the first segment is the average of its stops.
-        let mid = ramp_color(0.165);
+        let mid = heat(0.165);
         assert!((mid[0] - (0.13 + 0.15) / 2.0).abs() < 1e-6);
     }
 

@@ -205,6 +205,12 @@ class AvalanchersScenario:
             decode_coords="all",
         ).isel(run=slice(0, self.number_of_runs))
 
+    def plot(self, parameter="peak_flow_thickness", **kwargs):
+        """Plots ``parameter`` of one run over the DEM; see ``avalanchers.plot_scenario``."""
+        from . import plot_scenario
+
+        return plot_scenario(self, parameter, **kwargs)
+
     def __str__(self):
         return (
             f"Scenario: {self.name}\n"

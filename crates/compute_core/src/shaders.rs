@@ -121,7 +121,6 @@ define_shaders! {
     ChamferFlood => "chamfer" entry_point "chamfer_flood",
     ChamferReduce => "chamfer" entry_point "chamfer_reduce",
     ComputeBeelineDistance => "compute_beeline_distance",
-    PostProcess => "post_process",
     EvaluateMassMovement => "evaluate_mass_movement",
     InitializeParticles => "initialize_particles",
     // the four relaxation kernels share one source file; each entry point
@@ -137,6 +136,7 @@ define_shaders! {
     P2G2D => "p2g" entry_point "p2g_2d",
     P2G2DSorted => "p2g_sorted" entry_point "p2g_2d_sorted",
     P2GWeakPressure => "p2g_weak_pressure",
+    P2GWeakPressure3D => "p2g_weak_pressure" entry_point "p2g_weak_pressure_3d",
     // the four particle sort kernels share one source file
     SortClearBins => "sort_particles" entry_point "sort_clear_bins",
     SortCountParticles => "sort_particles" entry_point "sort_count_particles",
@@ -154,6 +154,7 @@ define_shaders! {
     GridPhysics3D => "grid_physics_terrain_following" entry_point "grid_physics_3d",
     G2P3D => "g2p_terrain_following" entry_point "g2p_3d",
     Friction => "friction",
+    Forest => "forest",
     EarthPressure => "earth_pressure",
     CurvilinearGeometry => "curvilinear_geometry",
     CartesianGeometry => "cartesian_geometry",
@@ -166,6 +167,7 @@ define_shaders! {
     GridIndex => "grid_index",
     BSpline => "bspline",
     FloatChecks => "float_checks",
+    EvaluationMask => "evaluation_mask",
     ForceQuantization => "force_quantization",
     Quantization => "quantization",
     QuantizationFill => "quantization_fill",
@@ -918,6 +920,24 @@ fn collect_shader_configs(
                 min_binding_size: None,
             },
         ),
+        // Binding 5: simulated-cell thresholds
+        (
+            BufferName::EvaluationParams.to_string(),
+            BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+        ),
+        // Binding 6:
+        (
+            BufferName::GridPeakVelocity.to_string(),
+            BindingType::Buffer {
+                ty: BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+        ),
     ];
     shader_configs.insert(
         ShaderName::EvaluateMassMovement,
@@ -1114,6 +1134,15 @@ fn collect_shader_configs(
                         min_binding_size: None,
                     },
                 ),
+                // Binding 6: simulated-cell thresholds
+                (
+                    BufferName::EvaluationParams.to_string(),
+                    BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
             ],
         )?,
     );
@@ -1211,6 +1240,24 @@ fn collect_shader_configs(
                 min_binding_size: None,
             },
         ),
+        // Binding 10: simulated-cell thresholds
+        (
+            BufferName::EvaluationParams.to_string(),
+            BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+        ),
+        // Binding 11:
+        (
+            BufferName::GridPeakVelocity.to_string(),
+            BindingType::Buffer {
+                ty: BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+        ),
     ];
     shader_configs.insert(
         ShaderName::ChamferPrepare,
@@ -1234,52 +1281,6 @@ fn collect_shader_configs(
             ShaderName::ChamferReduce,
             load_shader_source(ShaderName::ChamferReduce, has_float32_atomic),
             &chamfer_bindings,
-        )?,
-    );
-
-    shader_configs.insert(
-        ShaderName::PostProcess,
-        PendingShader::new(
-            ShaderName::PostProcess,
-            load_shader_source(ShaderName::PostProcess, has_float32_atomic),
-            &[
-                // Binding 0:
-                (
-                    BufferName::SimSettings.to_string(),
-                    BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                ),
-                // Binding 1:
-                (
-                    BufferName::PostProcessParams.to_string(),
-                    BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                ),
-                // Binding 2:
-                (
-                    BufferName::GridPeakFlowThickness.to_string(),
-                    BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                ),
-                // Binding 3:
-                (
-                    BufferName::GridPeakVelocity.to_string(),
-                    BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                ),
-            ],
         )?,
     );
 
@@ -1357,6 +1358,15 @@ fn collect_shader_configs(
                 // Binding 7:
                 (
                     BufferName::RegionOfInterest.to_string(),
+                    BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                ),
+                // Binding 8: input canopy cover (a placeholder without forest)
+                (
+                    BufferName::ForestCover.to_string(),
                     BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
@@ -2319,47 +2329,62 @@ fn collect_shader_configs(
             &sorted_p2g_bindings,
         )?,
     );
-    // curvilinear weak-form pressure, a particle pass after either P2G
+    // weak-form pressure, a particle pass after either P2G
+    let weak_pressure_bindings = vec![
+        // Binding 0:
+        (
+            BufferName::SimSettings.to_string(),
+            BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+        ),
+        // Binding 1:
+        (BufferName::SimInfo.to_string(), storage_buffer(false)),
+        // Binding 2:
+        (
+            BufferName::ParticlesPosition.to_string(),
+            storage_buffer(true),
+        ),
+        // Binding 3:
+        (BufferName::ParticlesMass.to_string(), storage_buffer(true)),
+        // Binding 4:
+        (BufferName::GridMass.to_string(), storage_buffer(true)),
+        // Binding 5:
+        (
+            TextureName::TerrainGeometry.to_string(),
+            BindingType::Texture {
+                multisampled: false,
+                view_dimension: wgpu::TextureViewDimension::D2,
+                sample_type: wgpu::TextureSampleType::Float {
+                    filterable: has_float32_filterable,
+                },
+            },
+        ),
+        // Binding 6:
+        (BufferName::GridForces.to_string(), storage_buffer(false)),
+    ];
+    // curvilinear model
     shader_configs.insert(
         ShaderName::P2GWeakPressure,
         PendingShader::new_with_constants(
             ShaderName::P2GWeakPressure,
             load_shader_source(ShaderName::P2GWeakPressure, has_float32_atomic),
-            &[
-                // Binding 0:
-                (
-                    BufferName::SimSettings.to_string(),
-                    BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                ),
-                // Binding 1:
-                (BufferName::SimInfo.to_string(), storage_buffer(false)),
-                // Binding 2:
-                (
-                    BufferName::ParticlesPosition.to_string(),
-                    storage_buffer(true),
-                ),
-                // Binding 3:
-                (BufferName::ParticlesMass.to_string(), storage_buffer(true)),
-                // Binding 4:
-                (BufferName::GridMass.to_string(), storage_buffer(true)),
-                // Binding 5:
-                (
-                    TextureName::TerrainGeometry.to_string(),
-                    BindingType::Texture {
-                        multisampled: false,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        sample_type: wgpu::TextureSampleType::Float {
-                            filterable: has_float32_filterable,
-                        },
-                    },
-                ),
-                // Binding 6:
-                (BufferName::GridForces.to_string(), storage_buffer(false)),
-            ],
+            &weak_pressure_bindings,
+            &[("WG_SIZE_1D", max_compute_invocations_per_workgroup as f64)],
+        )?,
+    );
+    // 3D Cartesian model: skips flying particles like p2g_3d
+    let mut weak_pressure_3d_bindings = weak_pressure_bindings.clone();
+    // Binding 7:
+    weak_pressure_3d_bindings.push((BufferName::ParticlesState.to_string(), storage_buffer(true)));
+    shader_configs.insert(
+        ShaderName::P2GWeakPressure3D,
+        PendingShader::new_with_constants(
+            ShaderName::P2GWeakPressure3D,
+            load_shader_source(ShaderName::P2GWeakPressure3D, has_float32_atomic),
+            &weak_pressure_3d_bindings,
             &[("WG_SIZE_1D", max_compute_invocations_per_workgroup as f64)],
         )?,
     );
@@ -2730,6 +2755,13 @@ fn collect_shader_configs(
         (BufferName::GridVelocityZ.to_string(), storage_buffer(false)),
         // Binding 14: only nodes whose cell holds a particle record peaks
         (BufferName::GridOccupied.to_string(), storage_buffer(true)),
+        // Binding 15: weak-form pressure sums of p2g_weak_pressure_3d
+        (BufferName::GridForces.to_string(), storage_buffer(true)),
+        // Binding 16: standing canopy cover, lowered by forest destruction
+        (
+            BufferName::ForestStanding.to_string(),
+            storage_buffer(false),
+        ),
     ]);
     let mut terrain_following_g2p_bindings = existing_bindings(ShaderName::G2P);
     // the curvilinear binding 14 is the z velocity, which this model does not have
@@ -3782,6 +3814,7 @@ mod tests {
             ShaderName::P2G3D,
             ShaderName::P2G3DSorted,
             ShaderName::P2GWeakPressure,
+            ShaderName::P2GWeakPressure3D,
         ] {
             for has_float32_atomic in [false, true] {
                 let source = validate_wgsl(shader, has_float32_atomic);
