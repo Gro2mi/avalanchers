@@ -180,6 +180,20 @@ impl Renderer {
             .set_enabled_range(standing.is_some() && cover.is_some(), range);
     }
 
+    /// Drapes an orthophoto (`(width, height, rgba8 sRGB pixels)`) over the
+    /// terrain in place of the elevation colours; `None` returns to them. The
+    /// image spans the DEM's outer cell edges, row 0 at the south edge, and
+    /// must fit the device's `max_texture_dimension_2d`. Grid overlays are drawn
+    /// on top.
+    pub fn set_orthophoto(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        image: Option<(u32, u32, &[u8])>,
+    ) {
+        self.terrain.set_orthophoto(device, queue, image);
+    }
+
     /// Attaches the simulation's particle buffers. Passing `None` hides the particles.
     pub fn set_particles(&mut self, device: &wgpu::Device, buffers: Option<ParticleBuffers<'_>>) {
         self.particles.set_buffers(device, buffers);

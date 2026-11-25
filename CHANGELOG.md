@@ -22,6 +22,13 @@ All notable changes to this project might be documented in this file.
 - `verification/run_forest_parabola_test.py`: forest band on half the width of a parabolic slope,
   so the same avalanche runs with and without forest side by side (runout per half, inertness of
   zero cover, breaking criterion), with `--export` for the live viewer.
+- Orthophoto basemap in the live viewer (key `O` or the panel's "basemap"): swisstopo SWISSIMAGE
+  in Switzerland and the basemap.at orthofoto in Austria, draped over the terrain in place of the
+  elevation colours. The DEM's coordinate system (LV95, LV03, MGI GK West/Central/East, MGI
+  Lambert, ETRS89-LAEA, UTM 32N/33N) is detected from its coordinates and can be overridden in the
+  panel. Tiles are cached in `ortho_cache/` and honour `AVALANCHERS_TILES_OFFLINE` and
+  `AVALANCHERS_TILE_DELAY_MS`. `data_processor::orthophoto` fetches and resamples the imagery
+  (new dependency `proj4rs`), and `Renderer::set_orthophoto` drapes any RGBA image.
 
 ### Changed
 - Grid models renamed: `3d-depth-averaged` is now **DAMPM global** (`dampm-global-cartesian`, short `global`),

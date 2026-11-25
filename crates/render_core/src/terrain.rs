@@ -272,7 +272,7 @@ struct TerrainUniforms {
     /// width, height, cell_size, vertical exaggeration
     grid: [f32; 4],
     /// min elevation, max elevation, momentum overlay unit (kg m/s per i32
-    /// step), unused
+    /// step), orthophoto enabled (1) or not (0)
     elevation: [f32; 4],
     /// direction towards the light
     light_dir: [f32; 4],
@@ -385,6 +385,13 @@ pub struct TerrainRenderer {
     heightmap_view: wgpu::TextureView,
     /// Bound when no simulation grid is attached, so the layout stays valid.
     placeholder_overlay: wgpu::Buffer,
+    /// The draped orthophoto, or a 1x1 placeholder while there is none.
+    ortho_view: wgpu::TextureView,
+    ortho_sampler: wgpu::Sampler,
+    /// The grid buffers bound at the moment, kept to rebuild the bind group
+    /// when the orthophoto changes.
+    overlay: wgpu::Buffer,
+    reference: wgpu::Buffer,
     uniforms: TerrainUniforms,
     vertex_count: u32,
 }
@@ -502,6 +509,23 @@ impl TerrainRenderer {
                     },
                     count: None,
                 },
+                // orthophoto draped over the terrain
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
 
@@ -512,6 +536,16 @@ impl TerrainRenderer {
             mapped_at_creation: false,
         });
 
+        let ortho_view = upload_orthophoto(device, queue, 1, 1, &[0; 4]);
+        let ortho_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Orthophoto Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
         let bind_group = create_bind_group(
             device,
             &bind_group_layout,
@@ -519,6 +553,8 @@ impl TerrainRenderer {
             &heightmap_view,
             &placeholder_overlay,
             &placeholder_overlay,
+            &ortho_view,
+            &ortho_sampler,
         );
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -574,7 +610,11 @@ impl TerrainRenderer {
             bind_group,
             uniform_buffer,
             heightmap_view,
+            overlay: placeholder_overlay.clone(),
+            reference: placeholder_overlay.clone(),
             placeholder_overlay,
+            ortho_view,
+            ortho_sampler,
             uniforms,
             vertex_count: terrain.vertex_count(),
         }
@@ -645,13 +685,37 @@ impl TerrainRenderer {
             Some(_) => [mode as u32 as f32, range.min, range.max, range.threshold],
             None => [0.0, range.min, range.max, range.threshold],
         };
+        self.overlay = buffer.unwrap_or(&self.placeholder_overlay).clone();
+        self.reference = reference.unwrap_or(&self.placeholder_overlay).clone();
+        self.rebuild_bind_group(device);
+    }
+
+    /// Drapes an RGBA8 (sRGB) image over the terrain in place of the elevation
+    /// colours; `None` returns to them. The image spans the DEM's outer cell
+    /// edges with row 0 at the south edge (the DEM row order), and must fit
+    /// `max_texture_dimension_2d`. Transparent pixels show the elevation colours.
+    pub fn set_orthophoto(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        image: Option<(u32, u32, &[u8])>,
+    ) {
+        let (width, height, rgba) = image.unwrap_or((1, 1, &[0; 4]));
+        self.ortho_view = upload_orthophoto(device, queue, width, height, rgba);
+        self.uniforms.elevation[3] = if image.is_some() { 1.0 } else { 0.0 };
+        self.rebuild_bind_group(device);
+    }
+
+    fn rebuild_bind_group(&mut self, device: &wgpu::Device) {
         self.bind_group = create_bind_group(
             device,
             &self.bind_group_layout,
             &self.uniform_buffer,
             &self.heightmap_view,
-            buffer.unwrap_or(&self.placeholder_overlay),
-            reference.unwrap_or(&self.placeholder_overlay),
+            &self.overlay,
+            &self.reference,
+            &self.ortho_view,
+            &self.ortho_sampler,
         );
     }
 
@@ -674,6 +738,52 @@ impl TerrainRenderer {
     }
 }
 
+fn upload_orthophoto(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+) -> wgpu::TextureView {
+    assert_eq!(
+        rgba.len(),
+        width as usize * height as usize * 4,
+        "an orthophoto of {width}x{height} needs that many RGBA8 pixels"
+    );
+    let size = wgpu::Extent3d {
+        width,
+        height,
+        depth_or_array_layers: 1,
+    };
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Orthophoto"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        rgba,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(width * 4),
+            rows_per_image: Some(height),
+        },
+        size,
+    );
+    texture.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn create_bind_group(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
@@ -681,6 +791,8 @@ fn create_bind_group(
     heightmap: &wgpu::TextureView,
     overlay: &wgpu::Buffer,
     reference: &wgpu::Buffer,
+    ortho: &wgpu::TextureView,
+    ortho_sampler: &wgpu::Sampler,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("Terrain Bind Group"),
@@ -701,6 +813,14 @@ fn create_bind_group(
             wgpu::BindGroupEntry {
                 binding: 3,
                 resource: reference.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::TextureView(ortho),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: wgpu::BindingResource::Sampler(ortho_sampler),
             },
         ],
     })

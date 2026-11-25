@@ -289,6 +289,49 @@ fn disabling_the_overlay_restores_plain_terrain() {
     assert_eq!(plain, toggled);
 }
 
+/// Magenta never appears in the elevation colours or the overlay ramps.
+fn is_magenta(p: &[u8; 4]) -> bool {
+    p[0] > 80 && p[2] > 80 && p[1] < p[0] / 3 && p[1] < p[2] / 3
+}
+
+#[test]
+fn orthophoto_replaces_the_elevation_colours_until_removed() {
+    let Ok(ctx) = pollster::block_on(GpuContext::headless()) else {
+        eprintln!("skipping: no GPU adapter available");
+        return;
+    };
+
+    let terrain = sloped_terrain(32, 32);
+    let plain = read_rendered_pixels(&ctx, &terrain);
+    assert!(!plain.iter().any(is_magenta));
+
+    // the left half (west) magenta, the right half transparent
+    let (width, height) = (4u32, 2u32);
+    let photo: Vec<u8> = (0..width * height)
+        .flat_map(|i| {
+            if i % width < width / 2 {
+                [255, 0, 255, 255]
+            } else {
+                [0, 0, 0, 0]
+            }
+        })
+        .collect();
+    let draped = render_with(&ctx, &terrain, |renderer, device| {
+        renderer.set_orthophoto(device, &ctx.queue, Some((width, height, &photo)));
+    });
+    let magenta = draped.iter().filter(|p| is_magenta(p)).count();
+    assert!(magenta > 100, "only {magenta} magenta pixels");
+    // transparent texels keep the elevation colours
+    let unchanged = draped.iter().zip(&plain).filter(|(a, b)| a == b).count();
+    assert!(unchanged > 100, "only {unchanged} pixels kept their colour");
+
+    let removed = render_with(&ctx, &terrain, |renderer, device| {
+        renderer.set_orthophoto(device, &ctx.queue, Some((width, height, &photo)));
+        renderer.set_orthophoto(device, &ctx.queue, None);
+    });
+    assert_eq!(plain, removed);
+}
+
 #[test]
 fn particles_are_drawn_on_top_of_the_terrain() {
     let Ok(ctx) = pollster::block_on(GpuContext::headless()) else {

@@ -55,6 +55,7 @@ tokio = { version = "1", features = ["rt", "macros", "sync"] }
 wiremock = "0.6"
 tiff = "0.11"
 weezl = "0.2"
+proj4rs = { version = "0.3", default-features = false }
 
 # python
 pyo3 = { version = "0.28", features = ["auto-initialize", "abi3-py37"] }
@@ -90,4 +91,7 @@ split-debuginfo = "unpacked"
 
 # naga parses and validates every WGSL shader when the GPU context starts;
 [profile.dev.package.naga]
+opt-level = 3
+# decoding cached orthophoto tiles (live_sim) is ~50x slower unoptimized
+[profile.dev.package.zune-jpeg]
 opt-level = 3

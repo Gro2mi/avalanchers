@@ -25,6 +25,8 @@ use rasterizer::RasterGrid;
 #[cfg(not(target_arch = "wasm32"))]
 use tile_manager::TileManager;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod orthophoto;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod output;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod store_reader;

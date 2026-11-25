@@ -6,7 +6,7 @@ struct Uniforms {
     // width, height, cell_size, vertical exaggeration
     grid: vec4<f32>,
     // min elevation, max elevation (both already scaled by the exaggeration),
-    // momentum overlay unit (kg m/s per i32 step)
+    // momentum overlay unit (kg m/s per i32 step), orthophoto enabled (> 0.5)
     elevation: vec4<f32>,
     // direction towards the light
     light_dir: vec4<f32>,
@@ -19,6 +19,9 @@ struct Uniforms {
 @group(0) @binding(2) var<storage, read> overlay_grid: array<f32>;
 // initial forest cover for the forest damage overlay (mode 4)
 @group(0) @binding(3) var<storage, read> overlay_reference: array<f32>;
+// orthophoto spanning the outer cell edges, row 0 at the south edge
+@group(0) @binding(4) var ortho: texture_2d<f32>;
+@group(0) @binding(5) var ortho_sampler: sampler;
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -27,6 +30,7 @@ struct VertexOutput {
     // Whole quads are dropped, so this must not be interpolated.
     @location(2) @interpolate(flat) valid: f32,
     @location(3) overlay_value: f32,
+    @location(4) ortho_uv: vec2<f32>,
 };
 
 // Returns the exaggerated height in `x` and the no-data flag in `y`.
@@ -92,6 +96,8 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     out.elevation = height;
     out.valid = valid;
     out.overlay_value = sample_overlay(gx, gy);
+    // vertices sit on cell centres, the orthophoto spans the cell edges
+    out.ortho_uv = (vec2<f32>(f32(gx), f32(gy)) + 0.5) / u.grid.xy;
     return out;
 }
 
@@ -203,6 +209,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let t = clamp((in.elevation - u.elevation.x) / range, 0.0, 1.0);
 
     var albedo = terrain_color(t);
+    // the photo already holds the real shading, so the lighting is softened
+    var ambient = 0.35;
+    var direct = 0.75;
+    // sampled unconditionally: textureSample needs uniform control flow
+    let photo = textureSample(ortho, ortho_sampler, in.ortho_uv);
+    if (u.elevation.w > 0.5) {
+        albedo = mix(albedo, photo.rgb, photo.a);
+        ambient = mix(ambient, 0.65, photo.a);
+        direct = mix(direct, 0.45, photo.a);
+    }
 
     if (u.overlay.x > 0.5 && in.overlay_value > u.overlay.w) {
         let span = max(u.overlay.z - u.overlay.y, 1e-6);
@@ -221,6 +237,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         albedo = mix(albedo, color, coverage);
     }
 
-    let shaded = albedo * (0.35 + 0.75 * diffuse);
+    let shaded = albedo * (ambient + direct * diffuse);
     return vec4<f32>(shaded, 1.0);
 }

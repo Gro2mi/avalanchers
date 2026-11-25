@@ -83,16 +83,16 @@ pub const OFFLINE_ENV: &str = "AVALANCHERS_TILES_OFFLINE";
 /// are sequential, so this caps the request rate of a bulk prefetch.
 pub const DELAY_ENV: &str = "AVALANCHERS_TILE_DELAY_MS";
 /// Retries of a request the server answered with 429 or 503.
-const MAX_THROTTLE_RETRIES: u32 = 5;
+pub(crate) const MAX_THROTTLE_RETRIES: u32 = 5;
 /// Wait before such a retry when the server sends no `Retry-After`.
 const DEFAULT_THROTTLE_WAIT: Duration = Duration::from_secs(30);
 
-fn tiles_offline() -> bool {
+pub(crate) fn tiles_offline() -> bool {
     std::env::var(OFFLINE_ENV)
         .is_ok_and(|value| matches!(value.trim().to_lowercase().as_str(), "1" | "true" | "yes"))
 }
 
-fn download_delay() -> Duration {
+pub(crate) fn download_delay() -> Duration {
     std::env::var(DELAY_ENV)
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok())
@@ -101,7 +101,7 @@ fn download_delay() -> Duration {
 
 /// Wait before retrying a throttled request: the `Retry-After` seconds if the
 /// server sent them, otherwise [`DEFAULT_THROTTLE_WAIT`].
-fn throttle_wait(retry_after: Option<&str>) -> Duration {
+pub(crate) fn throttle_wait(retry_after: Option<&str>) -> Duration {
     retry_after
         .and_then(|value| value.trim().parse::<u64>().ok())
         .map_or(DEFAULT_THROTTLE_WAIT, Duration::from_secs)
@@ -284,7 +284,7 @@ pub fn decode_tiled_lzw_f32(bytes: &[u8]) -> Result<(u32, u32, Vec<f32>), TileMa
 /// reqwest needs a Tokio reactor, but `get_dem` is driven by whatever executor
 /// the caller has: the CLI and the simulation tests use `pollster`, the Python
 /// bindings Tokio. Every request therefore runs on this dedicated runtime.
-fn http_runtime() -> &'static tokio::runtime::Runtime {
+pub(crate) fn http_runtime() -> &'static tokio::runtime::Runtime {
     static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
     RUNTIME.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()

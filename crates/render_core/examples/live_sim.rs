@@ -9,15 +9,19 @@
 //! simulation, `V` resets the view, `0` hides the overlay, `1` peak flow velocity, `2`
 //! peak flow thickness, `3` grid mass, `4` release areas, `5` slope angle, `6` slope
 //! aspect, `7` roughness, `8` grid momentum, `9` forest damage (again: initial forest
-//! cover), `P` toggles particles, `J` the particle elevation jitter. The egui panel
+//! cover), `P` toggles particles, `J` the particle elevation jitter, `O` the
+//! orthophoto basemap (SWISSIMAGE in Switzerland, basemap.at in Austria; the DEM's
+//! coordinate system is detected from its coordinates and can be overridden in the
+//! panel, tiles are cached in `ortho_cache/`). The egui panel
 //! scales the particle size (1 = a sphere of the particle volume, applied at once),
 //! switches the testcase (the DEM pngs next to the configured one), the simulation
 //! model and the other simulation settings; sliders fine-tune with the arrow keys once
 //! focused (click the slider or its label, or `Tab` to it), and double-clicking a
 //! slider's label resets the value to its default.
 
+use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
@@ -26,6 +30,7 @@ use compute_core::settings::{
     SimModel,
 };
 use compute_core::{ComputeOrchestrator, SimInfo, buffers::BufferName};
+use data_processor::orthophoto::{self, DemCrs, OrthoSource, Orthophoto};
 use render_core::{OrbitCamera, OverlayRamp, OverlayRange, ParticleBuffers, Renderer, TerrainData};
 use simulation::{Simulation, SimulationState};
 use winit::application::ApplicationHandler;
@@ -55,6 +60,13 @@ const RELEASE_TEXTURE_SUFFIX: &str = "releaseTexture";
 /// `avaFooforestCover.png` (cover in percent in the alpha channel).
 const FOREST_COVER_SUFFIX: &str = "forestCover";
 const WINDOW_ICON: &[u8] = include_bytes!("../../../frontend/icons/android-chrome-512x512.png");
+/// Longest side of a draped orthophoto in pixels (64 MB of RGBA at 4096²).
+const ORTHO_MAX_DIM: u32 = 4096;
+/// Orthophotos kept in memory, so toggling and switching testcases back does
+/// not resample the tiles again.
+const ORTHO_MEMORY_CACHE: usize = 4;
+/// How often a running orthophoto download is checked for completion.
+const ORTHO_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Grid buffers cloned from the simulation, both at startup and after a restart.
 const GRID_BUFFERS: [BufferName; 10] = [
@@ -844,6 +856,76 @@ fn bool_checkbox(ui: &mut egui::Ui, label: &str, field: &mut Option<bool>) {
     *field = Some(value);
 }
 
+/// How the bare terrain is coloured.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Basemap {
+    Elevation,
+    Orthophoto,
+}
+
+impl Basemap {
+    fn label(self) -> &'static str {
+        match self {
+            Basemap::Elevation => "elevation colours",
+            Basemap::Orthophoto => "orthophoto",
+        }
+    }
+}
+
+/// One orthophoto of one DEM.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct OrthoKey {
+    dem: String,
+    bounds: [u32; 4],
+    crs: DemCrs,
+    source: OrthoSource,
+}
+
+type OrthoResult = Result<Arc<Orthophoto>, String>;
+
+/// The orthophoto basemap: the panel's choices, the images in memory and the
+/// download running in the background.
+struct OrthoState {
+    basemap: Basemap,
+    /// `None` uses the CRS detected from the DEM coordinates.
+    crs_override: Option<DemCrs>,
+    /// `None` uses the service of the DEM's country.
+    source_override: Option<OrthoSource>,
+    /// DEM the overrides were chosen for; a different DEM resets them.
+    dem: String,
+    cache: HashMap<OrthoKey, Arc<Orthophoto>>,
+    job: Option<(OrthoKey, mpsc::Receiver<OrthoResult>)>,
+    /// Shown in the panel: progress, size or the last error.
+    status: String,
+    /// Attribution of the orthophoto on screen.
+    shown: Option<OrthoSource>,
+}
+
+impl OrthoState {
+    fn new() -> Self {
+        Self {
+            basemap: Basemap::Elevation,
+            crs_override: None,
+            source_override: None,
+            dem: String::new(),
+            cache: HashMap::new(),
+            job: None,
+            status: String::new(),
+            shown: None,
+        }
+    }
+}
+
+/// The CRS detected for `dem` and the orthophoto service that covers it.
+fn ortho_defaults(dem: &compute_core::dem::Dem) -> (Option<DemCrs>, Option<OrthoSource>) {
+    let crs = orthophoto::detect_crs(&dem.bounds, &dem.projection);
+    let source = crs.map(|crs| {
+        let (lon, lat) = orthophoto::center_lon_lat(&dem.bounds, crs).unwrap_or((0.0, 0.0));
+        OrthoSource::default_for(crs, lon, lat)
+    });
+    (crs, source)
+}
+
 struct ViewerWindow {
     window: Arc<Window>,
     surface: wgpu::Surface<'static>,
@@ -877,6 +959,7 @@ struct Viewer {
     /// Simulation state changed since the last rendered frame.
     pending_render: bool,
     last_render_at: Instant,
+    ortho: OrthoState,
 }
 
 impl Viewer {
@@ -898,6 +981,141 @@ impl Viewer {
             dirty: true,
             pending_render: false,
             last_render_at: Instant::now(),
+            ortho: OrthoState::new(),
+        }
+    }
+
+    /// The orthophoto the panel asks for, or why there is none.
+    fn ortho_target(&mut self) -> Result<OrthoKey, String> {
+        let dem = &self.sim.simulation.dem;
+        if self.ortho.dem != dem.source {
+            // overrides belong to the DEM they were chosen for
+            self.ortho.dem = dem.source.clone();
+            self.ortho.crs_override = None;
+            self.ortho.source_override = None;
+        }
+        let (detected_crs, _) = ortho_defaults(dem);
+        let crs = self
+            .ortho
+            .crs_override
+            .or(detected_crs)
+            .ok_or("the DEM's location is unknown: pick its coordinate system".to_string())?;
+        let source = match self.ortho.source_override {
+            Some(source) => source,
+            None => {
+                let (lon, lat) =
+                    orthophoto::center_lon_lat(&dem.bounds, crs).map_err(|e| e.to_string())?;
+                OrthoSource::default_for(crs, lon, lat)
+            }
+        };
+        let b = &dem.bounds;
+        Ok(OrthoKey {
+            dem: dem.source.clone(),
+            bounds: [b.xmin, b.ymin, b.xmax, b.ymax].map(f32::to_bits),
+            crs,
+            source,
+        })
+    }
+
+    /// Shows the orthophoto the panel asks for: from memory, or after a
+    /// background download (the elevation colours stay until it arrives).
+    fn refresh_orthophoto(&mut self) {
+        let target = match self.ortho.basemap {
+            Basemap::Elevation => None,
+            Basemap::Orthophoto => match self.ortho_target() {
+                Ok(key) => Some(key),
+                Err(reason) => {
+                    self.ortho.status = reason;
+                    None
+                }
+            },
+        };
+        let image = target
+            .as_ref()
+            .and_then(|key| self.ortho.cache.get(key).cloned());
+        if let (Some(key), None) = (&target, &image) {
+            let running = self.ortho.job.as_ref().is_some_and(|(job, _)| job == key);
+            if !running {
+                self.start_ortho_download(key.clone());
+            }
+        }
+        if let Some(image) = &image {
+            self.ortho.status = format!("{} x {} px", image.width, image.height);
+        } else if target.is_none() && self.ortho.basemap == Basemap::Elevation {
+            self.ortho.status.clear();
+        }
+        self.ortho.shown = image.as_ref().and(target.as_ref()).map(|key| key.source);
+        if let Some(view) = self.window.as_mut() {
+            view.renderer.set_orthophoto(
+                &self.sim.device,
+                &self.sim.queue,
+                image
+                    .as_ref()
+                    .map(|image| (image.width, image.height, image.rgba.as_slice())),
+            );
+        }
+        self.mark_dirty();
+    }
+
+    fn start_ortho_download(&mut self, key: OrthoKey) {
+        let dem = &self.sim.simulation.dem;
+        let bounds = dem.bounds.clone();
+        let max_dim = self
+            .sim
+            .device
+            .limits()
+            .max_texture_dimension_2d
+            .min(ORTHO_MAX_DIM);
+        let (crs, source) = (key.crs, key.source);
+        let (sender, receiver) = mpsc::channel();
+        // A superseded download finishes in the background and is dropped.
+        self.ortho.job = Some((key, receiver));
+        self.ortho.status = format!("loading {} …", source.label());
+        tracing::info!(
+            "Loading the {} orthophoto for {} ({})",
+            source.label(),
+            dem.source,
+            crs.label()
+        );
+        std::thread::spawn(move || {
+            let result = pollster::block_on(orthophoto::fetch_orthophoto(
+                &bounds,
+                crs,
+                source,
+                max_dim,
+                Path::new(orthophoto::DEFAULT_CACHE_DIR),
+            ));
+            let _ = sender.send(result.map(Arc::new).map_err(|e| e.to_string()));
+        });
+    }
+
+    /// Picks up a finished orthophoto download.
+    fn poll_orthophoto(&mut self) {
+        let Some((key, receiver)) = self.ortho.job.as_ref() else {
+            return;
+        };
+        let result = match receiver.try_recv() {
+            Ok(result) => result,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Err("the orthophoto download stopped".to_string())
+            }
+        };
+        let key = key.clone();
+        self.ortho.job = None;
+        match result {
+            Ok(image) => {
+                if self.ortho.cache.len() >= ORTHO_MEMORY_CACHE {
+                    self.ortho.cache.clear();
+                }
+                self.ortho.cache.insert(key, image);
+                self.refresh_orthophoto();
+            }
+            Err(error) => {
+                tracing::warn!("Could not load the orthophoto: {error}");
+                self.ortho.status = error;
+                self.mark_dirty();
+            }
         }
     }
 
@@ -1021,6 +1239,8 @@ impl Viewer {
         }
         self.apply_overlay();
         self.apply_particles();
+        // the fresh renderer has no orthophoto; a new DEM needs another one
+        self.refresh_orthophoto();
         let radius = self.particle_radius();
         if let Some(view) = self.window.as_mut() {
             let particles = view.renderer.particles_mut();
@@ -1123,6 +1343,7 @@ impl ApplicationHandler for Viewer {
 
         self.apply_overlay();
         self.apply_particles();
+        self.refresh_orthophoto();
         let radius = self.particle_radius();
         if let Some(view) = self.window.as_mut() {
             let particles = view.renderer.particles_mut();
@@ -1165,6 +1386,7 @@ impl ApplicationHandler for Viewer {
         }
 
         let mut pending_settings: Option<Settings> = None;
+        let mut ortho_changed = false;
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => self.resize(size.width, size.height),
@@ -1261,6 +1483,14 @@ impl ApplicationHandler for Viewer {
                             Overlay::ForestStanding
                         };
                         self.apply_overlay();
+                    }
+                    Key::Character("o" | "O") => {
+                        self.ortho.basemap = match self.ortho.basemap {
+                            Basemap::Elevation => Basemap::Orthophoto,
+                            Basemap::Orthophoto => Basemap::Elevation,
+                        };
+                        tracing::info!("Basemap: {}", self.ortho.basemap.label());
+                        self.refresh_orthophoto();
                     }
                     Key::Character("p" | "P") => {
                         self.show_particles = !self.show_particles;
@@ -1363,6 +1593,13 @@ impl ApplicationHandler for Viewer {
                 // Visual only: applied immediately, not through the draft settings.
                 let mut particle_size = Some(self.particle_size_scale);
                 let volume_radius = self.sim.particle_volume_radius;
+                // Basemap choices, applied after the frame like the settings.
+                let mut basemap = self.ortho.basemap;
+                let mut crs_choice = self.ortho.crs_override;
+                let mut source_choice = self.ortho.source_override;
+                let (detected_crs, auto_source) = ortho_defaults(&self.sim.simulation.dem);
+                let ortho_status = self.ortho.status.clone();
+                let ortho_shown = self.ortho.shown;
                 let egui_ctx = view.egui_state.egui_ctx().clone();
                 let input = view.egui_state.take_egui_input(&view.window);
                 // `run_ui` (not bare `begin_pass`) so egui knows the root UI covers the
@@ -1395,6 +1632,77 @@ impl ApplicationHandler for Viewer {
                                  (mass / density, r = {volume_radius:.2} m)",
                                 volume_radius * scale
                             ));
+                            ui.add_space(4.0);
+
+                            ui.horizontal(|ui| {
+                                ui.label("basemap");
+                                egui::ComboBox::from_id_salt("basemap")
+                                    .selected_text(basemap.label())
+                                    .show_ui(ui, |ui| {
+                                        for choice in [Basemap::Elevation, Basemap::Orthophoto] {
+                                            ui.selectable_value(
+                                                &mut basemap,
+                                                choice,
+                                                choice.label(),
+                                            );
+                                        }
+                                    });
+                            })
+                            .response
+                            .on_hover_text("O toggles the orthophoto");
+                            if basemap == Basemap::Orthophoto {
+                                ui.horizontal(|ui| {
+                                    ui.label("imagery");
+                                    let auto = format!(
+                                        "auto: {}",
+                                        auto_source.map_or("none", OrthoSource::label)
+                                    );
+                                    egui::ComboBox::from_id_salt("ortho_source")
+                                        .selected_text(
+                                            source_choice
+                                                .map_or(auto.clone(), |s| s.label().to_string()),
+                                        )
+                                        .show_ui(ui, |ui| {
+                                            ui.selectable_value(&mut source_choice, None, auto);
+                                            for source in OrthoSource::ALL {
+                                                ui.selectable_value(
+                                                    &mut source_choice,
+                                                    Some(source),
+                                                    source.label(),
+                                                );
+                                            }
+                                        });
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("DEM CRS");
+                                    let auto = format!(
+                                        "auto: {}",
+                                        detected_crs.map_or("unknown", DemCrs::label)
+                                    );
+                                    egui::ComboBox::from_id_salt("ortho_crs")
+                                        .width(220.0)
+                                        .selected_text(
+                                            crs_choice
+                                                .map_or(auto.clone(), |c| c.label().to_string()),
+                                        )
+                                        .show_ui(ui, |ui| {
+                                            ui.selectable_value(&mut crs_choice, None, auto);
+                                            for crs in DemCrs::ALL {
+                                                ui.selectable_value(
+                                                    &mut crs_choice,
+                                                    Some(crs),
+                                                    crs.label(),
+                                                );
+                                            }
+                                        });
+                                });
+                                if !ortho_status.is_empty() {
+                                    ui.label(egui::RichText::new(&ortho_status).small());
+                                }
+                                if let Some(source) = ortho_shown {
+                                    ui.label(egui::RichText::new(source.attribution()).small());
+                                }
+                            }
                             ui.add_space(4.0);
 
                             ui.horizontal(|ui| {
@@ -1724,6 +2032,14 @@ impl ApplicationHandler for Viewer {
                 if apply_clicked {
                     pending_settings = Some(self.draft.clone());
                 }
+                ortho_changed = basemap != self.ortho.basemap
+                    || crs_choice != self.ortho.crs_override
+                    || source_choice != self.ortho.source_override;
+                if ortho_changed {
+                    self.ortho.basemap = basemap;
+                    self.ortho.crs_override = crs_choice;
+                    self.ortho.source_override = source_choice;
+                }
                 // The scene above was drawn with the previous size; redraw once more.
                 let particle_size = particle_size.unwrap_or(DEFAULT_PARTICLE_SIZE_SCALE);
                 let particle_size_changed = particle_size != self.particle_size_scale;
@@ -1804,12 +2120,16 @@ impl ApplicationHandler for Viewer {
         {
             tracing::error!("Could not apply the new settings: {error}");
         }
+        if ortho_changed {
+            self.refresh_orthophoto();
+        }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_none() {
             return;
         }
+        self.poll_orthophoto();
 
         // Drain every due step batch (bounded); rendering is capped separately so
         // fast runs are not throttled to the display rate.
@@ -1846,6 +2166,15 @@ impl ApplicationHandler for Viewer {
             event_loop.set_control_flow(ControlFlow::WaitUntil(wake.max(Instant::now())));
         } else {
             event_loop.set_control_flow(ControlFlow::Wait);
+        }
+        // An orthophoto download runs on its own thread; wake up to collect it.
+        if self.ortho.job.is_some() {
+            let poll_at = Instant::now() + ORTHO_POLL_INTERVAL;
+            match event_loop.control_flow() {
+                ControlFlow::Poll => {}
+                ControlFlow::WaitUntil(wake) if wake <= poll_at => {}
+                _ => event_loop.set_control_flow(ControlFlow::WaitUntil(poll_at)),
+            }
         }
     }
 }
