@@ -53,7 +53,6 @@ def test_simulation_binding_smoke():
     sim.create_example("data/avaframe/avaParabola.png")
     sim.set_max_timesteps(3)
     sim.run()
-    sim.post_process()
 
     assert isinstance(sim.state, str)
     assert sim.cell_size > 0.0
@@ -179,10 +178,9 @@ def test_simulation_setters_and_getters():
     sim.set_max_timesteps(1)
 
     sim.run()
-    sim.post_process()
 
     expected_shape = dem.shape
-    assert sim.state == "PostProcessed"
+    assert sim.state == "Finished"
     assert sim.cell_size == 3.0
     assert sim.released_particles_per_cell >= 0
     assert sim.dem.shape == expected_shape
@@ -238,3 +236,32 @@ def test_simulation_setters_and_getters():
     assert sim.center_of_mass_x.ndim == 1
     assert sim.center_of_mass_y.ndim == 1
     assert sim.center_of_mass_z.ndim == 1
+
+
+def test_evaluate_peak_flow_pressure_threshold():
+    sim = avalanchers.PySimulation.new()
+    sim.create_example("data/avaframe/avaParabola.png")
+    density = 300.0
+    sim.update_settings({"density": density})
+    sim.set_max_timesteps(200)
+    sim.run()
+    thickness = np.asarray(sim.peak_flow_thickness).copy()
+    velocity = np.asarray(sim.peak_velocity).copy()
+
+    unthresholded = sim.evaluate(min_peak_flow_thickness=0.1)
+    # rho * v^2 >= p is the same mask as v >= sqrt(p / rho)
+    pressure = 0.5 * density * float(velocity.max()) ** 2
+    by_pressure = sim.evaluate(min_peak_flow_thickness=0.1, min_peak_flow_pressure=pressure)
+    by_velocity = sim.evaluate(
+        min_peak_flow_thickness=0.1, min_peak_velocity=(pressure / density) ** 0.5
+    )
+    assert by_pressure.peak_velocity == by_velocity.peak_velocity
+    assert by_pressure.intersection == by_velocity.intersection
+    assert by_pressure.overshoot == by_velocity.overshoot
+    assert by_pressure.peak_velocity <= unthresholded.peak_velocity
+
+    # evaluation leaves the peak fields untouched
+    np.testing.assert_array_equal(np.asarray(sim.peak_flow_thickness), thickness)
+    np.testing.assert_array_equal(np.asarray(sim.peak_velocity), velocity)
+    with pytest.raises(ValueError):
+        sim.evaluate(min_peak_flow_pressure=-1.0)

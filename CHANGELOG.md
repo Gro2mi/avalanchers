@@ -10,6 +10,14 @@ All notable changes to this project might be documented in this file.
   or `terrain`) and `curvilinear` is **DAMPM curvilinear** (`dampm-curvilinear`, short `curvilinear` or
   `curvi`). Settings and stores record the new names; the old strings, including `3d-depth-averaged`
   and `3d`, are still accepted. The Rust enum variant `SimModel::ThreeDDepthAveraged` is now `SimModel::Global`.
+- `post_process` is removed; `evaluate` takes the thresholds instead:
+  `evaluate(min_peak_flow_thickness, min_peak_velocity)` (Python: both optional, defaulting to the
+  `peak_flow_thickness_threshold` setting and 0). The evaluation shaders apply the thresholds when
+  they read the peak fields, so `peak_flow_thickness` and `peak_velocity` are no longer zeroed on the
+  GPU and are saved unthresholded, which lets a stored run be evaluated again with other thresholds.
+  `evaluate` only needs a finished simulation; the `PostProcessed` state is gone.
+  The Python `evaluate` also takes `min_peak_flow_pressure` (Pa), a threshold on
+  `density * peak_velocity**2` (default 0).
 
 ### Fixed
 - GeoTIFF DEMs written by GDAL keep their no-data cells out of the simulation. The no-data tag

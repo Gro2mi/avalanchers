@@ -201,6 +201,10 @@ struct Args {
     /// none (default), free-fall or curvature
     #[arg(long, value_parser = parse_detachment)]
     detachment: Option<Detachment>,
+    /// DAMPM global model: record peak maps only in cells holding a
+    /// depositing particle (allocates the grid occupied buffer)
+    #[arg(long, value_parser = parse_bool)]
+    enable_grid_occupied: Option<bool>,
     #[arg(long, value_parser = parse_bool)]
     enable_center_of_mass: Option<bool>,
     /// Integer (fixed point) grid atomics even on GPUs with float atomics;
@@ -392,6 +396,9 @@ impl Args {
         }
         if let Some(value) = self.detachment {
             settings.detachment = Some(value);
+        }
+        if let Some(value) = self.enable_grid_occupied {
+            settings.enable_grid_occupied = Some(value);
         }
         if let Some(value) = self.center_of_mass_biggest_blob {
             settings.center_of_mass_biggest_blob = Some(value);
@@ -635,11 +642,11 @@ fn print_summary(simulation: &mut Simulation, peak_velocity: &[f32]) -> Result<(
     );
     row("Peak flow thickness", format!("{peak_flow_thickness:.2} m"));
 
-    // the avalanche: the cells above the thickness threshold
-    block_on(simulation.post_process(settings.peak_flow_thickness_threshold, 0.0))?;
+    // the avalanche: the cells at or above the thickness threshold, the same
+    // mask the evaluation shaders use
     let affected: Vec<bool> = block_on(simulation.fetch_peak_flow_thickness())?
         .iter()
-        .map(|&thickness| thickness > 0.0)
+        .map(|&thickness| thickness >= settings.peak_flow_thickness_threshold)
         .collect();
     let affected_cells = affected.iter().filter(|&&set| set).count();
     row(
@@ -681,7 +688,8 @@ fn print_summary(simulation: &mut Simulation, peak_velocity: &[f32]) -> Result<(
     }
 
     if has_outline {
-        let evaluation = block_on(simulation.evaluate())?;
+        let evaluation =
+            block_on(simulation.evaluate(settings.peak_flow_thickness_threshold, 0.0))?;
         println!();
         println!("Compared with the outline ({outline_cells} cells)");
         row(
@@ -813,6 +821,7 @@ mod tests {
             enable_earth_pressure_coefficient: None,
             enable_entrainment: None,
             enable_weak_pressure: None,
+            enable_grid_occupied: None,
             detachment: None,
             center_of_mass_biggest_blob: None,
             release_area_fraction: None,

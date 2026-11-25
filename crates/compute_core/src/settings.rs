@@ -35,6 +35,10 @@ impl SimFlags {
     /// the bed-normal load g n_z + n_z H(v, v) turns negative.
     pub const DETACHMENT_CURVATURE: u32 = 1 << 8;
     pub const DETACHMENT: u32 = Self::DETACHMENT_FREE_FALL | Self::DETACHMENT_CURVATURE;
+    /// DAMPM global model: p2g marks the cells holding a depositing particle
+    /// in the grid occupied buffer and only those record peak maps
+    /// ([`Settings::enable_grid_occupied`]).
+    pub const GRID_OCCUPIED: u32 = 1 << 9;
 
     pub fn new(
         curvature: bool,
@@ -100,6 +104,9 @@ impl SimFlags {
     }
     pub fn is_detachment_enabled(&self) -> bool {
         self.detachment() != Detachment::None
+    }
+    pub fn is_grid_occupied_enabled(&self) -> bool {
+        (self.mask & Self::GRID_OCCUPIED) != 0
     }
 }
 #[repr(C)]
@@ -252,7 +259,7 @@ impl Hash for SimSettings {
                     flags_mask |= SimFlags::WEAK_PRESSURE;
                 }
                 if sim_model == Some(SimModel::GlobalCartesian) {
-                    flags_mask |= SimFlags::DETACHMENT;
+                    flags_mask |= SimFlags::DETACHMENT | SimFlags::GRID_OCCUPIED;
                 }
                 if SimFlags::from_u32(self.flags).is_earth_pressure_coefficient_enabled() {
                     hash_f32(self.internal_friction_angle, state);
@@ -669,6 +676,13 @@ impl SimSettings {
         }
         if let Some(val) = patch.detachment {
             settings.flags = (settings.flags & !SimFlags::DETACHMENT) | val.flags();
+        }
+        if let Some(val) = patch.enable_grid_occupied {
+            if val {
+                settings.flags |= SimFlags::GRID_OCCUPIED;
+            } else {
+                settings.flags &= !SimFlags::GRID_OCCUPIED;
+            }
         }
     }
 
@@ -1336,6 +1350,12 @@ pub struct Settings {
     /// ballistically and lands with the tangential velocity minus a Coulomb
     /// impulse.
     pub detachment: Option<Detachment>,
+    /// DAMPM global model: allocate the grid occupied buffer, in which p2g
+    /// marks the cells holding a depositing particle, and record the peak
+    /// maps only in those cells, so the B-spline spread of the flow edge does
+    /// not mark untouched neighbour cells (defaults to false: every node with
+    /// mass records peaks).
+    pub enable_grid_occupied: Option<bool>,
     /// 3D lift-off: terminal velocity (m/s) of the air drag on flying
     /// particles; 0 disables it (defaults to
     /// [`DEFAULT_FLIGHT_TERMINAL_VELOCITY`]).
@@ -1565,6 +1585,7 @@ mod tests {
             enable_entrainment: Some(false),
             enable_weak_pressure: Some(false),
             detachment: Some(Detachment::None),
+            enable_grid_occupied: Some(false),
             enable_center_of_mass: Some(true),
             integer_atomics: Some(true),
             center_of_mass_biggest_blob: Some(false),
@@ -1652,6 +1673,11 @@ mod tests {
             SimFlags::new(true, true, true, true, true, true).mask
         );
         assert!(SimFlags::from_u32(sim_settings.flags).is_weak_pressure_enabled());
+        assert!(!SimFlags::from_u32(sim_settings.flags).is_grid_occupied_enabled());
+
+        patch.enable_grid_occupied = Some(true);
+        sim_settings = SimSettings::from_settings(&patch, &dem);
+        assert!(SimFlags::from_u32(sim_settings.flags).is_grid_occupied_enabled());
     }
 
     #[test_log::test]

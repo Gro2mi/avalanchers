@@ -18,7 +18,9 @@ fn reset_grid(@builtin(global_invocation_id) global_id: vec3<u32>) {
         grid_momentum_atomic[xy_to_idx(global_id.xy) * 2u] = 0; // Reset grid momentum (u) for the new timestep
         grid_momentum_atomic[xy_to_idx(global_id.xy) * 2u + 1u] = 0; // Reset grid momentum (v) for the new timestep
         grid_momentum_z_atomic[xy_to_idx(global_id.xy)] = 0; // Reset grid momentum (w) of the terrain-following model
-        grid_occupied[xy_to_idx(global_id.xy)] = 0u;
+        if (sim_settings.flags & SIM_FLAG_GRID_OCCUPIED) != 0u {
+            grid_occupied[xy_to_idx(global_id.xy)] = 0u;
+        }
         grid_forces_atomic[xy_to_idx(global_id.xy) * 2u] = 0; // Reset grid forces (x) for the new timestep
         grid_forces_atomic[xy_to_idx(global_id.xy) * 2u + 1u] = 0; // Reset grid forces (y) for the new timestep
     }
@@ -123,6 +125,10 @@ struct SimSettings {
 };
 
 @group(0) @binding(0) var<uniform> sim_settings: SimSettings;
+
+// SimFlags::GRID_OCCUPIED (settings.rs): p2g marks the cells holding a
+// depositing particle in grid_occupied and only those record peak maps
+const SIM_FLAG_GRID_OCCUPIED: u32 = 1u << 9u;
 
 // Gully walls (reference surface, wall friction) need a reference surface at
 // least one cell wide; must match SimSettings::gully_walls_enabled.

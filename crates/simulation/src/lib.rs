@@ -13,8 +13,8 @@
 //! 3. **Simulate**: step the particle or MPM model
 //!    ([`Simulation::run_n_steps`], [`Simulation::run`]).
 //! 4. **Consume**: read results back through the cached `fetch_*` methods,
-//!    mask the peak fields ([`Simulation::post_process`]), evaluate them
-//!    against the outline ([`Simulation::evaluate`]) and persist everything
+//!    evaluate them against the outline with peak flow thickness / velocity
+//!    thresholds ([`Simulation::evaluate`]) and persist everything
 //!    to a Zarr store
 //!    ([`Simulation::save`] on native, `export_zarr_entries` in the browser).
 //!
@@ -30,8 +30,7 @@
 //! sim.create_default_with_release_areas("data/dem.png", "data/release.png")
 //!     .await?;
 //! sim.run().await?;                       // terrain + release + particles + physics
-//! sim.post_process(0.1, 0.0).await?;      // mask peak fields by thickness/velocity
-//! let evaluation = sim.evaluate().await?;  // metrics against the outline
+//! let evaluation = sim.evaluate(0.1, 0.0).await?; // metrics against the outline
 //! sim.save().await?;                      // write Zarr results
 //! ```
 
@@ -88,8 +87,6 @@ pub enum SimulationState {
     Running,
     /// Physics finished: `max_steps` reached or the GPU signalled `SIM_STOPPED`.
     Finished,
-    /// Peak grids thresholded ([`Simulation::post_process`]).
-    PostProcessed,
     /// Evaluation metrics computed against the region of interest
     /// ([`Simulation::evaluate`]).
     Evaluated,
@@ -1333,30 +1330,6 @@ impl Simulation {
         Ok(())
     }
 
-    /// Masks the peak result fields on the GPU: every cell whose peak flow
-    /// thickness is below `min_peak_flow_thickness` (m) or whose peak velocity
-    /// is below `min_peak_velocity` (m/s) is set to zero in both fields.
-    /// Requires [`SimulationState::Finished`].
-    ///
-    /// The GPU buffers are overwritten, so a second call can only remove
-    /// more cells.
-    pub async fn post_process(
-        &mut self,
-        min_peak_flow_thickness: f32,
-        min_peak_velocity: f32,
-    ) -> Result<()> {
-        if self.state < SimulationState::Finished {
-            bail!("Simulation must be finished before post-processing results");
-        }
-        self.orchestrator
-            .run_post_process(&self.settings, min_peak_flow_thickness, min_peak_velocity)
-            .await?;
-        self.gpu_cache.peak_flow_thickness = None;
-        self.gpu_cache.peak_velocity = None;
-        self.state = SimulationState::PostProcessed;
-        Ok(())
-    }
-
     /// Packs the per-cell ROI mask into u32 words (least significant bit =
     /// first cell), the layout the evaluation shaders expect.
     fn pack_roi_mask(roi: &[bool]) -> Vec<u32> {
@@ -1373,19 +1346,29 @@ impl Simulation {
     /// Evaluates the simulated avalanche against the region of interest on
     /// the GPU: overlap components, the chamfer distance (m) and the 3D
     /// beeline distance between the highest and lowest avalanche point. A
-    /// cell counts as simulated when its peak flow thickness is at least the
-    /// `peak_flow_thickness_threshold` setting; release cells are left out of
-    /// the overlap and the chamfer means. Requires
-    /// [`SimulationState::PostProcessed`] and an uploaded region of interest;
-    /// moves the state to [`SimulationState::Evaluated`].
-    pub async fn evaluate(&mut self) -> Result<MassMovementEvaluation> {
-        if self.state < SimulationState::PostProcessed {
-            bail!("Simulation must be post-processed before evaluation");
+    /// cell counts as simulated when its peak flow thickness is at least
+    /// `min_peak_flow_thickness` (m) and its peak velocity at least
+    /// `min_peak_velocity` (m/s); release cells are left out of the overlap
+    /// and the chamfer means. The thresholds are applied in the evaluation
+    /// shaders and the peak fields stay unchanged, so they are saved as
+    /// simulated and a run can be evaluated again with other thresholds.
+    /// Requires [`SimulationState::Finished`] and an uploaded region of
+    /// interest; moves the state to [`SimulationState::Evaluated`].
+    pub async fn evaluate(
+        &mut self,
+        min_peak_flow_thickness: f32,
+        min_peak_velocity: f32,
+    ) -> Result<MassMovementEvaluation> {
+        if self.state < SimulationState::Finished {
+            bail!("Simulation must be finished before evaluation");
         }
         if !self.roi_uploaded {
             bail!("Region of interest must be uploaded before evaluation");
         }
-        let evaluation = self.orchestrator.evaluate(&self.settings).await?;
+        let evaluation = self
+            .orchestrator
+            .evaluate(&self.settings, min_peak_flow_thickness, min_peak_velocity)
+            .await?;
         self.state = SimulationState::Evaluated;
         Ok(evaluation)
     }
@@ -3429,8 +3412,7 @@ fn test_trajectory() {
     fn test_lifecycle_preconditions_return_errors() {
         let mut sim = block_on(Simulation::new()).expect("Failed to create Simulation");
 
-        assert!(block_on(sim.post_process(0.0, 0.0)).is_err());
-        assert!(block_on(sim.evaluate()).is_err());
+        assert!(block_on(sim.evaluate(0.0, 0.0)).is_err());
         assert!(block_on(sim.compute_particles()).is_err());
         assert!(block_on(sim.fetch_peak_velocity()).is_err());
         assert!(block_on(sim.fetch_timestep_data()).is_err());
@@ -4192,7 +4174,6 @@ fn test_trajectory() {
         // the chamfer distance is infinite.
         let mut sim = setup_simple_sim(40.0, 3.0);
         block_on(sim.run()).expect("Failed to run simulation");
-        block_on(sim.post_process(0.0, 0.0)).expect("Failed to post-process");
         let simulated_cells = [14usize, 15, 20, 21];
         let mut peak_flow_thickness = vec![0.0f32; sim.dem.width * sim.dem.height];
         let mut simulated_mask = vec![false; peak_flow_thickness.len()];
@@ -4209,7 +4190,8 @@ fn test_trajectory() {
         // ROI identical to the simulated mask: every nearest distance is 0
         sim.set_roi(&simulated_mask).expect("Failed to set roi");
         block_on(sim.upload_roi()).expect("Failed to upload roi");
-        let evaluation = block_on(sim.evaluate()).expect("GPU evaluation failed");
+        let evaluation = block_on(sim.evaluate(sim.settings.peak_flow_thickness_threshold, 0.0))
+            .expect("GPU evaluation failed");
         assert!(
             (evaluation.chamfer - 0.0).abs() < 1e-9,
             "chamfer was {}",
@@ -4229,7 +4211,9 @@ fn test_trajectory() {
         release_only[15] = true;
         sim.set_roi(&release_only).expect("Failed to set roi");
         block_on(sim.upload_roi()).expect("Failed to upload roi");
-        let shifted_evaluation = block_on(sim.evaluate()).expect("GPU evaluation failed");
+        let shifted_evaluation =
+            block_on(sim.evaluate(sim.settings.peak_flow_thickness_threshold, 0.0))
+                .expect("GPU evaluation failed");
         assert!(
             shifted_evaluation.chamfer.is_finite() && shifted_evaluation.chamfer > 0.0,
             "chamfer was {}",

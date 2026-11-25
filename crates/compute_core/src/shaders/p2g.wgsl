@@ -64,7 +64,9 @@ fn p2g_3d(@builtin(global_invocation_id) id: vec3u) {
         return;
     }
     transfer_p2g_3d(id.x, particles_affine_matrix[id.x]);
-    atomicOr(&grid_occupied[xy_to_idx(cell)], 1u);
+    if (sim_settings.flags & SIM_FLAG_GRID_OCCUPIED) != 0u {
+        atomicOr(&grid_occupied[xy_to_idx(cell)], 1u);
+    }
 }
 
 // import transfer_p2g_z.wgsl;
@@ -232,6 +234,10 @@ struct SimSettings {
 };
 
 @group(0) @binding(0) var<uniform> sim_settings: SimSettings;
+
+// SimFlags::GRID_OCCUPIED (settings.rs): p2g marks the cells holding a
+// depositing particle in grid_occupied and only those record peak maps
+const SIM_FLAG_GRID_OCCUPIED: u32 = 1u << 9u;
 
 // Gully walls (reference surface, wall friction) need a reference surface at
 // least one cell wide; must match SimSettings::gully_walls_enabled.

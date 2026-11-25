@@ -1,5 +1,5 @@
-// Chamfer distance between the simulated cells
-// (grid_peak_flow_thickness >= sim_settings.peak_flow_thickness_threshold)
+// Chamfer distance between the simulated cells (passing the thresholds of
+// evaluation_params, see evaluation_mask.wgsl)
 // and the region-of-interest bitmask, in three kernels sharing this module:
 // - chamfer_prepare: seeds the nearest-neighbor fields. Per cell, both fields
 //   store the cell's own coordinates if it is a seed (region_of_interest bit
@@ -57,6 +57,8 @@ const WG_SIZE: u32 = 256u;
 @group(0) @binding(7) var<storage, read> chamfer_nearest_sim_snapshot: array<vec2u>;
 @group(0) @binding(8) var<storage, read_write> chamfer_result: ChamferDistanceResult;
 @group(0) @binding(9) var<storage, read> release_areas: array<f32>;
+@group(0) @binding(10) var<uniform> evaluation_params: EvaluationParams;
+@group(0) @binding(11) var<storage, read> grid_peak_velocity: array<f32>;
 
 fn bit_is_set(word: u32, index: u32) -> bool {
     return (word & (1u << (index % 32u))) != 0u;
@@ -83,7 +85,7 @@ fn chamfer_prepare(@builtin(global_invocation_id) id: vec3u) {
     chamfer_nearest_sim[idx] = select(
         no_seed,
         id.xy,
-        grid_peak_flow_thickness[idx] >= sim_settings.peak_flow_thickness_threshold,
+        is_simulated_cell(idx),
     );
 }
 
@@ -148,7 +150,7 @@ fn chamfer_reduce(@builtin(local_invocation_index) li: u32) {
         if release_areas[i] > RELEASE_THICKNESS_THRESHOLD {
             continue;
         }
-        let simulated = grid_peak_flow_thickness[i] >= sim_settings.peak_flow_thickness_threshold;
+        let simulated = is_simulated_cell(i);
         let reference = bit_is_set(region_of_interest[i / 32u], i);
 
         if simulated {
@@ -193,6 +195,30 @@ fn chamfer_reduce(@builtin(local_invocation_index) li: u32) {
     }
 }
 
+// import evaluation_mask.wgsl;
+// BEGIN evaluation_mask.wgsl
+// Simulated-avalanche mask shared by the evaluation shaders. A cell belongs to
+// the simulated avalanche when its peak flow thickness reaches
+// evaluation_params.min_peak_flow_thickness and its peak velocity reaches
+// evaluation_params.min_peak_velocity. The peak fields themselves are never
+// modified, so a stored run can be re-evaluated with other thresholds.
+//
+// The importing shader declares the evaluation_params uniform
+// (EvaluationParams) and the grid_peak_flow_thickness / grid_peak_velocity
+// storage buffers at its own binding slots.
+
+struct EvaluationParams {
+    min_peak_flow_thickness: f32,
+    min_peak_velocity: f32,
+    _padding: vec2<f32>,
+}
+
+fn is_simulated_cell(idx: u32) -> bool {
+    return grid_peak_flow_thickness[idx] >= evaluation_params.min_peak_flow_thickness
+        && grid_peak_velocity[idx] >= evaluation_params.min_peak_velocity;
+}
+
+// END evaluation_mask.wgsl
 // import constants.wgsl;
 // BEGIN constants.wgsl
 // Shared constants without dependencies.
@@ -257,6 +283,10 @@ struct SimSettings {
 };
 
 @group(0) @binding(0) var<uniform> sim_settings: SimSettings;
+
+// SimFlags::GRID_OCCUPIED (settings.rs): p2g marks the cells holding a
+// depositing particle in grid_occupied and only those record peak maps
+const SIM_FLAG_GRID_OCCUPIED: u32 = 1u << 9u;
 
 // Gully walls (reference surface, wall friction) need a reference surface at
 // least one cell wide; must match SimSettings::gully_walls_enabled.

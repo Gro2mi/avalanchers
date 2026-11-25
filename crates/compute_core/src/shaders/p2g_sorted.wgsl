@@ -86,7 +86,7 @@ fn p2g_3d_sorted(
     // a flying particle only widens the node box
     let state = select(0u, particles_state[particle.p_idx], particle.valid);
     let deposits = particle.valid && (state & PARTICLE_FLYING) == 0u;
-    if deposits {
+    if deposits && (sim_settings.flags & SIM_FLAG_GRID_OCCUPIED) != 0u {
         atomicOr(&grid_occupied[xy_to_idx(position_to_cell(particles_position[particle.p_idx]))], 1u);
     }
     if !box_fits_tile(node_box) {
@@ -383,6 +383,10 @@ struct SimSettings {
 };
 
 @group(0) @binding(0) var<uniform> sim_settings: SimSettings;
+
+// SimFlags::GRID_OCCUPIED (settings.rs): p2g marks the cells holding a
+// depositing particle in grid_occupied and only those record peak maps
+const SIM_FLAG_GRID_OCCUPIED: u32 = 1u << 9u;
 
 // Gully walls (reference surface, wall friction) need a reference surface at
 // least one cell wide; must match SimSettings::gully_walls_enabled.

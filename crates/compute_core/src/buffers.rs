@@ -77,10 +77,11 @@ pub struct ChamferParams {
     pub _padding: [u32; 3],
 }
 
-/// GPU layout mirror of the PostProcessParams struct in post_process.wgsl
+/// GPU layout mirror of the EvaluationParams struct in evaluation_mask.wgsl:
+/// the thresholds a cell's peak fields must reach to count as simulated.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable, Default)]
-pub struct PostProcessParams {
+pub struct EvaluationParams {
     pub min_peak_flow_thickness: f32,
     pub min_peak_velocity: f32,
     pub _padding: [f32; 2],
@@ -229,8 +230,8 @@ pub enum BufferName {
     ChamferNearestSim,
     ChamferNearestSimSnapshot,
 
-    /// thresholds of the post_process shader
-    PostProcessParams,
+    /// simulated-cell thresholds of the evaluation shaders
+    EvaluationParams,
 
     // soft sphere relaxation of the freshly initialized particles
     RelaxParams,
@@ -298,7 +299,7 @@ impl BufferName {
             BufferName::ChamferNearestRoiSnapshot => "chamfer_nearest_roi_snapshot",
             BufferName::ChamferNearestSim => "chamfer_nearest_sim",
             BufferName::ChamferNearestSimSnapshot => "chamfer_nearest_sim_snapshot",
-            BufferName::PostProcessParams => "post_process_params",
+            BufferName::EvaluationParams => "evaluation_params",
             BufferName::RelaxParams => "relax_params",
             BufferName::RelaxGridHead => "relax_grid_head",
             BufferName::ParticleNext => "particle_next",
@@ -367,7 +368,7 @@ impl std::str::FromStr for BufferName {
             "chamfer_nearest_roi_snapshot" => Ok(BufferName::ChamferNearestRoiSnapshot),
             "chamfer_nearest_sim" => Ok(BufferName::ChamferNearestSim),
             "chamfer_nearest_sim_snapshot" => Ok(BufferName::ChamferNearestSimSnapshot),
-            "post_process_params" => Ok(BufferName::PostProcessParams),
+            "evaluation_params" => Ok(BufferName::EvaluationParams),
             "relax_params" => Ok(BufferName::RelaxParams),
             "relax_grid_head" => Ok(BufferName::RelaxGridHead),
             "particle_next" => Ok(BufferName::ParticleNext),
@@ -908,6 +909,7 @@ pub fn create_buffers_and_texture_descriptions(
     device: &Device,
     texture_size: Extent3d,
     has_float32_filterable: bool,
+    grid_occupied: bool,
 ) -> Result<GpuResources> {
     let mut gpu_resources = GpuResources::default();
     let filter_mode = if has_float32_filterable {
@@ -1093,10 +1095,12 @@ pub fn create_buffers_and_texture_descriptions(
         grid_bytes_size,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
     );
+    // optional (enable_grid_occupied): without it the shaders never touch the
+    // buffer, which then only holds one element to satisfy the bindings
     gpu_resources.add_buffer(
         device,
         BufferName::GridOccupied,
-        grid_bytes_size,
+        if grid_occupied { grid_bytes_size } else { 4 },
         BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
     );
     // per-cell force vector: written by grid_physics for the terrain-following
@@ -1213,6 +1217,7 @@ mod tests {
                 "chamfer_nearest_sim_snapshot",
             ),
             (BufferName::EvaluationResult, "evaluation_result"),
+            (BufferName::EvaluationParams, "evaluation_params"),
         ];
 
         for (name, expected) in cases {

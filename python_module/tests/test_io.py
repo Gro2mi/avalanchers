@@ -132,7 +132,6 @@ def test_export_calibration_parameters_with_evaluation(tmp_path):
     sim.create_example("data/avaframe/avaParabola.png")
     sim.set_max_timesteps(3)
     sim.run()
-    sim.post_process()
     evaluation = sim.evaluate()
 
     path = str(tmp_path / "calibration.parquet")

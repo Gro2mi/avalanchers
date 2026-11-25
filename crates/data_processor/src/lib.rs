@@ -1280,6 +1280,7 @@ mod tests {
             enable_entrainment: Some(true),
             enable_weak_pressure: Some(true),
             detachment: Some(compute_core::settings::Detachment::FreeFall),
+            enable_grid_occupied: Some(true),
             enable_particle_interaction: Some(true),
             particle_placement: Some(ParticlePlacement::UniformRelaxed),
             integer_atomics: Some(true),

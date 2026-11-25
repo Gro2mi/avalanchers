@@ -80,9 +80,12 @@ fn grid_physics_3d(@builtin(global_invocation_id) id: vec3u) {
         weak_sum = vec2f(f32(grid_forces[idx * 2u]), f32(grid_forces[idx * 2u + 1u])) * INV_PRESSURE_FACTOR; // no_atomic_float
         // atomic_float weak_sum = vec2f(grid_forces[idx * 2u], grid_forces[idx * 2u + 1u]);
     }
-    // only cells that hold a particle enter the peak maps, so the B-spline
-    // spread of the flow edge does not mark untouched neighbour cells
-    let new_velocity = update_node(id.xy, n, velocity, mass, grid_occupied[idx] != 0u, use_weak_pressure, weak_sum);
+    // with enable_grid_occupied only cells that hold a particle enter the peak
+    // maps, so the B-spline spread of the flow edge does not mark untouched
+    // neighbour cells; otherwise every node with mass records peaks
+    let use_grid_occupied = (sim_settings.flags & SIM_FLAG_GRID_OCCUPIED) != 0u;
+    let record_peaks = !use_grid_occupied || grid_occupied[idx] != 0u;
+    let new_velocity = update_node(id.xy, n, velocity, mass, record_peaks, use_weak_pressure, weak_sum);
     grid_velocity[idx] = new_velocity.xy;
     grid_velocity_z[idx] = new_velocity.z;
 }
@@ -581,6 +584,10 @@ struct SimSettings {
 };
 
 @group(0) @binding(0) var<uniform> sim_settings: SimSettings;
+
+// SimFlags::GRID_OCCUPIED (settings.rs): p2g marks the cells holding a
+// depositing particle in grid_occupied and only those record peak maps
+const SIM_FLAG_GRID_OCCUPIED: u32 = 1u << 9u;
 
 // Gully walls (reference surface, wall friction) need a reference surface at
 // least one cell wide; must match SimSettings::gully_walls_enabled.

@@ -60,6 +60,7 @@ CALIBRATION_PARAMETER_DEFAULTS = {
     "enable_entrainment": True,
     "enable_weak_pressure": False,
     "detachment": "none",
+    "enable_grid_occupied": False,
     "flight_terminal_velocity": 40.0,
 }
 
