@@ -54,6 +54,7 @@ SIM_INFO_STOPPED = 1 << 31
 
 # default flow parameters of the thesis (Table tab:flow-parameters)
 SETTINGS = {
+    "enable_entrainment": False,
     "dem_path": str(DATA_DIR / "avaWog.png"),
     "release_areas_path": str(DATA_DIR / "avaWogreleaseTexture.png"),
     "sim_model": "dampm-global-cartesian",

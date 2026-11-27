@@ -49,6 +49,7 @@ ROTATIONS = [0.0, 120.0, 225.0]  # as in AvaFrame's rotation test
 # in memory per rotation (see module docstring).
 # ---------------------------------------------------------------------------
 SETTINGS = {
+    "enable_entrainment": False,
     "sim_model": "curvilinear",
     "friction_model": "coulomb",
     "friction_coefficient": 0.3,

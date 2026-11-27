@@ -215,6 +215,12 @@ pub enum BufferName {
     ForestCover,
     /// standing canopy cover per cell, lowered by forest destruction
     ForestStanding,
+    /// entrainment state per node as vec2f: x = remaining erodible snow depth
+    /// (m, bed-normal), lowered by entrainment; y = mass entrained at the node
+    /// in the current step divided by the node mass, which the entrainment
+    /// mass pass adds to the particles. One buffer for both keeps the grid
+    /// physics within 14 storage buffers.
+    EntrainmentState,
 
     /// unified evaluation metrics buffer written by the evaluation shaders
     EvaluationResult,
@@ -292,6 +298,7 @@ impl BufferName {
             BufferName::ReleaseAreas => "release_areas",
             BufferName::ForestCover => "forest_cover",
             BufferName::ForestStanding => "forest_standing",
+            BufferName::EntrainmentState => "entrainment_state",
             BufferName::TestOutput => "test_output",
             BufferName::GridForces => "grid_forces",
             BufferName::RegionOfInterest => "region_of_interest",
@@ -363,6 +370,7 @@ impl std::str::FromStr for BufferName {
             "release_areas" => Ok(BufferName::ReleaseAreas),
             "forest_cover" => Ok(BufferName::ForestCover),
             "forest_standing" => Ok(BufferName::ForestStanding),
+            "entrainment_state" => Ok(BufferName::EntrainmentState),
             "test_output" => Ok(BufferName::TestOutput),
             "grid_forces" => Ok(BufferName::GridForces),
             "region_of_interest" => Ok(BufferName::RegionOfInterest),
@@ -1173,6 +1181,15 @@ pub fn create_buffers_and_texture_descriptions(
             BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
         );
     }
+    // entrainment (SimFlags::ENTRAINMENT): remaining erodible depth and the
+    // per-step growth ratio per node; always full size, so the flag can be
+    // toggled between runs without reallocating
+    gpu_resources.add_buffer(
+        device,
+        BufferName::EntrainmentState,
+        2 * grid_bytes_size,
+        BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+    );
 
     Ok(gpu_resources)
 }
@@ -1220,6 +1237,7 @@ mod tests {
             (BufferName::ReleaseAreas, "release_areas"),
             (BufferName::ForestCover, "forest_cover"),
             (BufferName::ForestStanding, "forest_standing"),
+            (BufferName::EntrainmentState, "entrainment_state"),
             (BufferName::TestOutput, "test_output"),
             (BufferName::GridForces, "grid_forces"),
             (BufferName::CenterOfMass, "center_of_mass"),

@@ -56,6 +56,7 @@ OUTPUT_DIR = REPO_ROOT / "verification" / "outputs" / "dam_break_test"
 # crates/compute_core/src/settings.rs).
 # ---------------------------------------------------------------------------
 SETTINGS = {
+    "enable_entrainment": False,
     "dem_path": str(REPO_ROOT / "data" / "avaframe" / "avaDamBreak.png"),
     "release_areas_path": str(REPO_ROOT / "data" / "avaframe" / "avaDamBreakreleaseTexture.png"),
     "sim_model": "curvilinear",

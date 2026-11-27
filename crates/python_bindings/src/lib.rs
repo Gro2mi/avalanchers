@@ -704,6 +704,27 @@ impl PySimulation {
         self.inner.set_forest_cover(slice).map_runtime_err()
     }
 
+    /// Set the erodible snow depth of the entrainment model from a 2D
+    /// float32 array.
+    ///
+    /// Bed-normal depth in m per cell; 0 is not erodible. Used by the
+    /// ``dampm-global-cartesian`` model with ``enable_entrainment``; without
+    /// it every cell holds ``entrainment_thickness``. Takes effect with the
+    /// next run.
+    ///
+    /// Args:
+    ///     depth: ``(height, width)`` array matching the DEM shape.
+    ///         Must be C-contiguous (call ``.copy()`` if needed).
+    pub fn set_entrainment_area(&mut self, depth: PyReadonlyArray2<f32>) -> PyResult<()> {
+        let array = depth.as_array();
+        let slice = array.as_slice().ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(
+                "The entrainment area must be C-contiguous; pass it with .copy()",
+            )
+        })?;
+        self.inner.set_entrainment_area(slice).map_runtime_err()
+    }
+
     /// Run the simulation to completion (up to ``max_timesteps``).
     pub fn run(&mut self, py: Python<'_>) -> PyResult<()> {
         let inner = &mut self.inner;
@@ -892,6 +913,12 @@ impl PySimulation {
         Ok(dict)
     }
 
+    /// Total particle mass (kg). Grows with entrainment.
+    #[getter]
+    pub fn total_mass(&mut self) -> PyResult<f32> {
+        self.inner.get_total_mass().block_on().map_runtime_err()
+    }
+
     /// Diagnostic state of the simulation, read from the GPU (timestep,
     /// simulated time, particle count, stop ``flags``, ...).
     #[getter]
@@ -941,7 +968,9 @@ impl PySimulation {
     /// Write a grid to an ESRI ASCII file georeferenced by the DEM.
     ///
     /// Args:
-    ///     layer: ``peak_velocity``, ``peak_flow_thickness`` or ``release_areas``.
+    ///     layer: ``peak_velocity``, ``peak_flow_thickness``, ``release_areas``,
+    ///         or with entrainment ``entrainment_depth`` (remaining) and
+    ///         ``entrained_depth``.
     ///     path: Output file path.
     pub fn write_asc(&mut self, layer: &str, path: &str) -> PyResult<()> {
         self.inner
@@ -1270,6 +1299,44 @@ impl PySimulation {
         let data = self
             .inner
             .fetch_forest_standing()
+            .block_on()
+            .map_runtime_err()?;
+        if data.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(self.get_layer_f32(py, data)?))
+    }
+
+    /// ``(height, width)`` float32 array of the remaining erodible snow depth
+    /// (m) of the entrainment model in the current run. ``None`` without
+    /// entrainment.
+    #[getter]
+    pub fn entrainment_depth<'py>(
+        &mut self,
+        py: Python<'py>,
+    ) -> PyResult<Option<Bound<'py, PyArray2<f32>>>> {
+        let data = self
+            .inner
+            .fetch_entrainment_depth()
+            .block_on()
+            .map_runtime_err()?;
+        if data.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(self.get_layer_f32(py, data)?))
+    }
+
+    /// ``(height, width)`` float32 array of the snow depth (m) entrained in
+    /// the current run (initial minus remaining erodible depth). ``None``
+    /// without entrainment.
+    #[getter]
+    pub fn entrained_depth<'py>(
+        &mut self,
+        py: Python<'py>,
+    ) -> PyResult<Option<Bound<'py, PyArray2<f32>>>> {
+        let data = self
+            .inner
+            .fetch_entrained_depth()
             .block_on()
             .map_runtime_err()?;
         if data.is_empty() {

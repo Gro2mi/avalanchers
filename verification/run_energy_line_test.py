@@ -37,6 +37,7 @@ OUTPUT_DIR = REPO_ROOT / "verification" / "outputs" / "energy_line_test"
 # crates/compute_core/src/settings.rs).
 # ---------------------------------------------------------------------------
 SETTINGS = {
+    "enable_entrainment": False,
     "dem_path": str(REPO_ROOT / "data" / "avaframe" / "avaParabola.png"),
     "release_areas_path": str(REPO_ROOT / "data" / "avaframe" / "avaParabolareleaseTexture.png"),
     "sim_model": "curvilinear",

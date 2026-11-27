@@ -207,6 +207,9 @@ pub struct SimulationLoadResult {
     pub forest_cover_path: Option<String>,
     /// Whether a loaded forest cover is used (defaults to true).
     pub enable_forest: bool,
+    /// Erodible snow depth raster of the entrainment model, if one was
+    /// configured.
+    pub entrainment_area_path: Option<String>,
 }
 
 /// A single avalanche simulation: owns the GPU orchestrator, the loaded DEM,
@@ -285,6 +288,13 @@ pub struct Simulation {
     forest_cover: Option<Vec<f32>>,
     /// Whether a forest cover is used ([`Settings::enable_forest`]).
     enable_forest: bool,
+    /// Erodible snow depth raster of the entrainment model; loaded on
+    /// terrain analysis.
+    entrainment_area_path: Option<String>,
+    /// Erodible snow depth (m, bed-normal) per cell, from
+    /// `entrainment_area_path` or [`Self::set_entrainment_area`]; without it
+    /// every cell holds `SimSettings::entrainment_thickness`.
+    entrainment_area: Option<Vec<f32>>,
     #[cfg(not(target_arch = "wasm32"))]
     output: Option<data_processor::output::Output>,
 }
@@ -451,6 +461,8 @@ impl Simulation {
             forest_cover_path: None,
             forest_cover: None,
             enable_forest: true,
+            entrainment_area_path: None,
+            entrainment_area: None,
             #[cfg(not(target_arch = "wasm32"))]
             output: None,
         })
@@ -581,6 +593,7 @@ impl Simulation {
             output_path: settings.output_path.clone(),
             forest_cover_path: settings.forest_cover_path.clone(),
             enable_forest: settings.enable_forest.unwrap_or(true),
+            entrainment_area_path: settings.entrainment_area_path.clone(),
         })
     }
 
@@ -641,6 +654,8 @@ impl Simulation {
         self.forest_cover = None;
         self.enable_forest = data.enable_forest;
         self.sync_forest_flag();
+        self.entrainment_area_path = data.entrainment_area_path;
+        self.entrainment_area = None;
 
         self.gpu_cache.reset_all();
 
@@ -872,6 +887,14 @@ impl Simulation {
             self.forest_cover = None;
             self.sync_forest_flag();
         }
+        // nor does an erodible depth of another grid
+        if self
+            .entrainment_area
+            .as_ref()
+            .is_some_and(|depth| depth.len() != expected_len)
+        {
+            self.entrainment_area = None;
+        }
 
         self.state = SimulationState::DemLoaded;
         info!("Loaded the {}", self.dem_description());
@@ -985,6 +1008,123 @@ impl Simulation {
             .write_buffer(BufferName::ForestStanding, cover)
             .await?;
         Ok(())
+    }
+
+    /// Sets the erodible snow depth (m, bed-normal) per cell of the
+    /// entrainment model directly, overriding any configured entrainment
+    /// area path. The length must match the DEM, so the DEM has to be set
+    /// first. Takes effect with the next run.
+    pub fn set_entrainment_area(&mut self, depth: &[f32]) -> Result<()> {
+        if depth.len() != self.dem.width * self.dem.height {
+            bail!(
+                "Entrainment area array length ({}) does not match DEM dimensions ({}x{}={}). You have to set the DEM first.",
+                depth.len(),
+                self.dem.width,
+                self.dem.height,
+                self.dem.width * self.dem.height
+            );
+        }
+        self.entrainment_area = Some(data_processor::sanitize_entrainment_depth(depth.to_vec()));
+        self.entrainment_area_path = None;
+        Ok(())
+    }
+
+    /// The erodible snow depth per cell of the entrainment model, `None`
+    /// until one is set or loaded (a file loads on terrain analysis); runs
+    /// without it use the uniform `entrainment_thickness`.
+    pub fn entrainment_area(&self) -> Option<&[f32]> {
+        self.entrainment_area.as_deref()
+    }
+
+    /// Whether the run entrains snow ([`SimFlags::ENTRAINMENT`], DAMPM
+    /// global model only).
+    pub fn entrainment_enabled(&self) -> bool {
+        self.settings.sim_model == SimModel::GlobalCartesian.as_int()
+            && SimFlags::from_u32(self.settings.flags).is_entrainment_enabled()
+    }
+
+    /// Loads the configured entrainment area file if it is not loaded yet.
+    async fn ensure_entrainment_area(&mut self) -> Result<()> {
+        if self.entrainment_area.is_some() {
+            return Ok(());
+        }
+        let Some(path) = self.entrainment_area_path.clone() else {
+            return Ok(());
+        };
+        info!("Loading the entrainment area from {path}");
+        let depth = data_processor::load_entrainment_area(&path)
+            .await
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        if depth.len() != self.dem.width * self.dem.height {
+            bail!(
+                "Entrainment area {path} has {} cells, the DEM {}x{}={}",
+                depth.len(),
+                self.dem.width,
+                self.dem.height,
+                self.dem.width * self.dem.height
+            );
+        }
+        self.entrainment_area = Some(depth);
+        Ok(())
+    }
+
+    /// Erodible depth per cell at the start of a run: the entrainment area,
+    /// or `entrainment_thickness` everywhere without one.
+    pub fn initial_entrainment_depth(&self) -> Vec<f32> {
+        match &self.entrainment_area {
+            Some(depth) => depth.clone(),
+            None => vec![self.settings.entrainment_thickness; self.dem.width * self.dem.height],
+        }
+    }
+
+    /// Writes the initial erodible depth to the entrainment state, undoing
+    /// the erosion of a previous run.
+    async fn upload_entrainment_state(&mut self) -> Result<()> {
+        if !self.entrainment_enabled() {
+            return Ok(());
+        }
+        self.ensure_entrainment_area().await?;
+        let state: Vec<[f32; 2]> = self
+            .initial_entrainment_depth()
+            .into_iter()
+            .map(|depth| [depth, 0.0])
+            .collect();
+        self.orchestrator
+            .write_buffer(BufferName::EntrainmentState, &state)
+            .await?;
+        Ok(())
+    }
+
+    /// Remaining erodible snow depth (m) per cell: the initial depth lowered
+    /// by the entrainment of the current run. Empty without entrainment.
+    pub async fn fetch_entrainment_depth(&mut self) -> Result<Vec<f32>> {
+        if self.state < SimulationState::TerrainAnalyzed {
+            bail!("The terrain must be analyzed before reading the entrainment depth");
+        }
+        if !self.entrainment_enabled() {
+            return Ok(Vec::new());
+        }
+        self.gpu_cache.read_count += 1;
+        let state = self
+            .orchestrator
+            .read_buffer::<[f32; 2]>(BufferName::EntrainmentState)
+            .await?;
+        Ok(state.into_iter().map(|[depth, _]| depth).collect())
+    }
+
+    /// Entrained snow depth (m) per cell of the current run: initial minus
+    /// remaining erodible depth. Empty without entrainment.
+    pub async fn fetch_entrained_depth(&mut self) -> Result<Vec<f32>> {
+        let remaining = self.fetch_entrainment_depth().await?;
+        if remaining.is_empty() {
+            return Ok(remaining);
+        }
+        Ok(self
+            .initial_entrainment_depth()
+            .into_iter()
+            .zip(remaining)
+            .map(|(initial, left)| (initial - left).max(0.0))
+            .collect())
     }
 
     /// Standing canopy cover per cell: the forest cover lowered by the forest
@@ -1317,8 +1457,9 @@ impl Simulation {
         self.orchestrator
             .restore_initial_particles(mass_scale, thickness_scale)
             .await?;
-        // the destruction of the previous run is undone
+        // the destruction and erosion of the previous run are undone
         self.upload_forest_cover().await?;
+        self.upload_entrainment_state().await?;
 
         self.gpu_cache.reset_simulation_result();
         self.gpu_cache.release_areas = None;
@@ -1712,7 +1853,8 @@ impl Simulation {
     }
 
     /// Native only: writes the grid `layer` (`peak_velocity`,
-    /// `peak_flow_thickness` or `release_areas`) to `path` as an ESRI ASCII grid
+    /// `peak_flow_thickness`, `release_areas`, or with entrainment
+    /// `entrainment_depth` and `entrained_depth`) to `path` as an ESRI ASCII grid
     /// georeferenced by the DEM.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn write_asc(&mut self, layer: &str, path: &str) -> Result<()> {
@@ -1720,8 +1862,18 @@ impl Simulation {
             "peak_velocity" => self.fetch_peak_velocity().await?.clone(),
             "peak_flow_thickness" => self.fetch_peak_flow_thickness().await?.to_vec(),
             "release_areas" => self.fetch_release_areas().await?.to_vec(),
+            "entrainment_depth" | "entrained_depth" => {
+                if !self.entrainment_enabled() {
+                    bail!("Layer \"{layer}\" needs entrainment (DAMPM global model)");
+                }
+                if layer == "entrainment_depth" {
+                    self.fetch_entrainment_depth().await?
+                } else {
+                    self.fetch_entrained_depth().await?
+                }
+            }
             _ => bail!(
-                "Unknown layer \"{layer}\", expected peak_velocity, peak_flow_thickness or release_areas"
+                "Unknown layer \"{layer}\", expected peak_velocity, peak_flow_thickness, release_areas, entrainment_depth or entrained_depth"
             ),
         };
         data_processor::EsriGrid::from_dem_layer(&self.dem, &data)?
@@ -1767,6 +1919,8 @@ impl Simulation {
             .run_analyze_terrain(&self.settings, &self.dem)
             .await?;
         self.upload_forest_cover().await?;
+        self.ensure_entrainment_area().await?;
+        self.upload_entrainment_state().await?;
         self.state = SimulationState::TerrainAnalyzed;
         Ok(())
     }
@@ -2743,8 +2897,10 @@ impl Simulation {
     /// Sum of all particle masses.
     pub async fn get_total_mass(&mut self) -> Result<f32> {
         let particles_mass = self.fetch_particles_mass().await?;
-        let mass_total: f32 = particles_mass.iter().sum();
-        Ok(mass_total)
+        // summed in f64: entrainment changes the total by a few percent, below
+        // the rounding of an f32 sum over many particles
+        let mass_total: f64 = particles_mass.iter().map(|&m| f64::from(m)).sum();
+        Ok(mass_total as f32)
     }
 
     /// Total released volume, obtained from [`Self::get_total_mass`] via the
@@ -2992,7 +3148,7 @@ fn trajectory_summary_cpu(
 mod tests {
     use super::*;
     use compute_core::buffers::AtomicValues;
-    use compute_core::settings::Detachment;
+    use compute_core::settings::{Detachment, EntrainmentModel};
     use pollster::block_on;
     use std::collections::HashSet;
     use std::hash::Hash;
@@ -6479,6 +6635,121 @@ fn test_trajectory() {
         sim.set_release_areas(&release)
             .expect("Failed to set release areas");
         sim
+    }
+
+    fn entrainment_settings(thickness: f32) -> Settings {
+        Settings {
+            sim_model: Some(SimModel::GlobalCartesian),
+            enable_entrainment: Some(true),
+            entrainment_thickness: Some(thickness),
+            ..Default::default()
+        }
+    }
+
+    fn particle_mass_f64(sim: &mut Simulation) -> f64 {
+        block_on(sim.fetch_particles_mass())
+            .expect("Failed to read particle masses")
+            .iter()
+            .map(|&m| f64::from(m))
+            .sum()
+    }
+
+    /// Runs 300 steps on the 35 degree slope and returns the mass the
+    /// particles gained and the mass the snow cover lost (rho_e * entrained
+    /// depth * bed area, summed over the cells), checking that no cell gives
+    /// more snow than it holds.
+    fn entrained_mass_balance(settings: Settings) -> (f64, f64, f64) {
+        let mut sim = setup_slope_sim(settings);
+        block_on(sim.run_n_steps(0)).expect("Failed to prepare");
+        let initial_mass = particle_mass_f64(&mut sim);
+        block_on(sim.run_n_steps(300)).expect("Failed to run");
+        let final_mass = particle_mass_f64(&mut sim);
+
+        let entrained = block_on(sim.fetch_entrained_depth()).expect("Failed to read depth");
+        assert!(!entrained.is_empty());
+        let bed_area = f64::from(5.0f32 * 5.0 / 35f32.to_radians().cos());
+        let density = f64::from(sim.settings.entrainment_density);
+        let snow_mass: f64 =
+            entrained.iter().map(|&d| f64::from(d)).sum::<f64>() * density * bed_area;
+        let thickness = sim.settings.entrainment_thickness;
+        let remaining = block_on(sim.fetch_entrainment_depth()).expect("Failed to read depth");
+        assert!(
+            remaining
+                .iter()
+                .all(|&d| (0.0..=thickness + 1e-6).contains(&d))
+        );
+        (initial_mass, final_mass - initial_mass, snow_mass)
+    }
+
+    /// Every rate law: the particles gain exactly the snow the grid takes
+    /// from the erodible cover.
+    #[test]
+    fn entrainment_conserves_mass() {
+        for model in [
+            EntrainmentModel::ErosionEnergy,
+            EntrainmentModel::ExcessShearStress,
+            EntrainmentModel::VelocityProportional,
+        ] {
+            let (initial_mass, gained, snow_mass) = entrained_mass_balance(Settings {
+                entrainment_model: Some(model),
+                ..entrainment_settings(0.3)
+            });
+            assert!(
+                gained > 0.05 * initial_mass,
+                "{model}: the flow entrained only {gained} kg of {initial_mass} kg"
+            );
+            let error = (gained - snow_mass).abs() / snow_mass;
+            assert!(
+                error < 1e-2,
+                "{model}: particles gained {gained} kg, the snow cover lost {snow_mass} kg"
+            );
+        }
+    }
+
+    /// The excess shear stress law erodes nothing below the bed strength.
+    #[test]
+    fn excess_shear_stress_needs_stress_above_strength() {
+        let (_, gained, snow_mass) = entrained_mass_balance(Settings {
+            entrainment_model: Some(EntrainmentModel::ExcessShearStress),
+            critical_shear_stress: Some(1.0e7),
+            ..entrainment_settings(0.3)
+        });
+        assert_eq!(snow_mass, 0.0);
+        assert_eq!(gained, 0.0);
+    }
+
+    /// Without erodible snow the run matches one without entrainment up to
+    /// the summation order of the grid.
+    #[test]
+    fn entrainment_without_snow_changes_nothing() {
+        let mut reference = setup_slope_sim(Settings {
+            sim_model: Some(SimModel::GlobalCartesian),
+            ..Default::default()
+        });
+        block_on(reference.run_n_steps(100)).expect("Failed to run");
+        let mut sim = setup_slope_sim(entrainment_settings(0.0));
+        block_on(sim.run_n_steps(0)).expect("Failed to prepare");
+        let initial_mass = particle_mass_f64(&mut sim);
+        block_on(sim.run_n_steps(100)).expect("Failed to run");
+        assert_eq!(particle_mass_f64(&mut sim), initial_mass);
+        // the float-atomic grid sums in varying order, so two identical runs
+        // already differ in the last bits
+        let expected = block_on(reference.fetch_grid_mass())
+            .expect("Failed to read")
+            .to_vec();
+        let actual = block_on(sim.fetch_grid_mass())
+            .expect("Failed to read")
+            .to_vec();
+        let fullest = expected.iter().copied().fold(0.0f32, f32::max);
+        let max_diff = actual
+            .iter()
+            .zip(expected.iter())
+            .map(|(a, e)| (a - e).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_diff <= 1e-5 * fullest,
+            "grid mass differs by {max_diff} kg (fullest node {fullest} kg)"
+        );
     }
 
     const CLIFF_WIDTH: usize = 48;

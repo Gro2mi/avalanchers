@@ -153,8 +153,11 @@ define_shaders! {
     P2G3DSorted => "p2g_sorted" entry_point "p2g_3d_sorted",
     GridPhysics3D => "grid_physics_terrain_following" entry_point "grid_physics_3d",
     G2P3D => "g2p_terrain_following" entry_point "g2p_3d",
+    // 3D model: entrained mass onto the particles, between grid physics and g2p
+    EntrainParticles => "entrain_particles",
     Friction => "friction",
     Forest => "forest",
+    Entrainment => "entrainment",
     EarthPressure => "earth_pressure",
     CurvilinearGeometry => "curvilinear_geometry",
     CartesianGeometry => "cartesian_geometry",
@@ -2762,7 +2765,39 @@ fn collect_shader_configs(
             BufferName::ForestStanding.to_string(),
             storage_buffer(false),
         ),
+        // Binding 17: remaining erodible depth and entrained mass ratio
+        (
+            BufferName::EntrainmentState.to_string(),
+            storage_buffer(false),
+        ),
     ]);
+    let entrain_particles_bindings = vec![
+        // Binding 0:
+        (
+            BufferName::SimSettings.to_string(),
+            BindingType::Buffer {
+                ty: BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+        ),
+        // Binding 1:
+        (BufferName::SimInfo.to_string(), storage_buffer(false)),
+        // Binding 2:
+        (
+            BufferName::ParticlesPosition.to_string(),
+            storage_buffer(true),
+        ),
+        // Binding 3:
+        (BufferName::ParticlesState.to_string(), storage_buffer(true)),
+        // Binding 4:
+        (BufferName::ParticlesMass.to_string(), storage_buffer(false)),
+        // Binding 5:
+        (
+            BufferName::EntrainmentState.to_string(),
+            storage_buffer(true),
+        ),
+    ];
     let mut terrain_following_g2p_bindings = existing_bindings(ShaderName::G2P);
     // the curvilinear binding 14 is the z velocity, which this model does not have
     terrain_following_g2p_bindings
@@ -2841,6 +2876,15 @@ fn collect_shader_configs(
             ShaderName::G2P3D,
             load_shader_source(ShaderName::G2P3D, has_float32_atomic),
             &three_d_g2p_bindings,
+            &[("WG_SIZE_1D", max_compute_invocations_per_workgroup as f64)],
+        )?,
+    );
+    shader_configs.insert(
+        ShaderName::EntrainParticles,
+        PendingShader::new_with_constants(
+            ShaderName::EntrainParticles,
+            load_shader_source(ShaderName::EntrainParticles, has_float32_atomic),
+            &entrain_particles_bindings,
             &[("WG_SIZE_1D", max_compute_invocations_per_workgroup as f64)],
         )?,
     );
@@ -3834,6 +3878,7 @@ mod tests {
             ShaderName::GridPhysicsTerrainFollowing,
             ShaderName::GridPhysics3D,
             ShaderName::GridPhysics,
+            ShaderName::EntrainParticles,
         ] {
             for has_float32_atomic in [false, true] {
                 validate_wgsl(shader, has_float32_atomic);
