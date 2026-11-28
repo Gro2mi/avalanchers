@@ -1145,6 +1145,7 @@ const SHORTCUT_OVERLAYS = {
     '5': 'slope_angle',
     '6': 'slope_aspect',
     '7': 'roughness',
+    '9': 'forest_standing',
 };
 
 function isTypingTarget(target) {
