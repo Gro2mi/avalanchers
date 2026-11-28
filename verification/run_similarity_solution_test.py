@@ -51,6 +51,7 @@ OUTPUT_DIR = REPO_ROOT / "verification" / "outputs" / "similarity_solution_test"
 # only the DEM comes from a file.
 # ---------------------------------------------------------------------------
 SETTINGS = {
+    "enable_entrainment": False,
     "dem_path": str(REPO_ROOT / "data" / "avaframe" / "avaSimilaritySol.png"),
     "sim_model": "curvilinear",
     "friction_model": "coulomb",

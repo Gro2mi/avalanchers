@@ -90,6 +90,7 @@ FOREST_ROW_Y = 0.5 * (RELEASE_Y[1] + FOREST_Y[0])
 OPEN_ROW_Y = 0.5 * (RELEASE_Y[0] + FOREST_Y[0])
 
 SETTINGS = {
+    "enable_entrainment": False,
     "sim_model": "dampm-global-cartesian",
     "friction_model": "voellmy",
     "friction_coefficient": 0.2,

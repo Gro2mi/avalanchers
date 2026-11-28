@@ -396,6 +396,19 @@ struct SimSettings {
     forest_modulus_of_rupture: f32,
     forest_decay_coefficient: f32,
     forest_release_max_cover: f32,
+    // entrainment (entrainment.wgsl), read only with SIM_FLAG_ENTRAINMENT by
+    // the DAMPM global model: erosion energy e_b (J/kg), density (kg/m3) and
+    // uniform depth (m) of the erodible snow cover
+    erosion_energy: f32,
+    entrainment_density: f32,
+    entrainment_thickness: f32,
+    // entrainment rate law (EntrainmentModel): 0 erosion energy, 1 excess
+    // shear stress, 2 velocity-proportional, with their parameters tau_c (Pa),
+    // k (s/m) and kappa (-)
+    entrainment_model: u32,
+    critical_shear_stress: f32,
+    shear_erosion_coefficient: f32,
+    entrainment_velocity_coefficient: f32,
 };
 
 @group(0) @binding(0) var<uniform> sim_settings: SimSettings;
@@ -410,6 +423,14 @@ const SIM_FLAG_FOREST: u32 = 1u << 10u;
 
 fn forest_enabled() -> bool {
     return (sim_settings.flags & SIM_FLAG_FOREST) != 0u;
+}
+
+// SimFlags::ENTRAINMENT (settings.rs): the DAMPM global model entrains the
+// erodible snow cover (entrainment.wgsl)
+const SIM_FLAG_ENTRAINMENT: u32 = 1u << 3u;
+
+fn entrainment_enabled() -> bool {
+    return (sim_settings.flags & SIM_FLAG_ENTRAINMENT) != 0u;
 }
 
 // Gully walls (reference surface, wall friction) need a reference surface at

@@ -367,6 +367,17 @@
             font-size: 0.93rem;
         }
 
+        .loading-hint {
+            margin-top: 0.8rem;
+            margin-bottom: 0;
+            color: #ffd8a8;
+            font-size: 0.93rem;
+        }
+
+        .loading-hint a {
+            color: #ffe8cc;
+        }
+
         details.collapsible-card>summary {
             list-style: none;
             cursor: pointer;
@@ -595,6 +606,11 @@
             <h2 class="loading-title">Preparing Avalanchers</h2>
             <p class="loading-status" id="loadingStatus">Loading engine…</p>
             <p class="loading-detail" id="loadingDetail">Loading example…</p>
+            <p class="loading-hint" id="loadingGpuHint" hidden>
+                Could not access a GPU through WebGPU. Please check the
+                <a href="https://github.com/Gro2mi/avalanchers#requirements" target="_blank" rel="noopener">requirements</a>
+                or try Google Chrome, which currently has the best WebGPU support.
+            </p>
         </div>
     </div>
 

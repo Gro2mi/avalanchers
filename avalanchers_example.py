@@ -43,7 +43,7 @@ settings = {
     "roughness_threshold": 0.01,
     "enable_curvature": True,
     "enable_particle_interaction": True,
-    "enable_entrainment": True,
+    "enable_entrainment": False,
     "peak_flow_thickness_threshold": 0.2,
 }
 sim = avalanchers.PySimulation.new()
@@ -62,8 +62,7 @@ print(f"Execution time without plotting: {end - start:.2f} seconds")
 
 
 # avalanchers.plot3d(sim, "peak_flow_thickness", True)
-# avalanchers.plot3d(sim, "cell_count")
-# avalanchers.plot3d(sim, "peak_velocity")
+avalanchers.plot3d(sim, "peak_velocity")
 # avalanchers.plot_overview(sim)
 
 avalanchers.plot2d(sim, "peak_flow_thickness")

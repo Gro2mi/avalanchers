@@ -508,6 +508,10 @@ fn setting_attributes(name: &str) -> Attributes {
             "coulomb voellmy voellmy_min_shear samos_at mu_i",
         )),
         "constitutive_model" => result.extend(flag_values(&[0, 1], "drucker_prager mu_i")),
+        "entrainment_model" => result.extend(flag_values(
+            &[0, 1, 2],
+            "erosion_energy excess_shear_stress velocity_proportional",
+        )),
         "flags" => result.extend(attributes(json!({
             "flag_masks": [1, 2, 4, 8, 16, 32, 128],
             "flag_meanings": "curvature particle_interaction earth_pressure_coefficient \
@@ -535,8 +539,12 @@ fn setting_units(name: &str) -> Option<&'static str> {
         | "reference_surface_length"
         | "forest_trunk_diameter"
         | "forest_crown_diameter"
-        | "forest_tree_height" => "m",
-        "density" => "kg/m3",
+        | "forest_tree_height"
+        | "entrainment_thickness" => "m",
+        "density" | "entrainment_density" => "kg/m3",
+        "erosion_energy" => "J/kg",
+        "critical_shear_stress" => "Pa",
+        "shear_erosion_coefficient" => "s/m",
         "release_swe" => "kg/m2",
         "velocity_threshold" | "flight_terminal_velocity" | "forest_decay_coefficient" => "m/s",
         "drag_coefficient" => "m/s2",

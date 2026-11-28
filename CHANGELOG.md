@@ -5,6 +5,29 @@ All notable changes to this project might be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Snow entrainment for the DAMPM global model with the erosion-energy law of AvaFrame com1DFA /
+  SamosAT: the basal frictional power erodes q = tau_b |u| / `erosion_energy` (default 5000 J/kg)
+  kg per m^2 and second, at most the remaining erodible snow `entrainment_density` (default
+  100 kg/m^3) times its depth. The entrained snow is at rest, so the node keeps its momentum.
+  The erodible depth comes from `entrainment_area_path` (.asc/.tif in m, .png in cm in the alpha
+  channel; Python `set_entrainment_area`) or is `entrainment_thickness` (default 0.3 m)
+  everywhere. A new pass between grid physics and g2p adds the entrained mass of each node to
+  its particles with the p2g weights, so particle mass grows by exactly the eroded snow. Physics
+  in `entrainment.wgsl` and `entrain_particles.wgsl`. Python getters `entrainment_depth`
+  (remaining) and `entrained_depth`; `write_asc` layers of the same names.
+- Further entrainment rate laws, selected with `entrainment_model`: `erosion-energy` (default,
+  above), `excess-shear-stress` q = `shear_erosion_coefficient` (default 0.01 s/m) times
+  max(tau_b - `critical_shear_stress`, 0) (default 300 Pa), after Naaim et al. (2003), and
+  `velocity-proportional` q = `entrainment_velocity_coefficient` (kappa, default 0.5) times
+  rho_e |u|, as in RAMMS.
+- `verification/run_entrainment_test.py`: entrainment compared with AvaFrame com1DFA on the
+  avaHockeyChannel test (`avaHockeyChannelEntTest`) with the benchmark 0.3 m cover and a 3 m cover
+  that is not stripped completely: entrained mass over time, ent - null peak fields, entrained depth
+  map. com1DFA runs through `verification/entrainment_com1dfa_runner.py` in an AvaFrame environment
+  (`--avaframe-python`); results are cached. The erosion-energy law entrains 0.94 times the com1DFA
+  mass in both scenarios, with the same timing.
+- Python getter `total_mass` (particle mass, grows with entrainment); the total mass is now summed
+  in f64.
 - Forest model (NAKSIN / MoT-Voellmy type) for the DAMPM global model. A canopy cover raster
   (`forest_cover_path`: .asc, .tif or .png with percent in the alpha channel; Python
   `set_forest_cover`) gives the stem density n = cover / (pi/4 `forest_crown_diameter`^2) of stems of
@@ -31,6 +54,8 @@ All notable changes to this project might be documented in this file.
   (new dependency `proj4rs`), and `Renderer::set_orthophoto` drapes any RGBA image.
 
 ### Changed
+- `enable_entrainment` now defaults to false (it had no effect before entrainment existed), and
+  all verification scripts, settings files, examples and notebooks set it to false explicitly.
 - Grid models renamed: `3d-depth-averaged` is now **DAMPM global** (`dampm-global-cartesian`, short `global`),
   `terrain-following` is **DAMPM terrain-following** (`dampm-terrain-following`, short `terrain-following`
   or `terrain`) and `curvilinear` is **DAMPM curvilinear** (`dampm-curvilinear`, short `curvilinear` or

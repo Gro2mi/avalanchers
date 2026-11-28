@@ -210,6 +210,33 @@ pub struct SimSettings {
     /// Cells with a canopy cover above this fraction never release.
     #[serde(default = "default_forest_release_max_cover")]
     pub forest_release_max_cover: f32,
+    // Entrainment (com1DFA erosion-energy law), see entrainment.wgsl. Read
+    // only by the DAMPM global model with SimFlags::ENTRAINMENT.
+    /// Specific erosion energy e_b (J/kg): the basal frictional power
+    /// tau_b |u| entrains tau_b |u| / e_b kg per m^2 and second.
+    #[serde(default = "default_erosion_energy")]
+    pub erosion_energy: f32,
+    /// Density rho_e (kg/m^3) of the erodible snow cover.
+    #[serde(default = "default_entrainment_density")]
+    pub entrainment_density: f32,
+    /// Erodible depth h_e (m, bed-normal) of every cell when no entrainment
+    /// area raster is given.
+    #[serde(default = "default_entrainment_thickness")]
+    pub entrainment_thickness: f32,
+    /// Rate law of the entrainment, see [`EntrainmentModel`].
+    #[serde(default)]
+    pub entrainment_model: u32,
+    /// Excess shear stress law: bed shear strength tau_c (Pa) below which
+    /// the snow cover is not eroded.
+    #[serde(default = "default_critical_shear_stress")]
+    pub critical_shear_stress: f32,
+    /// Excess shear stress law: rate constant k (s/m) of
+    /// q = k (tau_b - tau_c).
+    #[serde(default = "default_shear_erosion_coefficient")]
+    pub shear_erosion_coefficient: f32,
+    /// Velocity-proportional law: dimensionless kappa of q = kappa rho_e |u|.
+    #[serde(default = "default_entrainment_velocity_coefficient")]
+    pub entrainment_velocity_coefficient: f32,
 }
 
 /// Hashes only the fields the selected simulation, friction and constitutive
@@ -326,6 +353,28 @@ impl Hash for SimSettings {
             }
         }
 
+        if sim_model == Some(SimModel::GlobalCartesian) {
+            flags_mask |= SimFlags::ENTRAINMENT;
+            if SimFlags::from_u32(self.flags).is_entrainment_enabled() {
+                self.entrainment_model.hash(state);
+                hash_f32(self.entrainment_density, state);
+                hash_f32(self.entrainment_thickness, state);
+                match EntrainmentModel::from_int(self.entrainment_model) {
+                    Some(EntrainmentModel::ErosionEnergy) => {
+                        hash_f32(self.erosion_energy, state);
+                    }
+                    Some(EntrainmentModel::ExcessShearStress) => {
+                        hash_f32(self.critical_shear_stress, state);
+                        hash_f32(self.shear_erosion_coefficient, state);
+                    }
+                    Some(EntrainmentModel::VelocityProportional) => {
+                        hash_f32(self.entrainment_velocity_coefficient, state);
+                    }
+                    None => {}
+                }
+            }
+        }
+
         (self.flags & flags_mask).hash(state);
     }
 }
@@ -380,6 +429,40 @@ fn default_forest_decay_coefficient() -> f32 {
 }
 fn default_forest_release_max_cover() -> f32 {
     DEFAULT_FOREST_RELEASE_MAX_COVER
+}
+
+// Entrainment defaults of AvaFrame com1DFA.
+pub const DEFAULT_EROSION_ENERGY: f32 = 5000.0;
+pub const DEFAULT_ENTRAINMENT_DENSITY: f32 = 100.0;
+pub const DEFAULT_ENTRAINMENT_THICKNESS: f32 = 0.3;
+
+fn default_erosion_energy() -> f32 {
+    DEFAULT_EROSION_ENERGY
+}
+fn default_entrainment_density() -> f32 {
+    DEFAULT_ENTRAINMENT_DENSITY
+}
+fn default_entrainment_thickness() -> f32 {
+    DEFAULT_ENTRAINMENT_THICKNESS
+}
+
+// Excess shear stress law: tau_c of the order of the shear strength of new
+// snow; k puts the rate of a 1 m deep, 20 m/s Voellmy flow on a 35 degree
+// slope (tau_b about 700 Pa) near that of the erosion-energy default.
+pub const DEFAULT_CRITICAL_SHEAR_STRESS: f32 = 300.0;
+pub const DEFAULT_SHEAR_EROSION_COEFFICIENT: f32 = 0.01;
+// Velocity-proportional law (RAMMS): kappa <= 1 for basal erosion, 1-5 for
+// ploughing (Christen et al. 2010b).
+pub const DEFAULT_ENTRAINMENT_VELOCITY_COEFFICIENT: f32 = 0.5;
+
+fn default_critical_shear_stress() -> f32 {
+    DEFAULT_CRITICAL_SHEAR_STRESS
+}
+fn default_shear_erosion_coefficient() -> f32 {
+    DEFAULT_SHEAR_EROSION_COEFFICIENT
+}
+fn default_entrainment_velocity_coefficient() -> f32 {
+    DEFAULT_ENTRAINMENT_VELOCITY_COEFFICIENT
 }
 
 fn is_release_thickness(thickness: f32) -> bool {
@@ -498,6 +581,39 @@ impl SimSettings {
                 self.forest_decay_coefficient
             ));
         }
+        let entrainment_positive = [
+            ("erosion_energy", self.erosion_energy),
+            ("entrainment_density", self.entrainment_density),
+            ("shear_erosion_coefficient", self.shear_erosion_coefficient),
+            (
+                "entrainment_velocity_coefficient",
+                self.entrainment_velocity_coefficient,
+            ),
+        ];
+        if let Some((name, value)) = entrainment_positive
+            .iter()
+            .find(|(_, value)| !(value.is_finite() && *value > 0.0))
+        {
+            return Err(format!("`{name}` must be positive, got {value}"));
+        }
+        if EntrainmentModel::from_int(self.entrainment_model).is_none() {
+            return Err(format!(
+                "unknown entrainment model {}",
+                self.entrainment_model
+            ));
+        }
+        if !(self.critical_shear_stress.is_finite() && self.critical_shear_stress >= 0.0) {
+            return Err(format!(
+                "`critical_shear_stress` must not be negative, got {}",
+                self.critical_shear_stress
+            ));
+        }
+        if !(self.entrainment_thickness.is_finite() && self.entrainment_thickness >= 0.0) {
+            return Err(format!(
+                "`entrainment_thickness` must not be negative, got {}",
+                self.entrainment_thickness
+            ));
+        }
         if self.uses_mu_i() {
             let finite = [
                 ("i0", self.i0),
@@ -587,7 +703,7 @@ impl SimSettings {
             roughness_threshold: 0.01,
             // earth pressure coefficient off: Voellmy-type parameters are
             // calibrated with hydrostatic lateral pressure (K = 1)
-            flags: SimFlags::new(true, true, false, true, false, false).mask,
+            flags: SimFlags::new(true, true, false, false, false, false).mask,
 
             min_slope_angle: 28.0,
             max_slope_angle: 60.0,
@@ -615,6 +731,13 @@ impl SimSettings {
             forest_modulus_of_rupture: DEFAULT_FOREST_MODULUS_OF_RUPTURE,
             forest_decay_coefficient: DEFAULT_FOREST_DECAY_COEFFICIENT,
             forest_release_max_cover: DEFAULT_FOREST_RELEASE_MAX_COVER,
+            erosion_energy: DEFAULT_EROSION_ENERGY,
+            entrainment_density: DEFAULT_ENTRAINMENT_DENSITY,
+            entrainment_thickness: DEFAULT_ENTRAINMENT_THICKNESS,
+            entrainment_model: EntrainmentModel::ErosionEnergy.as_int(),
+            critical_shear_stress: DEFAULT_CRITICAL_SHEAR_STRESS,
+            shear_erosion_coefficient: DEFAULT_SHEAR_EROSION_COEFFICIENT,
+            entrainment_velocity_coefficient: DEFAULT_ENTRAINMENT_VELOCITY_COEFFICIENT,
         }
     }
 
@@ -760,6 +883,27 @@ impl SimSettings {
         if let Some(val) = patch.forest_release_max_cover {
             settings.forest_release_max_cover = val;
         }
+        if let Some(val) = patch.erosion_energy {
+            settings.erosion_energy = val;
+        }
+        if let Some(val) = patch.entrainment_density {
+            settings.entrainment_density = val;
+        }
+        if let Some(val) = patch.entrainment_thickness {
+            settings.entrainment_thickness = val;
+        }
+        if let Some(val) = patch.entrainment_model {
+            settings.entrainment_model = val.as_int();
+        }
+        if let Some(val) = patch.critical_shear_stress {
+            settings.critical_shear_stress = val;
+        }
+        if let Some(val) = patch.shear_erosion_coefficient {
+            settings.shear_erosion_coefficient = val;
+        }
+        if let Some(val) = patch.entrainment_velocity_coefficient {
+            settings.entrainment_velocity_coefficient = val;
+        }
         if let Some(val) = patch.enable_curvature {
             if val {
                 settings.flags |= 1 << 0;
@@ -820,6 +964,95 @@ impl SimSettings {
         let mut file = std::fs::File::create(path)?;
         file.write_all(json.as_bytes())?;
         Ok(())
+    }
+}
+
+/// Rate law of the snow entrainment (`entrainment.wgsl`); q is the entrained
+/// mass per bed area and time, tau_b the basal shear stress of the flow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EntrainmentModel {
+    /// com1DFA / SamosAT: q = tau_b |u| / e_b (`erosion_energy`).
+    #[default]
+    ErosionEnergy,
+    /// Naaim et al. 2003: q = k max(tau_b - tau_c, 0)
+    /// (`shear_erosion_coefficient`, `critical_shear_stress`).
+    ExcessShearStress,
+    /// RAMMS: q = kappa rho_e |u| (`entrainment_velocity_coefficient`).
+    VelocityProportional,
+}
+
+impl EntrainmentModel {
+    pub fn from_int(value: u32) -> Option<Self> {
+        match value {
+            0 => Some(Self::ErosionEnergy),
+            1 => Some(Self::ExcessShearStress),
+            2 => Some(Self::VelocityProportional),
+            _ => None,
+        }
+    }
+
+    pub fn as_int(&self) -> u32 {
+        match self {
+            Self::ErosionEnergy => 0,
+            Self::ExcessShearStress => 1,
+            Self::VelocityProportional => 2,
+        }
+    }
+}
+
+impl FromStr for EntrainmentModel {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_lowercase().replace('_', "-").as_str() {
+            "erosion-energy" | "erosionenergy" | "samos-at" | "com1dfa" => Ok(Self::ErosionEnergy),
+            "excess-shear-stress" | "excessshearstress" | "shear-stress" => {
+                Ok(Self::ExcessShearStress)
+            }
+            "velocity-proportional" | "velocityproportional" | "ramms" => {
+                Ok(Self::VelocityProportional)
+            }
+            _ => Err(format!("unknown entrainment model: {value}")),
+        }
+    }
+}
+
+impl fmt::Display for EntrainmentModel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::ErosionEnergy => "erosion-energy",
+            Self::ExcessShearStress => "excess-shear-stress",
+            Self::VelocityProportional => "velocity-proportional",
+        })
+    }
+}
+
+impl Serialize for EntrainmentModel {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for EntrainmentModel {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Value {
+            Int(u32),
+            String(String),
+        }
+
+        match Value::deserialize(deserializer)? {
+            Value::Int(value) => Self::from_int(value)
+                .ok_or_else(|| D::Error::custom(format!("invalid entrainment model: {value}"))),
+            Value::String(value) => value.parse::<Self>().map_err(D::Error::custom),
+        }
     }
 }
 
@@ -1512,7 +1745,32 @@ pub struct Settings {
     /// Forest: cells with more canopy cover than this never release
     /// (defaults to 0.5).
     pub forest_release_max_cover: Option<f32>,
+    /// Entrain the snow cover with the com1DFA erosion-energy law (DAMPM
+    /// global model only; defaults to false).
     pub enable_entrainment: Option<bool>,
+    /// Entrainment: erodible depth raster (.asc, .tif or .png with the depth
+    /// in cm in the alpha channel) on the DEM grid, bed-normal depth in m;
+    /// 0 is not erodible. Without it every cell holds
+    /// `entrainment_thickness`.
+    pub entrainment_area_path: Option<String>,
+    /// Entrainment: specific erosion energy e_b in J/kg (defaults to 5000).
+    pub erosion_energy: Option<f32>,
+    /// Entrainment: density of the erodible snow in kg/m^3 (defaults to 100).
+    pub entrainment_density: Option<f32>,
+    /// Entrainment: uniform erodible depth in m used without an entrainment
+    /// area raster (defaults to 0.3).
+    pub entrainment_thickness: Option<f32>,
+    /// Entrainment rate law: `erosion-energy` (default),
+    /// `excess-shear-stress` or `velocity-proportional`, see
+    /// [`EntrainmentModel`].
+    pub entrainment_model: Option<EntrainmentModel>,
+    /// Excess shear stress law: bed shear strength tau_c in Pa (defaults
+    /// to 300).
+    pub critical_shear_stress: Option<f32>,
+    /// Excess shear stress law: rate constant k in s/m (defaults to 0.01).
+    pub shear_erosion_coefficient: Option<f32>,
+    /// Velocity-proportional law: dimensionless kappa (defaults to 0.5).
+    pub entrainment_velocity_coefficient: Option<f32>,
     pub enable_center_of_mass: Option<bool>,
     /// Accumulate the grid with integer (fixed point) atomics even on GPUs
     /// with float atomics, as WebGPU does (defaults to false). Masses and
@@ -1744,6 +2002,14 @@ mod tests {
             particle_placement: Some(ParticlePlacement::UniformRandom),
             enable_earth_pressure_coefficient: Some(false),
             enable_entrainment: Some(false),
+            entrainment_area_path: None,
+            erosion_energy: None,
+            entrainment_density: None,
+            entrainment_thickness: None,
+            entrainment_model: None,
+            critical_shear_stress: None,
+            shear_erosion_coefficient: None,
+            entrainment_velocity_coefficient: None,
             enable_weak_pressure: Some(false),
             detachment: Some(Detachment::None),
             enable_grid_occupied: Some(false),

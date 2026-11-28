@@ -50,6 +50,7 @@ RELEASE_THICKNESS = 2.0  # m, at most 2.55 (8-bit alpha / 100)
 
 # model settings of the test case: as in the double-bump case
 MODEL_SETTINGS = {
+    "enable_entrainment": False,
     "sim_model": "dampm-global-cartesian",
     "friction_model": "coulomb",
     "friction_coefficient": 0.4,

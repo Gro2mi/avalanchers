@@ -2,8 +2,8 @@
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use compute_core::settings::{
-    ConstitutiveModel, CrownLineMethod, Detachment, FrictionModel, ParticlePlacement,
-    ReleaseFillMethod, Settings, SimModel,
+    ConstitutiveModel, CrownLineMethod, Detachment, EntrainmentModel, FrictionModel,
+    ParticlePlacement, ReleaseFillMethod, Settings, SimModel,
 };
 use compute_core::utils::{MaxValue, timer_checkpoint, timer_new};
 use pollster::block_on;
@@ -24,6 +24,11 @@ fn parse_bool(value: &str) -> Result<bool> {
 
 fn parse_sim_model(value: &str) -> Result<SimModel> {
     SimModel::from_str(value).map_err(|err| anyhow::anyhow!("invalid sim model '{value}': {err}"))
+}
+
+fn parse_entrainment_model(value: &str) -> Result<EntrainmentModel> {
+    EntrainmentModel::from_str(value)
+        .map_err(|err| anyhow::anyhow!("invalid entrainment model '{value}': {err}"))
 }
 
 fn parse_friction_model(value: &str) -> Result<FrictionModel> {
@@ -217,6 +222,31 @@ struct Args {
     enable_earth_pressure_coefficient: Option<bool>,
     #[arg(long, value_parser = parse_bool)]
     enable_entrainment: Option<bool>,
+    /// Erodible depth raster (bed-normal, m) on the DEM grid
+    #[arg(long)]
+    entrainment_area_path: Option<String>,
+    /// Specific erosion energy e_b in J/kg
+    #[arg(long)]
+    erosion_energy: Option<f32>,
+    /// Density of the erodible snow in kg/m^3
+    #[arg(long)]
+    entrainment_density: Option<f32>,
+    /// Uniform erodible depth in m without an entrainment area raster
+    #[arg(long)]
+    entrainment_thickness: Option<f32>,
+    /// Entrainment rate law: erosion-energy, excess-shear-stress or
+    /// velocity-proportional
+    #[arg(long, value_parser = parse_entrainment_model)]
+    entrainment_model: Option<EntrainmentModel>,
+    /// Excess shear stress law: bed shear strength in Pa
+    #[arg(long)]
+    critical_shear_stress: Option<f32>,
+    /// Excess shear stress law: rate constant in s/m
+    #[arg(long)]
+    shear_erosion_coefficient: Option<f32>,
+    /// Velocity-proportional law: dimensionless kappa
+    #[arg(long)]
+    entrainment_velocity_coefficient: Option<f32>,
     #[arg(long, value_parser = parse_bool)]
     enable_weak_pressure: Option<bool>,
     /// DAMPM global model: when particles detach and fly ballistically:
@@ -439,6 +469,30 @@ impl Args {
         }
         if let Some(value) = self.enable_entrainment {
             settings.enable_entrainment = Some(value);
+        }
+        if let Some(value) = self.entrainment_area_path.clone() {
+            settings.entrainment_area_path = Some(value);
+        }
+        if let Some(value) = self.erosion_energy {
+            settings.erosion_energy = Some(value);
+        }
+        if let Some(value) = self.entrainment_density {
+            settings.entrainment_density = Some(value);
+        }
+        if let Some(value) = self.entrainment_thickness {
+            settings.entrainment_thickness = Some(value);
+        }
+        if let Some(value) = self.entrainment_model {
+            settings.entrainment_model = Some(value);
+        }
+        if let Some(value) = self.critical_shear_stress {
+            settings.critical_shear_stress = Some(value);
+        }
+        if let Some(value) = self.shear_erosion_coefficient {
+            settings.shear_erosion_coefficient = Some(value);
+        }
+        if let Some(value) = self.entrainment_velocity_coefficient {
+            settings.entrainment_velocity_coefficient = Some(value);
         }
         if let Some(value) = self.enable_weak_pressure {
             settings.enable_weak_pressure = Some(value);
@@ -878,6 +932,14 @@ mod tests {
             enable_particle_interaction: None,
             enable_earth_pressure_coefficient: None,
             enable_entrainment: None,
+            entrainment_area_path: None,
+            erosion_energy: None,
+            entrainment_density: None,
+            entrainment_thickness: None,
+            entrainment_model: None,
+            critical_shear_stress: None,
+            shear_erosion_coefficient: None,
+            entrainment_velocity_coefficient: None,
             enable_weak_pressure: None,
             enable_grid_occupied: None,
             detachment: None,

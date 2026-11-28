@@ -3,6 +3,7 @@
   "release_areas_path": "data/avaframe/avaParabolaForestreleaseTexture.png",
   "forest_cover_path": "data/avaframe/avaParabolaForestforestCover.png",
   "sim_model": "dampm-global-cartesian",
+  "enable_entrainment": false,
   "friction_model": "voellmy",
   "friction_coefficient": 0.2,
   "drag_coefficient": 2000.0,

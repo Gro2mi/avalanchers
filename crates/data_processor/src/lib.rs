@@ -950,6 +950,55 @@ pub async fn load_forest_cover(path: &str) -> Result<Vec<f32>, Box<dyn std::erro
     Ok(normalize_forest_cover(data))
 }
 
+/// Loads an erodible snow depth raster (bed-normal depth in m) of the
+/// entrainment model: `.asc` and `.tif` hold the depth in m, `.png` holds it
+/// in cm in the alpha channel. Nodata, negative and non-finite values are
+/// not erodible (0).
+pub async fn load_entrainment_area(path: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let data: Vec<f32> = match ext.as_str() {
+        "asc" => {
+            let mut grid = EsriGrid::from_file(path)?;
+            grid.flip_y();
+            grid.data
+        }
+        "png" => {
+            let (rgba, _, _) = read_png(path).await?;
+            rgba.iter()
+                .skip(3)
+                .step_by(4)
+                .map(|&val| val as f32 / 100.0)
+                .collect()
+        }
+        "tif" | "tiff" => {
+            let mut tiff = read_geo_tiff(path)?;
+            tiff.flip_y();
+            let nodata = tiff.metadata.nodata.map(|value| value as f32);
+            tiff.data
+                .as_f32()
+                .into_iter()
+                .map(|value| if Some(value) == nodata { 0.0 } else { value })
+                .collect()
+        }
+        _ => return Err(format!("Unsupported entrainment area format: {ext}").into()),
+    };
+    Ok(sanitize_entrainment_depth(data))
+}
+
+/// Erodible depths with nodata, negative and non-finite values set to 0.
+pub fn sanitize_entrainment_depth(mut depth: Vec<f32>) -> Vec<f32> {
+    for value in &mut depth {
+        if !(value.is_finite() && *value > 0.0) {
+            *value = 0.0;
+        }
+    }
+    depth
+}
+
 /// Loads release areas from raw bytes. `ext` selects the parser, e.g. "asc" or "tif".
 pub fn load_release_areas_from_bytes(
     bytes: &[u8],
@@ -1379,6 +1428,14 @@ mod tests {
             peak_flow_thickness_threshold: Some(14.0),
             enable_curvature: Some(true),
             enable_entrainment: Some(true),
+            entrainment_area_path: None,
+            erosion_energy: None,
+            entrainment_density: None,
+            entrainment_thickness: None,
+            entrainment_model: None,
+            critical_shear_stress: None,
+            shear_erosion_coefficient: None,
+            entrainment_velocity_coefficient: None,
             enable_weak_pressure: Some(true),
             detachment: Some(compute_core::settings::Detachment::FreeFall),
             enable_grid_occupied: Some(true),

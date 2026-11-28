@@ -2,6 +2,7 @@
   "dem_path": "data/avaframe/avaDoubleBump.png",
   "release_areas_path": "data/avaframe/avaDoubleBumpreleaseTexture.png",
   "sim_model": "dampm-global-cartesian",
+  "enable_entrainment": false,
   "friction_model": "coulomb",
   "friction_coefficient": 0.4,
   "enable_curvature": true,

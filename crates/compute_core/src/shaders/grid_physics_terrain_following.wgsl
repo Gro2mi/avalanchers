@@ -27,6 +27,9 @@
 // 3D model: standing canopy cover per node (forest.wgsl), lowered where the
 // flow breaks the stems; a 4-byte placeholder without SIM_FLAG_FOREST
 @group(0) @binding(16) var<storage, read_write> forest_standing: array<f32>;
+// 3D model: entrainment state per node (entrainment.wgsl), x = remaining
+// erodible depth, y = mass entrained this step / node mass
+@group(0) @binding(17) var<storage, read_write> entrainment_state: array<vec2f>;
 
 // Cartesian counterpart of grid_physics_curvilinear: forces act on a 3D velocity
 // tangent to the bed and are projected with the bed normal. The node keeps the
@@ -49,7 +52,7 @@ fn grid_physics_terrain_following(@builtin(global_invocation_id) id: vec3u) {
     }
     let mass = node_mass(idx);
     let velocity = surface_to_tangent(node_velocity_xy(idx, mass), n);
-    grid_velocity[idx] = tangent_to_surface(update_node(id.xy, n, velocity, mass, true, false, vec2f(0.0), 0.0), n);
+    grid_velocity[idx] = tangent_to_surface(update_node(id.xy, n, velocity, mass, true, false, vec2f(0.0), 0.0).velocity, n);
 }
 
 // The same update on a node velocity carried as a full 3D vector.
@@ -60,6 +63,12 @@ fn grid_physics_3d(@builtin(global_invocation_id) id: vec3u) {
     }
     let idx = xy_to_idx(id.xy);
     record_quantization_fill(grid_mass_atomic[idx], vec3i(grid_momentum_atomic[idx * 2u], grid_momentum_atomic[idx * 2u + 1u], grid_momentum_z_atomic[idx])); // no_atomic_float
+    let use_entrainment = entrainment_enabled();
+    if use_entrainment {
+        // no growth unless this node entrains below; the particle mass pass
+        // reads the growth of every node in its stencil
+        entrainment_state[idx].y = 0.0;
+    }
     if neighbourhood_is_empty(id.xy) {
         grid_velocity[idx] = vec2f(0.0);
         grid_velocity_z[idx] = 0.0;
@@ -92,7 +101,17 @@ fn grid_physics_3d(@builtin(global_invocation_id) id: vec3u) {
     if forest_enabled() {
         forest_cover = forest_standing[idx];
     }
-    let new_velocity = update_node(id.xy, n, velocity, mass, record_peaks, use_weak_pressure, weak_sum, forest_cover);
+    let update = update_node(id.xy, n, velocity, mass, record_peaks, use_weak_pressure, weak_sum, forest_cover);
+    var new_velocity = update.velocity;
+    if use_entrainment && mass >= min_node_mass() {
+        let state = entrainment_state[idx];
+        let dm = entrainment_mass(mass, get_h(id.x, id.y), update.basal_friction, length(new_velocity), n.z, state.x, sim_info.dt);
+        if dm > 0.0 {
+            // the entrained snow is at rest: the node keeps its momentum
+            new_velocity = new_velocity * (mass / (mass + dm));
+            entrainment_state[idx] = vec2f(entrainment_deplete(state.x, dm, n.z), dm / mass);
+        }
+    }
     grid_velocity[idx] = new_velocity.xy;
     grid_velocity_z[idx] = new_velocity.z;
     // stems loaded beyond their rupture moment by the flow of this step (the
@@ -148,9 +167,15 @@ fn node_velocity_xy(idx: u32, mass: f32) -> vec2f {
 // node mass instead of the centred difference of the nodal thickness.
 // forest_cover is the standing canopy cover of the node (0 without forest),
 // whose stem drag adds to the basal friction.
-// Returns the new tangent velocity.
+// Returns the new tangent velocity and the basal friction deceleration of the
+// bed alone (without wall and forest resistance), which drives entrainment.
+struct NodeUpdate {
+    velocity: vec3f,
+    basal_friction: f32,
+};
+
 fn update_node(xy: vec2u, n: vec3f, velocity: vec3f, mass: f32, record_peaks: bool,
-               use_weak_pressure: bool, weak_sum: vec2f, forest_cover: f32) -> vec3f {
+               use_weak_pressure: bool, weak_sum: vec2f, forest_cover: f32) -> NodeUpdate {
     let use_curvature: bool = (sim_settings.flags & (1u << 0u)) != 0u;
     let use_particle_interaction: bool = (sim_settings.flags & (1u << 1u)) != 0u;
     let use_earth_pressure_coefficient: bool = (sim_settings.flags & (1u << 2u)) != 0u;
@@ -221,8 +246,12 @@ fn update_node(xy: vec2u, n: vec3f, velocity: vec3f, mass: f32, record_peaks: bo
         let cos_beta = textureLoad(basal_topography_texture, vec2<i32>(xy), 0).x;
         wall_load = g_normal * gully_wall_load_factor(cos_beta, k_y);
     }
-    let friction_acceleration = basal_friction_acceleration(wall_load, sim_settings.snow_density, friction_speed, h, sim_settings.friction_model)
-        + forest_drag_acceleration(forest_cover, h, friction_speed);
+    let wall_friction = basal_friction_acceleration(wall_load, sim_settings.snow_density, friction_speed, h, sim_settings.friction_model);
+    var basal_friction = wall_friction;
+    if gully_walls_enabled() {
+        basal_friction = basal_friction_acceleration(g_normal, sim_settings.snow_density, friction_speed, h, sim_settings.friction_model);
+    }
+    let friction_acceleration = wall_friction + forest_drag_acceleration(forest_cover, h, friction_speed);
     var new_velocity = vec3f(0.0);
     if (friction_acceleration * sim_info.dt) < proposed_speed {
         new_velocity = proposed * (1.0 - friction_acceleration * sim_info.dt / proposed_speed);
@@ -251,7 +280,7 @@ fn update_node(xy: vec2u, n: vec3f, velocity: vec3f, mass: f32, record_peaks: bo
     if !is_nan(expected_cell_velocity) && h > 1e-3 && bitcast<u32>(expected_cell_velocity) > atomicLoad(&atomic_values.expected_max_velocity) {
         atomicMax(&atomic_values.expected_max_velocity, bitcast<u32>(expected_cell_velocity));
     }
-    return new_velocity;
+    return NodeUpdate(new_velocity, basal_friction);
 }
 
 // bed-normal flow thickness of a node
@@ -609,6 +638,79 @@ fn forest_decay(standing_cover: f32, dt: f32) -> f32 {
 }
 
 // END forest.wgsl
+// import entrainment.wgsl;
+// BEGIN entrainment.wgsl
+// Snow entrainment of the DAMPM global model.
+// Pure library module: it is textually imported and relies on the importing
+// module importing sim_settings.wgsl (sim_settings).
+//
+// Rate laws (sim_settings.entrainment_model, EntrainmentModel in settings.rs)
+// for the entrained mass per bed area and time q (kg m^-2 s^-1), with the
+// basal shear stress tau_b = rho h a_fric of the flow:
+//   0 erosion energy (com1DFA / SamosAT; Sampl & Zwinger 2004, Fischer et
+//     al. 2015): the basal frictional power erodes
+//       q = tau_b |u| / e_b
+//   1 excess shear stress (Naaim et al. 2003, Bouchut et al. 2008): the bed
+//     fails where the flow's shear stress exceeds its strength tau_c,
+//       q = k max(tau_b - tau_c, 0)
+//   2 velocity-proportional (RAMMS; Christen et al. 2010): the snow cover is
+//     taken up at a rate proportional to the flow speed,
+//       q = kappa rho_e |u|
+// The node's bed area dx^2 / n_z takes up dm = q dx^2 / n_z dt in a step, at
+// most the remaining erodible snow rho_e h_e dx^2 / n_z. The entrained snow
+// is at rest, so the node keeps its momentum: u <- u m / (m + dm). The work to
+// break and deform the snow cover (com1DFA's e_s, e_d, 0 by default) is not
+// modelled.
+//
+// State per node (EntrainmentState): x = remaining erodible depth h_e (m,
+// bed-normal), y = dm / m of the current step, which the entrainment mass
+// pass spreads onto the particles with their p2g weights. Since the node mass
+// is m_i = sum_p w_ip m_p, the particles gain exactly sum_i dm_i.
+// All entrainment physics lives here so the closures can be swapped as a unit.
+
+const ENTRAINMENT_EROSION_ENERGY: u32 = 0u;
+const ENTRAINMENT_EXCESS_SHEAR_STRESS: u32 = 1u;
+const ENTRAINMENT_VELOCITY_PROPORTIONAL: u32 = 2u;
+
+// entrained mass per bed area and time (kg m^-2 s^-1) of a flow with basal
+// shear stress tau_b (Pa) and speed `speed`
+fn entrainment_rate(tau_b: f32, speed: f32) -> f32 {
+    switch sim_settings.entrainment_model {
+        case ENTRAINMENT_EXCESS_SHEAR_STRESS: {
+            return sim_settings.shear_erosion_coefficient * max(tau_b - sim_settings.critical_shear_stress, 0.0);
+        }
+        case ENTRAINMENT_VELOCITY_PROPORTIONAL: {
+            return sim_settings.entrainment_velocity_coefficient * sim_settings.entrainment_density * speed;
+        }
+        default: {
+            return tau_b * speed / sim_settings.erosion_energy;
+        }
+    }
+}
+
+// mass (kg) a node of flow mass `mass`, bed-normal thickness h and speed
+// `speed` erodes in a step of dt from the remaining erodible depth h_e;
+// a_fric is the basal friction deceleration (m/s^2) of the flow and n_z the
+// z component of the bed normal. A node at rest erodes nothing.
+fn entrainment_mass(mass: f32, h: f32, a_fric: f32, speed: f32, n_z: f32, h_e: f32, dt: f32) -> f32 {
+    if h_e <= 0.0 || mass <= 0.0 || speed <= 0.0 {
+        return 0.0;
+    }
+    let bed_area = sim_settings.cell_size * sim_settings.cell_size / max(n_z, 1e-3);
+    let tau_b = sim_settings.snow_density * h * max(a_fric, 0.0);
+    let rate = entrainment_rate(tau_b, speed);
+    let available = sim_settings.entrainment_density * h_e * bed_area;
+    return min(max(rate, 0.0) * bed_area * dt, available);
+}
+
+// erodible depth (m) left after a node of bed normal z component n_z takes up
+// dm kg from the depth h_e
+fn entrainment_deplete(h_e: f32, dm: f32, n_z: f32) -> f32 {
+    let bed_area = sim_settings.cell_size * sim_settings.cell_size / max(n_z, 1e-3);
+    return max(h_e - dm / (sim_settings.entrainment_density * bed_area), 0.0);
+}
+
+// END entrainment.wgsl
 // import constants.wgsl;
 // BEGIN constants.wgsl
 // Shared constants without dependencies.
@@ -678,6 +780,19 @@ struct SimSettings {
     forest_modulus_of_rupture: f32,
     forest_decay_coefficient: f32,
     forest_release_max_cover: f32,
+    // entrainment (entrainment.wgsl), read only with SIM_FLAG_ENTRAINMENT by
+    // the DAMPM global model: erosion energy e_b (J/kg), density (kg/m3) and
+    // uniform depth (m) of the erodible snow cover
+    erosion_energy: f32,
+    entrainment_density: f32,
+    entrainment_thickness: f32,
+    // entrainment rate law (EntrainmentModel): 0 erosion energy, 1 excess
+    // shear stress, 2 velocity-proportional, with their parameters tau_c (Pa),
+    // k (s/m) and kappa (-)
+    entrainment_model: u32,
+    critical_shear_stress: f32,
+    shear_erosion_coefficient: f32,
+    entrainment_velocity_coefficient: f32,
 };
 
 @group(0) @binding(0) var<uniform> sim_settings: SimSettings;
@@ -692,6 +807,14 @@ const SIM_FLAG_FOREST: u32 = 1u << 10u;
 
 fn forest_enabled() -> bool {
     return (sim_settings.flags & SIM_FLAG_FOREST) != 0u;
+}
+
+// SimFlags::ENTRAINMENT (settings.rs): the DAMPM global model entrains the
+// erodible snow cover (entrainment.wgsl)
+const SIM_FLAG_ENTRAINMENT: u32 = 1u << 3u;
+
+fn entrainment_enabled() -> bool {
+    return (sim_settings.flags & SIM_FLAG_ENTRAINMENT) != 0u;
 }
 
 // Gully walls (reference surface, wall friction) need a reference surface at

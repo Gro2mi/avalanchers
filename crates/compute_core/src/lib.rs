@@ -754,6 +754,9 @@ pub struct ComputeOrchestrator {
     /// Weak-form pressure pass of the curvilinear model, dispatched after P2G
     /// when enable_weak_pressure is set.
     weak_pressure: Option<(ComputePipeline, BindGroup)>,
+    /// Entrainment mass pass of the DAMPM global model, dispatched between
+    /// the grid physics and g2p when entrainment is enabled.
+    entrain_particles: Option<(ComputePipeline, BindGroup)>,
     texture_size: Extent3d,
     shader_configs: ShaderConfigs,
     dispatch_number_workgroups_x_2d: u32,
@@ -1055,6 +1058,7 @@ impl ComputeOrchestrator {
             initial_mass_scale: 1.0,
             initial_max_thickness: 0.0,
             weak_pressure: None,
+            entrain_particles: None,
             float32_atomic_supported: has_float32_atomic,
             has_float32_atomic,
             completed_steps: 0,
@@ -1103,6 +1107,7 @@ impl ComputeOrchestrator {
         self.particle_sort = None;
         self.steps_since_particle_sort = 0;
         self.weak_pressure = None;
+        self.entrain_particles = None;
         self.initial_particles = None;
         Ok(true)
     }
@@ -2313,6 +2318,22 @@ impl ComputeOrchestrator {
             }
             None => None,
         };
+        // entrained mass onto the particles (DAMPM global model only)
+        self.entrain_particles = if sim_settings.sim_model == SimModel::GlobalCartesian.as_int()
+            && SimFlags::from_u32(sim_settings.flags).is_entrainment_enabled()
+        {
+            self.shader_configs.prepare(&[ShaderName::EntrainParticles]);
+            let config = self
+                .shader_configs
+                .get(&ShaderName::EntrainParticles)
+                .ok_or_else(|| anyhow!("EntrainParticles shader config not found"))?;
+            Some((
+                config.pipeline.clone(),
+                config.create_bind_group(&self.device, &self.resources)?,
+            ))
+        } else {
+            None
+        };
         self.prepared_max_steps = Some(sim_settings.max_steps);
         self.prepared_model = Some(sim_settings.sim_model);
         self.center_of_mass_biggest_blob =
@@ -2396,6 +2417,7 @@ impl ComputeOrchestrator {
         };
         let particle_sort = self.particle_sort.as_ref();
         let weak_pressure = self.weak_pressure.as_ref();
+        let entrain_particles = self.entrain_particles.as_ref();
         let mut steps_since_particle_sort = self.steps_since_particle_sort;
         for _ in 0..steps {
             if let (Some(source), Some(destination)) =
@@ -2455,6 +2477,14 @@ impl ComputeOrchestrator {
                 self.dispatch_number_workgroups_y_2d,
                 1,
             );
+
+            // the entrained mass of this step, before g2p moves the particles
+            // off the stencils the grid physics entrained on
+            if let Some((pipeline, bind_group)) = entrain_particles {
+                compute_pass.set_pipeline(pipeline);
+                compute_pass.set_bind_group(0, bind_group, &[]);
+                compute_pass.dispatch_workgroups(self.dispatch_number_workgroups_1d, 1, 1);
+            }
 
             compute_pass.set_pipeline(&simulation_pipelines.particle_update);
             compute_pass.set_bind_group(0, &simulation_bind_groups.particle_update, &[]);

@@ -35,6 +35,7 @@ OUT_DIR = REPO_ROOT / "verification" / "outputs" / "gully_test"
 SIM_INFO_STOPPED = 1 << 31
 
 SETTINGS = {
+    "enable_entrainment": False,
     "sim_model": "curvilinear",
     "friction_model": "coulomb",
     "friction_coefficient": 0.4,
