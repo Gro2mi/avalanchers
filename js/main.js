@@ -1193,9 +1193,19 @@ function withTimeout(promise, ms, label = "operation") {
     return Promise.race([promise.finally(() => clearTimeout(timer)), timeout]);
 }
 
+// Points the user to the README requirements and Chrome when no GPU can be
+// obtained through WebGPU.
+function showGpuHint() {
+    const hint = document.getElementById('loadingGpuHint');
+    if (hint) hint.hidden = false;
+}
+
 function checkWebGPU() {
     if (!navigator.gpu) {
-        alert("WebGPU is not supported in this browser. Please use a compatible browser like Chrome or Edge with WebGPU enabled.");
+        const msg = "WebGPU is not supported in this browser.";
+        setLoadingScreenStatus('WebGPU not available.', msg);
+        setRunStatus(msg, 'error');
+        showGpuHint();
         throw new Error("WebGPU not supported");
     }
 }
@@ -1218,6 +1228,7 @@ function setUpEngineLogging() {
 }
 
 async function loadEngine() {
+    let requestingGpu = false;
     try {
         setLoadingScreenStatus('Loading engine…', 'Waiting for WASM runtime.');
         statusEl.textContent = "Loading Engine...";
@@ -1227,7 +1238,10 @@ async function loadEngine() {
 
         setLoadingScreenStatus('Creating simulation…', 'Allocating engine resources.');
         statusEl.textContent = "Creating Simulation...";
+        // creating the simulation requests the GPU adapter and device
+        requestingGpu = true;
         window.sim = await withTimeout(WasmSimulation.new(), 5000, "WasmSimulation.new");
+        requestingGpu = false;
         window.viewer = new LiveViewer(window.sim, {
             isBusy: () => state.busy || state.fetchingResults > 0,
         });
@@ -1242,6 +1256,7 @@ async function loadEngine() {
         statusEl.style.backgroundColor = "rgba(255, 0, 0, 0.8)";
         setLoadingScreenStatus('Engine failed to load.', msg);
         setRunStatus('Engine failed to load.', 'error');
+        if (requestingGpu) showGpuHint();
         throw err;
     }
 }
