@@ -62,8 +62,7 @@ print(f"Execution time without plotting: {end - start:.2f} seconds")
 
 
 # avalanchers.plot3d(sim, "peak_flow_thickness", True)
-# avalanchers.plot3d(sim, "cell_count")
-# avalanchers.plot3d(sim, "peak_velocity")
+avalanchers.plot3d(sim, "peak_velocity")
 # avalanchers.plot_overview(sim)
 
 avalanchers.plot2d(sim, "peak_flow_thickness")
